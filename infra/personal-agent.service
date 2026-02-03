@@ -1,0 +1,16 @@
+[Unit]
+Description=Personal Agent Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/c/personal-agent
+Environment=PYTHONUNBUFFERED=1
+Environment=AGENT_TIMEZONE=America/Regina
+EnvironmentFile=/etc/personal-agent.env
+ExecStart=/home/c/personal-agent/.venv/bin/python -m telegram_adapter
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
