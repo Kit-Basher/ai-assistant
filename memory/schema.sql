@@ -116,6 +116,92 @@ CREATE UNIQUE INDEX IF NOT EXISTS uniq_storage_scan_stats_taken_scope
 CREATE INDEX IF NOT EXISTS idx_storage_scan_stats_scope_taken
     ON storage_scan_stats(scope, taken_at);
 
+CREATE TABLE IF NOT EXISTS resource_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    snapshot_local_date TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    load_1m REAL NOT NULL,
+    load_5m REAL NOT NULL,
+    load_15m REAL NOT NULL,
+    mem_total INTEGER NOT NULL,
+    mem_used INTEGER NOT NULL,
+    mem_free INTEGER NOT NULL,
+    swap_total INTEGER NOT NULL,
+    swap_used INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_resource_snapshots_date_host
+    ON resource_snapshots(snapshot_local_date, hostname);
+
+CREATE INDEX IF NOT EXISTS idx_resource_snapshots_taken
+    ON resource_snapshots(taken_at);
+
+CREATE TABLE IF NOT EXISTS resource_process_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    category TEXT NOT NULL,
+    pid INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    cpu_ticks INTEGER NOT NULL,
+    rss_bytes INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_resource_process_samples_taken_category
+    ON resource_process_samples(taken_at, category);
+
+CREATE TABLE IF NOT EXISTS resource_scan_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    procs_scanned INTEGER NOT NULL,
+    errors_skipped INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_resource_scan_stats_taken_scope
+    ON resource_scan_stats(taken_at, scope);
+
+CREATE INDEX IF NOT EXISTS idx_resource_scan_stats_scope_taken
+    ON resource_scan_stats(scope, taken_at);
+
+CREATE TABLE IF NOT EXISTS network_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    snapshot_local_date TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    default_iface TEXT NOT NULL,
+    default_gateway TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_network_snapshots_date_host
+    ON network_snapshots(snapshot_local_date, hostname);
+
+CREATE INDEX IF NOT EXISTS idx_network_snapshots_taken
+    ON network_snapshots(taken_at);
+
+CREATE TABLE IF NOT EXISTS network_interfaces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    name TEXT NOT NULL,
+    state TEXT NOT NULL,
+    rx_bytes INTEGER NOT NULL,
+    tx_bytes INTEGER NOT NULL,
+    rx_errors INTEGER NOT NULL,
+    tx_errors INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_network_interfaces_taken
+    ON network_interfaces(taken_at);
+
+CREATE TABLE IF NOT EXISTS network_nameservers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    nameserver TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_network_nameservers_taken
+    ON network_nameservers(taken_at);
+
 CREATE TABLE IF NOT EXISTS pending_clarifications (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,

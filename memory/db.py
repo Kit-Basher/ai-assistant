@@ -430,6 +430,263 @@ class MemoryDB:
         )
         self._commit_if_needed()
 
+    def insert_resource_snapshot(
+        self,
+        taken_at: str,
+        snapshot_local_date: str,
+        hostname: str,
+        load_1m: float,
+        load_5m: float,
+        load_15m: float,
+        mem_total: int,
+        mem_used: int,
+        mem_free: int,
+        swap_total: int,
+        swap_used: int,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO resource_snapshots (
+                taken_at,
+                snapshot_local_date,
+                hostname,
+                load_1m,
+                load_5m,
+                load_15m,
+                mem_total,
+                mem_used,
+                mem_free,
+                swap_total,
+                swap_used
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_local_date, hostname) DO UPDATE SET
+                taken_at = excluded.taken_at,
+                hostname = excluded.hostname,
+                load_1m = excluded.load_1m,
+                load_5m = excluded.load_5m,
+                load_15m = excluded.load_15m,
+                mem_total = excluded.mem_total,
+                mem_used = excluded.mem_used,
+                mem_free = excluded.mem_free,
+                swap_total = excluded.swap_total,
+                swap_used = excluded.swap_used
+            """,
+            (
+                taken_at,
+                snapshot_local_date,
+                hostname,
+                float(load_1m),
+                float(load_5m),
+                float(load_15m),
+                int(mem_total),
+                int(mem_used),
+                int(mem_free),
+                int(swap_total),
+                int(swap_used),
+            ),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def replace_resource_process_samples(
+        self,
+        taken_at: str,
+        category: str,
+        samples: list[tuple[int, str, int, int]],
+    ) -> None:
+        self._conn.execute(
+            "DELETE FROM resource_process_samples WHERE taken_at = ? AND category = ?",
+            (taken_at, category),
+        )
+        self._conn.executemany(
+            """
+            INSERT INTO resource_process_samples (taken_at, category, pid, name, cpu_ticks, rss_bytes)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (taken_at, category, int(pid), name, int(cpu_ticks), int(rss_bytes))
+                for pid, name, cpu_ticks, rss_bytes in samples
+            ],
+        )
+        self._commit_if_needed()
+
+    def insert_resource_scan_stats(
+        self, taken_at: str, scope: str, procs_scanned: int, errors_skipped: int
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO resource_scan_stats (taken_at, scope, procs_scanned, errors_skipped)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(taken_at, scope) DO UPDATE SET
+                procs_scanned = excluded.procs_scanned,
+                errors_skipped = excluded.errors_skipped
+            """,
+            (taken_at, scope, int(procs_scanned), int(errors_skipped)),
+        )
+        self._commit_if_needed()
+
+    def get_latest_resource_snapshot(self) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, taken_at, snapshot_local_date, hostname, load_1m, load_5m, load_15m,
+                   mem_total, mem_used, mem_free, swap_total, swap_used
+            FROM resource_snapshots
+            ORDER BY taken_at DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_previous_resource_snapshot(self, before_taken_at: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, taken_at, snapshot_local_date, hostname, load_1m, load_5m, load_15m,
+                   mem_total, mem_used, mem_free, swap_total, swap_used
+            FROM resource_snapshots
+            WHERE taken_at < ?
+            ORDER BY taken_at DESC
+            LIMIT 1
+            """,
+            (before_taken_at,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_resource_process_samples(self, taken_at: str, category: str) -> list[dict[str, Any]]:
+        order_by = "cpu_ticks DESC" if category == "cpu" else "rss_bytes DESC"
+        query = (
+            "SELECT pid, name, cpu_ticks, rss_bytes "
+            "FROM resource_process_samples "
+            "WHERE taken_at = ? AND category = ? "
+            f"ORDER BY {order_by}"
+        )
+        cur = self._conn.execute(query, (taken_at, category))
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_latest_resource_scan_stats(self, scope: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT taken_at, scope, procs_scanned, errors_skipped
+            FROM resource_scan_stats
+            WHERE scope = ?
+            ORDER BY taken_at DESC
+            LIMIT 1
+            """,
+            (scope,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def insert_network_snapshot(
+        self,
+        taken_at: str,
+        snapshot_local_date: str,
+        hostname: str,
+        default_iface: str,
+        default_gateway: str,
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO network_snapshots (
+                taken_at,
+                snapshot_local_date,
+                hostname,
+                default_iface,
+                default_gateway
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_local_date, hostname) DO UPDATE SET
+                taken_at = excluded.taken_at,
+                default_iface = excluded.default_iface,
+                default_gateway = excluded.default_gateway
+            """,
+            (taken_at, snapshot_local_date, hostname, default_iface, default_gateway),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def replace_network_interfaces(
+        self,
+        taken_at: str,
+        samples: list[tuple[str, str, int, int, int, int]],
+    ) -> None:
+        self._conn.execute(
+            "DELETE FROM network_interfaces WHERE taken_at = ?",
+            (taken_at,),
+        )
+        self._conn.executemany(
+            """
+            INSERT INTO network_interfaces (taken_at, name, state, rx_bytes, tx_bytes, rx_errors, tx_errors)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (taken_at, name, state, int(rx_bytes), int(tx_bytes), int(rx_errors), int(tx_errors))
+                for name, state, rx_bytes, tx_bytes, rx_errors, tx_errors in samples
+            ],
+        )
+        self._commit_if_needed()
+
+    def replace_network_nameservers(self, taken_at: str, nameservers: list[str]) -> None:
+        self._conn.execute(
+            "DELETE FROM network_nameservers WHERE taken_at = ?",
+            (taken_at,),
+        )
+        self._conn.executemany(
+            "INSERT INTO network_nameservers (taken_at, nameserver) VALUES (?, ?)",
+            [(taken_at, ns) for ns in nameservers],
+        )
+        self._commit_if_needed()
+
+    def get_latest_network_snapshot(self) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, taken_at, snapshot_local_date, hostname, default_iface, default_gateway
+            FROM network_snapshots
+            ORDER BY taken_at DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_previous_network_snapshot(self, before_taken_at: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, taken_at, snapshot_local_date, hostname, default_iface, default_gateway
+            FROM network_snapshots
+            WHERE taken_at < ?
+            ORDER BY taken_at DESC
+            LIMIT 1
+            """,
+            (before_taken_at,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_network_interfaces(self, taken_at: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT name, state, rx_bytes, tx_bytes, rx_errors, tx_errors
+            FROM network_interfaces
+            WHERE taken_at = ?
+            ORDER BY name ASC
+            """,
+            (taken_at,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_network_nameservers(self, taken_at: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT nameserver
+            FROM network_nameservers
+            WHERE taken_at = ?
+            ORDER BY nameserver ASC
+            """,
+            (taken_at,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     def get_latest_disk_snapshot(self, mountpoint: str) -> dict[str, Any] | None:
         cur = self._conn.execute(
             """

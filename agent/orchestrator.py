@@ -390,6 +390,17 @@ class Orchestrator:
                     response.text = self._maybe_add_narration_from_text("resource_report", response.text)
                     return response
 
+                if cmd.name == "network_report":
+                    response = self._call_skill(
+                        user_id,
+                        "network_governor",
+                        "network_report",
+                        {"user_id": user_id},
+                        ["db:read"],
+                    )
+                    response.text = self._maybe_add_narration_from_text("network_report", response.text)
+                    return response
+
             gate_result = handle_action_text(self.db, user_id, text, self.enable_writes)
             if gate_result:
                 return OrchestratorResponse(gate_result.get("message", ""))

@@ -19,7 +19,12 @@ except ModuleNotFoundError:  # pragma: no cover - testing without telegram insta
 from agent.config import load_config
 from agent.llm_router import LLMRouter
 from agent.logging_utils import log_event
-from agent.scheduled_snapshots import safe_run_scheduled_snapshot, safe_run_storage_snapshot
+from agent.scheduled_snapshots import (
+    safe_run_scheduled_snapshot,
+    safe_run_storage_snapshot,
+    safe_run_resource_snapshot,
+    safe_run_network_snapshot,
+)
 from agent.orchestrator import Orchestrator
 from memory.db import MemoryDB
 
@@ -188,6 +193,28 @@ async def _handle_storage_report(update: Update, context: ContextTypes.DEFAULT_T
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_resource_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+
+    response = orchestrator.handle_message("/resource_report", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+
+    response = orchestrator.handle_message("/network_report", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     import logging
 
@@ -224,6 +251,20 @@ async def _scheduled_storage_snapshot(context: ContextTypes.DEFAULT_TYPE) -> Non
     safe_run_storage_snapshot(db, timezone, home_path, user_id)
 
 
+async def _scheduled_resource_snapshot(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: MemoryDB = context.application.bot_data["db"]
+    timezone: str = context.application.bot_data["timezone"]
+    user_id = db.get_preference("telegram_chat_id") or "system"
+    safe_run_resource_snapshot(db, timezone, user_id)
+
+
+async def _scheduled_network_snapshot(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: MemoryDB = context.application.bot_data["db"]
+    timezone: str = context.application.bot_data["timezone"]
+    user_id = db.get_preference("telegram_chat_id") or "system"
+    safe_run_network_snapshot(db, timezone, user_id)
+
+
 def build_app() -> Application:
     config = load_config()
     db = MemoryDB(config.db_path)
@@ -258,6 +299,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("audit", _handle_audit))
     app.add_handler(CommandHandler("storage_snapshot", _handle_storage_snapshot))
     app.add_handler(CommandHandler("storage_report", _handle_storage_report))
+    app.add_handler(CommandHandler("resource_report", _handle_resource_report))
+    app.add_handler(CommandHandler("network_report", _handle_network_report))
 
     # Non-command messages only.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
@@ -273,6 +316,8 @@ def build_app() -> Application:
         run_time = time(9, 0, tzinfo=ZoneInfo(config.agent_timezone))
         app.job_queue.run_daily(_scheduled_disk_snapshot, time=run_time, name="disk_snapshot_daily")
         app.job_queue.run_daily(_scheduled_storage_snapshot, time=run_time, name="storage_snapshot_daily")
+        app.job_queue.run_daily(_scheduled_resource_snapshot, time=run_time, name="resource_snapshot_daily")
+        app.job_queue.run_daily(_scheduled_network_snapshot, time=run_time, name="network_snapshot_daily")
     return app
 
 
