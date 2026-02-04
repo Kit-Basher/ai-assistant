@@ -272,9 +272,78 @@ async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     now_ts = datetime.now(timezone.utc).isoformat()
     reminders = db.list_due_reminders(now_ts)
     for reminder in reminders:
-        await context.bot.send_message(chat_id=chat_id, text=f"Reminder: {reminder.text}")
-        db.mark_reminder_sent(reminder.id)
-        log_event(log_path, "reminder_sent", {"reminder_id": reminder.id})
+        try:
+            audit_id = db.audit_log_create(
+                user_id=str(chat_id),
+                action_type="reminder_send",
+                action_id=str(reminder.id),
+                status="attempted",
+                details={
+                    "event_type": "reminder_send",
+                    "reminder_id": reminder.id,
+                    "claim_attempted": True,
+                    "claim_succeeded": False,
+                    "send_succeeded": False,
+                },
+            )
+        except Exception:
+            return
+
+        claim_ok = db.claim_reminder_sent(reminder.id, now_ts)
+        if not claim_ok:
+            try:
+                db.audit_log_update_status(
+                    audit_id,
+                    "skipped",
+                    details={
+                        "event_type": "reminder_send",
+                        "reminder_id": reminder.id,
+                        "claim_attempted": True,
+                        "claim_succeeded": False,
+                        "send_succeeded": False,
+                        "status_transition": "pending->skipped",
+                    },
+                )
+            except Exception:
+                return
+            continue
+
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=f"Reminder: {reminder.text}")
+            try:
+                db.audit_log_update_status(
+                    audit_id,
+                    "executed",
+                    details={
+                        "event_type": "reminder_send",
+                        "reminder_id": reminder.id,
+                        "claim_attempted": True,
+                        "claim_succeeded": True,
+                        "send_succeeded": True,
+                        "status_transition": "pending->sent",
+                    },
+                )
+            except Exception:
+                return
+            log_event(log_path, "reminder_sent", {"reminder_id": reminder.id})
+        except Exception as exc:
+            db.mark_reminder_failed(reminder.id, str(exc))
+            try:
+                db.audit_log_update_status(
+                    audit_id,
+                    "failed",
+                    details={
+                        "event_type": "reminder_send",
+                        "reminder_id": reminder.id,
+                        "claim_attempted": True,
+                        "claim_succeeded": True,
+                        "send_succeeded": False,
+                        "status_transition": "sent->failed",
+                        "error": str(exc),
+                    },
+                )
+            except Exception:
+                return
 
 
 async def _scheduled_disk_snapshot(context: ContextTypes.DEFAULT_TYPE) -> None:

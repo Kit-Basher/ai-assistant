@@ -39,7 +39,9 @@ CREATE TABLE IF NOT EXISTS reminders (
     when_ts TEXT NOT NULL,
     text TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'pending',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    sent_at TEXT,
+    last_error TEXT
 );
 
 CREATE TABLE IF NOT EXISTS preferences (

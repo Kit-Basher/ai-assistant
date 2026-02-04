@@ -37,6 +37,8 @@ class ReminderRecord:
     text: str
     status: str
     created_at: str
+    sent_at: str | None = None
+    last_error: str | None = None
 
 
 @dataclass
@@ -85,6 +87,7 @@ class MemoryDB:
         with open(schema_path, "r", encoding="utf-8") as handle:
             script = handle.read()
         self._conn.executescript(script)
+        self._ensure_reminder_columns()
         self._conn.commit()
 
     @staticmethod
@@ -150,18 +153,39 @@ class MemoryDB:
 
     def list_due_reminders(self, now_ts: str) -> list[ReminderRecord]:
         cur = self._conn.execute(
-            "SELECT id, when_ts, text, status, created_at FROM reminders WHERE status = 'pending' AND when_ts <= ? ORDER BY when_ts ASC",
+            """
+            SELECT id, when_ts, text, status, created_at, sent_at, last_error
+            FROM reminders
+            WHERE status = 'pending' AND when_ts <= ?
+            ORDER BY when_ts ASC
+            """,
             (now_ts,),
         )
         rows = cur.fetchall()
         return [ReminderRecord(**dict(row)) for row in rows]
 
-    def mark_reminder_sent(self, reminder_id: int) -> None:
-        self._conn.execute(
-            "UPDATE reminders SET status = 'sent' WHERE id = ?",
-            (reminder_id,),
+    def claim_reminder_sent(self, reminder_id: int, sent_at: str) -> bool:
+        cur = self._conn.execute(
+            "UPDATE reminders SET status = 'sent', sent_at = ? WHERE id = ? AND status = 'pending'",
+            (sent_at, reminder_id),
         )
         self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def mark_reminder_failed(self, reminder_id: int, error: str | None = None) -> None:
+        self._conn.execute(
+            "UPDATE reminders SET status = 'failed', last_error = ? WHERE id = ?",
+            (error, reminder_id),
+        )
+        self._commit_if_needed()
+
+    def _ensure_reminder_columns(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(reminders)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "sent_at" not in cols:
+            self._conn.execute("ALTER TABLE reminders ADD COLUMN sent_at TEXT")
+        if "last_error" not in cols:
+            self._conn.execute("ALTER TABLE reminders ADD COLUMN last_error TEXT")
 
     def set_preference(self, key: str, value: str) -> None:
         self._conn.execute(
