@@ -18,6 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover - testing without telegram insta
 
 from agent.config import load_config
 from agent.llm_router import LLMRouter
+from agent.llm_client import build_llm_broker
 from agent.logging_utils import log_event
 from agent.scheduled_snapshots import (
     safe_run_scheduled_snapshot,
@@ -317,6 +318,8 @@ def build_app() -> Application:
 
     llm_client = LLMRouter(config, log_path=config.log_path)
 
+    llm_broker, llm_broker_error = build_llm_broker(config)
+
     orchestrator = Orchestrator(
         db=db,
         skills_path=config.skills_path,
@@ -324,6 +327,8 @@ def build_app() -> Application:
         timezone=config.agent_timezone,
         llm_client=llm_client,
         enable_writes=config.enable_writes,
+        llm_broker=llm_broker,
+        llm_broker_error=llm_broker_error,
     )
 
     app = Application.builder().token(config.telegram_bot_token).build()

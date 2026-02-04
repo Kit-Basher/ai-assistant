@@ -57,6 +57,8 @@ class Orchestrator:
         timezone: str,
         llm_client: Any,
         enable_writes: bool = False,
+        llm_broker: Any | None = None,
+        llm_broker_error: str | None = None,
     ) -> None:
         self.db = db
         self.skills = SkillLoader(skills_path).load_all()
@@ -66,11 +68,17 @@ class Orchestrator:
         self.confirmations = ConfirmationStore()
         self.enable_writes = enable_writes
         self._runner: Runner | None = None
+        self._llm_broker = llm_broker
+        self._llm_broker_error = llm_broker_error
 
     def _context(self) -> dict[str, Any]:
-        ctx = {"db": self.db, "timezone": self.timezone}
+        ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
         if self._runner:
             ctx["runner"] = self._runner
+        if self._llm_broker:
+            ctx["llm_broker"] = self._llm_broker
+        if self._llm_broker_error:
+            ctx["llm_broker_error"] = self._llm_broker_error
         return ctx
 
     def _ask_contains_advice(self, text: str) -> bool:

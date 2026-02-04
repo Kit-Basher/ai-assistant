@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+import os
+import re
 from typing import Any
 
 
@@ -47,7 +49,10 @@ FORBIDDEN_WORDS = (
     "recommend",
     "suggest",
     "should",
+    "concern",
+    "concerns",
 )
+_FORBIDDEN_RE = re.compile(r"\b(" + "|".join(re.escape(word) for word in FORBIDDEN_WORDS) + r")\b")
 
 
 def _blocked(message: str) -> dict[str, Any]:
@@ -110,7 +115,8 @@ def ask_opinion(context: dict[str, Any], question: str, timeframe: dict[str, Any
 
     lines: list[str] = []
     lines.append(f"Question Restated: {question.strip()}")
-    lines.append(f"Timeframe: {label} ({start_date} to {end_date}, {tz_name})")
+    timeframe_line = f"Timeframe: {label} ({start_date} to {end_date}, {tz_name})"
+    lines.append(timeframe_line)
 
     facts: list[str] = []
     domains = _infer_domains(question)
@@ -133,20 +139,34 @@ def ask_opinion(context: dict[str, Any], question: str, timeframe: dict[str, Any
 
     lines.append("Opinionated Assessment:")
     labels_used: list[str] = []
+    domain_lines: list[str] = []
     for domain in ["storage", "resources", "network", "weekly_reflection"]:
         if domain not in domains:
             continue
         label_out, basis = _opinion_for_domain(db, domain, start_date, end_date, start_ts, end_ts)
         label_out = _ensure_label(label_out)
         labels_used.append(label_out)
-        lines.append(f"- {domain}: {label_out} (basis: {basis})")
+        domain_line = f"- {domain}: {label_out} (basis: {basis})"
+        domain_lines.append(domain_line)
+        lines.append(domain_line)
 
     lines.append("Confidence & Limits:")
     lines.append("- Opinions are bounded labels derived from your historical data only.")
     lines.append("- No advice, instructions, or actions are being provided.")
     lines.append("- If data is sparse, the label defaults to 'no clear signal'.")
 
-    if _contains_forbidden(lines):
+    deterministic_text = "\n".join(lines)
+    rewrite = _maybe_rewrite_presentation(
+        context,
+        deterministic_text,
+        timeframe_line=timeframe_line,
+        domain_lines=domain_lines,
+    )
+    final_text = rewrite["text"]
+
+    _log_llm_decision(context, rewrite, validation_passed=rewrite["validation_passed"])
+
+    if _contains_forbidden([final_text]):
         return {"status": "failed", "text": "Opinion vocabulary violation.", "message": "Opinion vocabulary violation."}
 
     audit_details = {
@@ -154,6 +174,14 @@ def ask_opinion(context: dict[str, Any], question: str, timeframe: dict[str, Any
         "trigger": trigger,
         "domains": domains,
         "labels_used": labels_used,
+        "llm_presentation_attempted": rewrite["attempted"],
+        "llm_presentation_used": rewrite["used"],
+        "llm_validation_passed": rewrite["validation_passed"],
+        "llm_provider": rewrite["provider"],
+        "llm_failure_reason": rewrite.get("failure_reason"),
+        "llm_selector_mode": rewrite.get("selector_mode"),
+        "llm_decision": _summarize_decision(rewrite.get("decision")),
+        "llm_remote_used": _decision_remote_used(rewrite.get("decision")),
     }
     try:
         db.audit_log_create(
@@ -170,7 +198,7 @@ def ask_opinion(context: dict[str, Any], question: str, timeframe: dict[str, Any
             "text": "Audit logging failed. Operation aborted.",
         }
 
-    return {"status": "ok", "text": "\n".join(lines), "payload": {"labels_used": labels_used}}
+    return {"status": "ok", "text": final_text, "payload": {"labels_used": labels_used}}
 
 
 def _infer_domains(question: str) -> list[str]:
@@ -327,4 +355,274 @@ def _ensure_label(label: str) -> str:
 
 def _contains_forbidden(lines: list[str]) -> bool:
     text = "\n".join(lines).lower()
-    return any(word in text for word in FORBIDDEN_WORDS)
+    return _FORBIDDEN_RE.search(text) is not None
+
+
+def _summarize_decision(decision: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not decision or not isinstance(decision, dict):
+        return None
+    winner = decision.get("winner") or {}
+    return {
+        "winner_id": decision.get("winner_id"),
+        "provider": winner.get("provider"),
+        "model": winner.get("model"),
+        "score": winner.get("score"),
+        "candidates_count": decision.get("candidates_count"),
+    }
+
+
+def _decision_remote_used(decision: dict[str, Any] | None) -> bool:
+    if not decision or not isinstance(decision, dict):
+        return False
+    winner = decision.get("winner") or {}
+    return bool(winner.get("remote"))
+
+
+def _log_llm_decision(
+    context: dict[str, Any] | None,
+    rewrite: dict[str, Any],
+    *,
+    validation_passed: bool,
+) -> None:
+    log_path = (context or {}).get("log_path")
+    if not log_path:
+        return
+    try:
+        from agent.logging_utils import log_event
+
+        decision = rewrite.get("decision") if isinstance(rewrite, dict) else None
+        winner = (decision or {}).get("winner") or {}
+        candidates = []
+        for item in (decision or {}).get("candidates", []) or []:
+            candidates.append(
+                {
+                    "id": item.get("id"),
+                    "score": item.get("score"),
+                    "excluded_reason": None,
+                }
+            )
+        for rejected in (decision or {}).get("rejected", []) or []:
+            candidates.append(
+                {
+                    "id": rejected.get("id"),
+                    "score": None,
+                    "excluded_reason": rejected.get("reason"),
+                }
+            )
+        decision_payload = {
+            "command": "/ask_opinion",
+            "task": "presentation_rewrite",
+            "selector_mode": rewrite.get("selector_mode"),
+            "winner": {
+                "id": winner.get("id"),
+                "provider": winner.get("provider"),
+                "model": winner.get("model"),
+                "remote": winner.get("remote"),
+                "score": winner.get("score"),
+            },
+            "candidates": candidates,
+            "validation": {
+                "passed": bool(validation_passed),
+                "reason": rewrite.get("failure_reason") or "ok",
+            },
+            "fallback_used": not bool(rewrite.get("used")),
+        }
+        decisions_path = os.path.join(os.path.dirname(log_path), "llm_decisions.jsonl")
+        log_event(decisions_path, "llm_decision", decision_payload)
+    except Exception:
+        return
+
+
+def _maybe_rewrite_presentation(
+    context: dict[str, Any] | None,
+    deterministic_text: str,
+    *,
+    timeframe_line: str,
+    domain_lines: list[str],
+) -> dict[str, Any]:
+    enabled = os.getenv("ENABLE_LLM_PRESENTATION", "").strip().lower() in {"1", "true", "yes", "y", "on"}
+    selector = os.getenv("LLM_SELECTOR", "single").strip().lower() or "single"
+    provider = os.getenv("LLM_PROVIDER", "none").strip().lower() or "none"
+    if not enabled or (selector == "single" and provider == "none"):
+        return {
+            "text": deterministic_text,
+            "attempted": False,
+            "used": False,
+            "validation_passed": False,
+            "provider": provider,
+            "selector_mode": selector,
+            "decision": None,
+        }
+
+    must_keep_lines = [timeframe_line, *domain_lines]
+    prompt = _presentation_prompt(deterministic_text, must_keep_lines)
+    client = (context or {}).get("llm_presentation_client")
+    broker = (context or {}).get("llm_broker")
+
+    llm_text = None
+    decision = None
+    if selector == "broker":
+        if broker is None:
+            return {
+                "text": deterministic_text,
+                "attempted": True,
+                "used": False,
+                "validation_passed": False,
+                "provider": "none",
+                "selector_mode": selector,
+                "decision": None,
+                "failure_reason": "broker_unavailable",
+            }
+        try:
+            from agent.llm.broker import TaskSpec
+
+            task_spec = TaskSpec(task="presentation_rewrite", require_local=False)
+            client, decision = broker.select(task_spec)
+            provider = (decision or {}).get("winner", {}).get("provider", "none")
+            if hasattr(client, "generate"):
+                llm_text = client.generate(prompt)
+        except Exception:
+            return {
+                "text": deterministic_text,
+                "attempted": True,
+                "used": False,
+                "validation_passed": False,
+                "provider": "none",
+                "selector_mode": selector,
+                "decision": None,
+                "failure_reason": "broker_error",
+            }
+    elif client:
+        provider = getattr(client, "provider", provider)
+        if hasattr(client, "rewrite"):
+            result = client.rewrite(deterministic_text, must_keep_lines)
+            if isinstance(result, dict):
+                llm_text = result.get("text")
+                provider = result.get("provider") or provider
+            else:
+                llm_text = result
+        elif hasattr(client, "generate"):
+            llm_text = client.generate(prompt)
+    else:
+        llm_text = None
+
+    if not llm_text:
+        return {
+            "text": deterministic_text,
+            "attempted": True,
+            "used": False,
+            "validation_passed": False,
+            "provider": provider,
+            "selector_mode": selector,
+            "decision": decision,
+            "failure_reason": "no_llm_output",
+        }
+
+    ok, reason = _validate_llm_output(
+        llm_text,
+        deterministic_text,
+        must_keep_lines,
+        domain_lines,
+    )
+    if not ok:
+        return {
+            "text": deterministic_text,
+            "attempted": True,
+            "used": False,
+            "validation_passed": False,
+            "provider": provider,
+            "selector_mode": selector,
+            "decision": decision,
+            "failure_reason": reason,
+        }
+
+    return {
+        "text": llm_text,
+        "attempted": True,
+        "used": True,
+        "validation_passed": True,
+        "provider": provider,
+        "selector_mode": selector,
+        "decision": decision,
+    }
+
+
+def _presentation_prompt(deterministic_text: str, must_keep_lines: list[str]) -> str:
+    keep_block = "\n".join(must_keep_lines)
+    return (
+        "Rewrite for presentation only. You may rephrase ONLY non-kept sentences.\n"
+        "Do not add/remove facts. Do not add advice. Do not use forbidden words.\n"
+        "Output plain text only.\n\n"
+        "MUST KEEP EXACT LINES:\n"
+        f"{keep_block}\n\n"
+        "DETERMINISTIC MESSAGE:\n"
+        f"{deterministic_text}\n"
+    )
+
+
+def _validate_llm_output(
+    llm_text: str,
+    deterministic_text: str,
+    must_keep_lines: list[str],
+    domain_lines: list[str],
+) -> tuple[bool, str]:
+    output_lines = [line.rstrip() for line in llm_text.splitlines()]
+    deterministic_lines = {line.rstrip() for line in deterministic_text.splitlines()}
+
+    required_headers = [
+        "Question Restated:",
+        "Timeframe:",
+        "Factual Summary:",
+        "Opinionated Assessment:",
+        "Confidence & Limits:",
+    ]
+    for header in required_headers:
+        if not any(line.startswith(header) for line in output_lines):
+            return False, "missing_header"
+
+    for line in must_keep_lines:
+        if line not in output_lines:
+            return False, "missing_must_keep"
+
+    opinion_idx = _section_index(output_lines, "Opinionated Assessment:")
+    if opinion_idx is None:
+        return False, "missing_opinion_section"
+    next_header_idx = _next_header_index(output_lines, opinion_idx + 1)
+    opinion_lines = output_lines[opinion_idx + 1 : next_header_idx]
+    for line in opinion_lines:
+        if line.strip().startswith("- "):
+            if line not in domain_lines:
+                return False, "extra_domain_line"
+
+    domain_positions = []
+    for line in domain_lines:
+        try:
+            domain_positions.append(output_lines.index(line))
+        except ValueError:
+            return False, "missing_domain_line"
+    if domain_positions != sorted(domain_positions):
+        return False, "domain_order_changed"
+
+    if _contains_forbidden([llm_text]):
+        return False, "forbidden_word"
+
+    for line in output_lines:
+        if any(ch.isdigit() for ch in line):
+            if line not in must_keep_lines and line not in deterministic_lines:
+                return False, "extra_digits"
+
+    return True, "ok"
+
+
+def _section_index(lines: list[str], header: str) -> int | None:
+    for idx, line in enumerate(lines):
+        if line.startswith(header):
+            return idx
+    return None
+
+
+def _next_header_index(lines: list[str], start_idx: int) -> int:
+    for idx in range(start_idx, len(lines)):
+        if any(lines[idx].startswith(h) for h in ("Question Restated:", "Timeframe:", "Factual Summary:", "Opinionated Assessment:", "Confidence & Limits:")):
+            return idx
+    return len(lines)

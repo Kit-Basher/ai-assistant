@@ -43,6 +43,18 @@ A minimal Telegram-first personal agent with SQLite memory, a safe skills manife
 - Cloud models are only considered when `ALLOW_CLOUD=1`.
 - Watchdog tasks are forced local-only and degrade to Dummy if needed.
 
+### Optional LLM Presentation (Disabled by Default)
+
+The agent can optionally use a local or remote LLM to rewrite opinion output
+for readability only. This does not affect facts, labels, or audit behavior.
+
+To enable:
+1. Copy `packaging/example.env` to `.env`
+2. Set `ENABLE_LLM_PRESENTATION=1`
+3. Set `LLM_PROVIDER=<provider>` and its required key or base URL
+
+If validation fails, the agent automatically falls back to deterministic output.
+
 ## Run Locally
 - `TELEGRAM_BOT_TOKEN=... .venv/bin/python -m telegram_adapter`
 
