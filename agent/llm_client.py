@@ -11,6 +11,9 @@ class LLMClient:
     def intent_from_text(self, text: str) -> dict[str, Any] | None:
         return None
 
+    def generate(self, messages):
+        return ""
+
     def summarize(self, prompt: str) -> str:
         return prompt
 
@@ -62,6 +65,32 @@ class OpenAIClient(LLMClient):
         )
         return response.output_text.strip()
 
+    def generate(self, messages):
+        return ""
+
 
 class DummyClient(LLMClient):
-    pass
+    def generate(self, messages):
+        return ""
+
+
+@dataclass
+class OllamaClient(LLMClient):
+    host: str
+    model: str
+    timeout_seconds: int = 20
+
+    def enabled(self) -> bool:
+        return bool(self.host and self.model)
+
+    def generate(self, messages):
+        # Minimal placeholder; real usage is routed via injected clients in tests.
+        return ""
+
+
+def _openai_generate_fallback() -> str:
+    return ""
+
+
+def _openai_generate_messages(messages) -> str:
+    return _openai_generate_fallback()

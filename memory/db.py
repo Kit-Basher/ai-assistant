@@ -58,6 +58,7 @@ class MemoryDB:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._tx_depth = 0
 
     def close(self) -> None:
         self._conn.close()
@@ -65,15 +66,19 @@ class MemoryDB:
     @contextmanager
     def transaction(self) -> Any:
         try:
+            self._tx_depth += 1
             self._conn.execute("BEGIN")
             yield
             self._conn.commit()
         except Exception:
             self._conn.rollback()
             raise
+        finally:
+            if self._tx_depth > 0:
+                self._tx_depth -= 1
 
     def _commit_if_needed(self) -> None:
-        if not self._conn.in_transaction:
+        if self._tx_depth == 0:
             self._conn.commit()
 
     def init_schema(self, schema_path: str) -> None:
