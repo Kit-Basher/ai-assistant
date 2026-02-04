@@ -1,0 +1,17 @@
+[Unit]
+Description=Personal Agent (Telegram) for %i
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+Group=%i
+WorkingDirectory=/home/%i/personal-agent
+EnvironmentFile=/etc/personal-agent/%i.env
+ExecStart=/home/%i/personal-agent/.venv/bin/python -m telegram_adapter
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
