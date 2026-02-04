@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 import os
+import json
+import uuid
+from datetime import datetime, timezone, timedelta
 
 from agent.intent_router import route_message
 from agent.disk_diff import diff_disk_reports, time_since
@@ -16,10 +19,25 @@ from agent.confirmations import ConfirmationStore, PendingAction
 from agent.logging_utils import log_event
 from agent.policy import evaluate_policy
 from agent.skills_loader import SkillLoader
+from agent.ask_timeframe import parse_timeframe
 from memory.db import MemoryDB
 
 
 AUDIT_HARD_FAIL_MSG = "Audit logging failed. Operation aborted."
+_ASK_ADVICE_PHRASES = (
+    "should i",
+    "what should i do",
+    "recommend",
+    "recommendation",
+    "fix",
+    "optimize",
+    "how do i",
+    "how to",
+    "should we",
+    "best way",
+    "please advise",
+    "suggest",
+)
 
 
 @dataclass
@@ -54,6 +72,37 @@ class Orchestrator:
         if self._runner:
             ctx["runner"] = self._runner
         return ctx
+
+    def _ask_contains_advice(self, text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(phrase in lowered for phrase in _ASK_ADVICE_PHRASES)
+
+    def _store_pending_clarification(
+        self,
+        user_id: str,
+        chat_id: str,
+        intent_type: str,
+        partial_args: dict[str, Any],
+        question: str,
+        options: list[str],
+        minutes: int = 10,
+    ) -> None:
+        now_dt = datetime.now(timezone.utc)
+        pending_id = str(uuid.uuid4())
+        payload_json = json.dumps(partial_args, ensure_ascii=True)
+        options_json = json.dumps(options, ensure_ascii=True)
+        expires_at = (now_dt + timedelta(minutes=minutes)).isoformat()
+        self.db.replace_pending_clarification(
+            pending_id,
+            user_id,
+            chat_id,
+            intent_type,
+            payload_json,
+            question,
+            options_json,
+            expires_at,
+            now_dt.isoformat(),
+        )
 
     def _intent_context(self, chat_id: str | None = None) -> dict[str, Any]:
         context = dict(self._context())
@@ -357,6 +406,80 @@ class Orchestrator:
                     report = self._disk_digest_report(user_id)
                     text_out = self._maybe_add_narration("disk_digest", report["payload"], report["text"])
                     return OrchestratorResponse(text_out, report["payload"])
+
+                if cmd.name == "ask":
+                    question = (cmd.args or "").strip()
+                    if not question:
+                        return OrchestratorResponse("Usage: /ask <question>")
+                    if self._ask_contains_advice(question):
+                        refusal = (
+                            "I can only provide factual recall from existing snapshots. "
+                            "Please ask for observations, not advice or actions."
+                        )
+                        try:
+                            self.db.audit_log_create(
+                                user_id=user_id,
+                                action_type="ask_query",
+                                action_id="ask_query",
+                                status="refused",
+                                details={
+                                    "command": "/ask",
+                                    "question": question[:200],
+                                    "reason": "advice_request",
+                                },
+                            )
+                        except Exception:
+                            return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
+                        return OrchestratorResponse(refusal)
+
+                    parsed = parse_timeframe(question, self.db, self.timezone)
+                    if parsed.clarify:
+                        question_text = (
+                            "What timeframe should I use? (last 7 days, last 72 hours, or last week)"
+                        )
+                        options = ["last 7 days", "last 72 hours", "last week"]
+                        try:
+                            self.db.audit_log_create(
+                                user_id=user_id,
+                                action_type="ask_query",
+                                action_id="ask_query",
+                                status="clarification",
+                                details={
+                                    "command": "/ask",
+                                    "question": question[:200],
+                                    "clarification_required": True,
+                                },
+                            )
+                        except Exception:
+                            return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
+                        self._store_pending_clarification(
+                            user_id,
+                            user_id,
+                            "ask_query",
+                            {"question": question},
+                            question_text,
+                            options,
+                        )
+                        return OrchestratorResponse(question_text)
+                    if not parsed.ok:
+                        return OrchestratorResponse("No snapshots found yet.")
+
+                    timeframe = {
+                        "label": parsed.label,
+                        "start_date": parsed.start_date,
+                        "end_date": parsed.end_date,
+                        "start_ts": parsed.start_ts,
+                        "end_ts": parsed.end_ts,
+                        "user_id": user_id,
+                        "clarification_required": False,
+                    }
+                    return self._call_skill(
+                        user_id,
+                        "recall",
+                        "ask_query",
+                        {"question": question, "timeframe": timeframe},
+                        ["db:read"],
+                    )
 
                 if cmd.name == "storage_snapshot":
                     return self._call_skill(

@@ -1,0 +1,19 @@
+{
+  "name": "recall",
+  "description": "Observe-only conversational recall over existing snapshots.",
+  "version": "1.0.0",
+  "permissions": ["db:read", "net:none"],
+  "functions": [
+    {
+      "name": "ask_query",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "question": {"type": "string"},
+          "timeframe": {"type": "object"}
+        },
+        "required": ["question", "timeframe"]
+      }
+    }
+  ]
+}

@@ -704,6 +704,23 @@ class MemoryDB:
             return None
         return row["latest_date"]
 
+    def get_latest_snapshot_taken_at_any(self) -> str | None:
+        cur = self._conn.execute(
+            """
+            SELECT MAX(taken_at) AS latest_ts FROM (
+                SELECT taken_at FROM disk_snapshots
+                UNION ALL
+                SELECT taken_at FROM resource_snapshots
+                UNION ALL
+                SELECT taken_at FROM network_snapshots
+            )
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row["latest_ts"]
+
     def list_disk_snapshots_between(
         self, mountpoint: str, start_date: str, end_date: str
     ) -> list[dict[str, Any]]:

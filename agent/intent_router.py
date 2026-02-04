@@ -7,6 +7,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from skills.disk_cleanup import safe_cleanup
+from agent.ask_timeframe import parse_timeframe
 
 _REMEMBER_PREFIX = re.compile(
     r"^\s*(remember|note|save this|save a note|make a note|jot this down|don't forget|dont forget)\b[:\-]?\s*",
@@ -17,7 +19,8 @@ _REMEMBER_ANY = re.compile(
     re.IGNORECASE,
 )
 _REMINDER_TS = re.compile(r"\b(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\b")
-_TIME_ONLY = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))\s*([ap]m)?\s*$", re.IGNORECASE)
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TIME_ONLY = re.compile(r"^\s*(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*$", re.IGNORECASE)
 _REMIND_PHRASES = (
     "remind me",
     "set a reminder",
@@ -55,6 +58,39 @@ _PROJECTS_PHRASES = (
     "my projects",
 )
 
+_DISK_REGEX = re.compile(
+    r"\b(disk|ssd|storage|space|cleanup|largest folders|storage report|disk usage|ssd full|safe to clean)\b",
+    re.IGNORECASE,
+)
+_DISK_CHANGES = re.compile(r"\b(disk changes|what changed on my disk)\b", re.IGNORECASE)
+_DISK_BASELINE = re.compile(r"\bset disk baseline\b", re.IGNORECASE)
+_DISK_GROW = re.compile(r"\b(what grew under|show growth under)\b", re.IGNORECASE)
+_CLEAN_APT = re.compile(r"^\s*(clean|clear)\s+apt\s+cache\s*$", re.IGNORECASE)
+_CLEAN_HOME_CACHE = re.compile(r"^\s*(clear|clean)\s+cache\s*$", re.IGNORECASE)
+_CLEAN_JOURNALD = re.compile(r"^\s*(clean\s+logs|vacuum\s+journal)\s*$", re.IGNORECASE)
+_CLEAN_GENERIC = re.compile(r"\b(clean|clear|vacuum)\b", re.IGNORECASE)
+_ASK_PHRASES = (
+    "ask ",
+    "question ",
+    "what happened",
+    "what changed",
+    "summarize",
+)
+_ADVICE_PHRASES = (
+    "should i",
+    "what should i do",
+    "recommend",
+    "recommendation",
+    "fix",
+    "optimize",
+    "how do i",
+    "how to",
+    "should we",
+    "best way",
+    "please advise",
+    "suggest",
+)
+
 _ENERGY_KEYWORDS = {
     "low": {"tired", "exhausted", "low"},
     "med": {"ok", "okay", "medium", "normal"},
@@ -86,6 +122,11 @@ def _normalize(text: str) -> str:
 
 def _contains_any(haystack: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in haystack for phrase in phrases)
+
+
+def _contains_advice(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _ADVICE_PHRASES)
 
 
 def _extract_remember_content(text: str) -> str:
@@ -173,15 +214,32 @@ def _extract_reminder_text_only(text: str) -> str | None:
 
 
 def _skill_call(
-    skill: str, function: str, args: dict[str, Any], confidence: float, explanation: str
+    skill: str,
+    function: str,
+    args: dict[str, Any],
+    confidence: float,
+    explanation: str,
+    scopes: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "type": "skill_call",
         "skill": skill,
         "function": function,
         "args": args,
         "confidence": confidence,
         "explanation": explanation,
+    }
+    if scopes:
+        payload["scopes"] = scopes
+    return payload
+
+
+def _action_proposal(action_type: str, action_id: str, details: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "action_proposal",
+        "action_type": action_type,
+        "action_id": action_id,
+        "details": details,
     }
 
 
@@ -269,6 +327,79 @@ def _parse_time_only(text: str) -> tuple[int, int, str | None] | None:
     return hour, minute, ampm
 
 
+def _resolve_time_only(parsed: tuple[int, int, str | None]) -> tuple[int, int] | None:
+    hour, minute, ampm = parsed
+    if ampm:
+        if hour < 1 or hour > 12:
+            return None
+        if ampm == "pm" and hour != 12:
+            hour = hour + 12
+        if ampm == "am" and hour == 12:
+            hour = 0
+        return hour, minute
+    if hour >= 0 and hour <= 23:
+        return hour, minute
+    return None
+
+
+def resolve_datetime(
+    text: str, now_dt: datetime, context: dict[str, Any] | None
+) -> datetime | None:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return None
+    tz_name = (context or {}).get("timezone") or "UTC"
+    tzinfo = ZoneInfo(tz_name)
+    lowered = cleaned.lower()
+
+    if _REMINDER_TS.fullmatch(cleaned):
+        try:
+            parsed = datetime.strptime(cleaned, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=tzinfo)
+
+    if _DATE_ONLY.fullmatch(cleaned):
+        try:
+            parsed = datetime.strptime(cleaned, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return parsed.replace(tzinfo=tzinfo, hour=9, minute=0)
+
+    match = re.match(r"^(today|tomorrow)(?:\s+(.+))?$", lowered)
+    if match:
+        base = now_dt.astimezone(tzinfo).date()
+        if match.group(1) == "tomorrow":
+            base = base + timedelta(days=1)
+        time_part = match.group(2)
+        if time_part:
+            parsed_time = _parse_time_only(time_part)
+            if not parsed_time:
+                return None
+            resolved = _resolve_time_only(parsed_time)
+            if not resolved:
+                return None
+            hour, minute = resolved
+        else:
+            hour, minute = 9, 0
+        return datetime(base.year, base.month, base.day, hour, minute, tzinfo=tzinfo)
+
+    return None
+
+
+def _format_local_timestamp(when_dt: datetime, context: dict[str, Any] | None) -> str:
+    tz_name = (context or {}).get("timezone") or "UTC"
+    tzinfo = ZoneInfo(tz_name)
+    return when_dt.astimezone(tzinfo).strftime("%Y-%m-%d %H:%M")
+
+
+def _is_past_datetime(when_dt: datetime, now_dt: datetime, context: dict[str, Any] | None) -> bool:
+    tz_name = (context or {}).get("timezone") or "UTC"
+    tzinfo = ZoneInfo(tz_name)
+    now_local = now_dt.astimezone(tzinfo)
+    return when_dt <= now_local
+
+
 def _time_only_options(
     hour: int, minute: int, ampm: str | None, date_str: str
 ) -> list[str] | None:
@@ -346,64 +477,96 @@ def _handle_pending(
     if intent_type == "set_reminder":
         when_ts = partial_args.get("when_ts")
         reminder_text = partial_args.get("text")
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", text):
-            partial_args["when_ts"] = text
-            if _is_past_timestamp(text, now_dt, context):
-                question = "That time is in the past. Please pick a future time (YYYY-MM-DD HH:MM)."
-                options = _suggest_reminder_times(now_dt, context)
-                _store_pending(
-                    db,
-                    user_id,
-                    chat_id,
-                    intent_type,
-                    {"when_ts": None, "text": reminder_text},
-                    question,
-                    options,
-                    now_dt,
+        options = json.loads(pending.options_json) if pending.options_json else []
+        candidate = text.strip()
+        if candidate.isdigit() and options:
+            idx = int(candidate)
+            if 1 <= idx <= len(options):
+                candidate = options[idx - 1]
+
+        if not when_ts:
+            time_only = _parse_time_only(candidate)
+            if time_only:
+                date_str = _next_day_date_str(now_dt, context)
+                time_options = _time_only_options(time_only[0], time_only[1], time_only[2], date_str)
+                if time_options:
+                    question = "Please pick an explicit timestamp (YYYY-MM-DD HH:MM)."
+                    _store_pending(
+                        db,
+                        user_id,
+                        chat_id,
+                        intent_type,
+                        {"when_ts": None, "text": reminder_text},
+                        question,
+                        time_options,
+                        now_dt,
+                    )
+                    return _clarify(question, time_options, 0.60, intent_type)
+
+        resolved_dt = resolve_datetime(candidate, now_dt, context)
+        if resolved_dt is None and not when_ts:
+            if partial_args.get("retry"):
+                db.delete_pending_clarification(pending.id)
+                return _noop(
+                    "Sorry, I still couldn't parse that. Try 'tomorrow 2pm' or '2026-02-05 14:00'.",
+                    0.20,
                 )
-                return _clarify(question, options, 0.60, intent_type)
-            if not partial_args.get("text"):
-                question = "What should I remind you about?"
-                options = ["Call someone", "Pay a bill", "Do something"]
-                _store_pending(
-                    db,
-                    user_id,
-                    chat_id,
-                    intent_type,
-                    {"when_ts": text, "text": None},
-                    question,
-                    options,
-                    now_dt,
-                )
-                return _clarify(question, options, 0.60, intent_type)
+            question = "I couldn't parse that. Try 'tomorrow 2pm' or '2026-02-05 14:00'."
+            options = _suggest_reminder_times(now_dt, context)
+            _store_pending(
+                db,
+                user_id,
+                chat_id,
+                intent_type,
+                {"when_ts": None, "text": reminder_text, "retry": True},
+                question,
+                options,
+                now_dt,
+            )
+            return _clarify(question, options, 0.60, intent_type)
+
+        if resolved_dt and _is_past_datetime(resolved_dt, now_dt, context):
+            question = "That time is in the past. Please pick a future time (YYYY-MM-DD HH:MM)."
+            options = _suggest_reminder_times(now_dt, context)
+            _store_pending(
+                db,
+                user_id,
+                chat_id,
+                intent_type,
+                {"when_ts": None, "text": reminder_text},
+                question,
+                options,
+                now_dt,
+            )
+            return _clarify(question, options, 0.60, intent_type)
+
+        if resolved_dt and not reminder_text:
+            resolved_ts = _format_local_timestamp(resolved_dt, context)
+            question = "What should I remind you about?"
+            options = ["Call someone", "Pay a bill", "Do something"]
+            _store_pending(
+                db,
+                user_id,
+                chat_id,
+                intent_type,
+                {"when_ts": resolved_ts, "text": None},
+                question,
+                options,
+                now_dt,
+            )
+            return _clarify(question, options, 0.60, intent_type)
+
+        if resolved_dt and reminder_text:
+            resolved_ts = _format_local_timestamp(resolved_dt, context)
             db.delete_pending_clarification(pending.id)
             return _skill_call(
                 "core",
                 "set_reminder",
-                {"when_ts": partial_args.get("when_ts"), "text": partial_args.get("text")},
+                {"when_ts": resolved_ts, "text": reminder_text},
                 0.85,
-                "Resolved clarification with explicit timestamp.",
+                "Resolved clarification for reminder.",
             )
-        time_only = _parse_time_only(text)
-        if not when_ts and time_only:
-            date_str = _next_day_date_str(now_dt, context)
-            options = _time_only_options(time_only[0], time_only[1], time_only[2], date_str)
-            if options:
-                question = "Please pick an explicit timestamp (YYYY-MM-DD HH:MM)."
-                _store_pending(
-                    db,
-                    user_id,
-                    chat_id,
-                    intent_type,
-                    {"when_ts": None, "text": reminder_text},
-                    question,
-                    options,
-                    now_dt,
-                )
-                return _clarify(question, options, 0.60, intent_type)
-        parsed_when, parsed_text = _extract_reminder(text)
-        when_ts = when_ts or parsed_when
-        reminder_text = reminder_text or parsed_text or _extract_reminder_text_only(text)
+
         if when_ts and reminder_text:
             if _is_past_timestamp(when_ts, now_dt, context):
                 question = "That time is in the past. Please pick a future time (YYYY-MM-DD HH:MM)."
@@ -427,6 +590,7 @@ def _handle_pending(
                 0.85,
                 "Resolved clarification for reminder.",
             )
+
         if when_ts and not reminder_text:
             question = "What should I remind you about?"
             options = ["Call someone", "Pay a bill", "Do something"]
@@ -441,22 +605,9 @@ def _handle_pending(
                 now_dt,
             )
             return _clarify(question, options, 0.60, intent_type)
-        if not when_ts:
-            question = "When should I remind you? Please use YYYY-MM-DD HH:MM."
-            options = _suggest_reminder_times(now_dt, context)
-            _store_pending(
-                db,
-                user_id,
-                chat_id,
-                intent_type,
-                {"when_ts": when_ts, "text": reminder_text},
-                question,
-                options,
-                now_dt,
-            )
-            return _clarify(question, options, 0.60, intent_type)
-        question = "What should I remind you about?"
-        options = ["Call someone", "Pay a bill", "Do something"]
+
+        question = "When should I remind you? Please use YYYY-MM-DD HH:MM."
+        options = _suggest_reminder_times(now_dt, context)
         _store_pending(
             db,
             user_id,
@@ -468,6 +619,33 @@ def _handle_pending(
             now_dt,
         )
         return _clarify(question, options, 0.60, intent_type)
+
+    if intent_type == "ask_query":
+        candidate = text.strip()
+        parsed = parse_timeframe(candidate, db, (context or {}).get("timezone") or "UTC")
+        db.delete_pending_clarification(pending.id)
+        if not parsed.ok or parsed.clarify:
+            return _noop(
+                "Please re-run /ask with a specific timeframe (last 7 days, last 72 hours, or last week).",
+                0.20,
+            )
+        timeframe = {
+            "label": parsed.label,
+            "start_date": parsed.start_date,
+            "end_date": parsed.end_date,
+            "start_ts": parsed.start_ts,
+            "end_ts": parsed.end_ts,
+            "user_id": user_id,
+            "clarification_required": True,
+        }
+        return _skill_call(
+            "recall",
+            "ask_query",
+            {"question": partial_args.get("question") or "", "timeframe": timeframe},
+            0.85,
+            "Resolved clarification for ask_query.",
+            scopes=["db:read"],
+        )
 
     if intent_type == "remember_note":
         content = text.strip()
@@ -627,6 +805,49 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             )
         return _clarify(question, options, 0.60, "daily_plan")
 
+    if _contains_any(lowered, _ASK_PHRASES) or cleaned.endswith("?"):
+        if _contains_advice(cleaned):
+            return _noop(
+                "I can only provide factual recall from existing snapshots. Please ask for observations, not advice or actions.",
+                0.20,
+            )
+        if not db:
+            return _noop("Database unavailable for recall.", 0.20)
+        parsed = parse_timeframe(cleaned, db, (context or {}).get("timezone") or "UTC")
+        if parsed.clarify:
+            question = "What timeframe should I use? (last 7 days, last 72 hours, or last week)"
+            options = ["last 7 days", "last 72 hours", "last week"]
+            _store_pending(
+                db,
+                user_id,
+                chat_id,
+                "ask_query",
+                {"question": cleaned},
+                question,
+                options,
+                now_dt,
+            )
+            return _clarify(question, options, 0.60, "ask_query")
+        if not parsed.ok:
+            return _noop("No snapshots found yet.", 0.20)
+        timeframe = {
+            "label": parsed.label,
+            "start_date": parsed.start_date,
+            "end_date": parsed.end_date,
+            "start_ts": parsed.start_ts,
+            "end_ts": parsed.end_ts,
+            "user_id": user_id,
+            "clarification_required": False,
+        }
+        return _skill_call(
+            "recall",
+            "ask_query",
+            {"question": cleaned, "timeframe": timeframe},
+            0.85,
+            "Matched ask_query intent.",
+            scopes=["db:read"],
+        )
+
     if _contains_any(lowered, _WEEKLY_PHRASES):
         return _skill_call(
             "core",
@@ -635,6 +856,53 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             0.85,
             "Matched weekly-review intent.",
         )
+
+    if _DISK_CHANGES.search(lowered):
+        return {"type": "disk_changes"}
+
+    if _DISK_BASELINE.search(lowered):
+        return {"type": "disk_baseline"}
+
+    if _DISK_GROW.search(lowered):
+        match = re.search(r"under\\s+(.+)$", cleaned, re.IGNORECASE)
+        if match:
+            return {"type": "disk_grow", "path": match.group(1).strip()}
+
+    if _DISK_REGEX.search(lowered) or "why is my ssd full" in lowered:
+        return _skill_call(
+            "disk_report",
+            "disk_report",
+            {},
+            0.75,
+            "Matched disk report intent.",
+        )
+
+    if _CLEAN_APT.search(cleaned):
+        return _action_proposal(
+            "disk_cleanup",
+            "apt_cache",
+            {"path": "/var/cache/apt/archives"},
+        )
+
+    if _CLEAN_HOME_CACHE.search(cleaned):
+        return _action_proposal(
+            "disk_cleanup",
+            "home_cache",
+            {"path": "~/.cache"},
+        )
+
+    if _CLEAN_JOURNALD.search(cleaned):
+        return _action_proposal(
+            "disk_cleanup",
+            "journald_vacuum",
+            {"path": "/var/log/journal"},
+        )
+
+    if _CLEAN_GENERIC.search(cleaned):
+        return {
+            "type": "respond",
+            "text": "I can only propose: 'clean apt cache', 'clean logs', 'vacuum journal', or 'clear cache'. Try /disk_report for advice.",
+        }
 
     if re.search(r"\bprojects?\b", lowered) or _contains_any(lowered, _PROJECTS_PHRASES):
         return _skill_call(
