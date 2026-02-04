@@ -240,6 +240,20 @@ async def _handle_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_ask_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    text = update.effective_message.text or ""
+    content = _command_payload(text, "/ask_opinion")
+    prompt = "/ask_opinion {}".format(content).strip()
+
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message(prompt, user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     import logging
 
@@ -328,6 +342,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("network_report", _handle_network_report))
     app.add_handler(CommandHandler("weekly_reflection", _handle_weekly_reflection))
     app.add_handler(CommandHandler("ask", _handle_ask))
+    app.add_handler(CommandHandler("ask_opinion", _handle_ask_opinion))
 
     # Non-command messages only.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))

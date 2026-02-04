@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from skills.disk_cleanup import safe_cleanup
 from agent.ask_timeframe import parse_timeframe
 
 _REMEMBER_PREFIX = re.compile(
@@ -91,6 +90,15 @@ _ADVICE_PHRASES = (
     "suggest",
 )
 
+_OPINION_PHRASES = (
+    "what do you think",
+    "is this unusual",
+    "does this look stable",
+    "does this seem stable",
+    "is this normal for me",
+    "outside my baseline",
+)
+
 _ENERGY_KEYWORDS = {
     "low": {"tired", "exhausted", "low"},
     "med": {"ok", "okay", "medium", "normal"},
@@ -127,6 +135,14 @@ def _contains_any(haystack: str, phrases: tuple[str, ...]) -> bool:
 def _contains_advice(text: str) -> bool:
     lowered = text.lower()
     return any(phrase in lowered for phrase in _ADVICE_PHRASES)
+
+
+def _contains_opinion_trigger(text: str) -> str | None:
+    lowered = text.lower()
+    for phrase in _OPINION_PHRASES:
+        if phrase in lowered:
+            return phrase
+    return None
 
 
 def _extract_remember_content(text: str) -> str:
@@ -647,6 +663,37 @@ def _handle_pending(
             scopes=["db:read"],
         )
 
+    if intent_type == "ask_opinion":
+        candidate = text.strip()
+        parsed = parse_timeframe(candidate, db, (context or {}).get("timezone") or "UTC")
+        db.delete_pending_clarification(pending.id)
+        if not parsed.ok or parsed.clarify:
+            return _noop(
+                "Please re-run with a specific timeframe (last 7 days, last 72 hours, or last week).",
+                0.20,
+            )
+        timeframe = {
+            "label": parsed.label,
+            "start_date": parsed.start_date,
+            "end_date": parsed.end_date,
+            "start_ts": parsed.start_ts,
+            "end_ts": parsed.end_ts,
+            "user_id": user_id,
+            "clarification_required": True,
+        }
+        return _skill_call(
+            "opinion",
+            "ask_opinion",
+            {
+                "question": partial_args.get("question") or "",
+                "timeframe": timeframe,
+                "trigger": partial_args.get("trigger") or "",
+            },
+            0.85,
+            "Resolved clarification for ask_opinion.",
+            scopes=["db:read"],
+        )
+
     if intent_type == "remember_note":
         content = text.strip()
         if content:
@@ -810,6 +857,44 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             return _noop(
                 "I can only provide factual recall from existing snapshots. Please ask for observations, not advice or actions.",
                 0.20,
+            )
+        trigger = _contains_opinion_trigger(cleaned)
+        if trigger:
+            if not db:
+                return _noop("Database unavailable for recall.", 0.20)
+            parsed = parse_timeframe(cleaned, db, (context or {}).get("timezone") or "UTC")
+            if parsed.clarify:
+                question = "What timeframe should I use? (last 7 days, last 72 hours, or last week)"
+                options = ["last 7 days", "last 72 hours", "last week"]
+                _store_pending(
+                    db,
+                    user_id,
+                    chat_id,
+                    "ask_opinion",
+                    {"question": cleaned, "trigger": trigger},
+                    question,
+                    options,
+                    now_dt,
+                )
+                return _clarify(question, options, 0.60, "ask_opinion")
+            if not parsed.ok:
+                return _noop("No snapshots found yet.", 0.20)
+            timeframe = {
+                "label": parsed.label,
+                "start_date": parsed.start_date,
+                "end_date": parsed.end_date,
+                "start_ts": parsed.start_ts,
+                "end_ts": parsed.end_ts,
+                "user_id": user_id,
+                "clarification_required": False,
+            }
+            return _skill_call(
+                "opinion",
+                "ask_opinion",
+                {"question": cleaned, "timeframe": timeframe, "trigger": trigger},
+                0.85,
+                "Matched ask_opinion intent.",
+                scopes=["db:read"],
             )
         if not db:
             return _noop("Database unavailable for recall.", 0.20)

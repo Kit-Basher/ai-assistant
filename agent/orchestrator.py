@@ -77,6 +77,20 @@ class Orchestrator:
         lowered = (text or "").lower()
         return any(phrase in lowered for phrase in _ASK_ADVICE_PHRASES)
 
+    def _opinion_trigger(self, text: str) -> str | None:
+        lowered = (text or "").lower()
+        for phrase in (
+            "what do you think",
+            "is this unusual",
+            "does this look stable",
+            "does this seem stable",
+            "is this normal for me",
+            "outside my baseline",
+        ):
+            if phrase in lowered:
+                return phrase
+        return None
+
     def _store_pending_clarification(
         self,
         user_id: str,
@@ -478,6 +492,86 @@ class Orchestrator:
                         "recall",
                         "ask_query",
                         {"question": question, "timeframe": timeframe},
+                        ["db:read"],
+                    )
+
+                if cmd.name == "ask_opinion":
+                    question = (cmd.args or "").strip()
+                    if not question:
+                        return OrchestratorResponse("Usage: /ask_opinion <question>")
+                    if self._ask_contains_advice(question):
+                        refusal = (
+                            "I can provide bounded opinions about historical data, but not advice or actions. "
+                            "Please ask for observations or opinions only."
+                        )
+                        try:
+                            self.db.audit_log_create(
+                                user_id=user_id,
+                                action_type="ask_opinion",
+                                action_id="ask_opinion",
+                                status="refused",
+                                details={
+                                    "command": "/ask_opinion",
+                                    "question": question[:200],
+                                    "reason": "advice_request",
+                                },
+                            )
+                        except Exception:
+                            return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
+                        return OrchestratorResponse(refusal)
+
+                    trigger = self._opinion_trigger(question)
+                    if not trigger:
+                        return OrchestratorResponse(
+                            "This can be answered factually. Use /ask for factual recall."
+                        )
+
+                    parsed = parse_timeframe(question, self.db, self.timezone)
+                    if parsed.clarify:
+                        question_text = (
+                            "What timeframe should I use? (last 7 days, last 72 hours, or last week)"
+                        )
+                        options = ["last 7 days", "last 72 hours", "last week"]
+                        try:
+                            self.db.audit_log_create(
+                                user_id=user_id,
+                                action_type="ask_opinion",
+                                action_id="ask_opinion",
+                                status="clarification",
+                                details={
+                                    "command": "/ask_opinion",
+                                    "question": question[:200],
+                                    "clarification_required": True,
+                                },
+                            )
+                        except Exception:
+                            return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
+                        self._store_pending_clarification(
+                            user_id,
+                            user_id,
+                            "ask_opinion",
+                            {"question": question, "trigger": trigger},
+                            question_text,
+                            options,
+                        )
+                        return OrchestratorResponse(question_text)
+                    if not parsed.ok:
+                        return OrchestratorResponse("No snapshots found yet.")
+
+                    timeframe = {
+                        "label": parsed.label,
+                        "start_date": parsed.start_date,
+                        "end_date": parsed.end_date,
+                        "start_ts": parsed.start_ts,
+                        "end_ts": parsed.end_ts,
+                        "user_id": user_id,
+                        "clarification_required": False,
+                    }
+                    return self._call_skill(
+                        user_id,
+                        "opinion",
+                        "ask_opinion",
+                        {"question": question, "timeframe": timeframe, "trigger": trigger},
                         ["db:read"],
                     )
 

@@ -1,0 +1,20 @@
+{
+  "name": "opinion",
+  "description": "Bounded opinions over existing snapshot facts (no advice).",
+  "version": "2.0.0",
+  "permissions": ["db:read", "net:none"],
+  "functions": [
+    {
+      "name": "ask_opinion",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "question": {"type": "string"},
+          "timeframe": {"type": "object"},
+          "trigger": {"type": "string"}
+        },
+        "required": ["question", "timeframe", "trigger"]
+      }
+    }
+  ]
+}
