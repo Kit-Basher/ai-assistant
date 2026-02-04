@@ -8,7 +8,7 @@ from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from agent.config import load_config
 from agent.intent_router import route_message
-from agent.llm_client import DummyClient, OpenAIClient
+from agent.llm_router import LLMRouter
 from agent.logging_utils import log_event
 from agent.orchestrator import Orchestrator
 from memory.db import MemoryDB
@@ -113,9 +113,7 @@ def build_app() -> Application:
     )
     db.init_schema(schema_path)
 
-    llm_client = DummyClient()
-    if config.openai_api_key:
-        llm_client = OpenAIClient(api_key=config.openai_api_key, model=config.openai_model)
+    llm_client = LLMRouter(config, log_path=config.log_path)
 
     orchestrator = Orchestrator(
         db=db,
