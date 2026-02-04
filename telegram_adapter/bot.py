@@ -215,6 +215,17 @@ async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_T
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_weekly_reflection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+
+    response = orchestrator.handle_message("/weekly_reflection", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     import logging
 
@@ -301,6 +312,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("storage_report", _handle_storage_report))
     app.add_handler(CommandHandler("resource_report", _handle_resource_report))
     app.add_handler(CommandHandler("network_report", _handle_network_report))
+    app.add_handler(CommandHandler("weekly_reflection", _handle_weekly_reflection))
 
     # Non-command messages only.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))

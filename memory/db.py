@@ -687,6 +687,137 @@ class MemoryDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def get_latest_snapshot_local_date_any(self) -> str | None:
+        cur = self._conn.execute(
+            """
+            SELECT MAX(snapshot_local_date) AS latest_date FROM (
+                SELECT snapshot_local_date FROM disk_snapshots
+                UNION ALL
+                SELECT snapshot_local_date FROM resource_snapshots
+                UNION ALL
+                SELECT snapshot_local_date FROM network_snapshots
+            )
+            """
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row["latest_date"]
+
+    def list_disk_snapshots_between(
+        self, mountpoint: str, start_date: str, end_date: str
+    ) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT snapshot_local_date, taken_at, used_bytes
+            FROM disk_snapshots
+            WHERE mountpoint = ?
+              AND snapshot_local_date BETWEEN ? AND ?
+            ORDER BY snapshot_local_date ASC
+            """,
+            (mountpoint, start_date, end_date),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def list_dir_size_samples_for_date(self, scope: str, date_str: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT path, bytes
+            FROM dir_size_samples
+            WHERE scope = ? AND substr(taken_at, 1, 10) = ?
+            """,
+            (scope, date_str),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def list_dir_size_sample_dates(self, scope: str, start_date: str, end_date: str) -> list[str]:
+        cur = self._conn.execute(
+            """
+            SELECT DISTINCT substr(taken_at, 1, 10) AS day
+            FROM dir_size_samples
+            WHERE scope = ? AND substr(taken_at, 1, 10) BETWEEN ? AND ?
+            ORDER BY day ASC
+            """,
+            (scope, start_date, end_date),
+        )
+        return [row["day"] for row in cur.fetchall()]
+
+    def list_storage_scan_stats_between(self, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT errors_skipped
+            FROM storage_scan_stats
+            WHERE substr(taken_at, 1, 10) BETWEEN ? AND ?
+            """,
+            (start_date, end_date),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def list_resource_snapshots_between(self, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT snapshot_local_date, taken_at, load_1m, load_5m, load_15m,
+                   mem_used, mem_total, swap_used, swap_total
+            FROM resource_snapshots
+            WHERE snapshot_local_date BETWEEN ? AND ?
+            ORDER BY snapshot_local_date ASC
+            """,
+            (start_date, end_date),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_resource_process_samples_for_date(self, date_str: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT rps.pid, rps.name, rps.rss_bytes
+            FROM resource_process_samples rps
+            JOIN resource_snapshots rs ON rs.taken_at = rps.taken_at
+            WHERE rs.snapshot_local_date = ? AND rps.category = 'rss'
+            ORDER BY rps.rss_bytes DESC
+            LIMIT 5
+            """,
+            (date_str,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def list_network_snapshots_between(self, start_date: str, end_date: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT snapshot_local_date, taken_at, default_iface, default_gateway
+            FROM network_snapshots
+            WHERE snapshot_local_date BETWEEN ? AND ?
+            ORDER BY snapshot_local_date ASC
+            """,
+            (start_date, end_date),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_network_nameservers_for_date(self, date_str: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT ns.nameserver
+            FROM network_nameservers ns
+            JOIN network_snapshots snap ON snap.taken_at = ns.taken_at
+            WHERE snap.snapshot_local_date = ?
+            ORDER BY ns.nameserver ASC
+            """,
+            (date_str,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def get_network_interfaces_for_date(self, date_str: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT ni.name, ni.state, ni.rx_bytes, ni.tx_bytes, ni.rx_errors, ni.tx_errors
+            FROM network_interfaces ni
+            JOIN network_snapshots snap ON snap.taken_at = ni.taken_at
+            WHERE snap.snapshot_local_date = ?
+            ORDER BY ni.name ASC
+            """,
+            (date_str,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     def get_latest_disk_snapshot(self, mountpoint: str) -> dict[str, Any] | None:
         cur = self._conn.execute(
             """
