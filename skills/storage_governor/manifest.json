@@ -1,0 +1,27 @@
+{
+  "name": "storage_governor",
+  "description": "Observe-only storage snapshots and reports (disk totals + top directories).",
+  "version": "0.6.0",
+  "permissions": ["db:read", "db:write", "sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "storage_snapshot",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "top_n": {"type": "integer"},
+          "user_id": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "storage_report",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

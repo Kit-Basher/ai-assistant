@@ -55,6 +55,49 @@ CREATE TABLE IF NOT EXISTS activity_log (
     payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS disk_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    snapshot_local_date TEXT NOT NULL,
+    hostname TEXT NOT NULL,
+    mountpoint TEXT NOT NULL,
+    filesystem TEXT,
+    total_bytes INTEGER NOT NULL,
+    used_bytes INTEGER NOT NULL,
+    free_bytes INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_disk_snapshots_date_mount
+    ON disk_snapshots(snapshot_local_date, mountpoint);
+
+CREATE INDEX IF NOT EXISTS idx_disk_snapshots_mount_taken
+    ON disk_snapshots(mountpoint, taken_at);
+
+CREATE TABLE IF NOT EXISTS dir_size_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    path TEXT NOT NULL,
+    bytes INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_dir_size_samples_scope_taken
+    ON dir_size_samples(scope, taken_at);
+
+CREATE TABLE IF NOT EXISTS storage_scan_stats (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    taken_at TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    dirs_scanned INTEGER NOT NULL,
+    errors_skipped INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_storage_scan_stats_taken_scope
+    ON storage_scan_stats(taken_at, scope);
+
+CREATE INDEX IF NOT EXISTS idx_storage_scan_stats_scope_taken
+    ON storage_scan_stats(scope, taken_at);
+
 CREATE TABLE IF NOT EXISTS pending_clarifications (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
