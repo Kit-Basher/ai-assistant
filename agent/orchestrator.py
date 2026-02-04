@@ -30,6 +30,12 @@ class Orchestrator:
     def _context(self) -> dict[str, Any]:
         return {"db": self.db, "timezone": self.timezone}
 
+    def _intent_context(self, chat_id: str | None = None) -> dict[str, Any]:
+        context = dict(self._context())
+        if chat_id:
+            context["chat_id"] = chat_id
+        return context
+
     def _call_skill(
         self,
         user_id: str,
