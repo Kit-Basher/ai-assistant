@@ -71,6 +71,16 @@ class Orchestrator:
         header = f"Narration ({scope})"
         return f"{header}\n{result.text}\n\n{text}"
 
+    def _maybe_add_narration_from_text(self, kind: str, text: str) -> str:
+        router = LLMNarrationRouter()
+        result = router.summarize(kind, {"report_text": text})
+        if not result or not result.text:
+            return text
+        provider = result.provider or "unknown"
+        scope = "local" if provider == "ollama" else "cloud" if provider == "openai" else provider
+        header = f"Narration ({scope})"
+        return f"{header}\n{result.text}\n\n{text}"
+
     def _call_skill(
         self,
         user_id: str,
@@ -359,13 +369,26 @@ class Orchestrator:
                     )
 
                 if cmd.name == "storage_report":
-                    return self._call_skill(
+                    response = self._call_skill(
                         user_id,
                         "storage_governor",
                         "storage_report",
                         {"user_id": user_id},
                         ["db:read"],
                     )
+                    response.text = self._maybe_add_narration_from_text("storage_report", response.text)
+                    return response
+
+                if cmd.name == "resource_report":
+                    response = self._call_skill(
+                        user_id,
+                        "resource_governor",
+                        "resource_report",
+                        {"user_id": user_id},
+                        ["db:read"],
+                    )
+                    response.text = self._maybe_add_narration_from_text("resource_report", response.text)
+                    return response
 
             gate_result = handle_action_text(self.db, user_id, text, self.enable_writes)
             if gate_result:
