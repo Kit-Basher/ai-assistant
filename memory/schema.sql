@@ -55,6 +55,24 @@ CREATE TABLE IF NOT EXISTS activity_log (
     payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS disk_baselines (
+    user_id TEXT PRIMARY KEY,
+    snapshot_json TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS disk_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     taken_at TEXT NOT NULL,

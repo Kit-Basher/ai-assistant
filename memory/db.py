@@ -181,6 +181,150 @@ class MemoryDB:
         )
         self._commit_if_needed()
 
+    def audit_log_create(
+        self,
+        user_id: str,
+        action_type: str,
+        action_id: str,
+        status: str,
+        details_json: dict[str, Any] | str | None = None,
+        error: str | None = None,
+        created_at: str | None = None,
+        **kwargs: Any,
+    ) -> int:
+        created_at = created_at or self._now_iso()
+        if details_json is None and "details" in kwargs:
+            details_json = kwargs.get("details")
+        if details_json is None:
+            details_json = {}
+        if isinstance(details_json, str):
+            details_payload = details_json
+        else:
+            details_payload = json.dumps(details_json, ensure_ascii=True)
+        cur = self._conn.execute(
+            """
+            INSERT INTO audit_log (
+                created_at,
+                user_id,
+                action_type,
+                action_id,
+                status,
+                details_json,
+                error
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                created_at,
+                user_id,
+                action_type,
+                action_id,
+                status,
+                details_payload,
+                error,
+            ),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def audit_log_update_status(self, *args: Any, **kwargs: Any) -> bool:
+        if not args:
+            raise TypeError("audit_log_update_status requires arguments")
+
+        if isinstance(args[0], int):
+            audit_id = int(args[0])
+            status = args[1] if len(args) > 1 else None
+            error = args[2] if len(args) > 2 else kwargs.get("error")
+            details = args[3] if len(args) > 3 else kwargs.get("details")
+            if status is None:
+                raise TypeError("status is required")
+            if details is None:
+                cur = self._conn.execute(
+                    "UPDATE audit_log SET status = ?, error = ? WHERE id = ?",
+                    (status, error, audit_id),
+                )
+            else:
+                cur = self._conn.execute(
+                    "UPDATE audit_log SET status = ?, error = ?, details_json = ? WHERE id = ?",
+                    (status, error, json.dumps(details, ensure_ascii=True), audit_id),
+                )
+        else:
+            user_id = str(args[0])
+            action_id = str(args[1]) if len(args) > 1 else None
+            status = args[2] if len(args) > 2 else None
+            error = args[3] if len(args) > 3 else kwargs.get("error")
+            if action_id is None or status is None:
+                raise TypeError("action_id and status are required")
+            cur = self._conn.execute(
+                "UPDATE audit_log SET status = ?, error = ? WHERE user_id = ? AND action_id = ?",
+                (status, error, user_id, action_id),
+            )
+
+        self._commit_if_needed()
+        return cur.rowcount > 0
+
+    def audit_log_list_recent(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT id, created_at, user_id, action_type, action_id, status, details_json, error
+            FROM audit_log
+            WHERE user_id = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (user_id, limit),
+        )
+        rows = cur.fetchall()
+        results: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            try:
+                record["details"] = json.loads(record.pop("details_json") or "{}")
+            except json.JSONDecodeError:
+                record["details"] = {}
+                record.pop("details_json", None)
+            results.append(record)
+        return results
+
+    def disk_baseline_set(
+        self,
+        user_id: str,
+        snapshot_json: dict[str, Any] | str,
+        snapshot_hash: str,
+        created_at: str | None = None,
+    ) -> None:
+        created_at = created_at or self._now_iso()
+        if isinstance(snapshot_json, str):
+            payload = snapshot_json
+        else:
+            payload = json.dumps(snapshot_json, ensure_ascii=True)
+        self._conn.execute(
+            """
+            INSERT INTO disk_baselines (user_id, snapshot_json, snapshot_hash, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                snapshot_json = excluded.snapshot_json,
+                snapshot_hash = excluded.snapshot_hash,
+                created_at = excluded.created_at
+            """,
+            (user_id, payload, snapshot_hash, created_at),
+        )
+        self._commit_if_needed()
+
+    def disk_baseline_get(self, user_id: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            "SELECT user_id, snapshot_json, snapshot_hash, created_at FROM disk_baselines WHERE user_id = ?",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        record = dict(row)
+        try:
+            record["snapshot"] = json.loads(record.get("snapshot_json") or "{}")
+        except json.JSONDecodeError:
+            record["snapshot"] = {}
+        return record
+
     def activity_log_latest(self, event_type: str) -> str | None:
         cur = self._conn.execute(
             "SELECT ts FROM activity_log WHERE type = ? ORDER BY ts DESC LIMIT 1",
@@ -213,114 +357,6 @@ class MemoryDB:
                 record.pop("payload_json", None)
             results.append(record)
         return results
-
-    def audit_log_create(
-        self,
-        user_id: str,
-        action_type: str,
-        action_id: str,
-        status: str,
-        details: dict[str, Any],
-        error: str | None = None,
-    ) -> int:
-        created_at = self._now_iso()
-        cur = self._conn.execute(
-            """
-            INSERT INTO audit_log (
-                created_at,
-                user_id,
-                action_type,
-                action_id,
-                status,
-                details_json,
-                error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                created_at,
-                user_id,
-                action_type,
-                action_id,
-                status,
-                json.dumps(details, ensure_ascii=True),
-                error,
-            ),
-        )
-        self._commit_if_needed()
-        return int(cur.lastrowid)
-
-    def audit_log_update_status(
-        self,
-        audit_id: int,
-        status: str,
-        error: str | None = None,
-        details: dict[str, Any] | None = None,
-    ) -> None:
-        if details is None:
-            self._conn.execute(
-                "UPDATE audit_log SET status = ?, error = ? WHERE id = ?",
-                (status, error, audit_id),
-            )
-        else:
-            self._conn.execute(
-                "UPDATE audit_log SET status = ?, error = ?, details_json = ? WHERE id = ?",
-                (status, error, json.dumps(details, ensure_ascii=True), audit_id),
-            )
-        self._commit_if_needed()
-
-    def audit_log_list_recent(self, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        cur = self._conn.execute(
-            """
-            SELECT id, created_at, user_id, action_type, action_id, status, details_json, error
-            FROM audit_log
-            WHERE user_id = ?
-            ORDER BY created_at DESC
-            LIMIT ?
-            """,
-            (user_id, limit),
-        )
-        rows = cur.fetchall()
-        results: list[dict[str, Any]] = []
-        for row in rows:
-            record = dict(row)
-            try:
-                record["details"] = json.loads(record.pop("details_json") or "{}")
-            except json.JSONDecodeError:
-                record["details"] = {}
-                record.pop("details_json", None)
-            results.append(record)
-        return results
-
-    def disk_baseline_set(self, user_id: str, snapshot: dict[str, Any], snapshot_hash: str) -> None:
-        created_at = self._now_iso()
-        self._conn.execute(
-            """
-            INSERT INTO disk_baselines (user_id, snapshot_json, snapshot_hash, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                snapshot_json = excluded.snapshot_json,
-                snapshot_hash = excluded.snapshot_hash,
-                created_at = excluded.created_at
-            """,
-            (user_id, json.dumps(snapshot, ensure_ascii=True), snapshot_hash, created_at),
-        )
-        self._commit_if_needed()
-
-    def disk_baseline_get(self, user_id: str) -> dict[str, Any] | None:
-        cur = self._conn.execute(
-            "SELECT user_id, snapshot_json, snapshot_hash, created_at FROM disk_baselines WHERE user_id = ?",
-            (user_id,),
-        )
-        row = cur.fetchone()
-        if not row:
-            return None
-        record = dict(row)
-        try:
-            record["snapshot"] = json.loads(record.pop("snapshot_json") or "{}")
-        except json.JSONDecodeError:
-            record["snapshot"] = {}
-            record.pop("snapshot_json", None)
-        return record
 
     def insert_disk_snapshot(
         self,
