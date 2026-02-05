@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -37,6 +38,31 @@ class ParsedIntent:
 def _normalize(text: str) -> str:
     return (text or "").strip().lower()
 
+
+def _debug_enabled() -> bool:
+    return os.getenv("KNOWLEDGE_QUERY_DEBUG", "").strip() == "1"
+
+
+def _basename(path: str) -> str:
+    if path == "/":
+        return "/"
+    return path.rstrip("/").split("/")[-1]
+
+
+def _resolve_mount_key(db: Any, mountpoint: str) -> tuple[str, str | None]:
+    latest_taken_at = db.get_latest_disk_snapshot_taken_at()
+    if not latest_taken_at:
+        return mountpoint, None
+    candidates = db.list_disk_snapshot_mountpoints_for_taken_at(latest_taken_at)
+    if mountpoint in candidates:
+        return mountpoint, None
+    base = _basename(mountpoint)
+    if base == "/":
+        return mountpoint, None
+    matches = [m for m in candidates if _basename(m) == base]
+    if len(matches) == 1:
+        return matches[0], "matched_by_basename"
+    return mountpoint, "mount_key_not_found"
 
 def _now_local(tz_name: str) -> date:
     tz = ZoneInfo(tz_name or "UTC")
@@ -150,13 +176,22 @@ def _render_report(intent: ParsedIntent, facts: dict[str, Any], limits: dict[str
         lines.append(f"Knowledge query: {intent.intent}")
     if intent.start_date and intent.end_date:
         lines.append(f"Window: {intent.start_date} to {intent.end_date}")
+    is_time_window = intent.intent == "time_window_storage_changes"
+    if is_time_window:
+        snapshot_count = facts.get("snapshot_count")
+        latest_ts = facts.get("latest_snapshot_ts")
+        if snapshot_count is not None:
+            lines.append(f"Snapshots in window: {snapshot_count}")
+        if latest_ts:
+            lines.append(f"Latest snapshot timestamp: {latest_ts}")
 
     if facts.get("available") is False:
         lines.append("Data availability: not available")
         reason = facts.get("reason")
         if reason:
             lines.append(f"- reason: {reason}")
-        return "\n".join(lines)
+        if not is_time_window:
+            return "\n".join(lines)
 
     if intent.intent == "latest_snapshot_summary":
         lines.append("Latest disk snapshots:")
@@ -167,9 +202,13 @@ def _render_report(intent: ParsedIntent, facts: dict[str, Any], limits: dict[str
             used = _bytes_to_human(int(row["used_bytes"]))
             total = _bytes_to_human(int(row["total_bytes"]))
             delta = row.get("delta_used")
-            delta_str = _bytes_to_human(abs(int(delta))) if delta is not None else "n/a"
+            delta_reason = row.get("delta_reason")
+            delta_str = _bytes_to_human(abs(int(delta))) if delta is not None else ""
             sign = "+" if delta is not None and int(delta) >= 0 else "-"
-            delta_out = "n/a" if delta is None else f"{sign}{delta_str}"
+            if delta is None:
+                delta_out = f"not available ({delta_reason or 'missing_previous_snapshot'})"
+            else:
+                delta_out = f"{sign}{delta_str}"
             lines.append(
                 f"- {row['mountpoint']} used {used} / {total} (delta {delta_out} since previous)"
             )
@@ -178,12 +217,34 @@ def _render_report(intent: ParsedIntent, facts: dict[str, Any], limits: dict[str
         mounts = facts.get("mounts", [])
         if not mounts:
             lines.append("- no snapshots available")
+        if facts.get("available") is False:
+            reason = facts.get("reason") or "missing_data"
+            lines.append(f"- not available ({reason})")
         for row in mounts:
             delta = row.get("delta_used")
-            delta_str = "n/a" if delta is None else _bytes_to_human(abs(int(delta)))
+            delta_reason = row.get("delta_reason")
+            delta_str = _bytes_to_human(abs(int(delta))) if delta is not None else ""
             sign = "+" if delta is not None and int(delta) >= 0 else "-"
-            delta_out = "n/a" if delta is None else f"{sign}{delta_str}"
-            lines.append(f"- {row['mountpoint']} used change: {delta_out}")
+            if delta is None:
+                reason_label = delta_reason or "missing_data"
+                delta_out = f"not available ({reason_label})"
+            else:
+                delta_out = f"{sign}{delta_str}"
+            latest_used = row.get("latest_used_bytes")
+            latest_total = row.get("latest_total_bytes")
+            latest_pct = row.get("latest_used_percent")
+            latest_ts = row.get("latest_taken_at")
+            latest_suffix = ""
+            if latest_used is not None and latest_total is not None:
+                used = _bytes_to_human(int(latest_used))
+                total = _bytes_to_human(int(latest_total))
+                if latest_pct is None:
+                    latest_suffix = f"; latest {used} / {total}"
+                else:
+                    latest_suffix = f"; latest {used} / {total} ({latest_pct:.1f}%)"
+                if latest_ts:
+                    latest_suffix += f" at {latest_ts}"
+            lines.append(f"- {row['mountpoint']} used change: {delta_out}{latest_suffix}")
     elif intent.intent == "top_growth_paths":
         lines.append("Top path growth:")
         items = facts.get("top_paths", [])
@@ -216,20 +277,27 @@ def _latest_snapshot_summary(db: Any, mount_filter: str | None) -> dict[str, Any
         mounts = [m for m in mounts if m == mount_filter]
     results = []
     for mount in mounts:
-        latest = db.get_latest_disk_snapshot(mount)
+        resolved_mount, resolution_note = _resolve_mount_key(db, mount)
+        latest = db.get_latest_disk_snapshot(resolved_mount)
         if not latest:
             continue
-        prev = db.get_previous_disk_snapshot(mount, latest.get("taken_at"))
+        prev = db.get_previous_disk_snapshot(resolved_mount, latest.get("taken_at"))
         delta = None
+        delta_reason = None
         if prev:
             delta = int(latest["used_bytes"]) - int(prev["used_bytes"])
+        else:
+            delta_reason = "missing_previous_snapshot"
         results.append(
             {
                 "mountpoint": mount,
+                "resolved_mountpoint": resolved_mount if resolved_mount != mount else None,
+                "mount_resolution": resolution_note,
                 "taken_at": latest.get("taken_at"),
                 "used_bytes": int(latest["used_bytes"]),
                 "total_bytes": int(latest["total_bytes"]),
                 "delta_used": delta,
+                "delta_reason": delta_reason,
             }
         )
     if not results:
@@ -244,18 +312,81 @@ def _storage_changes_in_window(
     if mount_filter:
         mounts = [m for m in mounts if m == mount_filter]
     results = []
+    notes: list[str] = []
+    window_stats = db.get_disk_snapshot_window_stats(start_date, end_date)
+    snapshot_count = int(window_stats.get("snapshot_count") or 0)
+    earliest_date = window_stats.get("earliest_snapshot_date")
+    latest_date = window_stats.get("latest_snapshot_date")
+    earliest_ts = window_stats.get("earliest_taken_at")
+    latest_ts = window_stats.get("latest_taken_at")
+
+    if snapshot_count < 2:
+        notes.append("insufficient_snapshots_in_window")
+
     for mount in mounts:
-        rows = db.list_disk_snapshots_between(mount, start_date, end_date)
-        if len(rows) < 2:
-            results.append({"mountpoint": mount, "delta_used": None})
-            continue
-        first = rows[0]
-        last = rows[-1]
-        delta = int(last["used_bytes"]) - int(first["used_bytes"])
-        results.append({"mountpoint": mount, "delta_used": delta})
-    if not results:
-        return {"available": False, "reason": "no_snapshots"}
-    return {"available": True, "mounts": results}
+        resolved_mount, resolution_note = _resolve_mount_key(db, mount)
+        delta = None
+        delta_reason = None
+        if snapshot_count >= 2 and earliest_date and latest_date:
+            start_row = db.get_disk_snapshot_for_mount_and_date(resolved_mount, earliest_date)
+            end_row = db.get_disk_snapshot_for_mount_and_date(resolved_mount, latest_date)
+            if start_row and end_row:
+                delta = int(end_row["used_bytes"]) - int(start_row["used_bytes"])
+            else:
+                if not start_row and not end_row:
+                    delta_reason = "missing_start_end_snapshot"
+                elif not start_row:
+                    delta_reason = "missing_start_snapshot"
+                else:
+                    delta_reason = "missing_end_snapshot"
+        else:
+            delta_reason = "insufficient_snapshots_in_window"
+
+        latest = db.get_latest_disk_snapshot(resolved_mount)
+        latest_used = latest_total = latest_free = latest_pct = latest_taken_at = None
+        if latest:
+            latest_used = int(latest["used_bytes"])
+            latest_total = int(latest["total_bytes"])
+            latest_free = int(latest["free_bytes"])
+            latest_taken_at = latest.get("taken_at")
+            if latest_total > 0:
+                latest_pct = (latest_used / latest_total) * 100
+
+        results.append(
+            {
+                "mountpoint": mount,
+                "resolved_mountpoint": resolved_mount if resolved_mount != mount else None,
+                "mount_resolution": resolution_note,
+                "delta_used": delta,
+                "delta_reason": delta_reason,
+                "latest_used_bytes": latest_used,
+                "latest_total_bytes": latest_total,
+                "latest_free_bytes": latest_free,
+                "latest_used_percent": latest_pct,
+                "latest_taken_at": latest_taken_at,
+            }
+        )
+
+    if snapshot_count == 0:
+        return {
+            "available": False,
+            "reason": "no_snapshots",
+            "snapshot_count": snapshot_count,
+            "earliest_snapshot_ts": earliest_ts,
+            "latest_snapshot_ts": latest_ts,
+            "notes": notes,
+            "mounts": results,
+        }
+    return {
+        "available": True,
+        "mounts": results,
+        "snapshot_count": snapshot_count,
+        "earliest_snapshot_ts": earliest_ts,
+        "latest_snapshot_ts": latest_ts,
+        "earliest_snapshot_date": earliest_date,
+        "latest_snapshot_date": latest_date,
+        "notes": notes,
+    }
 
 
 def _top_growth_paths(
@@ -347,8 +478,61 @@ def knowledge_query(context: dict[str, Any], query: str) -> dict[str, Any]:
     }
     if facts.get("available") is False:
         limits["notes"].append(facts.get("reason"))
+    if facts.get("notes"):
+        limits["notes"].extend([note for note in facts.get("notes") if note])
 
     report_text = _render_report(parsed, facts, limits)
+    debug: dict[str, Any] | None = None
+    if _debug_enabled() and parsed.intent == "time_window_storage_changes":
+        window_start = parsed.start_date
+        window_end = parsed.end_date
+        window_stats = db.get_disk_snapshot_window_stats(window_start or "", window_end or "")
+        latest_taken_at = db.get_latest_disk_snapshot_taken_at()
+        latest_mounts = (
+            db.list_disk_snapshot_mountpoints_for_taken_at(latest_taken_at)
+            if latest_taken_at
+            else []
+        )
+        earliest_date = window_stats.get("earliest_snapshot_date")
+        latest_date = window_stats.get("latest_snapshot_date")
+        mount_rows = []
+        mount_keys = facts.get("mounts", [])
+        for row in mount_keys:
+            mountpoint = row.get("mountpoint")
+            start_row = (
+                db.get_disk_snapshot_for_mount_and_date(mountpoint, earliest_date)
+                if earliest_date
+                else None
+            )
+            end_row = (
+                db.get_disk_snapshot_for_mount_and_date(mountpoint, latest_date)
+                if latest_date
+                else None
+            )
+            mount_rows.append(
+                {
+                    "mountpoint": mountpoint,
+                    "has_start_snapshot": bool(start_row),
+                    "has_end_snapshot": bool(end_row),
+                }
+            )
+        debug = {
+            "window_start": window_start,
+            "window_end": window_end,
+            "snapshot_count_in_window": int(window_stats.get("snapshot_count") or 0),
+            "earliest_snapshot_ts_in_window": window_stats.get("earliest_taken_at"),
+            "latest_snapshot_ts_in_window": window_stats.get("latest_taken_at"),
+            "mount_keys_in_latest_snapshot": latest_mounts[:10],
+            "mount_keys_requested": [row.get("mountpoint") for row in mount_keys],
+            "mount_snapshot_matches": mount_rows,
+            "db_methods_used": [
+                "get_disk_snapshot_window_stats",
+                "get_disk_snapshot_for_mount_and_date",
+                "get_latest_disk_snapshot",
+                "get_latest_disk_snapshot_taken_at",
+                "list_disk_snapshot_mountpoints_for_taken_at",
+            ],
+        }
     return {
         "text": report_text,
         "data": {
@@ -361,5 +545,6 @@ def knowledge_query(context: dict[str, Any], query: str) -> dict[str, Any]:
             },
             "facts": facts,
             "limits": limits,
+            "debug": debug,
         },
     }

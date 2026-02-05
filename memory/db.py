@@ -841,6 +841,65 @@ class MemoryDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def get_disk_snapshot_window_stats(self, start_date: str, end_date: str) -> dict[str, Any]:
+        cur = self._conn.execute(
+            """
+            SELECT
+                COUNT(DISTINCT snapshot_local_date) AS snapshot_count,
+                MIN(snapshot_local_date) AS earliest_snapshot_date,
+                MAX(snapshot_local_date) AS latest_snapshot_date,
+                MIN(taken_at) AS earliest_taken_at,
+                MAX(taken_at) AS latest_taken_at
+            FROM disk_snapshots
+            WHERE snapshot_local_date BETWEEN ? AND ?
+            """,
+            (start_date, end_date),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else {
+            "snapshot_count": 0,
+            "earliest_snapshot_date": None,
+            "latest_snapshot_date": None,
+            "earliest_taken_at": None,
+            "latest_taken_at": None,
+        }
+
+    def get_disk_snapshot_for_mount_and_date(
+        self, mountpoint: str, snapshot_local_date: str
+    ) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, taken_at, snapshot_local_date, hostname, mountpoint, filesystem, total_bytes, used_bytes, free_bytes
+            FROM disk_snapshots
+            WHERE mountpoint = ? AND snapshot_local_date = ?
+            LIMIT 1
+            """,
+            (mountpoint, snapshot_local_date),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_latest_disk_snapshot_taken_at(self) -> str | None:
+        cur = self._conn.execute(
+            "SELECT MAX(taken_at) AS latest_ts FROM disk_snapshots"
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return row["latest_ts"]
+
+    def list_disk_snapshot_mountpoints_for_taken_at(self, taken_at: str) -> list[str]:
+        cur = self._conn.execute(
+            """
+            SELECT DISTINCT mountpoint
+            FROM disk_snapshots
+            WHERE taken_at = ?
+            ORDER BY mountpoint ASC
+            """,
+            (taken_at,),
+        )
+        return [row["mountpoint"] for row in cur.fetchall()]
+
     def list_dir_size_samples_for_date(self, scope: str, date_str: str) -> list[dict[str, Any]]:
         cur = self._conn.execute(
             """
