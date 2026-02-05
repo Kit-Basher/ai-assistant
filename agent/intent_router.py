@@ -61,6 +61,10 @@ _DISK_REGEX = re.compile(
     r"\b(disk|ssd|storage|space|cleanup|largest folders|storage report|disk usage|ssd full|safe to clean)\b",
     re.IGNORECASE,
 )
+_STORAGE_REPORT_REGEX = re.compile(
+    r"\b(storage\s+report|disk\s+report|last\s+disk\s+report|latest\s+disk\s+report)\b",
+    re.IGNORECASE,
+)
 _DISK_CHANGES = re.compile(r"\b(disk changes|what changed on my disk)\b", re.IGNORECASE)
 _DISK_BASELINE = re.compile(r"\bset disk baseline\b", re.IGNORECASE)
 _DISK_GROW = re.compile(r"\b(what grew under|show growth under)\b", re.IGNORECASE)
@@ -1061,6 +1065,16 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
         match = re.search(r"under\\s+(.+)$", cleaned, re.IGNORECASE)
         if match:
             return {"type": "disk_grow", "path": match.group(1).strip()}
+
+    if _STORAGE_REPORT_REGEX.search(lowered):
+        return _skill_call(
+            "storage_governor",
+            "storage_report",
+            {},
+            0.80,
+            "Matched storage report intent (alias).",
+            scopes=["db:read"],
+        )
 
     if _DISK_REGEX.search(lowered) or "why is my ssd full" in lowered:
         return _skill_call(

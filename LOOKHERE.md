@@ -1,0 +1,75 @@
+# Personal Agent (Telegram) — How To Use
+
+## What This Is
+This is a local‑first Telegram assistant designed to be trustable and auditable.  
+It runs on your machine, uses explicit confirmations for sensitive actions, and keeps a clear log of what happened.
+
+## Safety Model (Plain English)
+- No surprise actions: sensitive operations require explicit confirmation.
+- Facts → opinions: the assistant will not give advice without facts first.
+- Audit trail: actions and results are logged to a local JSONL file.
+
+## Quick Start (Systemd)
+If installed via `ops/install.sh`, the service is already set up.
+
+Common service commands:
+- Start: `sudo systemctl start personal-agent.service`
+- Stop: `sudo systemctl stop personal-agent.service`
+- Restart: `sudo systemctl restart personal-agent.service`
+- Status: `sudo systemctl status personal-agent.service`
+
+## Usage Examples (Natural Language)
+Try these in Telegram:
+- “show me my last disk report”
+- “what changed this week?”
+- “any anomalies lately?”
+- “largest directory growth in /home”
+
+## Slash Commands (Telegram)
+Core:
+- `/remind <YYYY-MM-DD HH:MM> | <text>`
+- `/status`
+- `/runtime_status`
+- `/weekly`
+
+Storage/Reports:
+- `/storage_snapshot`
+- `/storage_report`
+- `/resource_report`
+- `/network_report`
+- `/weekly_reflection`
+
+Ask/Opinion:
+- `/ask <question>`
+- `/ask_opinion <question>`
+
+Ops (if enabled):
+- `/restart` (requires confirmation via `/confirm`)
+- `/service_status`
+- `/logs [lines]`
+
+## Logs (Where To Look)
+Application event log (JSONL):
+- `/home/c/personal-agent/logs/agent.jsonl`
+
+Journal logs:
+- `journalctl -u personal-agent.service -n 200 --no-pager`
+
+## Troubleshooting
+**Bot not responding**
+- Check status: `sudo systemctl status personal-agent.service`
+- Check logs: `journalctl -u personal-agent.service -n 200 --no-pager`
+
+**Telegram Conflict: another poller**
+- Error looks like: `Conflict: terminated by other getUpdates request`
+- Ensure only one instance is running (no other machines polling this bot token).
+- Restart service: `sudo systemctl restart personal-agent.service`
+
+**No snapshots found**
+- Run `/storage_snapshot` once to seed data.
+- Or enable scheduled snapshots (set `ENABLE_SCHEDULED_SNAPSHOTS=1` in `/etc/personal-agent/agent.env` and restart).
+
+## Security Notes
+- Secrets live in `/etc/personal-agent/agent.env` (keep it `600` and root‑owned).
+- Do not paste tokens or secrets into chat, logs, or GitHub issues.
+

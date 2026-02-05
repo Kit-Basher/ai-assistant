@@ -49,64 +49,16 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # Route ALL non-command text through the orchestrator (single brain).
     response = orchestrator.handle_message(text, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    helper_text = (
+        "I can help with /remember, /projects, /project_new, /task_add, /remind. "
+        "Use slash commands for now."
+    )
+    reply_text = response.text.strip() if response and response.text else ""
+    if not reply_text:
+        reply_text = helper_text
+    await update.effective_message.reply_text(reply_text)
 
     log_event(log_path, "telegram_message", {"chat_id": chat_id, "text": text})
-
-    decision = route_message(
-        chat_id,
-        text,
-        {"db": db, "timezone": orchestrator.timezone, "chat_id": chat_id},
-    )
-    log_event(
-        log_path,
-        "intent_decision",
-        {
-            "user_id": chat_id,
-            "text": text,
-            "decision_type": decision.get("type"),
-            "decision_function": decision.get("function"),
-            "confidence": decision.get("confidence"),
-            "explanation": decision.get("explanation"),
-        },
-    )
-    if decision.get("type") == "skill_call":
-        log_event(
-            log_path,
-            "intent_metric",
-            {"metric": "intent_matched", "intent": decision.get("function")},
-        )
-    elif decision.get("type") == "clarify":
-        log_event(
-            log_path,
-            "intent_metric",
-            {"metric": "clarification_triggered", "intent": decision.get("intent")},
-        )
-    elif decision.get("type") == "noop":
-        log_event(
-            log_path,
-            "intent_metric",
-            {"metric": "no_intent", "intent": None},
-        )
-
-    if decision.get("type") == "skill_call":
-        response = orchestrator.handle_intent(decision, user_id=chat_id)
-        await update.message.reply_text(response.text)
-        return
-
-    if decision.get("type") == "clarify":
-        question = decision.get("question", "")
-        options = decision.get("options") or []
-        if options:
-            question = "{}\nOptions: {}".format(question, ", ".join(options))
-        await update.message.reply_text(question)
-        return
-
-    if decision.get("type") in {"respond", "noop"}:
-        await update.message.reply_text(decision.get("text", ""))
-        return
-
-    await update.message.reply_text("Try /help")
 
 
 def _command_payload(text: str, command: str) -> str:
@@ -270,7 +222,19 @@ async def _handle_ask_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     import logging
 
-    logging.getLogger(__name__).exception("Telegram handler error", exc_info=context.error)
+    logger = logging.getLogger(__name__)
+    error = context.error
+    try:
+        from telegram.error import Conflict
+    except Exception:  # pragma: no cover - defensive import
+        Conflict = None
+    if Conflict is not None and isinstance(error, Conflict):
+        logger.error(
+            "Telegram polling conflict detected. Another instance may be running or getUpdates is active elsewhere.",
+            exc_info=error,
+        )
+        return
+    logger.exception("Telegram handler error", exc_info=error)
 
 
 async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -492,7 +456,7 @@ def build_app() -> Application:
 
 def main() -> None:
     app = build_app()
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":

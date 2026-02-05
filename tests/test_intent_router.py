@@ -157,6 +157,12 @@ class TestIntentRouter(unittest.TestCase):
         decision = route_message("user1", "disk usage", self.context)
         self.assertEqual(decision["type"], "clarify")
 
+    def test_storage_report_alias(self) -> None:
+        decision = route_message("user1", "show me my last disk report", self.context)
+        self.assertEqual(decision["type"], "skill_call")
+        self.assertEqual(decision["skill"], "storage_governor")
+        self.assertEqual(decision["function"], "storage_report")
+
 
 if __name__ == "__main__":
     unittest.main()
