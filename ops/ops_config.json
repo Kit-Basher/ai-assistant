@@ -1,0 +1,5 @@
+{
+  "agent_unit_name": "personal-agent.service",
+  "supervisor_unit_name": "personal-agent-supervisor.service",
+  "socket_path": "/run/personal-agent/supervisor.sock"
+}

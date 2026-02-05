@@ -73,6 +73,38 @@ If validation fails, the agent automatically falls back to deterministic output.
 ## Run Locally
 - `TELEGRAM_BOT_TOKEN=... .venv/bin/python -m telegram_adapter`
 
+## Ops Supervisor
+The agent stays unprivileged. A separate local-only supervisor can perform a tiny allowlist
+of ops actions over a Unix socket (restart/status/logs), authenticated via HMAC.
+
+Setup steps:
+1. Copy `ops/ops_config.json` and confirm the unit names + socket path match your deployment.
+2. Create environment files:
+   - `/etc/personal-agent/agent.env` (agent):
+     - `SUPERVISOR_SOCKET_PATH=/run/personal-agent/supervisor.sock`
+     - `SUPERVISOR_HMAC_KEY=<shared-secret>`
+     - `AGENT_UNIT_NAME=<unit-name-from-ops_config.json>`
+   - `/etc/personal-agent/supervisor.env` (supervisor):
+     - `SUPERVISOR_SOCKET_PATH=/run/personal-agent/supervisor.sock`
+     - `SUPERVISOR_HMAC_KEY=<shared-secret>`
+     - `AGENT_UNIT_NAME=<unit-name-from-ops_config.json>`
+     - `SUPERVISOR_LOG_LINES_MAX=200`
+3. Install systemd units from `ops/systemd/` and update placeholders:
+   - `personal-agent.service`
+   - `personal-agent-supervisor.service`
+4. `sudo systemctl daemon-reload`
+5. `sudo systemctl enable --now personal-agent-supervisor.service personal-agent.service`
+
+Notes:
+- Use the same `SUPERVISOR_HMAC_KEY` in both services.
+- The supervisor accepts only allowlisted ops and rejects invalid signatures, stale timestamps, and replayed nonces.
+
+## Quick install (Ubuntu)
+- `bash ops/install.sh`
+
+## Uninstall
+- `bash ops/install.sh uninstall`
+
 ## Telegram Commands
 - `/remember <text>`
 - `/projects`
@@ -83,6 +115,9 @@ If validation fails, the agent automatically falls back to deterministic output.
 - `/plan <minutes> <energy:low|med|high>`
 - `/done <free text>`
 - `/weekly`
+- `/restart` (requires confirmation)
+- `/service_status`
+- `/logs [lines]`
 
 ## Natural Language Examples
 - "remember buy milk #groceries"

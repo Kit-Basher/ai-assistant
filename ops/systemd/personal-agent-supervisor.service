@@ -1,0 +1,20 @@
+[Unit]
+Description=Personal Agent Ops Supervisor
+After=network.target
+PartOf=personal-agent.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/personal-agent/supervisor.env
+RuntimeDirectory=personal-agent
+RuntimeDirectoryMode=0755
+ExecStart=/home/c/personal-agent/.venv/bin/python /home/c/personal-agent/ops/supervisor.py
+Restart=on-failure
+RestartSec=2
+StartLimitIntervalSec=60
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

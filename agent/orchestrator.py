@@ -164,6 +164,7 @@ class Orchestrator:
         args: dict[str, Any],
         requested_permissions: list[str],
         action_type: str | None = None,
+        confirmed: bool = False,
     ) -> OrchestratorResponse:
         skill = self.skills.get(skill_name)
         if not skill:
@@ -178,7 +179,7 @@ class Orchestrator:
         if not decision.allowed:
             return OrchestratorResponse("Permission denied.")
 
-        if decision.requires_confirmation:
+        if decision.requires_confirmation and not confirmed:
             pending = PendingAction(
                 user_id=user_id,
                 action={
@@ -257,6 +258,9 @@ class Orchestrator:
                 "next_best_task": (["db:read"], None),
                 "daily_plan": (["db:read"], None),
                 "weekly_review": (["db:read"], None),
+                "restart_agent": (["ops:supervisor"], "ops_restart"),
+                "service_status": (["ops:supervisor"], None),
+                "service_logs": (["ops:supervisor"], None),
             }
             requested_permissions, action_type = permissions_map.get(function_name, ([], None))
             result = self._call_skill(
@@ -300,11 +304,12 @@ class Orchestrator:
                     return self._call_skill(
                         user_id,
                         action["skill"],
-                        action["function"],
-                        action["args"],
-                        action["requested_permissions"],
-                        action.get("action_type"),
-                    )
+                    action["function"],
+                    action["args"],
+                    action["requested_permissions"],
+                    action.get("action_type"),
+                    confirmed=True,
+                )
 
                 if cmd.name == "remember":
                     result = self._call_skill(
@@ -411,6 +416,36 @@ class Orchestrator:
                         for entry in audit_entries:
                             lines.append(f"- {entry['id']} {entry['status']}")
                     return OrchestratorResponse("\n".join(lines))
+
+                if cmd.name == "restart":
+                    return self._call_skill(
+                        user_id,
+                        "ops_supervisor",
+                        "restart_agent",
+                        {},
+                        ["ops:supervisor"],
+                        action_type="ops_restart",
+                    )
+
+                if cmd.name == "service_status":
+                    return self._call_skill(
+                        user_id,
+                        "ops_supervisor",
+                        "service_status",
+                        {},
+                        ["ops:supervisor"],
+                    )
+
+                if cmd.name == "logs":
+                    lines_arg = cmd.args.strip() if cmd.args else ""
+                    lines_val = int(lines_arg) if lines_arg.isdigit() else None
+                    return self._call_skill(
+                        user_id,
+                        "ops_supervisor",
+                        "service_logs",
+                        {"lines": lines_val},
+                        ["ops:supervisor"],
+                    )
 
                 if cmd.name == "runtime_status":
                     return self._call_skill(
