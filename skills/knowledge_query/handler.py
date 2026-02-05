@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -17,14 +16,22 @@ SUPPORTED_EXAMPLES = [
 ]
 
 
-@dataclass
 class ParsedIntent:
-    intent: str | None
-    reason: str | None
-    start_date: str | None
-    end_date: str | None
-    path_filter: str | None
-    mount_filter: str | None
+    def __init__(
+        self,
+        intent: str | None,
+        reason: str | None,
+        start_date: str | None,
+        end_date: str | None,
+        path_filter: str | None,
+        mount_filter: str | None,
+    ) -> None:
+        self.intent = intent
+        self.reason = reason
+        self.start_date = start_date
+        self.end_date = end_date
+        self.path_filter = path_filter
+        self.mount_filter = mount_filter
 
 
 def _normalize(text: str) -> str:
