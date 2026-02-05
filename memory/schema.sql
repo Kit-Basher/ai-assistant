@@ -216,6 +216,28 @@ CREATE TABLE IF NOT EXISTS pending_clarifications (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS anomaly_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    snapshot_id INTEGER,
+    source TEXT NOT NULL,
+    anomaly_key TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    message TEXT NOT NULL,
+    metric_name TEXT,
+    metric_value REAL,
+    metric_unit TEXT,
+    context_json TEXT NOT NULL,
+    UNIQUE(user_id, observed_at, anomaly_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_events_user_time
+    ON anomaly_events(user_id, observed_at);
+
+CREATE INDEX IF NOT EXISTS idx_anomaly_events_user_key_time
+    ON anomaly_events(user_id, anomaly_key, observed_at);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_notes_project_id ON notes(project_id);
 CREATE INDEX IF NOT EXISTS idx_reminders_status ON reminders(status);

@@ -35,6 +35,11 @@ A minimal Telegram-first personal agent with SQLite memory, a safe skills manife
   - `AGENT_DB_PATH` (default: `memory/agent.db`)
   - `AGENT_LOG_PATH` (default: `logs/agent.jsonl`)
   - `AGENT_SKILLS_PATH` (default: `skills/`)
+  - `OPENROUTER_API_KEY` (enables OpenRouter if set)
+  - `OPENROUTER_BASE_URL` (default: `https://openrouter.ai/api/v1`)
+  - `OPENROUTER_MODEL` (default: `openai/gpt-4o-mini`)
+  - `OPENROUTER_SITE_URL` (optional for OpenRouter header)
+  - `OPENROUTER_APP_NAME` (optional for OpenRouter header)
 
 ## LLM Routing (v0.2)
 - Builds candidates by capability tier (low, mid, high) and provider.
@@ -42,6 +47,16 @@ A minimal Telegram-first personal agent with SQLite memory, a safe skills manife
 - Falls back on timeout/error to the next cheapest sufficient candidate.
 - Cloud models are only considered when `ALLOW_CLOUD=1`.
 - Watchdog tasks are forced local-only and degrade to Dummy if needed.
+
+## OpenRouter Setup (Optional)
+OpenRouter is disabled unless `OPENROUTER_API_KEY` is set. Defaults remain local-first.
+
+1. Set environment variables:
+   - `OPENROUTER_API_KEY`
+   - `OPENROUTER_BASE_URL` (optional; default `https://openrouter.ai/api/v1`)
+   - `OPENROUTER_MODEL` (optional; default `openai/gpt-4o-mini`)
+   - `OPENROUTER_SITE_URL` (optional)
+   - `OPENROUTER_APP_NAME` (optional)
 
 ### Optional LLM Presentation (Disabled by Default)
 
@@ -76,6 +91,8 @@ If validation fails, the agent automatically falls back to deterministic output.
 - "weekly review"
 - "projects"
 - "remind me 2026-02-05 15:00 to call dentist"
+- "what changed this week?"
+  - reply: `opinion` to get a cautious opinion based on the report
 
 ## Intent Phrases (v0.1)
 - Remember note:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 import os
 import json
@@ -17,6 +18,7 @@ from agent.action_gate import handle_action_text, propose_action
 from agent.commands import parse_command, split_pipe_args
 from agent.confirmations import ConfirmationStore, PendingAction
 from agent.logging_utils import log_event
+from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
 from agent.policy import evaluate_policy
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
@@ -70,6 +72,7 @@ class Orchestrator:
         self._runner: Runner | None = None
         self._llm_broker = llm_broker
         self._llm_broker_error = llm_broker_error
+        self._knowledge_cache = KnowledgeQueryCache()
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -130,6 +133,7 @@ class Orchestrator:
         context = dict(self._context())
         if chat_id:
             context["chat_id"] = chat_id
+        context["knowledge_cache"] = self._knowledge_cache
         return context
 
     def _maybe_add_narration(self, kind: str, payload: dict[str, Any], text: str) -> str:
@@ -189,7 +193,9 @@ class Orchestrator:
             self.confirmations.set(pending)
             return OrchestratorResponse(pending.message)
 
-        result = func.handler(self._context(), **args)
+        ctx = dict(self._context())
+        ctx["user_id"] = user_id
+        result = func.handler(ctx, **args)
         log_event(self.log_path, "skill_call", {"skill": skill_name, "function": function_name})
         if self._runner and self._runner.mode in {"sandbox", "live"}:
             if not self._audit_runner_result(skill_name, user_id):
@@ -197,6 +203,27 @@ class Orchestrator:
         response_text = "OK"
         if isinstance(result, dict) and result.get("text"):
             response_text = str(result["text"])
+        if skill_name == "knowledge_query" and isinstance(result, dict):
+            data = result.get("data", {})
+            facts = data.get("facts")
+            intent = data.get("intent")
+            query = args.get("query") or ""
+            if isinstance(facts, dict):
+                entry = self._knowledge_cache.set(user_id, query, facts, intent)
+                log_event(
+                    self.log_path,
+                    "knowledge_query_cached",
+                    {
+                        "user_id": user_id,
+                        "facts_hash": entry.facts_hash,
+                        "intent": (intent or {}).get("name") if isinstance(intent, dict) else None,
+                        "query_len": len(query),
+                    },
+                )
+                response_text = (
+                    f"{response_text}\n---\n"
+                    "Want my opinion on what to watch out for based on this report? Reply: `opinion`"
+                )
         if skill_name == "disk_report" and isinstance(result, dict):
             response_text = self._maybe_add_narration("disk_report", result, response_text)
         return OrchestratorResponse(response_text, result)
@@ -384,6 +411,15 @@ class Orchestrator:
                         for entry in audit_entries:
                             lines.append(f"- {entry['id']} {entry['status']}")
                     return OrchestratorResponse("\n".join(lines))
+
+                if cmd.name == "runtime_status":
+                    return self._call_skill(
+                        user_id,
+                        "runtime_status",
+                        "runtime_status",
+                        {},
+                        ["db:read"],
+                    )
 
                 if cmd.name == "autonomy_status":
                     return self._call_skill(
@@ -672,9 +708,17 @@ class Orchestrator:
                 return OrchestratorResponse(decision.get("text", ""))
 
             if decision.get("type") == "skill_call":
+                if decision.get("skill") == "opinion_on_report":
+                    facts = (decision.get("args") or {}).get("facts")
+                    if isinstance(facts, dict):
+                        log_event(
+                            self.log_path,
+                            "opinion_request_detected",
+                            {"user_id": user_id, "facts_hash": facts_hash(facts)},
+                        )
                 skill_name = decision.get("skill", "core")
                 default_scopes = ["db:read"] if skill_name == "core" else []
-                return self._call_skill(
+                response = self._call_skill(
                     user_id,
                     skill_name,
                     decision["function"],
@@ -682,6 +726,15 @@ class Orchestrator:
                     decision.get("scopes", default_scopes),
                     action_type="auto",
                 )
+                if decision.get("skill") == "opinion_on_report":
+                    facts = (decision.get("args") or {}).get("facts")
+                    if isinstance(facts, dict):
+                        log_event(
+                            self.log_path,
+                            "opinion_on_report_invoked",
+                            {"user_id": user_id, "facts_hash": facts_hash(facts)},
+                        )
+                return response
 
             if decision.get("type") == "clarification_request":
                 return OrchestratorResponse(decision["prompt"])
@@ -737,6 +790,9 @@ class Orchestrator:
                 for line in top_growth:
                     lines.append(f"- {line}")
         anomalies = detect_anomalies(old_snapshot or {}, new_snapshot)
+        if anomalies:
+            observed_at = new_entry.get("ts") or datetime.now(timezone.utc).isoformat()
+            self._persist_anomalies(user_id, observed_at, anomalies)
         if anomalies:
             lines.append("Notable changes:")
             for flag in anomalies:
@@ -860,6 +916,9 @@ class Orchestrator:
                     lines.append(f"- {line}")
         anomalies = detect_anomalies(old_snapshot, new_snapshot)
         if anomalies:
+            observed_at = new_entry.get("ts") or datetime.now(timezone.utc).isoformat()
+            self._persist_anomalies(user_id, observed_at, anomalies)
+        if anomalies:
             lines.append("Notable changes:")
             for flag in anomalies:
                 lines.append(f"- {flag}")
@@ -872,3 +931,23 @@ class Orchestrator:
             "anomalies": anomalies,
         }
         return {"text": "\n".join(lines), "payload": payload}
+
+    def _persist_anomalies(self, user_id: str, observed_at: str, flags: list[str]) -> None:
+        events = []
+        for flag in flags:
+            key = re.sub(r"[^a-z0-9]+", "_", (flag or "").lower()).strip("_") or "anomaly"
+            events.append(
+                {
+                    "source": "disk_anomalies",
+                    "anomaly_key": key,
+                    "severity": "warn",
+                    "message": flag,
+                    "context": {"raw": flag},
+                }
+            )
+        inserted = self.db.insert_anomaly_events(user_id, observed_at, events)
+        log_event(
+            self.log_path,
+            "anomaly_events_persisted",
+            {"user_id": user_id, "observed_at": observed_at, "count": inserted},
+        )

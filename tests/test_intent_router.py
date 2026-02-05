@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from agent.intent_router import route_message
+from agent.knowledge_cache import KnowledgeQueryCache
 from memory.db import MemoryDB
 
 
@@ -112,6 +113,49 @@ class TestIntentRouter(unittest.TestCase):
         )
         self.assertEqual(decision["type"], "clarify")
         self.assertIn("past", decision["question"].lower())
+
+    def test_opinion_followup_requires_cache(self) -> None:
+        decision = route_message("user1", "opinion", self.context)
+        self.assertEqual(decision["type"], "noop")
+        self.assertIn("need a report first", decision["text"].lower())
+
+    def test_opinion_followup_uses_cache(self) -> None:
+        cache = KnowledgeQueryCache()
+        cache.set(
+            "user1",
+            "what changed this week",
+            {"mounts": [{"mountpoint": "/", "delta_used": 10}]},
+            {"name": "time_window_storage_changes"},
+        )
+        context = dict(self.context)
+        context["knowledge_cache"] = cache
+        decision = route_message("user1", "opinion", context)
+        self.assertEqual(decision["type"], "skill_call")
+        self.assertEqual(decision["function"], "opinion_on_report")
+        self.assertIn("facts", decision["args"])
+
+    def test_knowledge_query_routes(self) -> None:
+        decision = route_message("user1", "what changed this week", self.context)
+        self.assertEqual(decision["type"], "skill_call")
+        self.assertEqual(decision["function"], "knowledge_query")
+        self.assertEqual(decision["args"]["query"], "what changed this week")
+
+    def test_knowledge_query_anomalies_routes(self) -> None:
+        decision = route_message("user1", "any anomalies lately?", self.context)
+        self.assertEqual(decision["type"], "skill_call")
+        self.assertEqual(decision["function"], "knowledge_query")
+
+    def test_knowledge_query_action_verbs_block(self) -> None:
+        decision = route_message("user1", "clean up disk space", self.context)
+        self.assertNotEqual(decision.get("function"), "knowledge_query")
+
+    def test_knowledge_query_advice_block(self) -> None:
+        decision = route_message("user1", "what should I do about disk usage", self.context)
+        self.assertNotEqual(decision.get("function"), "knowledge_query")
+
+    def test_knowledge_query_ambiguous_clarifies(self) -> None:
+        decision = route_message("user1", "disk usage", self.context)
+        self.assertEqual(decision["type"], "clarify")
 
 
 if __name__ == "__main__":

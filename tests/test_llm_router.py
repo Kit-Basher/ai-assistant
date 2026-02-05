@@ -35,6 +35,19 @@ def _config(**overrides) -> Config:
         allow_cloud=True,
         prefer_local=True,
         llm_timeout_seconds=20,
+        llm_provider="none",
+        enable_llm_presentation=False,
+        openai_base_url=None,
+        ollama_base_url=None,
+        anthropic_api_key=None,
+        llm_selector="single",
+        llm_broker_policy_path=None,
+        llm_allow_remote=False,
+        openrouter_api_key=None,
+        openrouter_base_url=None,
+        openrouter_model=None,
+        openrouter_site_url=None,
+        openrouter_app_name=None,
     )
     return base.__class__(**{**base.__dict__, **overrides})
 

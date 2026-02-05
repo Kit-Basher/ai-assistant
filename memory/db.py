@@ -632,6 +632,82 @@ class MemoryDB:
             (taken_at, snapshot_local_date, hostname, default_iface, default_gateway),
         )
         self._commit_if_needed()
+
+    def insert_anomaly_events(
+        self,
+        user_id: str,
+        observed_at: str,
+        events: list[dict[str, Any]],
+    ) -> int:
+        if not events:
+            return 0
+        rows = []
+        for event in events:
+            rows.append(
+                (
+                    user_id,
+                    observed_at,
+                    event.get("snapshot_id"),
+                    event.get("source", ""),
+                    event.get("anomaly_key", ""),
+                    event.get("severity", "info"),
+                    event.get("message", ""),
+                    event.get("metric_name"),
+                    event.get("metric_value"),
+                    event.get("metric_unit"),
+                    json.dumps(event.get("context", {}), ensure_ascii=True),
+                )
+            )
+        with self.transaction():
+            cur = self._conn.executemany(
+                """
+                INSERT OR IGNORE INTO anomaly_events (
+                    user_id,
+                    observed_at,
+                    snapshot_id,
+                    source,
+                    anomaly_key,
+                    severity,
+                    message,
+                    metric_name,
+                    metric_value,
+                    metric_unit,
+                    context_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return cur.rowcount if cur is not None else 0
+
+    def get_anomalies(
+        self,
+        user_id: str,
+        start_date: str,
+        end_date: str,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT observed_at, source, anomaly_key, severity, message,
+                   metric_name, metric_value, metric_unit, context_json
+            FROM anomaly_events
+            WHERE user_id = ?
+              AND substr(observed_at, 1, 10) BETWEEN ? AND ?
+            ORDER BY observed_at ASC
+            LIMIT ?
+            """,
+            (user_id, start_date, end_date, int(limit)),
+        )
+        rows = []
+        for row in cur.fetchall():
+            payload = dict(row)
+            try:
+                payload["context"] = json.loads(payload.get("context_json") or "{}")
+            except Exception:
+                payload["context"] = {}
+            payload.pop("context_json", None)
+            rows.append(payload)
+        return rows
         return int(cur.lastrowid)
 
     def replace_network_interfaces(

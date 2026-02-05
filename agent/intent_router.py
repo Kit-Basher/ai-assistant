@@ -99,6 +99,35 @@ _OPINION_PHRASES = (
     "outside my baseline",
 )
 
+_OPINION_FOLLOWUP_PHRASES = (
+    "opinion",
+    "give me your opinion",
+    "what should i watch out for",
+    "any concerns",
+)
+
+_KNOWLEDGE_PHRASES = (
+    "what changed",
+    "what happened",
+    "any anomalies",
+    "disk usage",
+    "storage growth",
+    "over the last",
+    "this week",
+    "last week",
+    "last 30 days",
+)
+
+_KNOWLEDGE_ACTION_VERBS = (
+    "delete",
+    "clean",
+    "clear",
+    "move",
+    "fix",
+    "run",
+    "stop",
+)
+
 _ENERGY_KEYWORDS = {
     "low": {"tired", "exhausted", "low"},
     "med": {"ok", "okay", "medium", "normal"},
@@ -143,6 +172,39 @@ def _contains_opinion_trigger(text: str) -> str | None:
         if phrase in lowered:
             return phrase
     return None
+
+
+def _has_time_window_hint(text: str) -> bool:
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in ("today", "yesterday", "this week", "last week")):
+        return True
+    if re.search(r"last\s+\d{1,2}\s+days", lowered):
+        return True
+    if "over the last" in lowered:
+        return True
+    if re.search(r"\d{4}-\d{2}-\d{2}\s*(?:to|-|–)\s*\d{4}-\d{2}-\d{2}", lowered):
+        return True
+    return False
+
+
+def _matches_knowledge_query(text: str) -> bool:
+    lowered = text.lower()
+    if not _contains_any(lowered, _KNOWLEDGE_PHRASES):
+        return False
+    if any(verb in lowered for verb in _KNOWLEDGE_ACTION_VERBS):
+        return False
+    if _contains_advice(lowered):
+        return False
+    if _contains_any(lowered, _ASK_PHRASES) and not _has_time_window_hint(lowered):
+        return False
+    return True
+
+
+def _matches_opinion_followup(text: str) -> bool:
+    lowered = text.lower().strip()
+    if lowered == "opinion" or lowered == "yes":
+        return True
+    return _contains_any(lowered, _OPINION_FOLLOWUP_PHRASES)
 
 
 def _extract_remember_content(text: str) -> str:
@@ -733,6 +795,7 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
     now_dt = _now_dt(context)
     db = (context or {}).get("db")
     chat_id = str((context or {}).get("chat_id") or user_id)
+    knowledge_cache = (context or {}).get("knowledge_cache")
     if db:
         pending = db.get_pending_clarification(user_id, chat_id, _now_iso(now_dt))
         if pending:
@@ -741,6 +804,26 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             )
             if pending_decision:
                 return pending_decision
+
+    if _matches_opinion_followup(cleaned):
+        if knowledge_cache:
+            entry = knowledge_cache.get_recent(user_id, now_dt)
+            if entry:
+                return _skill_call(
+                    "opinion_on_report",
+                    "opinion_on_report",
+                    {
+                        "facts": entry.facts,
+                        "context_note": f"from knowledge_query: {entry.query}",
+                    },
+                    0.85,
+                    "Matched opinion follow-up for knowledge query.",
+                    scopes=[],
+                )
+        return _noop(
+            "I can, but I need a report first — ask a knowledge question like “what changed this week?”",
+            0.60,
+        )
 
     lowered = cleaned.lower()
     if _contains_any(lowered, _REMIND_PHRASES):
@@ -896,6 +979,15 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
                 "Matched ask_opinion intent.",
                 scopes=["db:read"],
             )
+        if _matches_knowledge_query(cleaned):
+            return _skill_call(
+                "knowledge_query",
+                "knowledge_query",
+                {"query": cleaned},
+                0.85,
+                "Matched knowledge query intent.",
+                scopes=["db:read"],
+            )
         if not db:
             return _noop("Database unavailable for recall.", 0.20)
         parsed = parse_timeframe(cleaned, db, (context or {}).get("timezone") or "UTC")
@@ -930,6 +1022,23 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             {"question": cleaned, "timeframe": timeframe},
             0.85,
             "Matched ask_query intent.",
+            scopes=["db:read"],
+        )
+
+    if _matches_knowledge_query(cleaned):
+        if _DISK_REGEX.search(lowered) or _DISK_CHANGES.search(lowered) or _DISK_GROW.search(lowered):
+            question = (
+                "Do you want a summary of recent changes or a specific disk report?\n"
+                "Examples: what changed this week; latest disk report; any anomalies lately?"
+            )
+            options = ["what changed this week", "latest disk report", "any anomalies lately?"]
+            return _clarify(question, options, 0.60, "knowledge_query")
+        return _skill_call(
+            "knowledge_query",
+            "knowledge_query",
+            {"query": cleaned},
+            0.85,
+            "Matched knowledge query intent.",
             scopes=["db:read"],
         )
 

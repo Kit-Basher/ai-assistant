@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import urllib.request
 from typing import Any
 
 from agent.config import Config
@@ -85,6 +87,54 @@ class DummyClient(LLMClient):
 
 
 @dataclass
+class OpenRouterClient(LLMClient):
+    api_key: str
+    model: str
+    base_url: str
+    site_url: str | None = None
+    app_name: str | None = None
+    timeout_seconds: int = 20
+    provider: str = "openrouter"
+
+    def enabled(self) -> bool:
+        return bool(self.api_key and self.model and self.base_url)
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        if self.site_url:
+            headers["HTTP-Referer"] = self.site_url
+        if self.app_name:
+            headers["X-Title"] = self.app_name
+        return headers
+
+    def generate(self, prompt: str) -> str:
+        if not self.enabled():
+            return ""
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": "Follow the user's instructions exactly."},
+                {"role": "user", "content": prompt},
+            ],
+        }
+        url = self.base_url.rstrip("/") + "/chat/completions"
+        data = json.dumps(body, ensure_ascii=True).encode("utf-8")
+        request = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+            parsed = json.loads(raw or "{}")
+            choices = parsed.get("choices") or []
+            message = choices[0].get("message") if choices else None
+            return (message or {}).get("content") or ""
+        except Exception:
+            return ""
+
+
+@dataclass
 class OllamaClient(LLMClient):
     host: str
     model: str
@@ -118,6 +168,15 @@ def build_client_for_provider(config: Config, provider_policy) -> LLMClient:
             model=model or "",
             timeout_seconds=config.llm_timeout_seconds,
         )
+    if provider == "openrouter":
+        return OpenRouterClient(
+            api_key=config.openrouter_api_key or "",
+            model=model or (config.openrouter_model or ""),
+            base_url=config.openrouter_base_url or "",
+            site_url=config.openrouter_site_url,
+            app_name=config.openrouter_app_name,
+            timeout_seconds=config.llm_timeout_seconds,
+        )
     return UnsupportedClient(provider)
 
 
@@ -135,6 +194,15 @@ def build_llm_client(config: Config) -> LLMClient:
         return OllamaClient(
             host=config.ollama_base_url or config.ollama_host or "",
             model=config.ollama_model or "",
+            timeout_seconds=config.llm_timeout_seconds,
+        )
+    if provider == "openrouter":
+        return OpenRouterClient(
+            api_key=config.openrouter_api_key or "",
+            model=config.openrouter_model or "",
+            base_url=config.openrouter_base_url or "",
+            site_url=config.openrouter_site_url,
+            app_name=config.openrouter_app_name,
             timeout_seconds=config.llm_timeout_seconds,
         )
     return UnsupportedClient(provider)

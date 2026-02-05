@@ -21,6 +21,7 @@ class Config:
     allow_cloud: bool
     prefer_local: bool
     llm_timeout_seconds: int
+    enable_writes: bool = False
     llm_provider: str = "none"
     enable_llm_presentation: bool = False
     openai_base_url: str | None = None
@@ -32,6 +33,8 @@ class Config:
     openrouter_api_key: str | None = None
     openrouter_base_url: str | None = None
     openrouter_model: str | None = None
+    openrouter_site_url: str | None = None
+    openrouter_app_name: str | None = None
 
 
 def load_config() -> Config:
@@ -66,8 +69,19 @@ def load_config() -> Config:
         "on",
     }
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "").strip() or None
-    openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "").strip() or None
-    openrouter_model = os.getenv("OPENROUTER_MODEL", "").strip() or None
+    openrouter_base_url = (
+        os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip() or None
+    )
+    openrouter_model = os.getenv("OPENROUTER_MODEL", "openai/gpt-4o-mini").strip() or None
+    openrouter_site_url = os.getenv("OPENROUTER_SITE_URL", "").strip() or None
+    openrouter_app_name = os.getenv("OPENROUTER_APP_NAME", "").strip() or None
+    enable_writes = os.getenv("ENABLE_WRITES", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
 
     if enable_llm_presentation and llm_provider == "none":
         raise RuntimeError("ENABLE_LLM_PRESENTATION=1 requires LLM_PROVIDER to be set explicitly.")
@@ -76,7 +90,9 @@ def load_config() -> Config:
         raise RuntimeError("LLM_PROVIDER=openai requires OPENAI_API_KEY.")
     if llm_provider == "ollama" and not ollama_base_url:
         raise RuntimeError("LLM_PROVIDER=ollama requires OLLAMA_BASE_URL.")
-    if llm_provider not in {"none", "openai", "ollama", "anthropic"}:
+    if llm_provider == "openrouter" and not openrouter_api_key:
+        raise RuntimeError("LLM_PROVIDER=openrouter requires OPENROUTER_API_KEY.")
+    if llm_provider not in {"none", "openai", "ollama", "anthropic", "openrouter"}:
         raise RuntimeError(f"Unsupported LLM_PROVIDER: {llm_provider}")
     if llm_provider == "anthropic" and not anthropic_api_key:
         raise RuntimeError("LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY.")
@@ -113,6 +129,7 @@ def load_config() -> Config:
         allow_cloud=allow_cloud,
         prefer_local=prefer_local,
         llm_timeout_seconds=llm_timeout_seconds,
+        enable_writes=enable_writes,
         llm_provider=llm_provider,
         enable_llm_presentation=enable_llm_presentation,
         openai_base_url=openai_base_url,
@@ -124,4 +141,6 @@ def load_config() -> Config:
         openrouter_api_key=openrouter_api_key,
         openrouter_base_url=openrouter_base_url,
         openrouter_model=openrouter_model,
+        openrouter_site_url=openrouter_site_url,
+        openrouter_app_name=openrouter_app_name,
     )

@@ -36,6 +36,8 @@ def _config(**overrides) -> Config:
         openrouter_api_key=None,
         openrouter_base_url=None,
         openrouter_model=None,
+        openrouter_site_url=None,
+        openrouter_app_name=None,
     )
     return base.__class__(**{**base.__dict__, **overrides})
 
@@ -54,6 +56,34 @@ providers:
     provider: openai
     remote: true
     model: gpt-4.1-mini
+    capabilities: [presentation_rewrite]
+    cost: 3
+    latency: 3
+    reliability: 4
+
+weights:
+  cost: -2
+  latency: -1
+  reliability: 3
+
+selection:
+  tie_breaker: [reliability, latency, cost, id]
+"""
+
+POLICY_OPENROUTER = """
+providers:
+  - id: ollama_local
+    provider: ollama
+    remote: false
+    model: llama3.1
+    capabilities: [presentation_rewrite]
+    cost: 0
+    latency: 2
+    reliability: 3
+  - id: openrouter_fast
+    provider: openrouter
+    remote: true
+    model: openai/gpt-4o-mini
     capabilities: [presentation_rewrite]
     cost: 3
     latency: 3
@@ -130,6 +160,37 @@ class TestLLMBroker(unittest.TestCase):
         broker, error = build_llm_broker(cfg)
         self.assertIsNone(broker)
         self.assertTrue(error)
+
+    def test_openrouter_unavailable_without_key(self) -> None:
+        path = self._write_policy(POLICY_OPENROUTER)
+        policy = load_policy(path)
+        cfg = _config(
+            llm_allow_remote=True,
+            openrouter_api_key=None,
+            openrouter_base_url="https://openrouter.ai/api/v1",
+            ollama_base_url="http://127.0.0.1:11434",
+            llm_broker_policy_path=path,
+        )
+        broker = LLMBroker(cfg, policy, client_factory=lambda c, p: {"id": p.id})
+        client, decision = broker.select(TaskSpec(task="presentation_rewrite"))
+        self.assertEqual(client["id"], "ollama_local")
+        self.assertEqual(decision["winner_id"], "ollama_local")
+
+    def test_openrouter_available_with_key(self) -> None:
+        path = self._write_policy(POLICY_OPENROUTER)
+        policy = load_policy(path)
+        policy.weights["reliability"] = 8
+        cfg = _config(
+            llm_allow_remote=True,
+            openrouter_api_key="key",
+            openrouter_base_url="https://openrouter.ai/api/v1",
+            ollama_base_url="http://127.0.0.1:11434",
+            llm_broker_policy_path=path,
+        )
+        broker = LLMBroker(cfg, policy, client_factory=lambda c, p: {"id": p.id})
+        client, decision = broker.select(TaskSpec(task="presentation_rewrite"))
+        self.assertEqual(client["id"], "openrouter_fast")
+        self.assertEqual(decision["winner_id"], "openrouter_fast")
 
     def test_deterministic_selection(self) -> None:
         path = self._write_policy()

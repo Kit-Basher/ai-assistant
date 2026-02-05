@@ -26,6 +26,7 @@ from agent.scheduled_snapshots import (
     safe_run_resource_snapshot,
     safe_run_network_snapshot,
 )
+from agent.debug_protocol import DebugProtocol
 from agent.orchestrator import Orchestrator
 from memory.db import MemoryDB
 
@@ -147,6 +148,17 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_runtime_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+
+    response = orchestrator.handle_message("/runtime_status", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
 async def _handle_disk_grow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
         return
@@ -264,6 +276,8 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
     db: MemoryDB = context.application.bot_data["db"]
     log_path: str = context.application.bot_data["log_path"]
+    debug_protocol: DebugProtocol | None = context.application.bot_data.get("debug_protocol")
+    orchestrator: Orchestrator | None = context.application.bot_data.get("orchestrator")
 
     chat_id = db.get_preference("telegram_chat_id")
     if not chat_id:
@@ -308,6 +322,33 @@ async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 return
             continue
 
+        if debug_protocol and orchestrator:
+            if debug_protocol.record_reminder(
+                str(chat_id),
+                reminder.text,
+                datetime.now(timezone.utc),
+            ):
+                response = orchestrator.handle_message("/runtime_status", user_id=str(chat_id))
+                await context.bot.send_message(chat_id=chat_id, text=response.text)
+                db.mark_reminder_failed(reminder.id, "debug_protocol_triggered")
+                try:
+                    db.audit_log_update_status(
+                        audit_id,
+                        "failed",
+                        details={
+                            "event_type": "reminder_send",
+                            "reminder_id": reminder.id,
+                            "claim_attempted": True,
+                            "claim_succeeded": True,
+                            "send_succeeded": False,
+                            "status_transition": "sent->failed",
+                            "error": "debug_protocol_triggered",
+                        },
+                    )
+                except Exception:
+                    return
+                continue
+
         try:
             await context.bot.send_message(chat_id=chat_id, text=f"Reminder: {reminder.text}")
             try:
@@ -344,6 +385,15 @@ async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
             except Exception:
                 return
+            if debug_protocol and orchestrator:
+                if debug_protocol.record_audit_event(
+                    "reminder_send",
+                    str(reminder.id),
+                    "failed",
+                    datetime.now(timezone.utc),
+                ):
+                    response = orchestrator.handle_message("/runtime_status", user_id=str(chat_id))
+                    await context.bot.send_message(chat_id=chat_id, text=response.text)
 
 
 async def _scheduled_disk_snapshot(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -399,6 +449,7 @@ def build_app() -> Application:
         llm_broker=llm_broker,
         llm_broker_error=llm_broker_error,
     )
+    debug_protocol = DebugProtocol()
 
     app = Application.builder().token(config.telegram_bot_token).build()
 
@@ -408,6 +459,7 @@ def build_app() -> Application:
     # Explicit command handlers (commands should NOT go through the generic text handler).
     app.add_handler(CommandHandler("remind", _handle_remind))
     app.add_handler(CommandHandler("status", _handle_status))
+    app.add_handler(CommandHandler("runtime_status", _handle_runtime_status))
     app.add_handler(CommandHandler("disk_grow", _handle_disk_grow))
     app.add_handler(CommandHandler("audit", _handle_audit))
     app.add_handler(CommandHandler("storage_snapshot", _handle_storage_snapshot))
@@ -423,6 +475,7 @@ def build_app() -> Application:
 
     app.bot_data["db"] = db
     app.bot_data["orchestrator"] = orchestrator
+    app.bot_data["debug_protocol"] = debug_protocol
     app.bot_data["log_path"] = config.log_path
     app.bot_data["home_path"] = os.path.expanduser("~")
     app.bot_data["timezone"] = config.agent_timezone
