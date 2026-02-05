@@ -22,6 +22,7 @@ class Config:
     prefer_local: bool
     llm_timeout_seconds: int
     enable_writes: bool = False
+    enable_scheduled_snapshots: bool = False
     llm_provider: str = "none"
     enable_llm_presentation: bool = False
     openai_base_url: str | None = None
@@ -82,6 +83,13 @@ def load_config() -> Config:
         "y",
         "on",
     }
+    enable_scheduled_snapshots = os.getenv("ENABLE_SCHEDULED_SNAPSHOTS", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
 
     if enable_llm_presentation and llm_provider == "none":
         raise RuntimeError("ENABLE_LLM_PRESENTATION=1 requires LLM_PROVIDER to be set explicitly.")
@@ -130,6 +138,7 @@ def load_config() -> Config:
         prefer_local=prefer_local,
         llm_timeout_seconds=llm_timeout_seconds,
         enable_writes=enable_writes,
+        enable_scheduled_snapshots=enable_scheduled_snapshots,
         llm_provider=llm_provider,
         enable_llm_presentation=enable_llm_presentation,
         openai_base_url=openai_base_url,
