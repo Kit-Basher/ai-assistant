@@ -19,7 +19,12 @@ from agent.commands import parse_command, split_pipe_args
 from agent.confirmations import ConfirmationStore, PendingAction
 from agent.logging_utils import log_event
 from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
+from agent.conversation_memory import record_event
+from agent import memory_ingest
+from agent.compare_mode import compare_now_to_what_if
+from agent.report_followups import resource_followup
 from agent.policy import evaluate_policy
+from agent import opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
 from memory.db import MemoryDB
@@ -73,6 +78,7 @@ class Orchestrator:
         self._llm_broker = llm_broker
         self._llm_broker_error = llm_broker_error
         self._knowledge_cache = KnowledgeQueryCache()
+        self._pending_compare: dict[str, dict[str, str]] = {}
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -82,6 +88,8 @@ class Orchestrator:
             ctx["llm_broker"] = self._llm_broker
         if self._llm_broker_error:
             ctx["llm_broker_error"] = self._llm_broker_error
+        if self.llm_client:
+            ctx["llm_router"] = self.llm_client
         return ctx
 
     def _ask_contains_advice(self, text: str) -> bool:
@@ -156,6 +164,115 @@ class Orchestrator:
         header = f"Narration ({scope})"
         return f"{header}\n{result.text}\n\n{text}"
 
+    def _extract_opinion_facts(
+        self, skill_name: str, function_name: str, result: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if not isinstance(result, dict):
+            return None, None
+        if skill_name == "knowledge_query":
+            facts = (result.get("data") or {}).get("facts")
+            intent = (result.get("data") or {}).get("intent") or {}
+            if isinstance(facts, dict):
+                return facts, (intent.get("name") if isinstance(intent, dict) else None)
+            return None, None
+        if skill_name == "storage_governor" and function_name == "storage_report":
+            facts = result.get("payload")
+            return (facts if isinstance(facts, dict) else None), "storage_report"
+        if skill_name == "reflection" and function_name == "weekly_reflection":
+            facts = result.get("payload")
+            return (facts if isinstance(facts, dict) else None), "weekly_reflection"
+        if skill_name == "diagnostics" and function_name == "diagnostics_qa":
+            facts = result.get("payload")
+            return (facts if isinstance(facts, dict) else None), "diagnostics_qa"
+        return None, None
+
+    def _record_conversation_topic(
+        self,
+        user_id: str,
+        topic: str | None,
+        intent_type: str,
+    ) -> None:
+        if not topic:
+            return
+        try:
+            record_event(self.db, user_id, topic, intent_type)
+        except Exception:
+            return
+
+    def _topic_tags_for_decision(self, decision: dict[str, Any] | None) -> list[str]:
+        if not decision:
+            return []
+        if decision.get("type") == "skill_call":
+            skill = decision.get("skill")
+            function = decision.get("function")
+            if skill == "diagnostics":
+                topic = (decision.get("args") or {}).get("topic")
+                return [topic] if topic else ["diagnostics"]
+            if skill == "reflection" and function == "weekly_reflection":
+                return ["weekly_reflection"]
+            if skill == "observe_now":
+                return ["observe_now"]
+            if skill == "what_if":
+                return ["what_if"]
+            if skill == "compare_now":
+                return ["compare_now"]
+            if skill == "storage_governor" and function == "storage_report":
+                return ["storage_report"]
+            if skill == "knowledge_query":
+                return ["knowledge_query"]
+            if function:
+                return [function]
+            if skill:
+                return [skill]
+        return []
+
+    def _store_pending_compare(self, user_id: str, what_if_text: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+        self._pending_compare[user_id] = {"what_if_text": what_if_text, "expires_at": expires}
+
+    def _get_pending_compare(self, user_id: str) -> dict[str, Any] | None:
+        row = self._pending_compare.get(user_id)
+        if not row:
+            return None
+        try:
+            if row.get("expires_at") and datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
+                self._pending_compare.pop(user_id, None)
+                return None
+        except Exception:
+            return None
+        return row
+
+    def _format_opinion_reply(self, facts_text: str, opinion_text: str) -> str:
+        return f"Facts:\n{facts_text}\n\nOpinion (opt-in):\n{opinion_text}"
+
+
+    def _deliver_pending_opinion(
+        self, user_id: str, pending: opinion_gate.PendingOpinion
+    ) -> OrchestratorResponse:
+        facts = pending.context.get("facts")
+        facts_text = pending.context.get("facts_text") or "No facts available."
+        context_note = pending.context.get("context_note")
+        if not isinstance(facts, dict) or not facts:
+            opinion_gate.clear_pending(self.db, user_id)
+            return OrchestratorResponse("No facts available to form an opinion.")
+        opinion_resp = self._call_skill(
+            user_id,
+            "opinion_on_report",
+            "opinion_on_report",
+            {"facts": facts, "context_note": context_note},
+            [],
+        )
+        opinion_text = opinion_resp.text or "I can’t form a reliable opinion from the provided facts."
+        final_text = self._format_opinion_reply(facts_text, opinion_text)
+        opinion_gate.clear_pending(self.db, user_id)
+        log_event(
+            self.log_path,
+            "opinion_delivered",
+            {"user_id": user_id, "topic_key": pending.topic_key, "facts_hash": facts_hash(facts)},
+        )
+        return OrchestratorResponse(final_text, opinion_resp.data)
+
     def _call_skill(
         self,
         user_id: str,
@@ -221,12 +338,31 @@ class Orchestrator:
                         "query_len": len(query),
                     },
                 )
-                response_text = (
-                    f"{response_text}\n---\n"
-                    "Want my opinion on what to watch out for based on this report? Reply: `opinion`"
+                opinion_gate.store_pending(
+                    self.db,
+                    user_id,
+                    topic_key="knowledge_query",
+                    context={
+                        "facts": facts,
+                        "facts_text": response_text,
+                        "context_note": (intent or {}).get("name") if isinstance(intent, dict) else None,
+                    },
+                    log_path=self.log_path,
                 )
+                response_text = f"{response_text}\n---\n{opinion_gate.OPINION_GATE_PROMPT}"
         if skill_name == "disk_report" and isinstance(result, dict):
             response_text = self._maybe_add_narration("disk_report", result, response_text)
+        try:
+            memory_ingest.ingest_event(
+                self.db,
+                user_id,
+                "skill",
+                response_text,
+                [function_name or skill_name],
+                override=None,
+            )
+        except Exception:
+            pass
         return OrchestratorResponse(response_text, result)
 
     def _format_projects(self, projects: list[dict[str, Any]]) -> str:
@@ -294,8 +430,23 @@ class Orchestrator:
     def handle_message(self, text: str, user_id: str) -> OrchestratorResponse:
         self._runner = Runner()
         try:
+            override, cleaned_text = memory_ingest.parse_memory_override(text)
             cmd = parse_command(text)
+            if cmd and cmd.name == "nomem":
+                cmd = None
+                text = cleaned_text
             if cmd:
+                try:
+                    memory_ingest.ingest_event(
+                        self.db,
+                        user_id,
+                        "user",
+                        cleaned_text if override else text,
+                        [cmd.name],
+                        override=override,
+                    )
+                except Exception:
+                    pass
                 if cmd.name == "confirm":
                     pending = self.confirmations.pop(user_id)
                     if not pending:
@@ -482,6 +633,70 @@ class Orchestrator:
                         {},
                         [],
                     )
+
+                if cmd.name == "llm_ping":
+                    router = self.llm_client
+                    if not router or not hasattr(router, "chat"):
+                        return OrchestratorResponse(
+                            "LLM ping: provider=none model=none status=FAIL reason=unavailable"
+                        )
+                    provider_override = None
+                    if cmd.args:
+                        provider_override = cmd.args.strip().lower() or None
+                    result = router.chat(
+                        [
+                            {"role": "system", "content": "Reply with the single word PONG."},
+                            {"role": "user", "content": "ping"},
+                        ],
+                        purpose="diagnostics",
+                        compute_tier="low",
+                        provider_override=provider_override,
+                    )
+                    status = "OK" if result.get("ok") else "FAIL"
+                    reason = result.get("error_class") or ""
+                    reason_part = f" reason={reason}" if status == "FAIL" and reason else ""
+                    return OrchestratorResponse(
+                        "LLM ping: provider={provider} model={model} status={status} duration_ms={duration_ms}{reason}".format(
+                            provider=result.get("provider") or "none",
+                            model=result.get("model") or "none",
+                            status=status,
+                            duration_ms=result.get("duration_ms") or 0,
+                            reason=reason_part,
+                        )
+                    )
+
+                if cmd.name == "observe_now":
+                    self._record_conversation_topic(user_id, "observe_now", "command")
+                    return self._call_skill(
+                        user_id,
+                        "observe_now",
+                        "observe_now",
+                        {},
+                        [],
+                    )
+
+                if cmd.name == "what_if":
+                    self._record_conversation_topic(user_id, "what_if", "question")
+                    question = (cmd.args or "").strip()
+                    if not question:
+                        return OrchestratorResponse("Usage: /what_if <free text>")
+                    return self._call_skill(
+                        user_id,
+                        "what_if",
+                        "what_if",
+                        {"text": question},
+                        [],
+                    )
+
+                if cmd.name == "compare_now":
+                    self._record_conversation_topic(user_id, "compare_now", "question")
+                    question = (cmd.args or "").strip()
+                    if not question:
+                        pending = self._get_pending_compare(user_id)
+                        if not pending or not pending.get("what_if_text"):
+                            return OrchestratorResponse("Usage: /compare_now <what-if text>")
+                        question = pending.get("what_if_text") or ""
+                    return OrchestratorResponse(compare_now_to_what_if(question))
 
                 if cmd.name == "disk_changes":
                     report = self._disk_changes_report(user_id)
@@ -706,6 +921,18 @@ class Orchestrator:
                         ["db:read"],
                     )
 
+            reply_action, pending = opinion_gate.handle_reply(self.db, user_id, text, self.log_path)
+            if reply_action == "expired":
+                return OrchestratorResponse("Opinion request expired.")
+            if reply_action == "declined":
+                return OrchestratorResponse("Okay — sticking to facts.")
+            if reply_action == "accepted" and pending:
+                return self._deliver_pending_opinion(user_id, pending)
+
+            if override:
+                text = cleaned_text
+            opinion_requested = opinion_gate.is_opinion_request(text)
+
             gate_result = handle_action_text(self.db, user_id, text, self.enable_writes)
             if gate_result:
                 return OrchestratorResponse(gate_result.get("message", ""))
@@ -717,6 +944,18 @@ class Orchestrator:
 
             # Rule-based intent routing (v0.1)
             decision = route_message(user_id, text, self._intent_context())
+            try:
+                topic_tags = self._topic_tags_for_decision(decision)
+                memory_ingest.ingest_event(
+                    self.db,
+                    user_id,
+                    "user",
+                    text,
+                    topic_tags,
+                    override=override,
+                )
+            except Exception:
+                pass
 
             if decision.get("type") == "disk_changes":
                 report = self._disk_changes_report(user_id)
@@ -742,7 +981,31 @@ class Orchestrator:
             if decision.get("type") == "respond":
                 return OrchestratorResponse(decision.get("text", ""))
 
+            if decision.get("type") == "command_alias":
+                command = decision.get("command") or ""
+                if command:
+                    return self.handle_message(command, user_id)
+                return OrchestratorResponse("Try /help")
+
+            if decision.get("type") == "compare_now_pending":
+                pending = self._get_pending_compare(user_id)
+                if not pending:
+                    return OrchestratorResponse("No what-if scenario to compare. Ask a what-if question first.")
+                text = pending.get("what_if_text") or ""
+                if not text:
+                    return OrchestratorResponse("No what-if scenario to compare. Ask a what-if question first.")
+                return OrchestratorResponse(compare_now_to_what_if(text))
+
+            if decision.get("type") == "resource_followup":
+                question = decision.get("question") or ""
+                response_text = resource_followup(self.db, user_id, _resource_followup_kind(question), self.timezone)
+                return OrchestratorResponse(response_text)
+
             if decision.get("type") == "skill_call":
+                if decision.get("skill") == "opinion_on_report" and not pending:
+                    return OrchestratorResponse(
+                        "I can share an opinion after a report. Ask for a report first, then opt in."
+                    )
                 if decision.get("skill") == "opinion_on_report":
                     facts = (decision.get("args") or {}).get("facts")
                     if isinstance(facts, dict):
@@ -761,6 +1024,33 @@ class Orchestrator:
                     decision.get("scopes", default_scopes),
                     action_type="auto",
                 )
+                if skill_name == "diagnostics":
+                    topic = (decision.get("args") or {}).get("topic")
+                    self._record_conversation_topic(user_id, topic, "question")
+                if skill_name == "reflection" and decision.get("function") == "weekly_reflection":
+                    self._record_conversation_topic(user_id, "weekly_reflection", "question")
+                if skill_name == "what_if":
+                    self._record_conversation_topic(user_id, "what_if", "question")
+                    what_if_text = (decision.get("args") or {}).get("text") or ""
+                    if what_if_text:
+                        self._store_pending_compare(user_id, what_if_text)
+                if opinion_requested and skill_name != "knowledge_query" and isinstance(response.data, dict):
+                    facts, context_note = self._extract_opinion_facts(
+                        skill_name, decision.get("function", ""), response.data
+                    )
+                    if isinstance(facts, dict) and facts:
+                        opinion_gate.store_pending(
+                            self.db,
+                            user_id,
+                            topic_key=decision.get("function", "") or skill_name,
+                            context={
+                                "facts": facts,
+                                "facts_text": response.text,
+                                "context_note": context_note,
+                            },
+                            log_path=self.log_path,
+                        )
+                        response.text = f"{response.text}\n---\n{opinion_gate.OPINION_GATE_PROMPT}"
                 if decision.get("skill") == "opinion_on_report":
                     facts = (decision.get("args") or {}).get("facts")
                     if isinstance(facts, dict):
@@ -775,7 +1065,10 @@ class Orchestrator:
                 return OrchestratorResponse(decision["prompt"])
 
             return OrchestratorResponse(
-                "I can help with /remember, /projects, /project_new, /task_add, /remind. Use slash commands for now."
+                "I can help with /ask, /ask_opinion, /weekly_reflection, /storage_report, /resource_report, "
+                "/network_report, /storage_snapshot, /observe_now, /what_if, /compare_now, /remind, /status, "
+                "/runtime_status, /disk_grow, /audit, /llm_ping, /llm_status, /mem, /nomem. "
+                "Use slash commands for now."
             )
         finally:
             self._runner = None
@@ -986,3 +1279,20 @@ class Orchestrator:
             "anomaly_events_persisted",
             {"user_id": user_id, "observed_at": observed_at, "count": inserted},
         )
+
+
+def _resource_followup_kind(question: str) -> str:
+    lowered = (question or "").lower()
+    if "using the most memory" in lowered or "using memory" in lowered:
+        return "top_memory"
+    if "using cpu" in lowered:
+        return "top_cpu"
+    if "compare to last time" in lowered:
+        return "compare"
+    if "what changed since last snapshot" in lowered:
+        return "changed"
+    if "is this normal" in lowered:
+        return "is_normal"
+    if "ram high" in lowered:
+        return "ram_high"
+    return "ram_high"
