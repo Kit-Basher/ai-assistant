@@ -163,7 +163,7 @@ class TestKnowledgeQuery(unittest.TestCase):
             ],
         )
         context = {"db": self.db, "timezone": "UTC", "user_id": "user1"}
-        result = handler.knowledge_query(context, "any anomalies this week?")
+        result = handler.knowledge_query(context, "any anomalies 2026-02-01 to 2026-02-07?")
         facts = result["data"]["facts"]
         self.assertTrue(facts.get("available"))
         self.assertEqual(len(facts.get("anomalies", [])), 1)

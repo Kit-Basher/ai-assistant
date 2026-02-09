@@ -169,6 +169,17 @@ async def _handle_resource_report(update: Update, context: ContextTypes.DEFAULT_
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+
+    response = orchestrator.handle_message("/brief", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
 async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
         return
@@ -429,6 +440,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("storage_snapshot", _handle_storage_snapshot))
     app.add_handler(CommandHandler("storage_report", _handle_storage_report))
     app.add_handler(CommandHandler("resource_report", _handle_resource_report))
+    app.add_handler(CommandHandler("brief", _handle_brief))
     app.add_handler(CommandHandler("network_report", _handle_network_report))
     app.add_handler(CommandHandler("weekly_reflection", _handle_weekly_reflection))
     app.add_handler(CommandHandler("ask", _handle_ask))

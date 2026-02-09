@@ -1163,3 +1163,118 @@ class MemoryDB:
             (pending_id,),
         )
         self._commit_if_needed()
+
+    # --- Last report registry / report history (for followups) ---
+
+    def upsert_last_report(
+        self,
+        user_id: str,
+        report_key: str,
+        taken_at: str,
+        payload: dict[str, Any],
+        audit_ref: str | None = None,
+    ) -> None:
+        created_at = self._now_iso()
+        payload_json = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        with self.transaction():
+            self._conn.execute(
+                """
+                INSERT INTO report_history (user_id, report_key, taken_at, payload_json, audit_ref, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (user_id, report_key, taken_at, payload_json, audit_ref, created_at),
+            )
+            self._conn.execute(
+                """
+                INSERT INTO last_report_registry (user_id, report_key, taken_at, payload_json, audit_ref, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, report_key) DO UPDATE SET
+                    taken_at = excluded.taken_at,
+                    payload_json = excluded.payload_json,
+                    audit_ref = excluded.audit_ref,
+                    created_at = excluded.created_at
+                """,
+                (user_id, report_key, taken_at, payload_json, audit_ref, created_at),
+            )
+
+    def get_last_report(self, user_id: str, report_key: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT user_id, report_key, taken_at, payload_json, audit_ref, created_at
+            FROM last_report_registry
+            WHERE user_id = ? AND report_key = ?
+            """,
+            (user_id, report_key),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def get_report_history(self, user_id: str, report_key: str, limit: int = 2) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT user_id, report_key, taken_at, payload_json, audit_ref, created_at
+            FROM report_history
+            WHERE user_id = ? AND report_key = ?
+            ORDER BY taken_at DESC
+            LIMIT ?
+            """,
+            (user_id, report_key, int(limit)),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    # --- System facts snapshots (used by /brief) ---
+
+    def insert_system_facts_snapshot(
+        self,
+        id: str,
+        user_id: str,
+        taken_at: str,
+        boot_id: str,
+        schema_version: int,
+        facts_json: str,
+        content_hash_sha256: str,
+        partial: bool,
+        errors_json: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            INSERT INTO system_facts_snapshots (
+                id, user_id, taken_at, boot_id, schema_version,
+                facts_json, content_hash_sha256, partial, errors_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                user_id = excluded.user_id,
+                taken_at = excluded.taken_at,
+                boot_id = excluded.boot_id,
+                schema_version = excluded.schema_version,
+                facts_json = excluded.facts_json,
+                content_hash_sha256 = excluded.content_hash_sha256,
+                partial = excluded.partial,
+                errors_json = excluded.errors_json
+            """,
+            (
+                id,
+                user_id,
+                taken_at,
+                boot_id,
+                int(schema_version),
+                facts_json,
+                content_hash_sha256,
+                1 if partial else 0,
+                errors_json,
+            ),
+        )
+        self._commit_if_needed()
+
+    def list_system_facts_snapshots(self, user_id: str, limit: int = 2) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT id, user_id, taken_at, boot_id, schema_version, facts_json, content_hash_sha256, partial, errors_json
+            FROM system_facts_snapshots
+            WHERE user_id = ?
+            ORDER BY taken_at DESC
+            LIMIT ?
+            """,
+            (user_id, int(limit)),
+        )
+        return [dict(row) for row in cur.fetchall()]

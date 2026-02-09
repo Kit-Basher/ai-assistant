@@ -23,6 +23,7 @@ from agent.conversation_memory import record_event
 from agent import memory_ingest
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
+from agent.changed_report import build_changed_report_from_system_facts
 from agent.policy import evaluate_policy
 from agent import opinion_gate
 from agent.skills_loader import SkillLoader
@@ -869,6 +870,9 @@ class Orchestrator:
                         ["db:read"],
                     )
 
+                if cmd.name == "brief":
+                    return self._run_brief(user_id)
+
                 if cmd.name == "storage_snapshot":
                     return self._call_skill(
                         user_id,
@@ -981,6 +985,9 @@ class Orchestrator:
             if decision.get("type") == "respond":
                 return OrchestratorResponse(decision.get("text", ""))
 
+            if decision.get("type") == "brief":
+                return self._run_brief(user_id)
+
             if decision.get("type") == "command_alias":
                 command = decision.get("command") or ""
                 if command:
@@ -1002,12 +1009,12 @@ class Orchestrator:
                 return OrchestratorResponse(response_text)
 
             if decision.get("type") == "skill_call":
-                if decision.get("skill") == "opinion_on_report" and not pending:
-                    return OrchestratorResponse(
-                        "I can share an opinion after a report. Ask for a report first, then opt in."
-                    )
                 if decision.get("skill") == "opinion_on_report":
                     facts = (decision.get("args") or {}).get("facts")
+                    if not isinstance(facts, dict) or not facts:
+                        return OrchestratorResponse(
+                            "I can share an opinion after a report. Ask for a report first, then opt in."
+                        )
                     if isinstance(facts, dict):
                         log_event(
                             self.log_path,
@@ -1066,12 +1073,39 @@ class Orchestrator:
 
             return OrchestratorResponse(
                 "I can help with /ask, /ask_opinion, /weekly_reflection, /storage_report, /resource_report, "
-                "/network_report, /storage_snapshot, /observe_now, /what_if, /compare_now, /remind, /status, "
+                "/brief, /network_report, /storage_snapshot, /observe_now, /what_if, /compare_now, /remind, /status, "
                 "/runtime_status, /disk_grow, /audit, /llm_ping, /llm_status, /mem, /nomem. "
                 "Use slash commands for now."
             )
         finally:
             self._runner = None
+
+    def _run_brief(self, user_id: str) -> OrchestratorResponse:
+        # Fresh snapshot (observe-only; uses existing governors).
+        self._call_skill(
+            user_id,
+            "observe_now",
+            "observe_now",
+            {"user_id": user_id},
+            ["db:write", "sys:read"],
+            action_type="insert",
+        )
+
+        report = build_changed_report_from_system_facts(self.db, user_id)
+        if report.baseline_created:
+            text = "Baseline created. I'll report changes next time."
+            return OrchestratorResponse(text, {"baseline_created": True})
+
+        lines: list[str] = []
+        if report.machine_summary:
+            lines.append(report.machine_summary)
+        if report.delta_lines:
+            lines.extend(report.delta_lines)
+        else:
+            lines.append("No notable changes since last snapshot.")
+
+        # Keep it short and delta-focused.
+        return OrchestratorResponse("\n".join(lines[:12]), {"baseline_created": False})
 
     def _disk_changes(self, user_id: str) -> str:
         report = self._disk_changes_report(user_id)

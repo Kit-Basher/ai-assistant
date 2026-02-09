@@ -163,6 +163,18 @@ class TestIntentRouter(unittest.TestCase):
         self.assertEqual(decision["skill"], "storage_governor")
         self.assertEqual(decision["function"], "storage_report")
 
+    def test_brief_routes_and_avoids_ask_timeframe(self) -> None:
+        phrases = [
+            "anything new on my pc?",
+            "anything different?",
+            "what changed?",
+            "what's new on my computer",
+            "is my pc okay?",
+        ]
+        for text in phrases:
+            decision = route_message("user1", text, self.context)
+            self.assertEqual(decision.get("type"), "brief")
+
 
 if __name__ == "__main__":
     unittest.main()

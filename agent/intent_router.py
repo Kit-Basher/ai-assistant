@@ -66,6 +66,18 @@ _STORAGE_REPORT_REGEX = re.compile(
     re.IGNORECASE,
 )
 _DISK_CHANGES = re.compile(r"\b(disk changes|what changed on my disk)\b", re.IGNORECASE)
+_SYSTEM_BRIEF = re.compile(
+    r"\b("
+    r"anything\s+(?:new|different)"
+    r"|what(?:'s|’s| is)\s+new(?:\s+on\s+my\s+(?:pc|computer))?"
+    r"|what(?:'s|’s| is)\s+new\s+on\s+my\s+(?:computer|pc)"
+    r"|what\s+changed"
+    r"|what(?:'s|’s| is)\s+different"
+    r"|is\s+my\s+(?:pc|computer)\s+ok(?:ay)?"
+    r"|is\s+my\s+(?:pc|computer)\s+doing\s+ok(?:ay)?"
+    r")\b",
+    re.IGNORECASE,
+)
 _DISK_BASELINE = re.compile(r"\bset disk baseline\b", re.IGNORECASE)
 _DISK_GROW = re.compile(r"\b(what grew under|show growth under)\b", re.IGNORECASE)
 _CLEAN_APT = re.compile(r"^\s*(clean|clear)\s+apt\s+cache\s*$", re.IGNORECASE)
@@ -830,6 +842,13 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
         )
 
     lowered = cleaned.lower()
+
+    # System-wide "brief" (snapshot + delta), intentionally before ask_query time-window prompts.
+    if _SYSTEM_BRIEF.search(lowered) and not _has_time_window_hint(lowered):
+        # If the user is explicitly talking about disk-only changes, use disk routing instead.
+        if not (_DISK_REGEX.search(lowered) or _DISK_CHANGES.search(lowered)):
+            return {"type": "brief"}
+
     if _contains_any(lowered, _REMIND_PHRASES):
         when_ts, reminder_text = _extract_reminder(cleaned)
         if not reminder_text:

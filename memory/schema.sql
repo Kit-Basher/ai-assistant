@@ -238,6 +238,46 @@ CREATE INDEX IF NOT EXISTS idx_anomaly_events_user_time
 CREATE INDEX IF NOT EXISTS idx_anomaly_events_user_key_time
     ON anomaly_events(user_id, anomaly_key, observed_at);
 
+-- Unified, JSON-serialized system snapshots (v0.2 brief/delta).
+CREATE TABLE IF NOT EXISTS system_facts_snapshots (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    taken_at TEXT NOT NULL,
+    boot_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    facts_json TEXT NOT NULL,
+    content_hash_sha256 TEXT NOT NULL,
+    partial INTEGER NOT NULL DEFAULT 0,
+    errors_json TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_system_facts_user_taken
+    ON system_facts_snapshots(user_id, taken_at);
+
+-- Registry for last "rendered report" payloads (used for followups).
+CREATE TABLE IF NOT EXISTS last_report_registry (
+    user_id TEXT NOT NULL,
+    report_key TEXT NOT NULL,
+    taken_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    audit_ref TEXT,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (user_id, report_key)
+);
+
+CREATE TABLE IF NOT EXISTS report_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    report_key TEXT NOT NULL,
+    taken_at TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    audit_ref TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_history_user_key_taken
+    ON report_history(user_id, report_key, taken_at);
+
 CREATE INDEX IF NOT EXISTS idx_tasks_project_id ON tasks(project_id);
 CREATE INDEX IF NOT EXISTS idx_notes_project_id ON notes(project_id);
 CREATE INDEX IF NOT EXISTS idx_reminders_status ON reminders(status);
