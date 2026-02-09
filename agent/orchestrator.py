@@ -20,12 +20,12 @@ from agent.confirmations import ConfirmationStore, PendingAction
 from agent.logging_utils import log_event
 from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
 from agent.conversation_memory import record_event
-from agent import memory_ingest
+import agent.memory_ingest as memory_ingest
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
 from agent.changed_report import build_changed_report_from_system_facts
 from agent.policy import evaluate_policy
-from agent import opinion_gate
+import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
 from memory.db import MemoryDB
