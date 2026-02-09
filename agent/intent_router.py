@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -62,10 +63,69 @@ _DISK_REGEX = re.compile(
     re.IGNORECASE,
 )
 _STORAGE_REPORT_REGEX = re.compile(
-    r"\b(storage\s+report|disk\s+report|last\s+disk\s+report|latest\s+disk\s+report)\b",
+    r"\b(storage\s+report|disk\s+report|last\s+disk\s+report|latest\s+disk\s+report|disk\s+usage|storage|space|ssd\s+full)\b",
+    re.IGNORECASE,
+)
+_RESOURCE_REPORT_REGEX = re.compile(
+    r"\b(ram|memory\s+free|free\s+memory|available\s+memory|memory\s+usage|memory\s+low|low\s+memory|cpu\s+usage|system\s+load|load|top\s+cpu|high\s+cpu|cpu\s+hog|what('?s| is)\s+using\s+my\s+cpu|stuck|hung|frozen|not responding)\b",
+    re.IGNORECASE,
+)
+_HARDWARE_REPORT_REGEX = re.compile(
+    r"\b(gpu|graphics\s+card|video\s+card|nvidia|radeon|arc|cpu\s+model|processor\s+model|what\s+cpu|which\s+cpu|what\s+gpu|which\s+gpu)\b",
+    re.IGNORECASE,
+)
+_NETWORK_REPORT_REGEX = re.compile(
+    r"\b(network|network\s+status|network\s+report|internet|internet\s+up|ip|ip\s+address)\b",
+    re.IGNORECASE,
+)
+_STATUS_REPORT_REGEX = re.compile(
+    r"\b(status|runtime\s+status|uptime)\b",
     re.IGNORECASE,
 )
 _DISK_CHANGES = re.compile(r"\b(disk changes|what changed on my disk)\b", re.IGNORECASE)
+_SYSTEM_CHANGED = re.compile(
+    r"\b(what(?:'s| is| has)?\s+changed|what(?:'s| is)?\s+different|since\s+last\s+time|since\s+last\s+check|since\s+i\s+last\s+checked)\b",
+    re.IGNORECASE,
+)
+_SYSTEM_BRIEF = re.compile(
+    r"\b("
+    r"anything\s+(?:new|different)"
+    r"|what(?:'s|’s| is)\s+new(?:\s+on\s+my\s+(?:pc|computer))?"
+    r"|what(?:'s|’s| is)\s+new\s+on\s+my\s+(?:computer|pc)"
+    r"|is\s+my\s+(?:pc|computer)\s+ok(?:ay)?"
+    r"|is\s+my\s+(?:pc|computer)\s+doing\s+ok(?:ay)?"
+    r")\b",
+    re.IGNORECASE,
+)
+_SYSTEM_TREND = re.compile(
+    r"\b(since\s+when|when\s+did\b.*\b(start|begin)|when\s+did\s+this\s+start|how\s+long\s+has|how\s+long\s+have|over\s+time|trend)\b",
+    re.IGNORECASE,
+)
+_SYSTEM_HEALTH_SUMMARY = re.compile(
+    r"\b(health\s+summary|system\s+health|system\s+status|how('?s| is)\s+my\s+system|am\s+i\s+ok(?:ay)?|overall\s+health)\b",
+    re.IGNORECASE,
+)
+_SYSTEM_OPINION = re.compile(
+    r"\b("
+    r"should\s+i\s+worry|is\s+this\s+bad|is\s+this\s+serious|"
+    r"what\s+should\s+i\s+watch|what\s+should\s+i\s+keep\s+an\s+eye\s+on|any\s+concerns|"
+    r"what\s+would\s+you\s+do|next\s+steps|what\s+should\s+i\s+change|"
+    r"recommend|recommendation|advice|opinion"
+    r")\b",
+    re.IGNORECASE,
+)
+_DOCTOR = re.compile(
+    r"\b(doctor|check\s+config|check\s+setup|setup\s+check|config\s+check|is\s+this\s+set\s+up\s+right)\b",
+    re.IGNORECASE,
+)
+_EXPLAIN_LAST_REPORT = re.compile(
+    r"\b(what\s+does\s+that\s+mean|explain\s+(that|this|it)|is\s+that\s+bad|should\s+i\s+be\s+concerned|should\s+i\s+be\s+worried|why\s+is\s+that)\b",
+    re.IGNORECASE,
+)
+_ADVISE_FROM_LAST_REPORT = re.compile(
+    r"\b(what\s+should\s+i\s+do\s+next|what\s+should\s+i\s+do\s+now|next\s+steps|what\s+would\s+you\s+do|recommendations?)\b",
+    re.IGNORECASE,
+)
 _DISK_BASELINE = re.compile(r"\bset disk baseline\b", re.IGNORECASE)
 _DISK_GROW = re.compile(r"\b(what grew under|show growth under)\b", re.IGNORECASE)
 _CLEAN_APT = re.compile(r"^\s*(clean|clear)\s+apt\s+cache\s*$", re.IGNORECASE)
@@ -102,6 +162,14 @@ _OPINION_PHRASES = (
     "is this normal for me",
     "outside my baseline",
 )
+
+
+def _commands_visible() -> bool:
+    # Conversational mode hides slash command affordances by default.
+    ui_mode = (os.getenv("UI_MODE", "conversational") or "conversational").strip().lower()
+    if ui_mode == "cli":
+        return True
+    return os.getenv("SHOW_COMMANDS_IN_HELP", "0").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 _OPINION_FOLLOWUP_PHRASES = (
     "opinion",
@@ -707,10 +775,10 @@ def _handle_pending(
         parsed = parse_timeframe(candidate, db, (context or {}).get("timezone") or "UTC")
         db.delete_pending_clarification(pending.id)
         if not parsed.ok or parsed.clarify:
-            return _noop(
-                "Please re-run /ask with a specific timeframe (last 7 days, last 72 hours, or last week).",
-                0.20,
-            )
+            msg = "Please re-run with a specific timeframe (last 7 days, last 72 hours, or last week)."
+            if _commands_visible():
+                msg = "Please re-run /ask with a specific timeframe (last 7 days, last 72 hours, or last week)."
+            return _noop(msg, 0.20)
         timeframe = {
             "label": parsed.label,
             "start_date": parsed.start_date,
@@ -791,10 +859,10 @@ def _handle_pending(
 def route_message(user_id: str, text: str, context: dict | None) -> dict[str, Any]:
     cleaned = _normalize(text or "")
     if not cleaned:
-        return _noop("Try /help", 0.20)
+        return _noop("Say 'help' to see what I can do.", 0.20)
 
     if cleaned.startswith("/"):
-        return _noop("Try /help", 0.20)
+        return _noop("Say 'help' to see what I can do.", 0.20)
 
     now_dt = _now_dt(context)
     db = (context or {}).get("db")
@@ -824,12 +892,52 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
                     "Matched opinion follow-up for knowledge query.",
                     scopes=[],
                 )
-        return _noop(
-            "I can, but I need a report first — ask a knowledge question like “what changed this week?”",
-            0.60,
-        )
+        # "yes" is reserved for the opinion follow-up handshake, but a bare "opinion" should be
+        # allowed to fall through to the deterministic system-opinion layer.
+        if cleaned.lower().strip() == "yes":
+            return _noop(
+                "I can, but I need a report first — ask a knowledge question like “what changed this week?”",
+                0.60,
+            )
 
     lowered = cleaned.lower()
+    # "What changed?" (system-wide) snapshot + diff. Avoid time-window knowledge queries.
+    # "Brief / anything new?" (system-wide) snapshot + diff. Avoid time-window knowledge queries.
+    if (_SYSTEM_BRIEF.search(lowered) or _SYSTEM_CHANGED.search(lowered)) and not _has_time_window_hint(lowered):
+        # Disk-only change questions are handled elsewhere (disk report / disk changes).
+        if not any(word in lowered for word in ("disk", "ssd", "storage", "space")):
+            return {"type": "brief"}
+    # "Since when / trend?" (system-wide) from saved snapshots only (no new probes).
+    if _SYSTEM_TREND.search(lowered) and not _has_time_window_hint(lowered):
+        return {"type": "system_trend"}
+    # One-shot calm health summary (DB-only, no probes). Higher priority than vague followups.
+    if _SYSTEM_HEALTH_SUMMARY.search(lowered) and not _has_time_window_hint(lowered):
+        return {"type": "system_health_summary"}
+    # Setup/config validation (DB + filesystem only).
+    if _DOCTOR.search(lowered) and not _has_time_window_hint(lowered):
+        return {"type": "doctor"}
+    # Vague followups about the most recent cached observer report (no probes).
+    # Only apply when we have a last report in the registry; otherwise fall through to normal intents.
+    last_report = None
+    if db and hasattr(db, "get_latest_unexpired_report"):
+        try:
+            last_report = db.get_latest_unexpired_report(user_id, now_iso=_now_iso(now_dt))
+        except Exception:
+            last_report = None
+    elif db and hasattr(db, "get_last_report"):
+        # Back-compat fallback (Phase 5 registry).
+        try:
+            last_report = db.get_last_report(user_id)
+        except Exception:
+            last_report = None
+    if last_report:
+        if _EXPLAIN_LAST_REPORT.search(lowered):
+            return {"type": "explain_last_report"}
+        if _ADVISE_FROM_LAST_REPORT.search(lowered):
+            return {"type": "advise_from_last_report"}
+    # "Should I worry / what should I watch?" (system-wide) opinion based only on stored snapshots.
+    if _SYSTEM_OPINION.search(lowered):
+        return {"type": "system_opinion"}
     if _contains_any(lowered, _REMIND_PHRASES):
         when_ts, reminder_text = _extract_reminder(cleaned)
         if not reminder_text:
@@ -945,6 +1053,56 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
                 "I can only provide factual recall from existing snapshots. Please ask for observations, not advice or actions.",
                 0.20,
             )
+        if _HARDWARE_REPORT_REGEX.search(lowered) and not _has_time_window_hint(lowered):
+            return _skill_call(
+                "hardware_report",
+                "hardware_report",
+                {},
+                0.85,
+                "Matched hardware report intent (alias).",
+                scopes=["sys:read"],
+            )
+        if _RESOURCE_REPORT_REGEX.search(lowered) and not _has_time_window_hint(lowered):
+            return _skill_call(
+                "resource_governor",
+                "resource_report",
+                {},
+                0.80,
+                "Matched resource report intent (alias).",
+                scopes=["sys:read"],
+            )
+        if _STORAGE_REPORT_REGEX.search(lowered) and not _has_time_window_hint(lowered):
+            # If the user explicitly asks for "last/latest/delta/trend", they want the DB-backed report.
+            # Otherwise, default to a live disk-usage check.
+            wants_history = bool(re.search(r"\b(last|latest|since|delta|changed|trend|history)\b", lowered))
+            function = "storage_report" if wants_history else "storage_live_report"
+            scopes = ["db:read"] if function == "storage_report" else ["sys:read"]
+            return _skill_call(
+                "storage_governor",
+                function,
+                {},
+                0.80,
+                "Matched storage report intent (alias).",
+                scopes=scopes,
+            )
+        if _NETWORK_REPORT_REGEX.search(lowered) and not _has_time_window_hint(lowered):
+            return _skill_call(
+                "network_governor",
+                "network_report",
+                {},
+                0.80,
+                "Matched network report intent (alias).",
+                scopes=["db:read"],
+            )
+        if _STATUS_REPORT_REGEX.search(lowered) and not _has_time_window_hint(lowered):
+            return _skill_call(
+                "core",
+                "runtime_status",
+                {},
+                0.70,
+                "Matched runtime status intent (alias).",
+                scopes=["db:read"],
+            )
         trigger = _contains_opinion_trigger(cleaned)
         if trigger:
             if not db:
@@ -983,7 +1141,7 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
                 "Matched ask_opinion intent.",
                 scopes=["db:read"],
             )
-        if _matches_knowledge_query(cleaned):
+        if _matches_knowledge_query(cleaned) or _has_time_window_hint(lowered):
             return _skill_call(
                 "knowledge_query",
                 "knowledge_query",
@@ -1055,6 +1213,26 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             "Matched weekly-review intent.",
         )
 
+    if _HARDWARE_REPORT_REGEX.search(lowered):
+        return _skill_call(
+            "hardware_report",
+            "hardware_report",
+            {},
+            0.85,
+            "Matched hardware report intent (alias).",
+            scopes=["sys:read"],
+        )
+
+    if _RESOURCE_REPORT_REGEX.search(lowered):
+        return _skill_call(
+            "resource_governor",
+            "resource_report",
+            {},
+            0.80,
+            "Matched resource report intent (alias).",
+            scopes=["sys:read"],
+        )
+
     if _DISK_CHANGES.search(lowered):
         return {"type": "disk_changes"}
 
@@ -1067,12 +1245,35 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             return {"type": "disk_grow", "path": match.group(1).strip()}
 
     if _STORAGE_REPORT_REGEX.search(lowered):
+        wants_history = bool(re.search(r"\b(last|latest|since|delta|changed|trend|history)\b", lowered))
+        function = "storage_report" if wants_history else "storage_live_report"
+        scopes = ["db:read"] if function == "storage_report" else ["sys:read"]
         return _skill_call(
             "storage_governor",
-            "storage_report",
+            function,
             {},
             0.80,
             "Matched storage report intent (alias).",
+            scopes=scopes,
+        )
+
+    if _NETWORK_REPORT_REGEX.search(lowered):
+        return _skill_call(
+            "network_governor",
+            "network_report",
+            {},
+            0.80,
+            "Matched network report intent (alias).",
+            scopes=["db:read"],
+        )
+
+    if _STATUS_REPORT_REGEX.search(lowered):
+        return _skill_call(
+            "core",
+            "runtime_status",
+            {},
+            0.70,
+            "Matched runtime status intent (alias).",
             scopes=["db:read"],
         )
 
@@ -1107,9 +1308,13 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
         )
 
     if _CLEAN_GENERIC.search(cleaned):
+        advice = "Ask for a disk report if you want a read-only analysis before cleaning."
+        if _commands_visible():
+            advice = "Try /disk_report for advice."
         return {
             "type": "respond",
-            "text": "I can only propose: 'clean apt cache', 'clean logs', 'vacuum journal', or 'clear cache'. Try /disk_report for advice.",
+            "text": "I can only propose: 'clean apt cache', 'clean logs', 'vacuum journal', or 'clear cache'. "
+            + advice,
         }
 
     if re.search(r"\bprojects?\b", lowered) or _contains_any(lowered, _PROJECTS_PHRASES):
@@ -1146,4 +1351,4 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             )
         return _clarify(question, options, 0.60, "remember_note")
 
-    return _noop("Try /help", 0.30)
+    return _noop("Say 'help' to see what I can do.", 0.30)
