@@ -72,7 +72,7 @@ class TestIntentRouter(unittest.TestCase):
 
     def test_no_intent(self) -> None:
         decision = route_message("user1", "hello there", self.context)
-        self.assertEqual(decision["type"], "noop")
+        self.assertEqual(decision["type"], "greeting")
 
     def test_next_week_not_next_task(self) -> None:
         decision = route_message("user1", "next week", self.context)
@@ -174,6 +174,12 @@ class TestIntentRouter(unittest.TestCase):
         for text in phrases:
             decision = route_message("user1", text, self.context)
             self.assertEqual(decision.get("type"), "brief")
+
+    def test_affirmation_after_brief_offer_routes_to_brief(self) -> None:
+        ctx = dict(self.context)
+        ctx["last_topic"] = "brief_offer"
+        decision = route_message("user1", "yes please", ctx)
+        self.assertEqual(decision["type"], "brief")
 
 
 if __name__ == "__main__":

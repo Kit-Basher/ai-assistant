@@ -6,6 +6,7 @@ from typing import Any
 import os
 import json
 import uuid
+import subprocess
 from datetime import datetime, timezone, timedelta
 
 from agent.intent_router import route_message
@@ -17,7 +18,7 @@ from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
 from agent.commands import parse_command, split_pipe_args
 from agent.confirmations import ConfirmationStore, PendingAction
-from agent.logging_utils import log_event
+from agent.logging_utils import log_event, redact_payload
 from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
 from agent.conversation_memory import record_event
 import agent.memory_ingest as memory_ingest
@@ -28,6 +29,9 @@ from agent.policy import evaluate_policy
 import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
+from agent.cards import render_cards_markdown
+from agent.nl_router import build_cards_payload, nl_route
+from agent.nl_policy import can_run_nl_skill
 from memory.db import MemoryDB
 
 
@@ -80,6 +84,8 @@ class Orchestrator:
         self._llm_broker_error = llm_broker_error
         self._knowledge_cache = KnowledgeQueryCache()
         self._pending_compare: dict[str, dict[str, str]] = {}
+        self._last_offer_topic: dict[str, str] = {}
+        self._started_at = datetime.now(__import__("datetime").timezone.utc)
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -283,6 +289,7 @@ class Orchestrator:
         requested_permissions: list[str],
         action_type: str | None = None,
         confirmed: bool = False,
+        read_only_mode: bool = False,
     ) -> OrchestratorResponse:
         skill = self.skills.get(skill_name)
         if not skill:
@@ -314,7 +321,37 @@ class Orchestrator:
 
         ctx = dict(self._context())
         ctx["user_id"] = user_id
+        if read_only_mode:
+            ctx["read_only_mode"] = True
         result = func.handler(ctx, **args)
+        if read_only_mode:
+            details = redact_payload(
+                {
+                    "mode": "read_only",
+                    "skill": skill_name,
+                    "function": function_name,
+                    "args": args,
+                }
+            )
+            try:
+                self.db.audit_log_create(
+                    user_id=user_id,
+                    action_type="nl_read",
+                    action_id=f"{skill_name}.{function_name}",
+                    status="executed",
+                    details=details,
+                )
+                self.db.log_activity(
+                    "nl_read",
+                    {
+                        "user_id": user_id,
+                        "skill": skill_name,
+                        "function": function_name,
+                        "mode": "read_only",
+                    },
+                )
+            except Exception:
+                return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
         log_event(self.log_path, "skill_call", {"skill": skill_name, "function": function_name})
         if self._runner and self._runner.mode in {"sandbox", "live"}:
             if not self._audit_runner_result(skill_name, user_id):
@@ -339,31 +376,24 @@ class Orchestrator:
                         "query_len": len(query),
                     },
                 )
-                opinion_gate.store_pending(
-                    self.db,
-                    user_id,
-                    topic_key="knowledge_query",
-                    context={
-                        "facts": facts,
-                        "facts_text": response_text,
-                        "context_note": (intent or {}).get("name") if isinstance(intent, dict) else None,
-                    },
-                    log_path=self.log_path,
+                opinion_gate.store_pending(self.db, user_id, "knowledge_query")
+                response_text = (
+                    f"{response_text}\n---\nWant my opinion?\n{opinion_gate.OPINION_GATE_PROMPT}"
                 )
-                response_text = f"{response_text}\n---\n{opinion_gate.OPINION_GATE_PROMPT}"
         if skill_name == "disk_report" and isinstance(result, dict):
             response_text = self._maybe_add_narration("disk_report", result, response_text)
-        try:
-            memory_ingest.ingest_event(
-                self.db,
-                user_id,
-                "skill",
-                response_text,
-                [function_name or skill_name],
-                override=None,
-            )
-        except Exception:
-            pass
+        if not read_only_mode:
+            try:
+                memory_ingest.ingest_event(
+                    self.db,
+                    user_id,
+                    "skill",
+                    response_text,
+                    [function_name or skill_name],
+                    override=None,
+                )
+            except Exception:
+                pass
         return OrchestratorResponse(response_text, result)
 
     def _format_projects(self, projects: list[dict[str, Any]]) -> str:
@@ -925,6 +955,26 @@ class Orchestrator:
                         ["db:read"],
                     )
 
+                if cmd.name == "today":
+                    cards_payload = self._today_cards_payload(cmd.args or "")
+                    return self._cards_response(user_id, cards_payload)
+
+                if cmd.name == "open_loops":
+                    mode = (cmd.args or "").strip().lower()
+                    if mode == "all":
+                        return self._cards_response(user_id, self._open_loops_payload(status="all", order="due"))
+                    if mode == "due":
+                        return self._cards_response(user_id, self._open_loops_payload(status="open", order="due"))
+                    if mode == "important":
+                        return self._cards_response(user_id, self._open_loops_payload(status="open", order="important"))
+                    return self._cards_response(user_id, self._open_loops_payload(status="open", order="created"))
+
+                if cmd.name == "daily_brief_status":
+                    return self._cards_response(user_id, self._daily_brief_status_payload(user_id))
+
+                if cmd.name == "health":
+                    return self._cards_response(user_id, self._health_payload(user_id))
+
             reply_action, pending = opinion_gate.handle_reply(self.db, user_id, text, self.log_path)
             if reply_action == "expired":
                 return OrchestratorResponse("Opinion request expired.")
@@ -937,6 +987,170 @@ class Orchestrator:
                 text = cleaned_text
             opinion_requested = opinion_gate.is_opinion_request(text)
 
+            if not text.strip().startswith("/"):
+                nl_decision = nl_route(text)
+                nl_intent = nl_decision.get("intent")
+                if nl_intent in {"OBSERVE_PC", "EXPLAIN_PREVIOUS"}:
+                    return self._handle_nl_observe(user_id, text, nl_decision)
+                if nl_intent == "MEMORY_WRITE_REQUEST":
+                    memory_update = self._parse_memory_write(text)
+                    changed: list[str] = []
+                    if memory_update.get("response_style"):
+                        self.db.set_preference("response_style", str(memory_update["response_style"]))
+                        changed.append("response_style")
+                    if memory_update.get("max_cards") is not None:
+                        self.db.set_preference("max_cards", str(memory_update["max_cards"]))
+                        changed.append("max_cards")
+                    if memory_update.get("default_compare"):
+                        self.db.set_preference("default_compare", str(memory_update["default_compare"]))
+                        changed.append("default_compare")
+                    if memory_update.get("default_compare_enabled"):
+                        self.db.set_preference(
+                            "default_compare_enabled", str(memory_update["default_compare_enabled"])
+                        )
+                        changed.append("default_compare_enabled")
+                    if memory_update.get("show_confidence"):
+                        self.db.set_preference("show_confidence", str(memory_update["show_confidence"]))
+                        changed.append("show_confidence")
+                    if memory_update.get("daily_brief_enabled"):
+                        self.db.set_preference("daily_brief_enabled", str(memory_update["daily_brief_enabled"]))
+                        changed.append("daily_brief_enabled")
+                    if memory_update.get("daily_brief_time"):
+                        self.db.set_preference("daily_brief_time", str(memory_update["daily_brief_time"]))
+                        changed.append("daily_brief_time")
+                    if memory_update.get("daily_brief_quiet_mode"):
+                        self.db.set_preference(
+                            "daily_brief_quiet_mode", str(memory_update["daily_brief_quiet_mode"])
+                        )
+                        changed.append("daily_brief_quiet_mode")
+                    if memory_update.get("disk_delta_threshold_mb"):
+                        self.db.set_preference(
+                            "disk_delta_threshold_mb", str(memory_update["disk_delta_threshold_mb"])
+                        )
+                        changed.append("disk_delta_threshold_mb")
+                    if memory_update.get("only_send_if_service_unhealthy"):
+                        self.db.set_preference(
+                            "only_send_if_service_unhealthy",
+                            str(memory_update["only_send_if_service_unhealthy"]),
+                        )
+                        changed.append("only_send_if_service_unhealthy")
+                    if memory_update.get("include_open_loops_due_within_days"):
+                        self.db.set_preference(
+                            "include_open_loops_due_within_days",
+                            str(memory_update["include_open_loops_due_within_days"]),
+                        )
+                        changed.append("include_open_loops_due_within_days")
+                    if memory_update.get("important_paths") is not None:
+                        self.db.set_preference(
+                            "important_paths",
+                            json.dumps(memory_update["important_paths"], ensure_ascii=True),
+                        )
+                        changed.append("important_paths")
+                    if memory_update.get("baseline_window"):
+                        self.db.set_preference("baseline_window", str(memory_update["baseline_window"]))
+                        changed.append("baseline_window")
+                    if changed:
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "memory-updated",
+                                    "title": "Saved preference anchors",
+                                    "lines": [f"Updated: {', '.join(changed)}"],
+                                    "severity": "ok",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Stored your explicit preference/anchor request.",
+                            confidence=1.0,
+                            next_questions=["Show my current preferences.", "Plan my day."],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    cards_payload = build_cards_payload(
+                        [
+                            {
+                                "key": "memory-write-request",
+                                "title": "Memory write request detected",
+                                "lines": ["Write actions are not auto-run in free text mode."],
+                                "severity": "warn",
+                            }
+                        ],
+                        raw_available=False,
+                        summary="Write requests are blocked in NL read-only mode.",
+                        confidence=1.0,
+                        next_questions=["Ask for disk/resource status instead."],
+                    )
+                    return self._cards_response(user_id, cards_payload)
+                if nl_intent == "PLAN_DAY":
+                    cards_payload = self._today_cards_payload(text)
+                    return self._cards_response(user_id, cards_payload)
+                if nl_intent == "SHOW_PREFERENCES":
+                    cards_payload = self._preferences_cards_payload()
+                    return self._cards_response(user_id, cards_payload)
+                if nl_intent == "MEMORY_INSPECT":
+                    cards_payload = self._memory_inspection_payload()
+                    return self._cards_response(user_id, cards_payload)
+                if nl_intent == "OPEN_LOOPS_LIST":
+                    return self._cards_response(user_id, self._open_loops_payload(status="open", order="due"))
+                if nl_intent == "DAILY_BRIEF_STATUS":
+                    return self._cards_response(user_id, self._daily_brief_status_payload(user_id))
+                if nl_intent == "OPEN_LOOP_ADD":
+                    title, due, priority = self._parse_open_loop_add(text)
+                    if title:
+                        self.db.add_open_loop(title, due, priority=priority)
+                        payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "open-loop-added",
+                                    "title": "Open loop added",
+                                    "lines": [f"{title} (due {due or 'unspecified'}, P{priority})"],
+                                    "severity": "ok",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Stored your open loop.",
+                            confidence=1.0,
+                            next_questions=["Show open loops", "Mark one done"],
+                        )
+                        return self._cards_response(user_id, payload)
+                if nl_intent == "OPEN_LOOP_DONE":
+                    title_fragment = self._parse_open_loop_done(text)
+                    if title_fragment:
+                        count = self.db.complete_open_loop_by_title(title_fragment)
+                        payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "open-loop-done",
+                                    "title": "Open loop updated",
+                                    "lines": [f"Marked done: {title_fragment}" if count else "No matching open loop found."],
+                                    "severity": "ok" if count else "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Updated open loop status." if count else "Could not find an open loop to mark done.",
+                            confidence=1.0 if count else 0.8,
+                            next_questions=["Show open loops", "Add another open loop"],
+                        )
+                        return self._cards_response(user_id, payload)
+                if nl_intent == "CHITCHAT":
+                    if re.match(r"^(hi|hello|hey)(\\b|[!.?]|$)", text.strip().lower()):
+                        pass
+                    else:
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "chitchat",
+                                    "title": "Personal Agent",
+                                    "lines": ["Ask about disk, CPU, memory, or process changes."],
+                                    "severity": "ok",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Ready for a read-only system check.",
+                            confidence=1.0,
+                            next_questions=["What changed on my disk?", "How are CPU and memory right now?"],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+
             gate_result = handle_action_text(self.db, user_id, text, self.enable_writes)
             if gate_result:
                 return OrchestratorResponse(gate_result.get("message", ""))
@@ -947,7 +1161,11 @@ class Orchestrator:
                     return OrchestratorResponse("LLM intent parsing not wired yet.")
 
             # Rule-based intent routing (v0.1)
-            decision = route_message(user_id, text, self._intent_context())
+            intent_ctx = self._intent_context()
+            intent_ctx["last_topic"] = self._last_offer_topic.get(user_id)
+            decision = route_message(user_id, text, intent_ctx)
+            if decision.get("type") != "greeting":
+                self._last_offer_topic.pop(user_id, None)
             try:
                 topic_tags = self._topic_tags_for_decision(decision)
                 memory_ingest.ingest_event(
@@ -1049,15 +1267,11 @@ class Orchestrator:
                         opinion_gate.store_pending(
                             self.db,
                             user_id,
-                            topic_key=decision.get("function", "") or skill_name,
-                            context={
-                                "facts": facts,
-                                "facts_text": response.text,
-                                "context_note": context_note,
-                            },
-                            log_path=self.log_path,
+                            decision.get("function", "") or skill_name,
                         )
-                        response.text = f"{response.text}\n---\n{opinion_gate.OPINION_GATE_PROMPT}"
+                        response.text = (
+                            f"{response.text}\n---\nWant my opinion?\n{opinion_gate.OPINION_GATE_PROMPT}"
+                        )
                 if decision.get("skill") == "opinion_on_report":
                     facts = (decision.get("args") or {}).get("facts")
                     if isinstance(facts, dict):
@@ -1071,12 +1285,11 @@ class Orchestrator:
             if decision.get("type") == "clarification_request":
                 return OrchestratorResponse(decision["prompt"])
 
-            return OrchestratorResponse(
-                "I can help with /ask, /ask_opinion, /weekly_reflection, /storage_report, /resource_report, "
-                "/brief, /network_report, /storage_snapshot, /observe_now, /what_if, /compare_now, /remind, /status, "
-                "/runtime_status, /disk_grow, /audit, /llm_ping, /llm_status, /mem, /nomem. "
-                "Use slash commands for now."
-            )
+            if decision.get("type") == "greeting":
+                self._last_offer_topic[user_id] = "brief_offer"
+                return OrchestratorResponse('Hey 🙂 Want a quick /brief, or ask “anything new on my PC?”')
+
+            return OrchestratorResponse("I didn’t understand that. Try /brief, or ask “anything new on my PC?”")
         finally:
             self._runner = None
 
@@ -1293,6 +1506,677 @@ class Orchestrator:
             "anomalies": anomalies,
         }
         return {"text": "\n".join(lines), "payload": payload}
+
+    def _parse_memory_write(self, text: str) -> dict[str, Any]:
+        lowered = (text or "").strip().lower()
+        raw = (text or "").strip()
+        result = {
+            "response_style": None,
+            "max_cards": None,
+            "default_compare": None,
+            "default_compare_enabled": None,
+            "show_confidence": None,
+            "important_paths": None,
+            "baseline_window": None,
+            "daily_brief_enabled": None,
+            "daily_brief_time": None,
+            "daily_brief_quiet_mode": None,
+            "disk_delta_threshold_mb": None,
+            "only_send_if_service_unhealthy": None,
+            "include_open_loops_due_within_days": None,
+        }
+        explicit_prefix = (
+            lowered.startswith("remember that")
+            or lowered.startswith("from now on")
+            or lowered.startswith("remember this")
+            or lowered.startswith("set max cards to")
+            or lowered.startswith("turn confidence ")
+            or lowered.startswith("default compare ")
+            or lowered.startswith("daily brief ")
+            or lowered.startswith("set disk delta threshold to")
+            or lowered.startswith("only send if service unhealthy ")
+            or lowered.startswith("set open loops due window to")
+        )
+        if not explicit_prefix:
+            return result
+        if "concise" in lowered:
+            result["response_style"] = "concise"
+        elif "detailed" in lowered:
+            result["response_style"] = "detailed"
+        m_cards = re.search(r"max cards\s*(?:is|=)?\s*(\d+)", lowered)
+        if m_cards:
+            result["max_cards"] = max(1, min(12, int(m_cards.group(1))))
+        if "set max cards to" in lowered:
+            m_set = re.search(r"set max cards to\s*(\d+)", lowered)
+            if m_set:
+                result["max_cards"] = max(1, min(12, int(m_set.group(1))))
+        if "default compare" in lowered:
+            if "last snapshot" in lowered:
+                result["default_compare"] = "last_snapshot"
+            elif "baseline" in lowered:
+                result["default_compare"] = "baseline"
+            if lowered.endswith(" on") or " on " in lowered:
+                result["default_compare_enabled"] = "on"
+            if lowered.endswith(" off") or " off " in lowered:
+                result["default_compare_enabled"] = "off"
+        if "turn confidence off" in lowered:
+            result["show_confidence"] = "off"
+        elif "turn confidence on" in lowered:
+            result["show_confidence"] = "on"
+        if lowered.startswith("daily brief "):
+            if " off" in lowered or lowered.endswith("off"):
+                result["daily_brief_enabled"] = "off"
+            if " on" in lowered or lowered.endswith("on") or " at " in lowered:
+                result["daily_brief_enabled"] = "on"
+            match_time = re.search(r"\bat\s*([0-2]?\d:[0-5]\d)\b", lowered)
+            if match_time:
+                result["daily_brief_time"] = match_time.group(1)
+            if "quiet on" in lowered:
+                result["daily_brief_quiet_mode"] = "on"
+            elif "quiet off" in lowered:
+                result["daily_brief_quiet_mode"] = "off"
+        m_disk_delta = re.search(r"set disk delta threshold to\s*(\d+)\s*mb", lowered)
+        if m_disk_delta:
+            result["disk_delta_threshold_mb"] = str(max(1, min(102400, int(m_disk_delta.group(1)))))
+        if lowered.startswith("only send if service unhealthy "):
+            if lowered.endswith("on"):
+                result["only_send_if_service_unhealthy"] = "on"
+            elif lowered.endswith("off"):
+                result["only_send_if_service_unhealthy"] = "off"
+        m_due = re.search(r"set open loops due window to\s*(\d+)\s*day", lowered)
+        if m_due:
+            result["include_open_loops_due_within_days"] = str(max(1, min(30, int(m_due.group(1)))))
+        m_path = re.search(r"important path[s]?:\s*(.+)$", raw, re.IGNORECASE)
+        if m_path:
+            parts = [p.strip() for p in m_path.group(1).split(",") if p.strip()]
+            result["important_paths"] = parts[:10]
+        m_window = re.search(r"baseline window\s*(?:is|=)?\s*([a-z0-9_ -]+)$", lowered)
+        if m_window:
+            result["baseline_window"] = m_window.group(1).strip()[:50]
+        return result
+
+    def _today_cards_payload(self, request_text: str = "") -> dict[str, Any]:
+        tasks_md = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tasks.md"))
+        tasks: list[tuple[str, int | None]] = []
+        lowered = (request_text or "").strip().lower()
+        if os.path.isfile(tasks_md):
+            try:
+                with open(tasks_md, "r", encoding="utf-8") as handle:
+                    for raw_line in handle.readlines():
+                        t = raw_line.strip()
+                        if t.startswith("- [ ]") or t.startswith("- [x]"):
+                            body = t[5:].strip()
+                            mins = None
+                            match = re.search(r"\[(\d+)m\]", body, re.IGNORECASE)
+                            if match:
+                                mins = int(match.group(1))
+                                body = re.sub(r"\s*\[\d+m\]\s*", " ", body, flags=re.IGNORECASE).strip()
+                            tasks.append((body, mins))
+            except Exception:
+                tasks = []
+        if not tasks:
+            rows = self.db.list_tasks(limit=8)
+            for row in rows:
+                if str(row.get("status") or "").lower() in {"todo", "doing"}:
+                    effort = row.get("effort_mins")
+                    mins = int(effort) if isinstance(effort, int) else None
+                    tasks.append((str(row.get("title") or "").strip(), mins))
+        if "quick wins" in lowered:
+            quick = [item for item in tasks if item[1] is not None and item[1] <= 20]
+            tasks = quick if quick else tasks
+        if "top 3" in lowered or "top three" in lowered or "priorities" in lowered:
+            tasks = tasks[:3]
+        lines = [
+            f"{title} ({mins}m)" if mins is not None else title
+            for title, mins in tasks[:6]
+            if title
+        ]
+        if not lines:
+            lines = ["No tasks found in tasks.md or DB tasks table."]
+        cards = [{"key": "today-plan", "title": "Today plan", "lines": lines[:6], "severity": "ok"}]
+        return build_cards_payload(
+            cards,
+            raw_available=True,
+            summary="Here is your read-only plan for today.",
+            confidence=0.90,
+            next_questions=["Show top 3 priorities.", "Show only quick wins."],
+        )
+
+    def _apply_card_preferences(self, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        out = dict(payload or {})
+        cards = list(out.get("cards") or [])
+        next_questions = list(out.get("next_questions") or [])
+        max_cards_pref = self.db.get_preference("max_cards")
+        max_cards = int(max_cards_pref) if (max_cards_pref and max_cards_pref.isdigit()) else 4
+        max_cards = max(1, min(12, max_cards))
+        out["cards"] = cards[:max_cards]
+        next_q_pref = self.db.get_preference("next_questions_limit")
+        next_q_limit = int(next_q_pref) if (next_q_pref and next_q_pref.isdigit()) else 2
+        next_q_limit = max(0, min(5, next_q_limit))
+        out["next_questions"] = next_questions[:next_q_limit]
+        show_conf_pref = (self.db.get_preference("show_confidence") or "on").strip().lower()
+        out["show_confidence"] = show_conf_pref not in {"off", "false", "0", "no"}
+        return out
+
+    def _cards_response(self, user_id: str, payload: dict[str, Any]) -> OrchestratorResponse:
+        adjusted = self._apply_card_preferences(user_id, payload)
+        return OrchestratorResponse(render_cards_markdown(adjusted), adjusted)
+
+    def _preferences_cards_payload(self) -> dict[str, Any]:
+        keys = [
+            "response_style",
+            "max_cards",
+            "default_compare",
+            "default_compare_enabled",
+            "show_confidence",
+            "daily_brief_enabled",
+            "daily_brief_time",
+            "daily_brief_quiet_mode",
+            "disk_delta_threshold_mb",
+            "only_send_if_service_unhealthy",
+            "include_open_loops_due_within_days",
+            "important_paths",
+            "baseline_window",
+        ]
+        lines = []
+        for key in keys:
+            value = self.db.get_preference(key)
+            if value is not None and str(value).strip():
+                lines.append(f"{key}: {value}")
+        if not lines:
+            lines = ["No saved preferences yet."]
+        return build_cards_payload(
+            [{"key": "prefs", "title": "Your preferences", "lines": lines, "severity": "ok"}],
+            raw_available=False,
+            summary="Current saved assistant preferences.",
+            confidence=1.0,
+            next_questions=self._preferences_followups(),
+        )
+
+    def _preferences_followups(self) -> list[str]:
+        followups: list[str] = []
+        max_cards = self.db.get_preference("max_cards")
+        show_conf = (self.db.get_preference("show_confidence") or "on").strip().lower()
+        if max_cards and max_cards.isdigit():
+            next_val = 4 if int(max_cards) != 4 else 3
+            followups.append(f"Set max cards to {next_val}")
+        else:
+            followups.append("Set max cards to 4")
+        if show_conf in {"off", "false", "0", "no"}:
+            followups.append("Turn confidence on")
+        else:
+            followups.append("Turn confidence off")
+        followups.append("Change max cards")
+        return followups
+
+    def _memory_inspection_payload(self) -> dict[str, Any]:
+        rows = self.db.list_preferences()
+        lines: list[str] = []
+        for row in rows:
+            key = str(row.get("key") or "")
+            if not key:
+                continue
+            value = str(row.get("value") or "")
+            updated = str(row.get("updated_at") or "unknown")
+            lines.append(f"{key}: {value} (updated {updated})")
+        if not lines:
+            lines = ["No remembered preferences or anchors yet."]
+        return build_cards_payload(
+            [{"key": "memory-inspect", "title": "What I remember about you", "lines": lines, "severity": "ok"}],
+            raw_available=False,
+            summary="Only explicit preferences and anchors are stored.",
+            confidence=1.0,
+            next_questions=self._preferences_followups(),
+        )
+
+    def _parse_open_loop_add(self, text: str) -> tuple[str | None, str | None, int]:
+        match = re.match(r"^remember that (?:i need to )?(.+?) by (.+)$", (text or "").strip(), re.IGNORECASE)
+        if not match:
+            return None, None, 3
+        title = match.group(1).strip()
+        priority = 3
+        if title.startswith("!"):
+            priority = 1
+            title = title.lstrip("!").strip()
+        return title, match.group(2).strip(), priority
+
+    def _parse_open_loop_done(self, text: str) -> str | None:
+        match = re.match(r"^mark (.+) done$", (text or "").strip(), re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def _open_loops_payload(
+        self,
+        due_soon_only: bool = False,
+        status: str = "open",
+        order: str = "created",
+        due_within_days: int = 2,
+    ) -> dict[str, Any]:
+        rows = self.db.list_open_loops(status=status, limit=20, order=order)
+        lines: list[str] = []
+        if due_soon_only:
+            now = datetime.now(timezone.utc).date()
+            filtered = []
+            for row in rows:
+                due = (row.get("due_date") or "").strip()
+                try:
+                    due_date = datetime.fromisoformat(due).date()
+                except Exception:
+                    continue
+                if (due_date - now).days <= due_within_days:
+                    filtered.append(row)
+            rows = filtered
+        for row in rows:
+            due = row.get("due_date") or "no due date"
+            priority = int(row.get("priority") or 3)
+            lines.append(f"P{priority} {row.get('title')}: due {due} ({row.get('status')})")
+        if not lines:
+            lines = ["No open loops."]
+        label = "all" if status == "all" else "open"
+        return build_cards_payload(
+            [{"key": "open-loops", "title": "Open loops", "lines": lines[:8], "severity": "ok"}],
+            raw_available=False,
+            summary=f"Tracked {label} loops.",
+            confidence=1.0,
+            next_questions=["Mark one done", "Add a new loop with due date"],
+        )
+
+    def _brief_decision_reasons(self, decision_reason: str, signals: dict[str, Any], threshold_mb: float) -> list[str]:
+        lines: list[str] = []
+        if decision_reason == "send":
+            lines.append("Brief should send now.")
+            return lines
+        if decision_reason == "already_sent_today":
+            lines.append("Already sent today.")
+        if decision_reason == "before_time":
+            lines.append("Scheduled time has not been reached.")
+        if decision_reason == "disabled":
+            lines.append("Daily brief is disabled.")
+        if decision_reason == "service_healthy_gate":
+            lines.append("Suppressed: service is healthy and service-only gate is on.")
+        if decision_reason == "quiet_no_signals":
+            disk_delta = signals.get("disk_delta_mb")
+            lines.append(
+                f"Suppressed: disk delta below threshold ({disk_delta}MB < {threshold_mb:.0f}MB)."
+            )
+            lines.append("Suppressed: no due open loops in window.")
+        if decision_reason == "invalid_time":
+            lines.append("Configured brief time is invalid.")
+        return lines or [f"Decision: {decision_reason}"]
+
+    def _daily_brief_status_payload(self, user_id: str) -> dict[str, Any]:
+        from agent.daily_brief import should_send_daily_brief
+
+        enabled = (self.db.get_preference("daily_brief_enabled") or "off").strip().lower() in {"on", "true", "1", "yes"}
+        local_time = (self.db.get_preference("daily_brief_time") or "09:00").strip()
+        last_sent = self.db.get_preference("daily_brief_last_sent_date")
+        quiet_mode = (self.db.get_preference("daily_brief_quiet_mode") or "off").strip().lower() in {"on", "true", "1", "yes"}
+        threshold_pref = self.db.get_preference("disk_delta_threshold_mb")
+        threshold_mb = float(threshold_pref) if (threshold_pref and threshold_pref.isdigit()) else 250.0
+        svc_gate = (self.db.get_preference("only_send_if_service_unhealthy") or "off").strip().lower() in {"on", "true", "1", "yes"}
+        include_due_pref = self.db.get_preference("include_open_loops_due_within_days")
+        include_due_days = int(include_due_pref) if (include_due_pref and include_due_pref.isdigit()) else 2
+        brief_payload = self.build_daily_brief_cards(user_id)
+        signals = brief_payload.get("daily_brief_signals") if isinstance(brief_payload, dict) else {}
+        decision = should_send_daily_brief(
+            now_utc=datetime.now(timezone.utc),
+            timezone_name=self.timezone,
+            enabled=enabled,
+            local_time_hhmm=local_time,
+            last_sent_local_date=last_sent,
+            quiet_mode=quiet_mode,
+            disk_delta_mb=(signals or {}).get("disk_delta_mb"),
+            disk_delta_threshold_mb=threshold_mb,
+            service_unhealthy=bool((signals or {}).get("service_unhealthy")),
+            only_send_if_service_unhealthy=svc_gate,
+            has_due_open_loops=int((signals or {}).get("due_open_loops_count") or 0) > 0 and include_due_days > 0,
+        )
+        reasons = self._brief_decision_reasons(decision.reason, signals or {}, threshold_mb)
+        cards = [
+            {
+                "key": "brief-status",
+                "title": "Daily brief status",
+                "lines": [f"should_send: {decision.should_send}", f"reason: {decision.reason}", *reasons],
+                "severity": "ok" if decision.should_send else "warn",
+            },
+            {
+                "key": "brief-signals",
+                "title": "Signals",
+                "lines": [
+                    f"disk_delta_mb: {(signals or {}).get('disk_delta_mb')}",
+                    f"service_unhealthy: {bool((signals or {}).get('service_unhealthy'))}",
+                    f"due_open_loops_count: {int((signals or {}).get('due_open_loops_count') or 0)}",
+                ],
+                "severity": "ok",
+            },
+        ]
+        return build_cards_payload(
+            cards,
+            raw_available=True,
+            summary="Daily brief send decision explained.",
+            confidence=1.0,
+            next_questions=["Enable daily brief at 09:00", "Set disk delta threshold to 300 mb"],
+        )
+
+    def _systemd_active(self, unit: str) -> str:
+        try:
+            proc = subprocess.run(
+                ["systemctl", "is-active", unit],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            text = (proc.stdout or proc.stderr or "").strip()
+            return text or "unknown"
+        except Exception:
+            return "unknown"
+
+    def _health_payload(self, user_id: str) -> dict[str, Any]:
+        now = datetime.now(timezone.utc).isoformat()
+        uptime_sec = int((datetime.now(timezone.utc) - self._started_at).total_seconds())
+        observe_audit = self.db.audit_log_latest_by_type("observe_now_scheduled")
+        observe_last = observe_audit.get("created_at") if isinstance(observe_audit, dict) else "none"
+        observe_status = observe_audit.get("status") if isinstance(observe_audit, dict) else "unknown"
+        daily_enabled = self.db.get_preference("daily_brief_enabled") or "off"
+        daily_time = self.db.get_preference("daily_brief_time") or "09:00"
+        daily_last_sent = self.db.get_preference("daily_brief_last_sent_date") or "never"
+        last_failed = None
+        for row in self.db.audit_log_list_recent(user_id, limit=20):
+            if str(row.get("status") or "").lower() == "failed":
+                last_failed = row
+                break
+        error_line = "none"
+        if last_failed:
+            err = redact_payload({"error": str(last_failed.get("error") or "")}).get("error") or ""
+            error_line = f"{last_failed.get('action_type')}:{last_failed.get('action_id')} {err[:140]}"
+        cards = [
+            {
+                "key": "health-bot",
+                "title": "Bot status",
+                "lines": [f"now_utc: {now}", f"uptime_sec: {uptime_sec}", f"user: {user_id}"],
+                "severity": "ok",
+            },
+            {
+                "key": "health-observe",
+                "title": "Observe scheduler",
+                "lines": [
+                    f"service active: {self._systemd_active('personal-agent-observe.service')}",
+                    f"timer active: {self._systemd_active('personal-agent-observe.timer')}",
+                    f"last run: {observe_last} ({observe_status})",
+                ],
+                "severity": "ok" if observe_status in {"executed", "started", "unknown"} else "warn",
+            },
+            {
+                "key": "health-db",
+                "title": "Database",
+                "lines": [f"path: {self.db.db_path}", f"schema_version: {self.db.get_schema_version()}"],
+                "severity": "ok",
+            },
+            {
+                "key": "health-brief",
+                "title": "Daily brief config",
+                "lines": [
+                    f"enabled: {daily_enabled}",
+                    f"time: {daily_time}",
+                    f"last_sent_date: {daily_last_sent}",
+                ],
+                "severity": "ok",
+            },
+            {
+                "key": "health-error",
+                "title": "Last error summary",
+                "lines": [error_line],
+                "severity": "warn" if error_line != "none" else "ok",
+            },
+        ]
+        return build_cards_payload(
+            cards,
+            raw_available=False,
+            summary="Health snapshot of bot, scheduler, DB, and daily brief.",
+            confidence=1.0,
+            next_questions=["Show daily brief status", "Show open loops due"],
+        )
+
+    def build_daily_brief_cards(self, user_id: str) -> dict[str, Any]:
+        cards: list[dict[str, Any]] = []
+        include_due_days_pref = self.db.get_preference("include_open_loops_due_within_days")
+        include_due_days = int(include_due_days_pref) if (include_due_days_pref and include_due_days_pref.isdigit()) else 2
+        disk_delta_mb: float | None = None
+        service_unhealthy = False
+        due_open_loops_count = 0
+        # Disk delta + top growth.
+        storage_resp = self._call_skill(
+            user_id,
+            "storage_governor",
+            "storage_report",
+            {"user_id": user_id},
+            ["db:read"],
+            action_type="observe",
+            read_only_mode=True,
+        )
+        storage_data = storage_resp.data if isinstance(storage_resp.data, dict) else {}
+        storage_cards = ((storage_data.get("cards_payload") or {}).get("cards") or []) if isinstance(storage_data, dict) else []
+        disk_usage = next((c for c in storage_cards if isinstance(c, dict) and str(c.get("title", "")).startswith("Disk usage")), None)
+        top_growth = next((c for c in storage_cards if isinstance(c, dict) and str(c.get("title", "")).startswith("Top growing paths")), None)
+        if isinstance(disk_usage, dict):
+            cards.append(disk_usage)
+        if isinstance(top_growth, dict):
+            cards.append(top_growth)
+        mounts = (storage_data.get("payload") or {}).get("mounts") if isinstance(storage_data, dict) else None
+        if isinstance(mounts, list):
+            delta_bytes = 0
+            for mount in mounts:
+                if not isinstance(mount, dict):
+                    continue
+                value = mount.get("delta_used")
+                if value is None:
+                    continue
+                try:
+                    delta_bytes += int(value)
+                except Exception:
+                    continue
+            disk_delta_mb = round(delta_bytes / (1024.0 * 1024.0), 2)
+        # Service verdict.
+        service_resp = self._call_skill(
+            user_id,
+            "service_health_report",
+            "service_health_report",
+            {"user_id": user_id},
+            ["db:read"],
+            action_type="observe",
+            read_only_mode=True,
+        )
+        service_data = service_resp.data if isinstance(service_resp.data, dict) else {}
+        service_cards = ((service_data.get("cards_payload") or {}).get("cards") or []) if isinstance(service_data, dict) else []
+        if service_cards and isinstance(service_cards[0], dict):
+            cards.append(service_cards[0])
+            sev = str(service_cards[0].get("severity") or "ok").lower()
+            service_unhealthy = sev in {"warn", "bad"}
+        # Today plan.
+        today_payload = self._today_cards_payload()
+        today_cards = today_payload.get("cards") or []
+        if today_cards and isinstance(today_cards[0], dict):
+            cards.append(today_cards[0])
+        # Due soon loops (only in daily brief flow).
+        loops_payload = self._open_loops_payload(due_soon_only=True, order="due", due_within_days=include_due_days)
+        loops_cards = loops_payload.get("cards") or []
+        if loops_cards and isinstance(loops_cards[0], dict):
+            cards.append(loops_cards[0])
+            loop_lines = [str(item) for item in (loops_cards[0].get("lines") or [])]
+            if loop_lines == ["No open loops."]:
+                due_open_loops_count = 0
+            else:
+                due_open_loops_count = len(loop_lines)
+        payload = self._apply_card_preferences(
+            user_id,
+            build_cards_payload(
+                cards,
+                raw_available=True,
+                summary="Daily brief: key changes and today’s focus.",
+                confidence=0.95,
+                next_questions=["Show full disk pressure report", "Show all open loops"],
+            ),
+        )
+        payload["daily_brief_signals"] = {
+            "disk_delta_mb": disk_delta_mb,
+            "service_unhealthy": bool(service_unhealthy),
+            "due_open_loops_count": int(due_open_loops_count),
+        }
+        return payload
+
+    def _domain_summary_and_followups(
+        self, skill_name: str, function_name: str, data: dict[str, Any], text: str
+    ) -> tuple[str, list[str]]:
+        payload = data.get("payload") if isinstance(data, dict) else {}
+        if skill_name == "storage_governor" and function_name == "storage_report":
+            mounts = (payload or {}).get("mounts") or []
+            growth_lines = []
+            top_used = None
+            if mounts:
+                top_used = sorted(mounts, key=lambda m: float(m.get("used_pct", 0.0)), reverse=True)[0]
+            root_top = ((payload or {}).get("root_top") or {}).get("samples") or []
+            home_top = ((payload or {}).get("home_top") or {}).get("samples") or []
+            top_path = None
+            if root_top or home_top:
+                combined = sorted(list(root_top) + list(home_top), key=lambda t: int(t[1]), reverse=True)
+                if combined:
+                    top_path = combined[0][0]
+            if top_used:
+                growth_lines.append(
+                    f"Disk {top_used.get('mountpoint')} is {float(top_used.get('used_pct', 0.0)):.1f}% used"
+                )
+            if top_path:
+                growth_lines.append(f"largest tracked dir: {top_path}")
+            summary = "; ".join(growth_lines) if growth_lines else "Disk status snapshot ready."
+            followups = ["Show only top growing paths", "Show largest files in /var/log"]
+            has_delta = any(m.get("delta_used") is not None for m in mounts)
+            if has_delta:
+                summary = summary + ". Deltas are included."
+            return summary, followups
+        if skill_name == "disk_pressure_report":
+            largest_files = (payload or {}).get("largest_files") or []
+            growth = (payload or {}).get("growth") or []
+            culprit = largest_files[0][0] if largest_files else (growth[0][0] if growth else None)
+            summary = f"Disk pressure culprit: {culprit}" if culprit else "Disk pressure is currently stable."
+            return summary, ["Show only top growing paths", "Show largest files in /var/log"]
+        if skill_name == "network_governor":
+            cards_payload = data.get("cards_payload") if isinstance(data, dict) else {}
+            lines = []
+            if isinstance(cards_payload, dict):
+                cards = cards_payload.get("cards") or []
+                if cards and isinstance(cards[0], dict):
+                    lines = [str(x) for x in (cards[0].get("lines") or [])]
+            latency = next((line.split(":", 1)[1].strip() for line in lines if line.startswith("ping latency:")), "unavailable")
+            route = next((line.split(":", 1)[1].strip() for line in lines if line.startswith("default route:")), "n/a")
+            verdict = "Network looks healthy" if "unavailable" not in latency else "Network health is partial"
+            return f"{verdict}; latency {latency}; route {route}", ["Show DNS changes", "Show interface errors only"]
+        if skill_name == "service_health_report":
+            report = (payload or {}).get("report") or ""
+            lower = str(report).lower()
+            running = "running" if "- status: active" in lower else "stopped/degraded"
+            has_error = "error" in lower or "failed" in lower
+            verdict = f"Service is {running}"
+            if has_error:
+                verdict += "; recent errors found"
+            return verdict, ["Show last 20 service logs", "Check runtime status details"]
+        if skill_name == "resource_governor":
+            loads = (payload or {}).get("loads") or {}
+            mem = (payload or {}).get("memory") or {}
+            used = int(mem.get("used", 0))
+            total = int(mem.get("total", 0))
+            pct = (used / total * 100.0) if total else 0.0
+            return f"CPU load 1m {float(loads.get('1m', 0.0)):.2f}; memory {pct:.1f}% used", [
+                "Show only CPU deltas",
+                "Show only memory deltas",
+            ]
+        return "Status snapshot ready.", ["Show details", "What changed since last snapshot?"]
+
+    def _handle_nl_observe(self, user_id: str, text: str, decision: dict[str, Any]) -> OrchestratorResponse:
+        selected = decision.get("skills") or []
+        cards: list[dict[str, Any]] = []
+        raw_available = False
+        blocked_count = 0
+        summary_parts: list[str] = []
+        followups: list[str] = []
+        permissions_map = {
+            "storage_report": ["db:read"],
+            "resource_report": ["db:read"],
+            "network_report": ["db:read"],
+            "service_health_report": ["db:read"],
+            "disk_pressure_report": ["db:read", "sys:read"],
+        }
+        for idx, selected_skill in enumerate(selected):
+            skill_name = selected_skill.get("skill")
+            function_name = selected_skill.get("function")
+            requested_permissions = permissions_map.get(str(function_name or ""), ["db:read"])
+            allowed, _reason = can_run_nl_skill(
+                self.skills,
+                str(skill_name or ""),
+                str(function_name or ""),
+                requested_permissions=requested_permissions,
+            )
+            if not allowed:
+                blocked_count += 1
+                continue
+            response = self._call_skill(
+                user_id,
+                skill_name,
+                function_name,
+                {"user_id": user_id},
+                requested_permissions,
+                action_type="observe",
+                read_only_mode=True,
+            )
+            data = response.data if isinstance(response.data, dict) else {}
+            summary, domain_followups = self._domain_summary_and_followups(
+                str(skill_name or ""), str(function_name or ""), data, text
+            )
+            if summary:
+                summary_parts.append(summary)
+            for item in domain_followups:
+                if item not in followups:
+                    followups.append(item)
+            cards_payload = data.get("cards_payload") if isinstance(data, dict) else None
+            if isinstance(cards_payload, dict):
+                for card in cards_payload.get("cards", []):
+                    if not isinstance(card, dict):
+                        continue
+                    card_copy = dict(card)
+                    card_copy.setdefault("key", f"{skill_name}:{function_name}:{idx}:{len(cards)}")
+                    cards.append(card_copy)
+                raw_available = raw_available or bool(cards_payload.get("raw_available"))
+            elif response.text:
+                cards.append(
+                    {
+                        "key": f"{skill_name}:{function_name}:{idx}",
+                        "title": function_name.replace("_", " ").title(),
+                        "lines": [response.text],
+                        "severity": "ok",
+                    }
+                )
+                raw_available = True
+
+        if blocked_count and not cards:
+            cards.append(
+                {
+                    "key": "nl-read-only-refused",
+                    "title": "Read-only guard",
+                    "lines": ["NL path refused non read-only skill execution."],
+                    "severity": "warn",
+                }
+            )
+
+        summary_text = "; ".join([part for part in summary_parts if part]).strip() or "Status snapshot ready."
+        cards_payload = build_cards_payload(
+            cards,
+            raw_available=raw_available,
+            summary=summary_text,
+            confidence=0.95 if cards else 0.40,
+            next_questions=followups or ["Show details", "What changed since last snapshot?"],
+        )
+        return self._cards_response(user_id, cards_payload)
 
     def _persist_anomalies(self, user_id: str, observed_at: str, flags: list[str]) -> None:
         events = []

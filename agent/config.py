@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,19 @@ class Config:
     openrouter_model: str | None = None
     openrouter_site_url: str | None = None
     openrouter_app_name: str | None = None
+
+
+@dataclass(frozen=True)
+class ObserveConfig:
+    db_path: str
+
+
+def load_observe_config() -> ObserveConfig:
+    db_path = os.environ.get("AGENT_DB_PATH")
+    if not db_path:
+        repo_root = Path(__file__).resolve().parents[1]
+        db_path = str(repo_root / "memory" / "agent.db")
+    return ObserveConfig(db_path=db_path)
 
 
 def load_config() -> Config:

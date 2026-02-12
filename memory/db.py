@@ -55,6 +55,8 @@ class PendingClarificationRecord:
 
 
 class MemoryDB:
+    SCHEMA_VERSION = 2
+
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -88,6 +90,9 @@ class MemoryDB:
             script = handle.read()
         self._conn.executescript(script)
         self._ensure_reminder_columns()
+        self._ensure_preference_columns()
+        self._ensure_open_loop_columns()
+        self._ensure_schema_meta()
         self._conn.commit()
 
     @staticmethod
@@ -142,6 +147,84 @@ class MemoryDB:
         self._commit_if_needed()
         return int(cur.lastrowid)
 
+    def add_open_loop(self, title: str, due_date: str | None = None, priority: int = 3) -> int:
+        now = self._now_iso()
+        bounded_priority = max(1, min(3, int(priority)))
+        cur = self._conn.execute(
+            "INSERT INTO open_loops (title, due_date, priority, status, created_at, completed_at) VALUES (?, ?, ?, 'open', ?, NULL)",
+            (title, due_date, bounded_priority, now),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def list_open_loops(
+        self,
+        status: str = "open",
+        limit: int = 20,
+        order: str = "due",
+    ) -> list[dict[str, Any]]:
+        order_sql = (
+            "ORDER BY COALESCE(due_date, '9999-12-31') ASC, priority ASC, created_at DESC"
+            if order == "due"
+            else "ORDER BY priority ASC, COALESCE(due_date, '9999-12-31') ASC, created_at DESC"
+            if order == "important"
+            else "ORDER BY created_at DESC"
+        )
+        if status == "all":
+            cur = self._conn.execute(
+                f"""
+                SELECT id, title, due_date, priority, status, created_at, completed_at
+                FROM open_loops
+                {order_sql}
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        else:
+            cur = self._conn.execute(
+                f"""
+                SELECT id, title, due_date, priority, status, created_at, completed_at
+                FROM open_loops
+                WHERE status = ?
+                {order_sql}
+                LIMIT ?
+                """,
+                (status, limit),
+            )
+        return [dict(row) for row in cur.fetchall()]
+
+    def complete_open_loop_by_title(self, title_fragment: str) -> int:
+        now = self._now_iso()
+        cur = self._conn.execute(
+            """
+            UPDATE open_loops
+            SET status = 'done', completed_at = ?
+            WHERE id = (
+                SELECT id FROM open_loops
+                WHERE status = 'open' AND lower(title) LIKE lower(?)
+                ORDER BY created_at DESC
+                LIMIT 1
+            )
+            """,
+            (now, f"%{title_fragment}%"),
+        )
+        self._commit_if_needed()
+        return int(cur.rowcount)
+
+    def list_tasks(self, limit: int = 20) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT id, project_id, title, details, effort_mins, impact_1to5, status, due_date, created_at, updated_at
+            FROM tasks
+            ORDER BY
+                CASE status WHEN 'todo' THEN 0 WHEN 'doing' THEN 1 ELSE 2 END,
+                updated_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
     def add_reminder(self, when_ts: str, text: str) -> int:
         created_at = self._now_iso()
         cur = self._conn.execute(
@@ -187,10 +270,43 @@ class MemoryDB:
         if "last_error" not in cols:
             self._conn.execute("ALTER TABLE reminders ADD COLUMN last_error TEXT")
 
-    def set_preference(self, key: str, value: str) -> None:
+    def _ensure_preference_columns(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(preferences)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "updated_at" not in cols:
+            self._conn.execute("ALTER TABLE preferences ADD COLUMN updated_at TEXT")
+
+    def _ensure_open_loop_columns(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(open_loops)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "priority" not in cols:
+            self._conn.execute("ALTER TABLE open_loops ADD COLUMN priority INTEGER NOT NULL DEFAULT 3")
+
+    def _ensure_schema_meta(self) -> None:
+        self._conn.execute("CREATE TABLE IF NOT EXISTS schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self._conn.execute(
-            "INSERT INTO preferences (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
+            """
+            INSERT INTO schema_meta (key, value) VALUES ('schema_version', ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (str(self.SCHEMA_VERSION),),
+        )
+
+    def get_schema_version(self) -> int:
+        cur = self._conn.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'")
+        row = cur.fetchone()
+        if not row:
+            return 0
+        try:
+            return int(row["value"])
+        except Exception:
+            return 0
+
+    def set_preference(self, key: str, value: str) -> None:
+        now = self._now_iso()
+        self._conn.execute(
+            "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value, now),
         )
         self._commit_if_needed()
 
@@ -201,6 +317,10 @@ class MemoryDB:
         )
         row = cur.fetchone()
         return row["value"] if row else None
+
+    def list_preferences(self) -> list[dict[str, Any]]:
+        cur = self._conn.execute("SELECT key, value, updated_at FROM preferences ORDER BY key ASC")
+        return [dict(row) for row in cur.fetchall()]
 
     def log_activity(self, event_type: str, payload: dict[str, Any]) -> None:
         ts = self._now_iso()
@@ -313,6 +433,28 @@ class MemoryDB:
                 record.pop("details_json", None)
             results.append(record)
         return results
+
+    def audit_log_latest_by_type(self, action_type: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, created_at, user_id, action_type, action_id, status, details_json, error
+            FROM audit_log
+            WHERE action_type = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (action_type,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        record = dict(row)
+        try:
+            record["details"] = json.loads(record.pop("details_json") or "{}")
+        except json.JSONDecodeError:
+            record["details"] = {}
+            record.pop("details_json", None)
+        return record
 
     def disk_baseline_set(
         self,

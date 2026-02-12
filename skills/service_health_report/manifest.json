@@ -1,0 +1,18 @@
+{
+  "name": "service_health_report",
+  "description": "Read-only service health for personal-agent.service.",
+  "version": "0.1.0",
+  "permissions": ["db:read", "sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "service_health_report",
+      "read_only": true,
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

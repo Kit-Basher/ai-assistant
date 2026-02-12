@@ -20,6 +20,11 @@ class TestDBInit(unittest.TestCase):
 
             projects = db.list_projects()
             self.assertEqual(projects, [])
+            self.assertEqual(MemoryDB.SCHEMA_VERSION, db.get_schema_version())
+
+            # idempotent init
+            db.init_schema(schema_path)
+            self.assertEqual(MemoryDB.SCHEMA_VERSION, db.get_schema_version())
 
             db.close()
 

@@ -16,6 +16,7 @@
     },
     {
       "name": "resource_report",
+      "read_only": true,
       "args_schema": {
         "type": "object",
         "properties": {
