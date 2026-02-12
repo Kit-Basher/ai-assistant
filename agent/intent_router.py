@@ -9,6 +9,8 @@ from zoneinfo import ZoneInfo
 
 from agent.ask_timeframe import parse_timeframe
 
+_AFFIRMATION = re.compile(r"^\s*(?:y|yes(?:\s+please)?|ok(?:ay)?|sure|please|do\s+it)\b", re.I)
+
 _REMEMBER_PREFIX = re.compile(
     r"^\s*(remember|note|save this|save a note|make a note|jot this down|don't forget|dont forget)\b[:\-]?\s*",
     re.IGNORECASE,
@@ -821,6 +823,15 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             if pending_decision:
                 return pending_decision
 
+    # Deterministic greeting detection so the orchestrator can offer a one-turn
+    # follow-up (e.g., "yes please") without requiring slash commands.
+    lowered = cleaned.lower()
+    if re.match(r"^(hi|hello|hey)(\b|[!.?]|$)", lowered):
+        return {"type": "greeting"}
+
+    if (context or {}).get("last_topic") == "brief_offer" and _AFFIRMATION.match(cleaned):
+        return {"type": "brief"}
+
     if _matches_opinion_followup(cleaned):
         if knowledge_cache:
             entry = knowledge_cache.get_recent(user_id, now_dt)
@@ -840,8 +851,6 @@ def route_message(user_id: str, text: str, context: dict | None) -> dict[str, An
             "I can, but I need a report first — ask a knowledge question like “what changed this week?”",
             0.60,
         )
-
-    lowered = cleaned.lower()
 
     # System-wide "brief" (snapshot + delta), intentionally before ask_query time-window prompts.
     if _SYSTEM_BRIEF.search(lowered) and not _has_time_window_hint(lowered):

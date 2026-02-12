@@ -1,0 +1,12 @@
+[Unit]
+Description=Personal Agent Scheduled Observe Now
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/c/personal-agent
+Environment=PYTHONPATH=/home/c/personal-agent
+Environment=AGENT_DB_PATH=/home/c/personal-agent/memory/agent.db
+ExecStart=/home/c/personal-agent/.venv/bin/python -m agent.scheduled_observe
+StandardOutput=journal
+StandardError=journal

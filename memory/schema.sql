@@ -34,6 +34,16 @@ CREATE TABLE IF NOT EXISTS notes (
     FOREIGN KEY(project_id) REFERENCES projects(id)
 );
 
+CREATE TABLE IF NOT EXISTS open_loops (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    due_date TEXT,
+    priority INTEGER NOT NULL DEFAULT 3,
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS reminders (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     when_ts TEXT NOT NULL,
@@ -47,7 +57,8 @@ CREATE TABLE IF NOT EXISTS reminders (
 CREATE TABLE IF NOT EXISTS preferences (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     key TEXT NOT NULL UNIQUE,
-    value TEXT NOT NULL
+    value TEXT NOT NULL,
+    updated_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS activity_log (
@@ -214,6 +225,11 @@ CREATE TABLE IF NOT EXISTS pending_clarifications (
     options_json TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS anomaly_events (

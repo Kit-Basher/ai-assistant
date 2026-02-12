@@ -28,6 +28,8 @@ from agent.scheduled_snapshots import (
 )
 from agent.debug_protocol import DebugProtocol
 from agent.orchestrator import Orchestrator
+from agent.cards import render_cards_markdown, validate_cards_payload
+from agent.daily_brief import should_send_daily_brief
 from memory.db import MemoryDB
 
 
@@ -49,14 +51,16 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # Route ALL non-command text through the orchestrator (single brain).
     response = orchestrator.handle_message(text, user_id=chat_id)
-    helper_text = (
-        "I can help with /remember, /projects, /project_new, /task_add, /remind. "
-        "Use slash commands for now."
-    )
     reply_text = response.text.strip() if response and response.text else ""
+    parse_mode = None
+    if response and isinstance(response.data, dict):
+        ok, _ = validate_cards_payload(response.data)
+        if ok:
+            reply_text = render_cards_markdown(response.data)
+            parse_mode = "Markdown"
     if not reply_text:
-        reply_text = helper_text
-    await update.effective_message.reply_text(reply_text)
+        reply_text = "Ask about disk, CPU, memory, or process changes."
+    await update.effective_message.reply_text(reply_text, parse_mode=parse_mode)
 
     log_event(log_path, "telegram_message", {"chat_id": chat_id, "text": text})
 
@@ -199,6 +203,46 @@ async def _handle_weekly_reflection(update: Update, context: ContextTypes.DEFAUL
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/weekly_reflection", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message("/today", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_open_loops(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    text = update.effective_message.text or ""
+    content = _command_payload(text, "/open_loops")
+    prompt = f"/open_loops {content}".strip()
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message(prompt, user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message("/health", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_daily_brief_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message("/daily_brief_status", user_id=chat_id)
     await update.effective_message.reply_text(response.text)
 
 
@@ -399,6 +443,63 @@ async def _scheduled_network_snapshot(context: ContextTypes.DEFAULT_TYPE) -> Non
     safe_run_network_snapshot(db, timezone, user_id)
 
 
+async def _scheduled_daily_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
+    db: MemoryDB = context.application.bot_data["db"]
+    timezone_name: str = context.application.bot_data["timezone"]
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    chat_id = db.get_preference("telegram_chat_id")
+    if not chat_id:
+        return
+    enabled = (db.get_preference("daily_brief_enabled") or "off").strip().lower() in {"on", "true", "1", "yes"}
+    local_time = (db.get_preference("daily_brief_time") or "09:00").strip()
+    quiet_mode = (db.get_preference("daily_brief_quiet_mode") or "off").strip().lower() in {"on", "true", "1", "yes"}
+    threshold_pref = db.get_preference("disk_delta_threshold_mb")
+    disk_delta_threshold_mb = float(threshold_pref) if (threshold_pref and threshold_pref.isdigit()) else 250.0
+    svc_gate = (db.get_preference("only_send_if_service_unhealthy") or "off").strip().lower() in {
+        "on",
+        "true",
+        "1",
+        "yes",
+    }
+    include_due_pref = db.get_preference("include_open_loops_due_within_days")
+    include_due_days = int(include_due_pref) if (include_due_pref and include_due_pref.isdigit()) else 2
+    last_sent = db.get_preference("daily_brief_last_sent_date")
+    payload = orchestrator.build_daily_brief_cards(str(chat_id))
+    signals = payload.get("daily_brief_signals") if isinstance(payload, dict) else {}
+    disk_delta_mb = signals.get("disk_delta_mb") if isinstance(signals, dict) else None
+    service_unhealthy = bool(signals.get("service_unhealthy")) if isinstance(signals, dict) else False
+    due_open_loops = int(signals.get("due_open_loops_count") or 0) if isinstance(signals, dict) else 0
+    decision = should_send_daily_brief(
+        now_utc=datetime.now(timezone.utc),
+        timezone_name=timezone_name,
+        enabled=enabled,
+        local_time_hhmm=local_time,
+        last_sent_local_date=last_sent,
+        quiet_mode=quiet_mode,
+        disk_delta_mb=disk_delta_mb,
+        disk_delta_threshold_mb=disk_delta_threshold_mb,
+        service_unhealthy=service_unhealthy,
+        only_send_if_service_unhealthy=svc_gate,
+        has_due_open_loops=due_open_loops > 0 and include_due_days > 0,
+    )
+    if not decision.should_send:
+        return
+    text = render_cards_markdown(payload)
+    send_ok = False
+    for attempt in (1, 2):
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            send_ok = True
+            break
+        except Exception:
+            if attempt == 1:
+                await asyncio.sleep(1.0)
+                continue
+            return
+    if send_ok:
+        db.set_preference("daily_brief_last_sent_date", decision.local_date)
+
+
 def build_app() -> Application:
     config = load_config()
     db = MemoryDB(config.db_path)
@@ -443,6 +544,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("brief", _handle_brief))
     app.add_handler(CommandHandler("network_report", _handle_network_report))
     app.add_handler(CommandHandler("weekly_reflection", _handle_weekly_reflection))
+    app.add_handler(CommandHandler("today", _handle_today))
+    app.add_handler(CommandHandler("open_loops", _handle_open_loops))
+    app.add_handler(CommandHandler("health", _handle_health))
+    app.add_handler(CommandHandler("daily_brief_status", _handle_daily_brief_status))
     app.add_handler(CommandHandler("ask", _handle_ask))
     app.add_handler(CommandHandler("ask_opinion", _handle_ask_opinion))
 
@@ -457,6 +562,7 @@ def build_app() -> Application:
     app.bot_data["timezone"] = config.agent_timezone
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
+    app.job_queue.run_repeating(_scheduled_daily_brief, interval=60, first=10)
     if config.enable_scheduled_snapshots:
         run_time = time(9, 0, tzinfo=ZoneInfo(config.agent_timezone))
         app.job_queue.run_daily(_scheduled_disk_snapshot, time=run_time, name="disk_snapshot_daily")

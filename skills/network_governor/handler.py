@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import re
+import socket
+import subprocess
 from typing import Any
 
+from agent.cards import normalize_card
 from skills.network_governor import collector
 
 AUDIT_HARD_FAIL_MSG = "Audit logging failed. Operation aborted."
@@ -75,8 +79,12 @@ def network_report(context: dict[str, Any], user_id: str | None = None) -> dict[
     db = context.get("db") if context else None
     timezone = (context or {}).get("timezone") or "UTC"
     actor_id = user_id or (context or {}).get("user_id") or "system"
+    read_only_mode = bool((context or {}).get("read_only_mode"))
     if not db:
         return _blocked("Database not available.")
+
+    if read_only_mode:
+        return _build_network_report(db, timezone)
 
     try:
         with db.transaction():
@@ -181,4 +189,51 @@ def _build_network_report(db: Any, timezone: str) -> dict[str, Any]:
         "nameservers": nameservers,
         "interfaces": latest_ifaces,
     }
-    return {"status": "ok", "text": "\n".join(lines), "payload": payload}
+    primary_ip = _primary_ip()
+    ping_ms = _ping_latency_ms()
+    up_count = len([row for row in latest_ifaces if str(row.get("state") or "").lower() == "up"])
+    cards = [
+        normalize_card(
+            {
+                "title": "Network diagnostics",
+                "lines": [
+                    f"interfaces up: {up_count}/{len(latest_ifaces)}",
+                    f"default route: {latest.get('default_iface') or 'n/a'} via {latest.get('default_gateway') or 'n/a'}",
+                    f"primary IP: {primary_ip or 'n/a'}",
+                    "DNS: {}".format(", ".join([ns["nameserver"] for ns in nameservers]) if nameservers else "n/a"),
+                    f"ping latency: {ping_ms}" if ping_ms else "ping latency: unavailable",
+                ],
+                "severity": "ok",
+            },
+            0,
+        )
+    ]
+    return {"status": "ok", "text": "\n".join(lines), "payload": payload, "cards_payload": {"cards": cards, "raw_available": True}}
+
+
+def _primary_ip() -> str | None:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.connect(("8.8.8.8", 53))
+        ip = sock.getsockname()[0]
+        sock.close()
+        return ip
+    except Exception:
+        return None
+
+
+def _ping_latency_ms() -> str | None:
+    try:
+        proc = subprocess.run(
+            ["ping", "-c", "1", "-W", "1", "1.1.1.1"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            check=False,
+        )
+    except Exception:
+        return None
+    match = re.search(r"time=([0-9.]+)\\s*ms", (proc.stdout or ""))
+    if not match:
+        return None
+    return f"{float(match.group(1)):.1f} ms"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.cards import normalize_card
 from skills.storage_governor import collector
 
 AUDIT_HARD_FAIL_MSG = "Audit logging failed. Operation aborted."
@@ -105,9 +106,13 @@ def storage_report(context: dict[str, Any], user_id: str | None = None) -> dict[
     db = context.get("db") if context else None
     timezone = (context or {}).get("timezone") or "UTC"
     actor_id = user_id or (context or {}).get("user_id") or "system"
+    read_only_mode = bool((context or {}).get("read_only_mode"))
 
     if not db:
         return _blocked("Database not available.")
+
+    if read_only_mode:
+        return _build_storage_report(db, timezone)
 
     details = {"event_type": "storage_report", "mode": "observe", "timezone": timezone}
     try:
@@ -186,6 +191,7 @@ def _build_storage_report(db: Any, timezone: str) -> dict[str, Any]:
     if home_latest:
         home_prev = db.get_previous_dir_size_samples("home_top", home_latest["taken_at"])
         home_stats = db.get_storage_scan_stats_for_taken_at("home_top", home_latest["taken_at"])
+    has_previous = any(m.get("prev_taken_at") for m in mount_reports) or bool(root_prev) or bool(home_prev)
 
     if not mount_reports and not root_latest and not home_latest:
         text = "No storage snapshots found yet."
@@ -246,6 +252,84 @@ def _build_storage_report(db: Any, timezone: str) -> dict[str, Any]:
         "home_top": home_latest or {},
         "root_stats": root_stats or {},
         "home_stats": home_stats or {},
+        "has_previous": has_previous,
         "timezone": timezone,
     }
-    return {"status": "ok", "text": "\n".join(lines), "payload": payload}
+    cards: list[dict[str, Any]] = []
+    if mount_reports:
+        for mount in mount_reports:
+            cards.append(
+                normalize_card(
+                    {
+                        "title": f"Disk usage ({mount['mountpoint']})",
+                        "lines": [
+                            "used {} / {} ({:.1f}%), free {}".format(
+                                _bytes_to_human(mount["used_bytes"]),
+                                _bytes_to_human(mount["total_bytes"]),
+                                mount["used_pct"],
+                                _bytes_to_human(mount["free_bytes"]),
+                            ),
+                            "delta {}".format(_format_delta(mount["delta_used"], mount.get("prev_used_bytes"))),
+                        ],
+                        "severity": "bad" if mount["used_pct"] >= 95 else "warn" if mount["used_pct"] >= 85 else "ok",
+                    },
+                    len(cards),
+                )
+            )
+    if root_latest:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Top / dirs",
+                    "lines": [f"{path}: {_bytes_to_human(int(bytes_val))}" for path, bytes_val in root_latest.get("samples", [])[:5]],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    if home_latest:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Top home dirs",
+                    "lines": [f"{path}: {_bytes_to_human(int(bytes_val))}" for path, bytes_val in home_latest.get("samples", [])[:5]],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    growth_rows: list[tuple[str, int]] = []
+    for path, bytes_val in (root_latest or {}).get("samples", []):
+        prev_map = {p: b for p, b in (root_prev or {}).get("samples", [])}
+        if path in prev_map:
+            growth_rows.append((path, int(bytes_val) - int(prev_map[path])))
+    for path, bytes_val in (home_latest or {}).get("samples", []):
+        prev_map = {p: b for p, b in (home_prev or {}).get("samples", [])}
+        if path in prev_map:
+            growth_rows.append((path, int(bytes_val) - int(prev_map[path])))
+    growth_rows = [row for row in growth_rows if row[1] > 0]
+    growth_rows.sort(key=lambda item: item[1], reverse=True)
+    if has_previous:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Top growing paths",
+                    "lines": [f"{path}: +{_bytes_to_human(delta)}" for path, delta in growth_rows[:5]]
+                    or ["No growth detected in top tracked paths."],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    else:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Comparison",
+                    "lines": ["No previous snapshot to compare; here's current status."],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    return {"status": "ok", "text": "\n".join(lines), "payload": payload, "cards_payload": {"cards": cards, "raw_available": True}}

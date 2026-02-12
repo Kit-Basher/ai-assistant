@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Personal Agent observe_now on a cadence
+
+[Timer]
+# Default cadence; override via systemd drop-in for 3x/day etc.
+OnCalendar=hourly
+Persistent=true
+Unit=personal-agent-observe.service
+
+[Install]
+WantedBy=timers.target

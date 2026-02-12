@@ -12,6 +12,7 @@ class SkillFunction:
     name: str
     args_schema: dict[str, Any]
     handler: Callable[..., Any]
+    read_only: bool = False
 
 
 @dataclass
@@ -58,6 +59,7 @@ class SkillLoader:
                     name=func_name,
                     args_schema=func.get("args_schema", {}),
                     handler=handler,
+                    read_only=bool(func.get("read_only", False)),
                 )
 
             skill = Skill(

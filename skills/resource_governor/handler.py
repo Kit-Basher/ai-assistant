@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.cards import normalize_card
 from skills.resource_governor import collector
 
 AUDIT_HARD_FAIL_MSG = "Audit logging failed. Operation aborted."
@@ -94,9 +95,13 @@ def resource_report(context: dict[str, Any], user_id: str | None = None) -> dict
     db = context.get("db") if context else None
     timezone = (context or {}).get("timezone") or "UTC"
     actor_id = user_id or (context or {}).get("user_id") or "system"
+    read_only_mode = bool((context or {}).get("read_only_mode"))
 
     if not db:
         return _blocked("Database not available.")
+
+    if read_only_mode:
+        return _build_resource_report(db, timezone)
 
     try:
         with db.transaction():
@@ -189,8 +194,26 @@ def _build_resource_report(db: Any, timezone: str) -> dict[str, Any]:
         if swap_used_delta is not None:
             lines.append("Swap delta: {}".format(_format_delta(swap_used_delta, swap_used)))
 
-    cpu_samples = db.get_resource_process_samples(latest.get("taken_at"), "cpu")
-    rss_samples = db.get_resource_process_samples(latest.get("taken_at"), "rss")
+    latest_taken_at = latest.get("taken_at")
+    previous_taken_at = previous.get("taken_at") if previous else None
+    cpu_samples = db.get_resource_process_samples(latest_taken_at, "cpu")
+    rss_samples = db.get_resource_process_samples(latest_taken_at, "rss")
+    prev_cpu_samples = db.get_resource_process_samples(previous_taken_at, "cpu") if previous_taken_at else []
+    prev_rss_samples = db.get_resource_process_samples(previous_taken_at, "rss") if previous_taken_at else []
+    prev_cpu_map = {int(row["pid"]): int(row["cpu_ticks"]) for row in prev_cpu_samples if "pid" in row}
+    prev_rss_map = {int(row["pid"]): int(row["rss_bytes"]) for row in prev_rss_samples if "pid" in row}
+    cpu_delta_rows: list[dict[str, Any]] = []
+    for row in cpu_samples:
+        pid = int(row["pid"])
+        delta = int(row["cpu_ticks"]) - int(prev_cpu_map.get(pid, 0))
+        cpu_delta_rows.append({"pid": pid, "name": row["name"], "cpu_ticks_delta": delta})
+    cpu_delta_rows.sort(key=lambda item: item["cpu_ticks_delta"], reverse=True)
+    rss_delta_rows: list[dict[str, Any]] = []
+    for row in rss_samples:
+        pid = int(row["pid"])
+        delta = int(row["rss_bytes"]) - int(prev_rss_map.get(pid, 0))
+        rss_delta_rows.append({"pid": pid, "name": row["name"], "rss_bytes_delta": delta})
+    rss_delta_rows.sort(key=lambda item: item["rss_bytes_delta"], reverse=True)
     if cpu_samples:
         lines.append("Top processes by CPU ticks (since boot):")
         for row in cpu_samples:
@@ -211,7 +234,8 @@ def _build_resource_report(db: Any, timezone: str) -> dict[str, Any]:
         )
 
     payload = {
-        "taken_at": latest.get("taken_at"),
+        "taken_at": latest_taken_at,
+        "previous_taken_at": previous_taken_at,
         "snapshot_local_date": latest.get("snapshot_local_date"),
         "loads": {
             "1m": float(latest["load_1m"]),
@@ -226,5 +250,109 @@ def _build_resource_report(db: Any, timezone: str) -> dict[str, Any]:
         "swap": {"total": swap_total, "used": swap_used},
         "cpu_samples": cpu_samples,
         "rss_samples": rss_samples,
+        "cpu_deltas": cpu_delta_rows[:5],
+        "rss_deltas": rss_delta_rows[:5],
     }
-    return {"status": "ok", "text": "\n".join(lines), "payload": payload}
+    cards = [
+        normalize_card(
+            {
+                "title": "CPU load",
+                "lines": [
+                    "1m={:.2f}, 5m={:.2f}, 15m={:.2f}".format(
+                        float(latest["load_1m"]),
+                        float(latest["load_5m"]),
+                        float(latest["load_15m"]),
+                    )
+                ],
+                "severity": "warn" if float(latest["load_1m"]) >= 2.0 else "ok",
+            },
+            0,
+        ),
+        normalize_card(
+            {
+                "title": "Memory",
+                "lines": [
+                    "used {} / total {} (free {})".format(
+                        _bytes_to_human(mem_used),
+                        _bytes_to_human(mem_total),
+                        _bytes_to_human(mem_free),
+                    )
+                ],
+                "severity": "warn" if (mem_total and (mem_used / mem_total) >= 0.85) else "ok",
+            },
+            1,
+        ),
+    ]
+    if cpu_samples:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Top CPU processes",
+                    "lines": [f"pid={row['pid']} {row['name']}: {row['cpu_ticks']}" for row in cpu_samples[:5]],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    if rss_samples:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Top memory processes",
+                    "lines": [
+                        f"pid={row['pid']} {row['name']}: {_bytes_to_human(int(row['rss_bytes']))}"
+                        for row in rss_samples[:5]
+                    ],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    if previous_taken_at:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "CPU delta vs previous snapshot",
+                    "lines": [
+                        f"pid={row['pid']} {row['name']}: {row['cpu_ticks_delta']:+d} ticks"
+                        for row in cpu_delta_rows[:5]
+                        if int(row["cpu_ticks_delta"]) != 0
+                    ]
+                    or ["No material CPU delta detected."],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Memory delta vs previous snapshot",
+                    "lines": [
+                        f"pid={row['pid']} {row['name']}: {_format_delta(int(row['rss_bytes_delta']))}"
+                        for row in rss_delta_rows[:5]
+                        if int(row["rss_bytes_delta"]) != 0
+                    ]
+                    or ["No material memory delta detected."],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    else:
+        cards.append(
+            normalize_card(
+                {
+                    "title": "Comparison",
+                    "lines": ["No previous snapshot to compare; here's current status."],
+                    "severity": "ok",
+                },
+                len(cards),
+            )
+        )
+    return {
+        "status": "ok",
+        "text": "\n".join(lines),
+        "payload": payload,
+        "cards_payload": {"cards": cards, "raw_available": True},
+    }
