@@ -96,7 +96,8 @@ class Orchestrator:
         self._last_offer_topic: dict[str, str] = {}
         self._started_at = datetime.now(__import__("datetime").timezone.utc)
         self._epistemic_monitor = EpistemicMonitor(db)
-        self._epistemic_history: dict[str, list[MessageTurn]] = {}
+        self._epistemic_history: dict[tuple[str, str], list[MessageTurn]] = {}
+        self._epistemic_thread_state: dict[str, dict[str, str | None]] = {}
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -264,23 +265,74 @@ class Orchestrator:
     def _format_opinion_reply(self, facts_text: str, opinion_text: str) -> str:
         return f"Facts:\n{facts_text}\n\nOpinion (opt-in):\n{opinion_text}"
 
-    def _epistemic_recent_messages(self, user_id: str, limit: int = 8) -> tuple[MessageTurn, ...]:
-        turns = self._epistemic_history.get(user_id, [])
+    def _default_thread_id(self, user_id: str) -> str:
+        return f"user:{user_id}"
+
+    def _resolve_epistemic_thread(self, user_id: str, response: OrchestratorResponse) -> tuple[str, str, str | None]:
+        data = response.data if isinstance(response.data, dict) else {}
+        explicit_thread_id = None
+        if isinstance(data.get("active_thread_id"), str) and data.get("active_thread_id", "").strip():
+            explicit_thread_id = data.get("active_thread_id", "").strip()
+        elif isinstance(data.get("thread_id"), str) and data.get("thread_id", "").strip():
+            explicit_thread_id = data.get("thread_id", "").strip()
+
+        explicit_label = data.get("thread_label")
+        next_label = explicit_label.strip() if isinstance(explicit_label, str) and explicit_label.strip() else None
+
+        prev = self._epistemic_thread_state.get(user_id) or {}
+        active_thread_id = (
+            explicit_thread_id
+            or (prev.get("active_thread_id").strip() if isinstance(prev.get("active_thread_id"), str) else None)
+            or self._default_thread_id(user_id)
+        )
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        prev_thread_id = prev.get("active_thread_id")
+        if prev_thread_id != active_thread_id:
+            created_at = now_iso
+        else:
+            prev_created_at = prev.get("thread_created_at")
+            created_at = prev_created_at if isinstance(prev_created_at, str) and prev_created_at else now_iso
+            if next_label is None:
+                prev_label = prev.get("thread_label")
+                next_label = prev_label if isinstance(prev_label, str) and prev_label else None
+
+        self._epistemic_thread_state[user_id] = {
+            "active_thread_id": active_thread_id,
+            "thread_created_at": created_at,
+            "thread_label": next_label,
+        }
+        return active_thread_id, created_at, next_label
+
+    def _epistemic_recent_messages(self, user_id: str, thread_id: str, limit: int = 8) -> tuple[MessageTurn, ...]:
+        turns = self._epistemic_history.get((user_id, thread_id), [])
         return tuple(turns[-max(1, int(limit)):])
 
-    def _epistemic_append_turn(self, user_id: str, role: str, text: str) -> None:
+    def _epistemic_append_turn(self, user_id: str, thread_id: str, role: str, text: str) -> None:
         cleaned = " ".join((text or "").split())
         if not cleaned or role not in {"user", "assistant"}:
             return
-        turns = self._epistemic_history.setdefault(user_id, [])
+        turns = self._epistemic_history.setdefault((user_id, thread_id), [])
         turns.append(MessageTurn(role=role, text=cleaned))
         if len(turns) > 12:
             del turns[:-12]
+        try:
+            self.db.log_activity(
+                "epistemic_turn",
+                {
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "role": role,
+                    "text": cleaned,
+                },
+            )
+        except Exception:
+            pass
 
-    def _epistemic_extract_referents(self, user_id: str) -> tuple[str, ...]:
+    def _epistemic_extract_referents(self, user_id: str, thread_id: str) -> tuple[str, ...]:
         refs: list[str] = []
         seen: set[str] = set()
-        for turn in self._epistemic_recent_messages(user_id, limit=8):
+        for turn in self._epistemic_recent_messages(user_id, thread_id, limit=8):
             if turn.role != "assistant":
                 continue
             for match in re.finditer(r"\[(\d+)\]\s+([^|\n]+)", turn.text):
@@ -317,12 +369,19 @@ class Orchestrator:
                 signals.append(error.strip().lower())
         return tuple(sorted(set(signals)))
 
-    def _epistemic_memory_signals(self, response: OrchestratorResponse) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+    def _epistemic_memory_signals(
+        self,
+        response: OrchestratorResponse,
+        active_thread_id: str,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool, tuple[str, ...], tuple[str, ...], bool]:
         text = (response.text or "").strip()
         lower = text.lower()
         hits: list[str] = []
         ambiguous: list[str] = []
         miss = False
+        in_scope: list[str] = []
+        out_of_scope: list[str] = []
+        out_of_scope_relevant = False
 
         if "no snapshots found yet" in lower or "no facts available" in lower:
             miss = True
@@ -335,25 +394,64 @@ class Orchestrator:
             data = response.data.get("data")
             if isinstance(data, dict) and isinstance(data.get("facts"), dict):
                 hits.append("facts")
+                in_scope.append("facts")
             if "baseline_created" in response.data:
                 hits.append("system_facts")
+                in_scope.append("system_facts")
             if response.data.get("clarification_required") is True:
                 ambiguous.append("clarification_required")
+            memory_items = response.data.get("memory_items")
+            if isinstance(memory_items, list):
+                for item in memory_items:
+                    if not isinstance(item, dict):
+                        continue
+                    raw_ref = item.get("ref")
+                    if not isinstance(raw_ref, str) or not raw_ref.strip():
+                        continue
+                    ref = raw_ref.strip()
+                    is_global = bool(item.get("global")) or str(item.get("scope", "")).strip().lower() == "global"
+                    raw_thread = item.get("thread_id")
+                    item_thread = raw_thread.strip() if isinstance(raw_thread, str) and raw_thread.strip() else None
+                    relevant = item.get("relevant")
+                    is_relevant = True if relevant is None else bool(relevant)
+                    if is_global or item_thread == active_thread_id:
+                        in_scope.append(ref)
+                    else:
+                        out_of_scope.append(ref)
+                        if is_relevant:
+                            out_of_scope_relevant = True
 
-        return tuple(sorted(set(hits))), tuple(sorted(set(ambiguous))), bool(miss)
+        return (
+            tuple(sorted(set(hits))),
+            tuple(sorted(set(ambiguous))),
+            bool(miss),
+            tuple(sorted(set(in_scope))),
+            tuple(sorted(set(out_of_scope))),
+            bool(out_of_scope_relevant),
+        )
 
     def _build_epistemic_context(self, user_id: str, response: OrchestratorResponse) -> ContextPack:
-        hits, ambiguous, miss = self._epistemic_memory_signals(response)
+        active_thread_id, thread_created_at, thread_label = self._resolve_epistemic_thread(user_id, response)
+        recent_messages = self._epistemic_recent_messages(user_id, active_thread_id, limit=8)
+        hits, ambiguous, miss, in_scope, out_of_scope, out_of_scope_relevant = self._epistemic_memory_signals(
+            response, active_thread_id
+        )
         return ContextPack(
             user_id=user_id,
-            active_thread_id=self._last_offer_topic.get(user_id),
-            recent_messages=self._epistemic_recent_messages(user_id, limit=8),
+            active_thread_id=active_thread_id,
+            thread_created_at=thread_created_at,
+            thread_label=thread_label,
+            recent_messages=recent_messages,
             memory_hits=hits,
             memory_ambiguous=ambiguous,
             memory_miss=miss,
+            in_scope_memory=in_scope,
+            out_of_scope_memory=out_of_scope,
+            out_of_scope_relevant_memory=out_of_scope_relevant,
+            thread_turn_count=len(recent_messages),
             tools_available=tuple(sorted(self.skills.keys())),
             tool_failures=self._epistemic_tool_failures(response),
-            referents=self._epistemic_extract_referents(user_id),
+            referents=self._epistemic_extract_referents(user_id, active_thread_id),
         )
 
     def _build_epistemic_candidate(self, response: OrchestratorResponse) -> CandidateContract | str:
@@ -374,8 +472,9 @@ class Orchestrator:
             self._epistemic_monitor.record(user_id, decision, active_thread_id=ctx.active_thread_id)
         except Exception:
             pass
-        self._epistemic_append_turn(user_id, "user", user_text)
-        self._epistemic_append_turn(user_id, "assistant", decision.user_text)
+        thread_id = ctx.active_thread_id or self._default_thread_id(user_id)
+        self._epistemic_append_turn(user_id, thread_id, "user", user_text)
+        self._epistemic_append_turn(user_id, thread_id, "assistant", decision.user_text)
         return OrchestratorResponse(decision.user_text, response.data)
 
     def _deliver_pending_opinion(

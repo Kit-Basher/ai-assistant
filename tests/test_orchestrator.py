@@ -169,6 +169,48 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(second.data, dict)
         self.assertEqual(f"Already done: [{task_id}] Write report", second.data["cards"][0]["lines"][0])
 
+    def test_build_epistemic_context_scopes_memory_to_active_thread(self) -> None:
+        orch = self._orchestrator()
+        response = OrchestratorResponse(
+            "ok",
+            {
+                "thread_id": "thread-a",
+                "thread_label": "Focus",
+                "memory_items": [
+                    {"ref": "mem:local-a", "thread_id": "thread-a", "relevant": True},
+                    {"ref": "mem:global-style", "scope": "global", "relevant": True},
+                    {"ref": "mem:other-b", "thread_id": "thread-b", "relevant": True},
+                ],
+            },
+        )
+        ctx = orch._build_epistemic_context("user1", response)
+        self.assertEqual("thread-a", ctx.active_thread_id)
+        self.assertEqual("Focus", ctx.thread_label)
+        self.assertEqual(("mem:global-style", "mem:local-a"), ctx.in_scope_memory)
+        self.assertEqual(("mem:other-b",), ctx.out_of_scope_memory)
+        self.assertTrue(ctx.out_of_scope_relevant_memory)
+
+    def test_starting_new_thread_resets_turn_count(self) -> None:
+        orch = self._orchestrator()
+        orch._apply_epistemic_layer("user1", "hello", OrchestratorResponse("hello back", {"thread_id": "thread-a"}))
+
+        same_thread_ctx = orch._build_epistemic_context("user1", OrchestratorResponse("ok", {"thread_id": "thread-a"}))
+        self.assertGreaterEqual(same_thread_ctx.thread_turn_count, 2)
+
+        new_thread_ctx = orch._build_epistemic_context("user1", OrchestratorResponse("ok", {"thread_id": "thread-b"}))
+        self.assertEqual(0, new_thread_ctx.thread_turn_count)
+
+    def test_epistemic_turn_activity_logs_include_thread_id(self) -> None:
+        orch = self._orchestrator()
+        orch.handle_message("hello there", "user1")
+        rows = self.db.activity_log_list_recent("epistemic_turn", limit=2)
+        self.assertGreaterEqual(len(rows), 2)
+        for row in rows:
+            payload = row.get("payload") or {}
+            self.assertEqual("user1", payload.get("user_id"))
+            self.assertTrue(str(payload.get("thread_id") or "").strip())
+            self.assertIn(payload.get("role"), {"user", "assistant"})
+
 
 if __name__ == "__main__":
     unittest.main()

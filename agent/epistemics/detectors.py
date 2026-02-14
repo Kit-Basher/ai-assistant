@@ -16,6 +16,12 @@ _SOFT_CROSS_THREAD_PHRASES = (
     "previously",
     "last time",
 )
+_SUMMARY_DRIFT_PHRASES = (
+    "we've been working on",
+    "we have been working on",
+    "your project",
+    "as usual",
+)
 _EXPLICIT_CROSS_THREAD_REQUESTS = (
     "other thread",
     "previous thread",
@@ -157,6 +163,30 @@ def detect_cross_thread_risk(user_text: str, ctx: ContextPack, candidate: Candid
                 hard=True,
             )
         )
+    out_of_scope_set = set(ctx.out_of_scope_memory)
+    memory_claim_refs = tuple(
+        claim.ref.strip()
+        for claim in candidate.claims
+        if claim.support == "memory" and isinstance(claim.ref, str) and claim.ref.strip()
+    )
+    if out_of_scope_set and any(ref in out_of_scope_set for ref in memory_claim_refs):
+        reasons.append(
+            DetectorReason(
+                code="CROSS_THREAD_RISK",
+                detail="Candidate references memory from a different thread.",
+                evidence=" | ".join(sorted(set(ref for ref in memory_claim_refs if ref in out_of_scope_set))),
+                hard=True,
+            )
+        )
+    elif ctx.out_of_scope_relevant_memory and any(claim.support == "memory" for claim in candidate.claims):
+        reasons.append(
+            DetectorReason(
+                code="CROSS_THREAD_RISK",
+                detail="Candidate may rely on out-of-scope memory.",
+                evidence=" | ".join(ctx.out_of_scope_memory[:2]) if ctx.out_of_scope_memory else None,
+                hard=True,
+            )
+        )
     lowered = user_text.lower()
     if ctx.active_thread_id and ("other thread" in lowered or "previous thread" in lowered):
         reasons.append(
@@ -183,6 +213,18 @@ def detect_cross_thread_risk(user_text: str, ctx: ContextPack, candidate: Candid
                         DetectorReason(
                             code="CROSS_THREAD_RISK",
                             detail="Soft cross-thread reference requires confirmation.",
+                            evidence=phrase,
+                            hard=True,
+                        )
+                    )
+                    break
+        if ctx.thread_turn_count <= 0:
+            for phrase in _SUMMARY_DRIFT_PHRASES:
+                if phrase in candidate_text:
+                    reasons.append(
+                        DetectorReason(
+                            code="CROSS_THREAD_RISK",
+                            detail="Summary-style reference in a new thread requires confirmation.",
                             evidence=phrase,
                             hard=True,
                         )

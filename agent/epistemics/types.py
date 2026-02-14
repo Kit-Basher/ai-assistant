@@ -43,10 +43,16 @@ class MessageTurn:
 class ContextPack:
     user_id: str
     active_thread_id: str | None
+    thread_created_at: str | None = None
+    thread_label: str | None = None
     recent_messages: tuple[MessageTurn, ...] = field(default_factory=tuple)
     memory_hits: tuple[str, ...] = field(default_factory=tuple)
     memory_ambiguous: tuple[str, ...] = field(default_factory=tuple)
     memory_miss: bool = False
+    in_scope_memory: tuple[str, ...] = field(default_factory=tuple)
+    out_of_scope_memory: tuple[str, ...] = field(default_factory=tuple)
+    out_of_scope_relevant_memory: bool = False
+    thread_turn_count: int = 0
     tools_available: tuple[str, ...] = field(default_factory=tuple)
     tool_failures: tuple[str, ...] = field(default_factory=tuple)
     referents: tuple[str, ...] = field(default_factory=tuple)

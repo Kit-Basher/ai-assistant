@@ -7,7 +7,7 @@ from unittest.mock import patch
 from agent.epistemics.contract import build_plain_answer_candidate
 from agent.epistemics.gate import apply_epistemic_gate
 from agent.epistemics.question_selector import select_one_question
-from agent.epistemics.types import CandidateContract, ContextPack, ThreadRef
+from agent.epistemics.types import CandidateContract, Claim, ContextPack, ThreadRef
 
 
 def _base_ctx(**kwargs) -> ContextPack:
@@ -18,6 +18,10 @@ def _base_ctx(**kwargs) -> ContextPack:
         "memory_hits": tuple(),
         "memory_ambiguous": tuple(),
         "memory_miss": False,
+        "in_scope_memory": tuple(),
+        "out_of_scope_memory": tuple(),
+        "out_of_scope_relevant_memory": False,
+        "thread_turn_count": 0,
         "tools_available": ("core",),
         "tool_failures": tuple(),
         "referents": tuple(),
@@ -126,6 +130,85 @@ class TestEpistemicGate(unittest.TestCase):
         self.assertTrue(decision.intercepted)
         self.assertIn("CROSS_THREAD_RISK", decision.reasons)
         _assert_intercept_shape(self, decision.user_text)
+
+    def test_cross_thread_memory_reference_intercepts(self) -> None:
+        ctx = _base_ctx(
+            active_thread_id="thread-1",
+            in_scope_memory=("global:response_style",),
+            out_of_scope_memory=("mem:thread-2-plan",),
+            out_of_scope_relevant_memory=True,
+            thread_turn_count=2,
+        )
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="Using your previous plan from another conversation.",
+            clarifying_question=None,
+            claims=(
+                Claim(
+                    text="You planned to launch this month.",
+                    support="memory",
+                    ref="mem:thread-2-plan",
+                ),
+            ),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("what should I do now", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("CROSS_THREAD_RISK", decision.reasons)
+        _assert_intercept_shape(self, decision.user_text)
+        self.assertEqual(
+            "Do you want me to use information from another conversation?",
+            decision.user_text.splitlines()[2],
+        )
+
+    def test_global_memory_claim_allowed(self) -> None:
+        ctx = _base_ctx(
+            active_thread_id="thread-1",
+            in_scope_memory=("global:response_style",),
+            out_of_scope_memory=tuple(),
+            out_of_scope_relevant_memory=False,
+            thread_turn_count=1,
+        )
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="You prefer concise answers.",
+            clarifying_question=None,
+            claims=(
+                Claim(
+                    text="Preference is concise answers.",
+                    support="memory",
+                    ref="global:response_style",
+                ),
+            ),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("what do you remember about my style", ctx, candidate)
+        self.assertFalse(decision.intercepted)
+
+    def test_new_thread_summary_phrase_intercepts(self) -> None:
+        ctx = _base_ctx(active_thread_id="thread-2", thread_turn_count=0)
+        candidate = build_plain_answer_candidate("We've been working on your project, so continue as usual.")
+        decision = apply_epistemic_gate("status", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("CROSS_THREAD_RISK", decision.reasons)
+        _assert_intercept_shape(self, decision.user_text)
+
+    def test_new_thread_resets_drift_risk(self) -> None:
+        candidate = build_plain_answer_candidate("As usual, keep the same cadence.")
+        existing_thread_ctx = _base_ctx(active_thread_id="thread-1", thread_turn_count=3)
+        existing_thread_decision = apply_epistemic_gate("status", existing_thread_ctx, candidate)
+        self.assertFalse(existing_thread_decision.intercepted)
+
+        new_thread_ctx = _base_ctx(active_thread_id="thread-2", thread_turn_count=0)
+        new_thread_decision = apply_epistemic_gate("status", new_thread_ctx, candidate)
+        self.assertTrue(new_thread_decision.intercepted)
+        self.assertIn("CROSS_THREAD_RISK", new_thread_decision.reasons)
 
 
 if __name__ == "__main__":

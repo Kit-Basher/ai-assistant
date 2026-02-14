@@ -64,11 +64,7 @@ def select_one_question(
         return _normalize_one_question("Should I handle one request first before the other")
 
     if chosen == "CROSS_THREAD_RISK":
-        if candidate.thread_refs:
-            target = sorted(ref.target_thread_id for ref in candidate.thread_refs if ref.needs_confirmation)
-            if target:
-                return _normalize_one_question(f'Do you want me to use details from thread "{target[0]}"')
-        return _normalize_one_question("Do you want me to stay on the current thread only")
+        return _normalize_one_question("Do you want me to use information from another conversation")
 
     if chosen == "MEMORY_MISS":
         return _normalize_one_question("Can you paste the exact detail you want me to use")
