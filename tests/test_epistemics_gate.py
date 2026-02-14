@@ -126,6 +126,54 @@ class TestEpistemicGate(unittest.TestCase):
         self.assertTrue(question.endswith("?"))
         self.assertNotIn("\n", question)
 
+    def test_selector_unresolved_reference_uses_ab_form(self) -> None:
+        ctx = _base_ctx(referents=("[1] Build", "[2] Test"))
+        candidate = build_plain_answer_candidate("Done.")
+        question = select_one_question("do that", ctx, candidate, ("UNRESOLVED_REFERENCE",))
+        self.assertEqual("Which do you mean: [1] Build or [2] Test?", question)
+
+    def test_selector_missing_slot_date_and_time_questions(self) -> None:
+        ctx = _base_ctx()
+        candidate = build_plain_answer_candidate("Scheduled.")
+        question_date = select_one_question("schedule at 09:30 UTC", ctx, candidate, ("MISSING_REQUIRED_SLOT",))
+        question_time = select_one_question("schedule on 2026-03-01", ctx, candidate, ("MISSING_REQUIRED_SLOT",))
+        self.assertEqual("What date should I use?", question_date)
+        self.assertEqual("What time should I use?", question_time)
+
+    def test_selector_cross_thread_text_remains_locked(self) -> None:
+        ctx = _base_ctx(active_thread_id="thread-1")
+        candidate = build_plain_answer_candidate("Done.")
+        question = select_one_question("previously we discussed this", ctx, candidate, ("CROSS_THREAD_RISK",))
+        self.assertEqual("Do you want me to use information from another conversation?", question)
+
+    def test_selector_questions_are_single_line_single_question_and_bounded_length(self) -> None:
+        ctx = _base_ctx(referents=("A" * 200, "B" * 200))
+        candidate = CandidateContract(
+            kind="clarify",
+            final_answer="",
+            clarifying_question="Which one?? and why?",
+            claims=tuple(),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        reason_inputs = (
+            ("UNRESOLVED_REFERENCE", "do that"),
+            ("MISSING_REQUIRED_SLOT", "schedule on 2026-03-01 at 09:30"),
+            ("MULTI_INTENT", "schedule and copy"),
+            ("CROSS_THREAD_RISK", "use previous thread"),
+            ("MEMORY_MISS", "recall it"),
+            ("TOOL_FAILURE_OR_UNAVAILABLE", "run operation"),
+            ("UNSUPPORTED_CLAIM", "claim"),
+        )
+        for reason_code, user_text in reason_inputs:
+            question = select_one_question(user_text, ctx, candidate, (reason_code,))
+            self.assertEqual(1, question.count("?"), reason_code)
+            self.assertTrue(question.endswith("?"), reason_code)
+            self.assertNotIn("\n", question, reason_code)
+            self.assertLessEqual(len(question), 120, reason_code)
+
     def test_soft_cross_thread_phrase_triggers_intercept(self) -> None:
         ctx = _base_ctx(active_thread_id="thread-1")
         candidate = build_plain_answer_candidate("As we discussed earlier, continue with the same plan.")
