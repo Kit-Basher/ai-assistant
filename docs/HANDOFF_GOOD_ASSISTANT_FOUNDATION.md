@@ -1,5 +1,34 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.4 — Thread Workflow Template (/thread_new)
+
+Purpose: explicit thread lifecycle initialization for intentional setup.
+
+Command syntax:
+- `/thread_new "<label>"`
+- `/thread_new "<label>" --terse on --summary off`
+- `/thread_new "<label>"`
+  - `- bullet`
+  - `Open: next step`
+
+Behavior:
+- deterministic thread id generation
+- sets active thread
+- persists label
+- optional per-thread prefs via flags
+- optional initial anchor from message body
+- no LLM usage
+- no question marks in output
+- `skip_friction_formatting` applied
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.2 — Path B Continuity (Plan/Options/Anchors/Resume)
 
 Since `v0.2.1-good-assistant-foundation`, the following deterministic continuity features were added:
