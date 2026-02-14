@@ -1378,6 +1378,59 @@ class Orchestrator:
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
+                if cmd.name == "resume":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    rows = self.db.list_thread_anchors(thread_id, limit=2)
+                    lines = [f"Resume (thread {thread_id}):"]
+                    if not rows:
+                        lines.append("No checkpoints yet. Create one with: /anchor <title>")
+                        return OrchestratorResponse(
+                            "\n".join(lines),
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+
+                    latest_row = rows[0]
+                    focus = (str(latest_row.get("title") or "")).replace("?", "").strip() or "Checkpoint"
+                    lines.append(f"Focus: {focus}")
+
+                    next_text = (str(latest_row.get("open_line") or "")).replace("?", "").strip()
+                    if next_text.lower().startswith("open:"):
+                        next_text = next_text[5:].strip()
+                    if next_text:
+                        lines.append(f"Next: {next_text}")
+
+                    def _parse_notes(raw_bullets: str) -> list[str]:
+                        try:
+                            decoded = json.loads(raw_bullets or "[]")
+                        except Exception:
+                            decoded = []
+                        out: list[str] = []
+                        if isinstance(decoded, list):
+                            for item in decoded:
+                                if not isinstance(item, str):
+                                    continue
+                                value = " ".join(item.replace("?", "").split()).strip()
+                                if not value:
+                                    continue
+                                out.append(value)
+                                if len(out) >= 2:
+                                    break
+                        return out
+
+                    notes = _parse_notes(str(latest_row.get("bullets") or "[]"))
+                    if not notes and len(rows) > 1:
+                        notes = _parse_notes(str(rows[1].get("bullets") or "[]"))
+                    if notes:
+                        lines.append("Notes:")
+                        for note in notes[:2]:
+                            lines.append(f"- {note}")
+
+                    lines.append("Tip: Add a new checkpoint with /anchor when you make progress.")
+                    return OrchestratorResponse(
+                        "\n".join(lines),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
                 if cmd.name == "anchors_reset":
                     thread_id = self._active_thread_id_for_user(user_id)
                     reset_anchors(self.db, thread_id)

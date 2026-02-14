@@ -156,6 +156,79 @@ class TestAnchors(unittest.TestCase):
             self.assertNotIn("Next:", response.text)
             self.assertEqual(0, response.text.count("?"))
 
+    def test_resume_no_anchors_format(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-empty")
+        response = orch.handle_message("/resume", "user1")
+        self.assertEqual(
+            "Resume (thread thread-empty):\nNo checkpoints yet. Create one with: /anchor <title>",
+            response.text,
+        )
+        self.assertNotIn("?", response.text)
+
+    def test_resume_with_focus_next_notes_tip(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message(
+            "/anchor Sprint status?\n- Ship docs?\n- Run tests?\n- Extra line?\nOpen: finish release checklist?",
+            "user1",
+        )
+        response = orch.handle_message("/resume", "user1")
+        self.assertEqual(
+            "\n".join(
+                [
+                    "Resume (thread thread-a):",
+                    "Focus: Sprint status",
+                    "Next: finish release checklist",
+                    "Notes:",
+                    "- Ship docs",
+                    "- Run tests",
+                    "Tip: Add a new checkpoint with /anchor when you make progress.",
+                ]
+            ),
+            response.text,
+        )
+        self.assertNotIn("?", response.text)
+
+    def test_resume_omits_next_when_open_absent(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message("/anchor Sprint status\n- Ship docs\n- Run tests", "user1")
+        response = orch.handle_message("/resume", "user1")
+        lines = response.text.splitlines()
+        self.assertEqual("Resume (thread thread-a):", lines[0])
+        self.assertEqual("Focus: Sprint status", lines[1])
+        self.assertNotIn("Next:", response.text)
+        self.assertIn("Notes:", response.text)
+        self.assertNotIn("?", response.text)
+
+    def test_resume_uses_max_two_bullets(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message("/anchor Plan\n- one\n- two\n- three", "user1")
+        response = orch.handle_message("/resume", "user1")
+        self.assertIn("Notes:", response.text)
+        self.assertIn("- one", response.text)
+        self.assertIn("- two", response.text)
+        self.assertNotIn("- three", response.text)
+        self.assertNotIn("?", response.text)
+
+    def test_resume_uses_previous_anchor_bullets_when_latest_empty(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message("/anchor Older\n- old one\n- old two", "user1")
+        orch.handle_message("/anchor Newest", "user1")
+        rows = self.db.list_thread_anchors("thread-a", limit=1)
+        self.assertEqual(1, len(rows))
+        self.db._conn.execute("UPDATE thread_anchors SET bullets = '[]' WHERE id = ?", (rows[0]["id"],))
+        self.db._conn.commit()
+        response = orch.handle_message("/resume", "user1")
+        self.assertIn("Focus: Newest", response.text)
+        self.assertIn("Notes:", response.text)
+        self.assertIn("- old one", response.text)
+        self.assertIn("- old two", response.text)
+        self.assertNotIn("?", response.text)
+
 
 if __name__ == "__main__":
     unittest.main()
