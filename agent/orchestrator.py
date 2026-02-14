@@ -32,6 +32,14 @@ from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
+from agent.epistemics import (
+    CandidateContract,
+    ContextPack,
+    EpistemicMonitor,
+    MessageTurn,
+    apply_epistemic_gate,
+    build_plain_answer_candidate,
+)
 from memory.db import MemoryDB
 
 
@@ -86,6 +94,8 @@ class Orchestrator:
         self._pending_compare: dict[str, dict[str, str]] = {}
         self._last_offer_topic: dict[str, str] = {}
         self._started_at = datetime.now(__import__("datetime").timezone.utc)
+        self._epistemic_monitor = EpistemicMonitor(db)
+        self._epistemic_history: dict[str, list[MessageTurn]] = {}
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -253,6 +263,119 @@ class Orchestrator:
     def _format_opinion_reply(self, facts_text: str, opinion_text: str) -> str:
         return f"Facts:\n{facts_text}\n\nOpinion (opt-in):\n{opinion_text}"
 
+    def _epistemic_recent_messages(self, user_id: str, limit: int = 8) -> tuple[MessageTurn, ...]:
+        turns = self._epistemic_history.get(user_id, [])
+        return tuple(turns[-max(1, int(limit)):])
+
+    def _epistemic_append_turn(self, user_id: str, role: str, text: str) -> None:
+        cleaned = " ".join((text or "").split())
+        if not cleaned or role not in {"user", "assistant"}:
+            return
+        turns = self._epistemic_history.setdefault(user_id, [])
+        turns.append(MessageTurn(role=role, text=cleaned))
+        if len(turns) > 12:
+            del turns[:-12]
+
+    def _epistemic_extract_referents(self, user_id: str) -> tuple[str, ...]:
+        refs: list[str] = []
+        seen: set[str] = set()
+        for turn in self._epistemic_recent_messages(user_id, limit=8):
+            if turn.role != "assistant":
+                continue
+            for match in re.finditer(r"\[(\d+)\]\s+([^|\n]+)", turn.text):
+                candidate = f"[{match.group(1)}] {match.group(2).strip()}"
+                if candidate not in seen:
+                    seen.add(candidate)
+                    refs.append(candidate)
+            for line in turn.text.splitlines():
+                if not line.strip().startswith("- "):
+                    continue
+                candidate = line.strip()[2:].strip()
+                if candidate and candidate not in seen:
+                    seen.add(candidate)
+                    refs.append(candidate)
+        return tuple(refs[:5])
+
+    def _epistemic_tool_failures(self, response: OrchestratorResponse) -> tuple[str, ...]:
+        lower = (response.text or "").strip().lower()
+        signals: list[str] = []
+        patterns = (
+            "runner_not_configured",
+            "permission denied",
+            "skill not found",
+            "function not found",
+            "error:",
+            "traceback",
+        )
+        for pattern in patterns:
+            if pattern in lower:
+                signals.append(pattern)
+        if isinstance(response.data, dict):
+            error = response.data.get("error")
+            if isinstance(error, str) and error.strip():
+                signals.append(error.strip().lower())
+        return tuple(sorted(set(signals)))
+
+    def _epistemic_memory_signals(self, response: OrchestratorResponse) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        text = (response.text or "").strip()
+        lower = text.lower()
+        hits: list[str] = []
+        ambiguous: list[str] = []
+        miss = False
+
+        if "no snapshots found yet" in lower or "no facts available" in lower:
+            miss = True
+        if "what timeframe should i use" in lower:
+            ambiguous.append("timeframe")
+        if "clarification required" in lower:
+            ambiguous.append("clarification_required")
+
+        if isinstance(response.data, dict):
+            data = response.data.get("data")
+            if isinstance(data, dict) and isinstance(data.get("facts"), dict):
+                hits.append("facts")
+            if "baseline_created" in response.data:
+                hits.append("system_facts")
+            if response.data.get("clarification_required") is True:
+                ambiguous.append("clarification_required")
+
+        return tuple(sorted(set(hits))), tuple(sorted(set(ambiguous))), bool(miss)
+
+    def _build_epistemic_context(self, user_id: str, response: OrchestratorResponse) -> ContextPack:
+        hits, ambiguous, miss = self._epistemic_memory_signals(response)
+        return ContextPack(
+            user_id=user_id,
+            active_thread_id=self._last_offer_topic.get(user_id),
+            recent_messages=self._epistemic_recent_messages(user_id, limit=8),
+            memory_hits=hits,
+            memory_ambiguous=ambiguous,
+            memory_miss=miss,
+            tools_available=tuple(sorted(self.skills.keys())),
+            tool_failures=self._epistemic_tool_failures(response),
+            referents=self._epistemic_extract_referents(user_id),
+        )
+
+    def _build_epistemic_candidate(self, response: OrchestratorResponse) -> CandidateContract | str:
+        if isinstance(response.data, dict):
+            candidate_json = response.data.get("epistemic_candidate_json")
+            if isinstance(candidate_json, str) and candidate_json.strip():
+                return candidate_json.strip()
+        text = (response.text or "").strip()
+        if text.startswith("{") and '"kind"' in text:
+            return text
+        return build_plain_answer_candidate(response.text or "")
+
+    def _apply_epistemic_layer(self, user_id: str, user_text: str, response: OrchestratorResponse) -> OrchestratorResponse:
+        ctx = self._build_epistemic_context(user_id, response)
+        candidate = self._build_epistemic_candidate(response)
+        decision = apply_epistemic_gate(user_text, ctx, candidate)
+        try:
+            self._epistemic_monitor.record(user_id, decision)
+        except Exception:
+            pass
+        self._epistemic_append_turn(user_id, "user", user_text)
+        self._epistemic_append_turn(user_id, "assistant", decision.user_text)
+        return OrchestratorResponse(decision.user_text, response.data)
 
     def _deliver_pending_opinion(
         self, user_id: str, pending: opinion_gate.PendingOpinion
@@ -459,6 +582,10 @@ class Orchestrator:
             self._runner = None
 
     def handle_message(self, text: str, user_id: str) -> OrchestratorResponse:
+        response = self._handle_message_impl(text, user_id)
+        return self._apply_epistemic_layer(user_id, text, response)
+
+    def _handle_message_impl(self, text: str, user_id: str) -> OrchestratorResponse:
         self._runner = Runner()
         try:
             override, cleaned_text = memory_ingest.parse_memory_override(text)
@@ -1353,7 +1480,7 @@ class Orchestrator:
             if decision.get("type") == "command_alias":
                 command = decision.get("command") or ""
                 if command:
-                    return self.handle_message(command, user_id)
+                    return self._handle_message_impl(command, user_id)
                 return OrchestratorResponse("Try /help")
 
             if decision.get("type") == "compare_now_pending":

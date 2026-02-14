@@ -42,7 +42,8 @@ class OpenAIClient(LLMClient):
         system = (
             "You are a parser that converts user text into a JSON intent. "
             "Return a JSON object with keys: command, args. "
-            "If uncertain, return null."
+            "If uncertain, return null. "
+            "Output strict JSON only; no prose, no markdown."
         )
         response = client.responses.create(
             model=self.model,
