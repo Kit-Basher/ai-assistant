@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS user_prefs (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS thread_prefs (
+    thread_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, key)
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,

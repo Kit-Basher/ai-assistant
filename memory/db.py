@@ -92,6 +92,7 @@ class MemoryDB:
         self._ensure_reminder_columns()
         self._ensure_preference_columns()
         self._ensure_user_prefs_table()
+        self._ensure_thread_prefs_table()
         self._ensure_open_loop_columns()
         self._ensure_schema_meta()
         self._conn.commit()
@@ -309,6 +310,19 @@ class MemoryDB:
             """
         )
 
+    def _ensure_thread_prefs_table(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_prefs (
+                thread_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, key)
+            )
+            """
+        )
+
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
         cols = {row["name"] for row in cur.fetchall()}
@@ -382,6 +396,38 @@ class MemoryDB:
 
     def clear_user_prefs(self) -> None:
         self._conn.execute("DELETE FROM user_prefs")
+        self._commit_if_needed()
+
+    def set_thread_pref(self, thread_id: str, key: str, value: str) -> None:
+        now = self._now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO thread_prefs (thread_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+            ON CONFLICT(thread_id, key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (thread_id, key, value, now),
+        )
+        self._commit_if_needed()
+
+    def get_thread_pref(self, thread_id: str, key: str) -> str | None:
+        cur = self._conn.execute(
+            "SELECT value FROM thread_prefs WHERE thread_id = ? AND key = ?",
+            (thread_id, key),
+        )
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+    def list_thread_prefs(self, thread_id: str) -> dict[str, str]:
+        cur = self._conn.execute(
+            "SELECT key, value FROM thread_prefs WHERE thread_id = ? ORDER BY key ASC",
+            (thread_id,),
+        )
+        return {str(row["key"]): str(row["value"]) for row in cur.fetchall()}
+
+    def clear_thread_prefs(self, thread_id: str) -> None:
+        self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ?", (thread_id,))
         self._commit_if_needed()
 
     def log_activity(self, event_type: str, payload: dict[str, Any]) -> None:

@@ -33,7 +33,16 @@ from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_summary
-from agent.prefs import ALLOWED_PREF_KEYS, get_bool_pref, list_prefs, reset_prefs, set_pref
+from agent.prefs import (
+    ALLOWED_PREF_KEYS,
+    get_pref_effective,
+    get_pref_effective_with_source,
+    list_prefs,
+    reset_prefs,
+    reset_thread_prefs,
+    set_pref,
+    set_thread_pref,
+)
 from agent.epistemics import (
     CandidateContract,
     Claim,
@@ -182,12 +191,19 @@ class Orchestrator:
             return body
         return paragraphs[0]
 
-    def _formatting_prefs(self) -> dict[str, bool]:
+    def _active_thread_id_for_user(self, user_id: str) -> str:
+        state = self._epistemic_thread_state.get(user_id) or {}
+        value = state.get("active_thread_id")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        return self._default_thread_id(user_id)
+
+    def _formatting_prefs(self, thread_id: str | None) -> dict[str, bool]:
         return {
-            "show_next_action": get_bool_pref(self.db, "show_next_action", True),
-            "show_summary": get_bool_pref(self.db, "show_summary", True),
-            "terse_mode": get_bool_pref(self.db, "terse_mode", False),
-            "commands_in_codeblock": get_bool_pref(self.db, "commands_in_codeblock", False),
+            "show_next_action": bool(get_pref_effective(self.db, thread_id, "show_next_action", True)),
+            "show_summary": bool(get_pref_effective(self.db, thread_id, "show_summary", True)),
+            "terse_mode": bool(get_pref_effective(self.db, thread_id, "terse_mode", False)),
+            "commands_in_codeblock": bool(get_pref_effective(self.db, thread_id, "commands_in_codeblock", False)),
         }
 
     def _context(self) -> dict[str, Any]:
@@ -743,8 +759,11 @@ class Orchestrator:
         candidate = self._build_epistemic_candidate(response, ctx)
         decision = apply_epistemic_gate(user_text, ctx, candidate)
         user_visible_text = decision.user_text
-        if not decision.intercepted and isinstance(candidate, CandidateContract):
-            prefs = self._formatting_prefs()
+        skip_friction_formatting = bool(
+            isinstance(response.data, dict) and response.data.get("skip_friction_formatting") is True
+        )
+        if not decision.intercepted and isinstance(candidate, CandidateContract) and not skip_friction_formatting:
+            prefs = self._formatting_prefs(ctx.active_thread_id)
             show_summary = prefs["show_summary"] and self._summary_enabled()
             show_next = prefs["show_next_action"] and self._next_action_enabled()
             body_text = self._apply_commands_in_codeblock_pref(
@@ -1254,26 +1273,87 @@ class Orchestrator:
                     for key in ALLOWED_PREF_KEYS:
                         value = "on" if prefs.get(key, "off") == "on" else "off"
                         lines.append(f"{key}: {value}")
-                    return OrchestratorResponse("\n".join(lines))
+                    return OrchestratorResponse(
+                        "\n".join(lines),
+                        {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
+                    )
 
                 if cmd.name == "prefs_set":
                     parts = (cmd.args or "").strip().split()
                     if len(parts) != 2:
-                        return OrchestratorResponse("Usage: /prefs_set <key> <on|off>")
+                        return OrchestratorResponse(
+                            "Usage: /prefs_set <key> <on|off>",
+                            {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
+                        )
                     key = parts[0].strip()
                     value = parts[1].strip().lower()
                     if key not in ALLOWED_PREF_KEYS:
                         return OrchestratorResponse(
-                            "Unknown preference key. Allowed: " + ", ".join(ALLOWED_PREF_KEYS)
+                            "Unknown preference key. Allowed: " + ", ".join(ALLOWED_PREF_KEYS),
+                            {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
                         )
                     if value not in {"on", "off"}:
-                        return OrchestratorResponse("Usage: /prefs_set <key> <on|off>")
+                        return OrchestratorResponse(
+                            "Usage: /prefs_set <key> <on|off>",
+                            {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
+                        )
                     set_pref(self.db, key, value)
-                    return OrchestratorResponse(f"{key}: {value}")
+                    return OrchestratorResponse(
+                        f"{key}: {value}",
+                        {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
+                    )
 
                 if cmd.name == "prefs_reset":
                     reset_prefs(self.db)
-                    return OrchestratorResponse("Preferences reset to defaults.")
+                    return OrchestratorResponse(
+                        "Preferences reset to defaults.",
+                        {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
+                    )
+
+                if cmd.name == "prefs_thread":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    lines = []
+                    for key in ALLOWED_PREF_KEYS:
+                        value, source = get_pref_effective_with_source(self.db, thread_id, key)
+                        lines.append(f"{key}: {value} (source: {source})")
+                    return OrchestratorResponse(
+                        "\n".join(lines),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "prefs_thread_set":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    parts = (cmd.args or "").strip().split()
+                    if len(parts) != 2:
+                        return OrchestratorResponse(
+                            "Usage: /prefs_thread_set <key> <on|off>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    key = parts[0].strip()
+                    value = parts[1].strip().lower()
+                    if key not in ALLOWED_PREF_KEYS:
+                        return OrchestratorResponse(
+                            "Unknown preference key. Allowed: " + ", ".join(ALLOWED_PREF_KEYS),
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    if value not in {"on", "off"}:
+                        return OrchestratorResponse(
+                            "Usage: /prefs_thread_set <key> <on|off>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    set_thread_pref(self.db, thread_id, key, value)
+                    return OrchestratorResponse(
+                        f"{key}: {value} (thread)",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "prefs_thread_reset":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    reset_thread_prefs(self.db, thread_id)
+                    return OrchestratorResponse(
+                        "Thread preferences reset.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
 
                 if cmd.name == "epistemics_report":
                     return OrchestratorResponse(build_epistemics_report(self.db))
