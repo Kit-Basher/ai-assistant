@@ -27,6 +27,32 @@ python3 -m agent.epistemics.canary
 python3 -m agent.friction.canary
 ```
 
+## v0.2.3 — Thread Navigation (threads index, switch, labels)
+
+Thread navigation now supports explicit, deterministic context control:
+
+- `/threads` lists recent threads with:
+  - `thread_id`
+  - `last_ts`
+  - `Label: <label|none>`
+  - `Focus: <latest anchor title|none>`
+  - line format: `1) <thread_id>  <last_ts>  Label: <label|none>  Focus: <title|none>`
+- `/thread_use <thread_id>` explicitly switches active thread without cross-thread blending.
+- `/thread_label <label>` sets a persisted per-thread label.
+- `/thread_unlabel` clears the current thread label.
+- Determinism/safety:
+  - outputs are normalized to remove `?`
+  - command replies use `skip_friction_formatting`
+  - no LLM calls or inferred labels
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## 1) Overview
 
 This checkpoint captures the stable "Good Assistant foundation" on branch `brief-v0.2-clean`.
