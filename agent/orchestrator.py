@@ -32,6 +32,7 @@ from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
+from agent.friction import compute_next_action
 from agent.epistemics import (
     CandidateContract,
     Claim,
@@ -100,6 +101,15 @@ class Orchestrator:
         self._epistemic_monitor = EpistemicMonitor(db)
         self._epistemic_history: dict[tuple[str, str], list[MessageTurn]] = {}
         self._epistemic_thread_state: dict[str, dict[str, str | None]] = {}
+
+    @staticmethod
+    def _next_action_enabled() -> bool:
+        raw = (os.getenv("FRiction_NEXT_ACTION", "") or "").strip().lower()
+        if not raw:
+            raw = (os.getenv("FRICTION_NEXT_ACTION", "") or "").strip().lower()
+        if not raw:
+            return True
+        return raw not in {"0", "false", "off", "no"}
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -653,6 +663,16 @@ class Orchestrator:
         ctx = self._build_epistemic_context(user_id, response)
         candidate = self._build_epistemic_candidate(response, ctx)
         decision = apply_epistemic_gate(user_text, ctx, candidate)
+        user_visible_text = decision.user_text
+        if (
+            not decision.intercepted
+            and self._next_action_enabled()
+            and isinstance(candidate, CandidateContract)
+            and "Next:" not in user_visible_text
+        ):
+            next_action = compute_next_action(user_text, ctx, candidate)
+            if next_action:
+                user_visible_text = f"{user_visible_text}\n\nNext: {next_action}"
         try:
             self._epistemic_monitor.record(user_id, decision, active_thread_id=ctx.active_thread_id)
         except Exception:
@@ -661,8 +681,8 @@ class Orchestrator:
         user_turn_id = ctx.recent_turn_ids[-1] if ctx.recent_turn_ids else self._next_turn_id(user_id, thread_id, "user")
         self._epistemic_append_turn(user_id, thread_id, "user", user_text, turn_id=user_turn_id)
         assistant_turn_id = self._next_turn_id(user_id, thread_id, "assistant")
-        self._epistemic_append_turn(user_id, thread_id, "assistant", decision.user_text, turn_id=assistant_turn_id)
-        return OrchestratorResponse(decision.user_text, response.data)
+        self._epistemic_append_turn(user_id, thread_id, "assistant", user_visible_text, turn_id=assistant_turn_id)
+        return OrchestratorResponse(user_visible_text, response.data)
 
     def _deliver_pending_opinion(
         self, user_id: str, pending: opinion_gate.PendingOpinion
