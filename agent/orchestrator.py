@@ -32,7 +32,7 @@ from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
-from agent.friction import compute_next_action
+from agent.friction import compute_next_action, compute_summary
 from agent.epistemics import (
     CandidateContract,
     Claim,
@@ -107,6 +107,13 @@ class Orchestrator:
         raw = (os.getenv("FRiction_NEXT_ACTION", "") or "").strip().lower()
         if not raw:
             raw = (os.getenv("FRICTION_NEXT_ACTION", "") or "").strip().lower()
+        if not raw:
+            return True
+        return raw not in {"0", "false", "off", "no"}
+
+    @staticmethod
+    def _summary_enabled() -> bool:
+        raw = (os.getenv("FRICTION_SUMMARY", "") or "").strip().lower()
         if not raw:
             return True
         return raw not in {"0", "false", "off", "no"}
@@ -664,6 +671,15 @@ class Orchestrator:
         candidate = self._build_epistemic_candidate(response, ctx)
         decision = apply_epistemic_gate(user_text, ctx, candidate)
         user_visible_text = decision.user_text
+        if (
+            not decision.intercepted
+            and self._summary_enabled()
+            and isinstance(candidate, CandidateContract)
+            and not user_visible_text.startswith("In short: ")
+        ):
+            summary_line = compute_summary(candidate, user_visible_text)
+            if summary_line:
+                user_visible_text = f"{summary_line}\n\n{user_visible_text}"
         if (
             not decision.intercepted
             and self._next_action_enabled()
