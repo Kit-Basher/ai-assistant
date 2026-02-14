@@ -32,7 +32,7 @@ from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
-from agent.friction import compute_next_action, compute_plan, compute_summary
+from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
     get_pref_effective,
@@ -155,6 +155,20 @@ class Orchestrator:
         if not raw:
             return True
         return raw not in {"0", "false", "off", "no"}
+
+    @staticmethod
+    def _options_enabled() -> bool:
+        raw = (os.getenv("FRICTION_OPTIONS", "") or "").strip().lower()
+        if not raw:
+            return True
+        return raw not in {"0", "false", "off", "no"}
+
+    @staticmethod
+    def _normalize_friction_text(text: str | None) -> str:
+        if not text:
+            return ""
+        value = " ".join(text.lower().replace("\n", " ").split())
+        return re.sub(r"[^a-z0-9 ./_\\-]+", " ", value).strip()
 
     @staticmethod
     def _is_command_line(line: str) -> bool:
@@ -774,6 +788,7 @@ class Orchestrator:
             show_summary = prefs["show_summary"] and self._summary_enabled()
             show_next = prefs["show_next_action"] and self._next_action_enabled()
             show_plan = self._plan_enabled()
+            show_options = self._options_enabled()
             body_text = self._apply_commands_in_codeblock_pref(
                 user_visible_text,
                 prefs["commands_in_codeblock"],
@@ -783,7 +798,34 @@ class Orchestrator:
             if prefs["terse_mode"] and summary_line:
                 show_plan = False
             plan_steps = compute_plan(user_text, candidate, body_text) if show_plan else None
+            if prefs["terse_mode"] and plan_steps:
+                show_options = False
             next_action = compute_next_action(user_text, ctx, candidate) if show_next else None
+            options = compute_options(user_text, candidate, body_text) if show_options else None
+            if options:
+                plan_norm = {
+                    self._normalize_friction_text(step)
+                    for step in (plan_steps or [])
+                    if self._normalize_friction_text(step)
+                }
+                next_norm = self._normalize_friction_text(next_action)
+                filtered_options: list[str] = []
+                seen: set[str] = set()
+                for option in options:
+                    normalized = self._normalize_friction_text(option)
+                    if not normalized:
+                        continue
+                    if normalized in seen:
+                        continue
+                    if normalized in plan_norm:
+                        continue
+                    if next_norm and (normalized == next_norm or normalized in next_norm or next_norm in normalized):
+                        continue
+                    seen.add(normalized)
+                    filtered_options.append(option.replace("?", "").strip())
+                    if len(filtered_options) >= 3:
+                        break
+                options = filtered_options if len(filtered_options) >= 2 else None
             parts: list[str] = []
             if summary_line:
                 parts.append(summary_line)
@@ -791,6 +833,11 @@ class Orchestrator:
             if plan_steps:
                 lines = [f"{idx}. {step}" for idx, step in enumerate(plan_steps, start=1)]
                 parts.append("Plan:\n" + "\n".join(lines))
+            if options:
+                labels = ("A", "B", "C")
+                option_lines = [f"{labels[idx]}) {option}" for idx, option in enumerate(options)]
+                option_lines.append("Choose A, B, or C.")
+                parts.append("Options:\n" + "\n".join(option_lines))
             if next_action:
                 parts.append(f"Next: {next_action}")
             user_visible_text = "\n\n".join(part for part in parts if part and part.strip())
