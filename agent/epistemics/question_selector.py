@@ -15,12 +15,15 @@ _PRIORITY = (
 
 
 def _normalize_one_question(value: str) -> str:
-    question = " ".join((value or "").strip().split())
+    question = " ".join((value or "").replace("\n", " ").split())
     if not question:
         question = "What exact outcome do you want me to produce"
     if "?" in question:
+        # Drop all question suffixes beyond the first.
         question = question.split("?", 1)[0]
-    question = question.rstrip(".! ")
+    question = question.replace("?", "").strip().rstrip(".! ")
+    if not question:
+        question = "What exact outcome do you want me to produce"
     return f"{question}?"
 
 
@@ -77,4 +80,3 @@ def select_one_question(
         return _normalize_one_question("Which source should I rely on for that claim")
 
     return _normalize_one_question("What exact outcome do you want me to produce")
-

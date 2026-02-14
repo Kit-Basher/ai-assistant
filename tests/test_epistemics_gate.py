@@ -4,6 +4,7 @@ import unittest
 
 from agent.epistemics.contract import build_plain_answer_candidate
 from agent.epistemics.gate import apply_epistemic_gate
+from agent.epistemics.question_selector import select_one_question
 from agent.epistemics.types import CandidateContract, ContextPack, ThreadRef
 
 
@@ -24,11 +25,13 @@ def _base_ctx(**kwargs) -> ContextPack:
 
 
 def _assert_intercept_shape(test: unittest.TestCase, text: str) -> None:
-    test.assertIn("I’m not sure.", text)
+    lines = text.splitlines()
+    test.assertEqual(3, len(lines))
+    test.assertEqual("I’m not sure.", lines[0])
+    test.assertEqual("", lines[1])
+    test.assertEqual(lines[2], lines[2].strip())
+    test.assertTrue(lines[2].endswith("?"))
     test.assertEqual(1, text.count("?"))
-    parts = text.split("\n\n")
-    test.assertEqual(2, len(parts))
-    test.assertTrue(parts[1].strip().endswith("?"))
 
 
 class TestEpistemicGate(unittest.TestCase):
@@ -79,6 +82,31 @@ class TestEpistemicGate(unittest.TestCase):
         decision = apply_epistemic_gate("run the operation", ctx, candidate)
         self.assertTrue(decision.intercepted)
         self.assertIn("TOOL_FAILURE_OR_UNAVAILABLE", decision.reasons)
+        _assert_intercept_shape(self, decision.user_text)
+
+    def test_selector_normalizes_multiple_question_marks(self) -> None:
+        ctx = _base_ctx()
+        candidate = CandidateContract(
+            kind="clarify",
+            final_answer="",
+            clarifying_question="Which one?? and why?",
+            claims=tuple(),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        question = select_one_question("pick one", ctx, candidate, tuple())
+        self.assertEqual(1, question.count("?"))
+        self.assertTrue(question.endswith("?"))
+        self.assertNotIn("\n", question)
+
+    def test_soft_cross_thread_phrase_triggers_intercept(self) -> None:
+        ctx = _base_ctx(active_thread_id="thread-1")
+        candidate = build_plain_answer_candidate("As we discussed earlier, continue with the same plan.")
+        decision = apply_epistemic_gate("summarize this", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("CROSS_THREAD_RISK", decision.reasons)
         _assert_intercept_shape(self, decision.user_text)
 
 

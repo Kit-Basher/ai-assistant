@@ -34,6 +34,22 @@ class TestEpistemicsContract(unittest.TestCase):
         self.assertIn("ASSUMPTIONS_REQUIRE_CLARIFY", validation)
         self.assertIn("ASSUMPTIONS_REQUIRE_QUESTION", validation)
 
+    def test_clarify_final_answer_leakage_rejected(self) -> None:
+        payload = {
+            "kind": "clarify",
+            "final_answer": "You should do this next.",
+            "clarifying_question": "Which item should I use?",
+            "claims": [],
+            "assumptions": [],
+            "unresolved_refs": [],
+            "thread_refs": [],
+        }
+        parsed, errors = parse_candidate_json(json.dumps(payload))
+        self.assertEqual(tuple(), errors)
+        self.assertIsNotNone(parsed)
+        validation = validate_candidate(parsed)
+        self.assertIn("CLARIFY_FINAL_ANSWER_NOT_ALLOWED", validation)
+
 
 if __name__ == "__main__":
     unittest.main()

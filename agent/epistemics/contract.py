@@ -17,6 +17,8 @@ _REQUIRED_KEYS = (
     "thread_refs",
 )
 
+_CLARIFY_FINAL_ANSWER_WHITELIST = {"", "Okay.", "Understood."}
+
 
 def is_trivially_definitional(text: str) -> bool:
     cleaned = (text or "").strip().lower()
@@ -163,8 +165,9 @@ def validate_candidate(candidate: CandidateContract) -> tuple[str, ...]:
         question = (candidate.clarifying_question or "").strip()
         if not question:
             errors.append("CLARIFY_REQUIRES_QUESTION")
-        if candidate.final_answer.strip():
-            errors.append("CLARIFY_FINAL_ANSWER_MUST_BE_EMPTY")
+        final_answer = (candidate.final_answer or "").strip()
+        if final_answer not in _CLARIFY_FINAL_ANSWER_WHITELIST:
+            errors.append("CLARIFY_FINAL_ANSWER_NOT_ALLOWED")
         if question.count("?") != 1:
             errors.append("CLARIFY_SINGLE_QUESTION")
 
@@ -182,4 +185,3 @@ def build_plain_answer_candidate(text: str) -> CandidateContract:
         thread_refs=tuple(),
         raw_json=None,
     )
-

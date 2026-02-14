@@ -14,6 +14,26 @@ _INTERCEPT_TEXT_PREFIX = "I’m not sure."
 _SCORE_THRESHOLD = 0.55
 
 
+def _sanitize_intercept_question(question: str | None) -> str:
+    line = " ".join((question or "").replace("\n", " ").split())
+    if not line:
+        line = "What exact detail should I use"
+    if "?" in line:
+        line = line.split("?", 1)[0]
+    line = line.replace("?", "").strip().rstrip(".! ")
+    if not line:
+        line = "What exact detail should I use"
+    return f"{line}?"
+
+
+def _render_intercept_text(question: str | None) -> str:
+    normalized = _sanitize_intercept_question(question)
+    if normalized.count("?") != 1:
+        normalized = _sanitize_intercept_question(normalized)
+    # Spec lock: exactly 3 lines with blank middle line.
+    return "\n".join([_INTERCEPT_TEXT_PREFIX.rstrip(), "", normalized.rstrip()])
+
+
 def apply_epistemic_gate(
     user_text: str,
     ctx: ContextPack,
@@ -54,7 +74,7 @@ def apply_epistemic_gate(
     if should_intercept:
         reason_codes = tuple(sorted(reason_set))
         question = select_one_question(user_text, ctx, parsed, reason_codes)
-        user_visible = f"{_INTERCEPT_TEXT_PREFIX}\n\n{question}"
+        user_visible = _render_intercept_text(question)
         return GateDecision(
             intercepted=True,
             user_text=user_visible,
@@ -74,4 +94,3 @@ def apply_epistemic_gate(
         question=None,
         contract_errors=tuple(sorted(set(contract_errors + validation_errors))),
     )
-

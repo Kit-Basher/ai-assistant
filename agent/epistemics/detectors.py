@@ -9,6 +9,19 @@ from agent.epistemics.types import CandidateContract, ContextPack, DetectorReaso
 _PRONOUNS = {"it", "that", "those", "them"}
 _SCHEDULE_WORDS = ("schedule", "remind", "/remind")
 _FILE_OP_WORDS = ("delete", "remove", "move", "rename", "copy")
+_SOFT_CROSS_THREAD_PHRASES = (
+    "as we discussed",
+    "earlier you said",
+    "previously",
+    "last time",
+)
+_EXPLICIT_CROSS_THREAD_REQUESTS = (
+    "other thread",
+    "previous thread",
+    "previous conversation",
+    "earlier conversation",
+    "cross-thread",
+)
 
 
 def _has_datetime_hint(text: str) -> bool:
@@ -139,6 +152,27 @@ def detect_cross_thread_risk(user_text: str, ctx: ContextPack, candidate: Candid
                 hard=True,
             )
         )
+    if ctx.active_thread_id:
+        explicit_cross_thread_request = any(token in lowered for token in _EXPLICIT_CROSS_THREAD_REQUESTS)
+        candidate_text = " ".join(
+            [
+                candidate.final_answer,
+                candidate.clarifying_question or "",
+                *[claim.text for claim in candidate.claims],
+            ]
+        ).lower()
+        if not explicit_cross_thread_request:
+            for phrase in _SOFT_CROSS_THREAD_PHRASES:
+                if phrase in candidate_text:
+                    reasons.append(
+                        DetectorReason(
+                            code="CROSS_THREAD_RISK",
+                            detail="Soft cross-thread reference requires confirmation.",
+                            evidence=phrase,
+                            hard=True,
+                        )
+                    )
+                    break
     return tuple(reasons)
 
 
