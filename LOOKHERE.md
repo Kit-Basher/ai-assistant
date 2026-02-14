@@ -4,6 +4,10 @@
 This is a local‑first Telegram assistant designed to be trustable and auditable.  
 It runs on your machine, uses explicit confirmations for sensitive actions, and keeps a clear log of what happened.
 
+## Current Status (Authoritative)
+- Use `PROJECT_STATUS.md` for current branch status, active work, and latest test health.
+- If another status/tracking doc conflicts, prefer `PROJECT_STATUS.md`.
+
 ## Safety Model (Plain English)
 - No surprise actions: sensitive operations require explicit confirmation.
 - Facts → opinions: the assistant will not give advice without facts first.

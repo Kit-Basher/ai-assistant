@@ -2,6 +2,10 @@
 
 A minimal Telegram-first personal agent with SQLite memory, a safe skills manifest, and a systemd service for 24/7 uptime.
 
+## Current Status (Authoritative)
+- For current branch state, shipped capabilities, in-progress work, and test health, use `PROJECT_STATUS.md`.
+- If any other project-tracking doc disagrees, `PROJECT_STATUS.md` is the source of truth.
+
 ## Features (v0.1)
 - Telegram bot with slash commands
 - Natural language intent routing for common requests (non-slash messages)
