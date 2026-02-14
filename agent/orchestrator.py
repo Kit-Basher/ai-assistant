@@ -5,6 +5,7 @@ import re
 from typing import Any
 import os
 import json
+import shlex
 import uuid
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -237,6 +238,81 @@ class Orchestrator:
             "thread_created_at": now_iso,
             "thread_label": None,
         }
+
+    def _create_new_thread_id_for_user(self, user_id: str) -> str:
+        base = self._default_thread_id(user_id)
+        prefix = f"{base}:t"
+        max_idx = 0
+
+        for row in self.db.list_recent_threads(limit=1000):
+            if not isinstance(row, dict):
+                continue
+            thread_id = str(row.get("thread_id") or "").strip()
+            if not thread_id.startswith(prefix):
+                continue
+            suffix = thread_id[len(prefix):]
+            if suffix.isdigit():
+                max_idx = max(max_idx, int(suffix))
+
+        for (known_user, thread_id) in self._epistemic_history.keys():
+            if known_user != user_id:
+                continue
+            if not thread_id.startswith(prefix):
+                continue
+            suffix = thread_id[len(prefix):]
+            if suffix.isdigit():
+                max_idx = max(max_idx, int(suffix))
+
+        state = self._epistemic_thread_state.get(user_id) or {}
+        current_thread = str(state.get("active_thread_id") or "").strip()
+        if current_thread.startswith(prefix):
+            suffix = current_thread[len(prefix):]
+            if suffix.isdigit():
+                max_idx = max(max_idx, int(suffix))
+
+        return f"{prefix}{max_idx + 1}"
+
+    def _parse_thread_new_args(self, raw_args: str) -> tuple[str, dict[str, str], str]:
+        args = raw_args or ""
+        header_line, _, body = args.partition("\n")
+        header_line = header_line.strip()
+        body_text = body if body else ""
+
+        try:
+            tokens = shlex.split(header_line)
+        except Exception:
+            tokens = header_line.split()
+
+        label_tokens: list[str] = []
+        pref_flags: dict[str, str] = {}
+        flag_map = {
+            "terse": "terse_mode",
+            "summary": "show_summary",
+            "next": "show_next_action",
+            "codeblock": "commands_in_codeblock",
+        }
+        idx = 0
+        while idx < len(tokens):
+            token = tokens[idx]
+            if token.startswith("--"):
+                flag = token[2:].strip().lower()
+                next_token = tokens[idx + 1].strip().lower() if idx + 1 < len(tokens) else None
+                if flag in flag_map and next_token in {"on", "off"}:
+                    pref_flags[flag_map[flag]] = next_token
+                    idx += 2
+                    continue
+                if idx + 1 < len(tokens) and not tokens[idx + 1].startswith("--"):
+                    idx += 2
+                else:
+                    idx += 1
+                continue
+            label_tokens.append(token)
+            idx += 1
+
+        raw_label = " ".join(label_tokens).strip()
+        normalized_label = self._normalize_thread_label(raw_label) if raw_label else ""
+        final_label = normalized_label if normalized_label else "Untitled"
+        return final_label, pref_flags, body_text
 
     def _formatting_prefs(self, thread_id: str | None) -> dict[str, bool]:
         return {
@@ -1450,6 +1526,50 @@ class Orchestrator:
                     return OrchestratorResponse(
                         f"Active thread set to {target_thread_id}.",
                         {"skip_friction_formatting": True, "thread_id": target_thread_id},
+                    )
+
+                if cmd.name == "thread_new":
+                    label, pref_flags, body_text = self._parse_thread_new_args(cmd.args or "")
+                    thread_id = self._create_new_thread_id_for_user(user_id)
+                    self._set_active_thread_id_for_user(user_id, thread_id)
+                    self.db.set_thread_label(thread_id, label)
+
+                    for pref_key in (
+                        "terse_mode",
+                        "show_summary",
+                        "show_next_action",
+                        "commands_in_codeblock",
+                    ):
+                        value = pref_flags.get(pref_key)
+                        if value in {"on", "off"}:
+                            set_thread_pref(self.db, thread_id, pref_key, value)
+
+                    anchor_created = False
+                    if body_text.strip():
+                        parsed_anchor = parse_anchor_input(f"{label}\n{body_text}")
+                        if parsed_anchor is not None:
+                            _, bullets, open_line = parsed_anchor
+                            create_anchor(self.db, thread_id, label, bullets, open_line)
+                            anchor_created = True
+
+                    prefs = self._formatting_prefs(thread_id)
+                    terse = "on" if prefs.get("terse_mode") else "off"
+                    summary = "on" if prefs.get("show_summary") else "off"
+                    next_action = "on" if prefs.get("show_next_action") else "off"
+                    codeblock = "on" if prefs.get("commands_in_codeblock") else "off"
+                    lines = [
+                        "New thread created:",
+                        f"Thread: {thread_id}",
+                        f"Label: {label}",
+                        f"Prefs: terse={terse} summary={summary} next={next_action} codeblock={codeblock}",
+                    ]
+                    if anchor_created:
+                        lines.append("Anchor initialized.")
+                    lines.append("Use /resume to continue.")
+                    text_out = "\n".join(lines).replace("?", "")
+                    return OrchestratorResponse(
+                        text_out,
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
                 if cmd.name == "thread_label":
