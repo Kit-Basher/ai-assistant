@@ -1,36 +1,71 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import os
 from typing import Any
 
 from agent.epistemics.types import GateDecision
 
 
 class EpistemicMonitor:
+    @staticmethod
+    def _safe_env_int(name: str, default: int, low: int, high: int) -> int:
+        raw = (os.getenv(name, "") or "").strip()
+        if not raw:
+            return int(default)
+        try:
+            value = int(raw)
+        except Exception:
+            return int(default)
+        return max(low, min(high, value))
+
+    @staticmethod
+    def _safe_env_float(name: str, default: float, low: float, high: float) -> float:
+        raw = (os.getenv(name, "") or "").strip()
+        if not raw:
+            return float(default)
+        try:
+            value = float(raw)
+        except Exception:
+            return float(default)
+        return max(low, min(high, value))
+
     def __init__(
         self,
         db: Any,
-        window_size: int = 50,
-        spike_threshold: float = 0.40,
+        window_size: int | None = None,
+        spike_threshold: float | None = None,
         spike_min_samples: int = 10,
     ) -> None:
         self.db = db
-        self.window_size = int(window_size)
-        self.spike_threshold = float(spike_threshold)
+        self.window_size = (
+            int(window_size)
+            if window_size is not None
+            else self._safe_env_int("ROLLING_WINDOW_SIZE", 50, 1, 1000)
+        )
+        self.spike_threshold = (
+            float(spike_threshold)
+            if spike_threshold is not None
+            else self._safe_env_float("SPIKE_THRESHOLD", 0.35, 0.0, 1.0)
+        )
         self.spike_min_samples = int(spike_min_samples)
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def record(self, user_id: str, decision: GateDecision) -> None:
+    def record(self, user_id: str, decision: GateDecision, active_thread_id: str | None = None) -> None:
         now_iso = self._now_iso()
         status = "intercepted" if decision.intercepted else "passed"
+        reasons = sorted(set(decision.reasons))
+        hard_reasons = sorted(set(decision.hard_reasons))
         details = {
             "event_type": "epistemic_gate",
+            "active_thread_id": active_thread_id,
             "intercepted": bool(decision.intercepted),
-            "score": float(decision.score),
-            "reasons": list(decision.reasons),
-            "hard_reasons": list(decision.hard_reasons),
+            "uncertainty_score": float(decision.score),
+            "reasons": reasons,
+            "hard_reasons": hard_reasons,
+            "candidate_kind": decision.candidate_kind,
             "contract_errors": list(decision.contract_errors),
         }
         try:
@@ -51,9 +86,9 @@ class EpistemicMonitor:
                 {
                     "user_id": user_id,
                     "intercepted": bool(decision.intercepted),
-                    "score": float(decision.score),
-                    "reasons": list(decision.reasons),
-                    "hard_reasons": list(decision.hard_reasons),
+                    "uncertainty_score": float(decision.score),
+                    "reasons": reasons,
+                    "hard_reasons": hard_reasons,
                 },
             )
         except Exception:
@@ -104,4 +139,3 @@ class EpistemicMonitor:
             self.db.insert_anomaly_events(user_id=user_id, observed_at=now_iso, events=[event])
         except Exception:
             pass
-

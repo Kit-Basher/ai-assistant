@@ -39,6 +39,7 @@ from agent.epistemics import (
     MessageTurn,
     apply_epistemic_gate,
     build_plain_answer_candidate,
+    build_epistemics_report,
 )
 from memory.db import MemoryDB
 
@@ -370,7 +371,7 @@ class Orchestrator:
         candidate = self._build_epistemic_candidate(response)
         decision = apply_epistemic_gate(user_text, ctx, candidate)
         try:
-            self._epistemic_monitor.record(user_id, decision)
+            self._epistemic_monitor.record(user_id, decision, active_thread_id=ctx.active_thread_id)
         except Exception:
             pass
         self._epistemic_append_turn(user_id, "user", user_text)
@@ -852,6 +853,9 @@ class Orchestrator:
                             f"- {entry['created_at']} {entry['action_type']}:{entry['action_id']} {entry['status']}"
                         )
                     return OrchestratorResponse("\n".join(lines))
+
+                if cmd.name == "epistemics_report":
+                    return OrchestratorResponse(build_epistemics_report(self.db))
 
                 if cmd.name == "status":
                     writes_flag = "on" if self.enable_writes else "off"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 
 from agent.epistemics.contract import is_trivially_definitional
@@ -22,6 +23,20 @@ _EXPLICIT_CROSS_THREAD_REQUESTS = (
     "earlier conversation",
     "cross-thread",
 )
+
+
+def _soft_cross_thread_phrases() -> tuple[str, ...]:
+    raw = (os.getenv("SOFT_CROSS_THREAD_PHRASES", "") or "").strip()
+    if not raw:
+        return _SOFT_CROSS_THREAD_PHRASES
+    parsed = [
+        token.strip().lower()
+        for token in re.split(r"[|,]", raw)
+        if token and token.strip()
+    ]
+    if not parsed:
+        return _SOFT_CROSS_THREAD_PHRASES
+    return tuple(parsed)
 
 
 def _has_datetime_hint(text: str) -> bool:
@@ -162,7 +177,7 @@ def detect_cross_thread_risk(user_text: str, ctx: ContextPack, candidate: Candid
             ]
         ).lower()
         if not explicit_cross_thread_request:
-            for phrase in _SOFT_CROSS_THREAD_PHRASES:
+            for phrase in _soft_cross_thread_phrases():
                 if phrase in candidate_text:
                     reasons.append(
                         DetectorReason(

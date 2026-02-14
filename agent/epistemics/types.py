@@ -76,4 +76,4 @@ class GateDecision:
     score: float
     question: str | None = None
     contract_errors: tuple[str, ...] = field(default_factory=tuple)
-
+    candidate_kind: str = "answer"

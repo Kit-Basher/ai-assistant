@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from agent.epistemics.contract import (
     build_plain_answer_candidate,
     parse_candidate_json,
@@ -11,7 +13,21 @@ from agent.epistemics.types import CandidateContract, ContextPack, GateDecision
 
 
 _INTERCEPT_TEXT_PREFIX = "I’m not sure."
-_SCORE_THRESHOLD = 0.55
+
+
+def _safe_env_float(name: str, default: float, low: float, high: float) -> float:
+    raw = (os.getenv(name, "") or "").strip()
+    if not raw:
+        return float(default)
+    try:
+        value = float(raw)
+    except Exception:
+        return float(default)
+    return max(low, min(high, value))
+
+
+def _pass_score_threshold() -> float:
+    return _safe_env_float("PASS_SCORE_THRESHOLD", 0.55, 0.0, 1.0)
 
 
 def _sanitize_intercept_question(question: str | None) -> str:
@@ -68,7 +84,7 @@ def apply_epistemic_gate(
         hard_reasons.add("CLARIFY_REQUESTED")
 
     should_intercept = bool(hard_reasons)
-    if detector_result.score >= _SCORE_THRESHOLD:
+    if detector_result.score >= _pass_score_threshold():
         should_intercept = True
 
     if should_intercept:
@@ -83,6 +99,7 @@ def apply_epistemic_gate(
             score=detector_result.score,
             question=question,
             contract_errors=tuple(sorted(set(contract_errors + validation_errors))),
+            candidate_kind=parsed.kind,
         )
 
     return GateDecision(
@@ -93,4 +110,5 @@ def apply_epistemic_gate(
         score=detector_result.score,
         question=None,
         contract_errors=tuple(sorted(set(contract_errors + validation_errors))),
+        candidate_kind=parsed.kind,
     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+import os
+from unittest.mock import patch
 
 from agent.epistemics.contract import build_plain_answer_candidate
 from agent.epistemics.gate import apply_epistemic_gate
@@ -83,6 +85,22 @@ class TestEpistemicGate(unittest.TestCase):
         self.assertTrue(decision.intercepted)
         self.assertIn("TOOL_FAILURE_OR_UNAVAILABLE", decision.reasons)
         _assert_intercept_shape(self, decision.user_text)
+
+    def test_env_threshold_override_changes_intercept_decision(self) -> None:
+        ctx = _base_ctx()
+        candidate = build_plain_answer_candidate("OK")
+        user_text = "plan and copy notes"
+
+        with patch.dict(os.environ, {"PASS_SCORE_THRESHOLD": "0.90"}, clear=False):
+            decision_high = apply_epistemic_gate(user_text, ctx, candidate)
+        self.assertFalse(decision_high.intercepted)
+        self.assertIn("MULTI_INTENT", decision_high.reasons)
+
+        with patch.dict(os.environ, {"PASS_SCORE_THRESHOLD": "0.20"}, clear=False):
+            decision_low = apply_epistemic_gate(user_text, ctx, candidate)
+        self.assertTrue(decision_low.intercepted)
+        self.assertIn("MULTI_INTENT", decision_low.reasons)
+        _assert_intercept_shape(self, decision_low.user_text)
 
     def test_selector_normalizes_multiple_question_marks(self) -> None:
         ctx = _base_ctx()
