@@ -220,6 +220,17 @@ class Orchestrator:
             return value.strip()
         return self._default_thread_id(user_id)
 
+    def _set_active_thread_id_for_user(self, user_id: str, thread_id: str) -> None:
+        normalized = (thread_id or "").strip()
+        if not normalized:
+            return
+        now_iso = datetime.now(timezone.utc).isoformat()
+        self._epistemic_thread_state[user_id] = {
+            "active_thread_id": normalized,
+            "thread_created_at": now_iso,
+            "thread_label": None,
+        }
+
     def _formatting_prefs(self, thread_id: str | None) -> dict[str, bool]:
         return {
             "show_next_action": bool(get_pref_effective(self.db, thread_id, "show_next_action", True)),
@@ -1376,6 +1387,52 @@ class Orchestrator:
                     return OrchestratorResponse(
                         "\n".join(lines),
                         {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "threads":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    rows = self.db.list_recent_threads(limit=10)
+                    lines = ["Threads:"]
+                    if not rows:
+                        lines.append("(none)")
+                    else:
+                        for idx, row in enumerate(rows, start=1):
+                            listed_thread_id = str(row.get("thread_id") or "").replace("?", "").strip()
+                            last_ts = str(row.get("last_ts") or "").replace("?", "").strip()
+                            if not listed_thread_id or not last_ts:
+                                continue
+                            focus = self.db.get_latest_anchor_title(listed_thread_id)
+                            focus_text = str(focus or "(none)").replace("?", "").strip() or "(none)"
+                            lines.append(f"{idx}) {listed_thread_id} {last_ts} Focus: {focus_text}")
+                    return OrchestratorResponse(
+                        "\n".join(lines),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "thread_use":
+                    current_thread_id = self._active_thread_id_for_user(user_id)
+                    target_thread_id = (cmd.args or "").replace("?", "").strip()
+                    if not target_thread_id:
+                        return OrchestratorResponse(
+                            "Usage: /thread_use <thread_id>",
+                            {"skip_friction_formatting": True, "thread_id": current_thread_id},
+                        )
+                    rows = self.db.list_recent_threads(limit=200)
+                    recent_ids = {
+                        str(row.get("thread_id") or "").strip()
+                        for row in rows
+                        if isinstance(row, dict) and str(row.get("thread_id") or "").strip()
+                    }
+                    has_anchor = self.db.get_latest_anchor_title(target_thread_id) is not None
+                    if target_thread_id not in recent_ids and not has_anchor:
+                        return OrchestratorResponse(
+                            f"Unknown thread: {target_thread_id}.",
+                            {"skip_friction_formatting": True, "thread_id": current_thread_id},
+                        )
+                    self._set_active_thread_id_for_user(user_id, target_thread_id)
+                    return OrchestratorResponse(
+                        f"Active thread set to {target_thread_id}.",
+                        {"skip_friction_formatting": True, "thread_id": target_thread_id},
                     )
 
                 if cmd.name == "resume":

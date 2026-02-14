@@ -470,6 +470,90 @@ class MemoryDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def get_latest_anchor_title(self, thread_id: str) -> str | None:
+        cur = self._conn.execute(
+            """
+            SELECT title
+            FROM thread_anchors
+            WHERE thread_id = ?
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        title = str(row["title"] or "").strip()
+        return title if title else None
+
+    def list_recent_threads(self, limit: int = 10) -> list[dict[str, Any]]:
+        max_rows = max(1, int(limit))
+        latest_by_thread: dict[str, str] = {}
+
+        try:
+            cur = self._conn.execute(
+                """
+                SELECT
+                    json_extract(payload_json, '$.thread_id') AS thread_id,
+                    MAX(ts) AS last_ts
+                FROM activity_log
+                WHERE type = 'epistemic_turn'
+                  AND json_extract(payload_json, '$.thread_id') IS NOT NULL
+                  AND TRIM(json_extract(payload_json, '$.thread_id')) <> ''
+                GROUP BY json_extract(payload_json, '$.thread_id')
+                """
+            )
+            for row in cur.fetchall():
+                thread_id = str(row["thread_id"] or "").strip()
+                last_ts = str(row["last_ts"] or "").strip()
+                if thread_id and last_ts:
+                    latest_by_thread[thread_id] = last_ts
+        except Exception:
+            cur = self._conn.execute(
+                """
+                SELECT ts, payload_json
+                FROM activity_log
+                WHERE type = 'epistemic_turn'
+                ORDER BY ts DESC, id DESC
+                LIMIT 5000
+                """
+            )
+            for row in cur.fetchall():
+                ts = str(row["ts"] or "").strip()
+                if not ts:
+                    continue
+                try:
+                    payload = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    payload = {}
+                thread_id = str(payload.get("thread_id") or "").strip() if isinstance(payload, dict) else ""
+                if not thread_id:
+                    continue
+                if thread_id not in latest_by_thread:
+                    latest_by_thread[thread_id] = ts
+
+        cur = self._conn.execute(
+            """
+            SELECT thread_id, MAX(created_at) AS last_ts
+            FROM thread_anchors
+            GROUP BY thread_id
+            """
+        )
+        for row in cur.fetchall():
+            thread_id = str(row["thread_id"] or "").strip()
+            last_ts = str(row["last_ts"] or "").strip()
+            if not thread_id or not last_ts:
+                continue
+            existing = latest_by_thread.get(thread_id)
+            if existing is None or last_ts > existing:
+                latest_by_thread[thread_id] = last_ts
+
+        records = [{"thread_id": thread_id, "last_ts": last_ts} for thread_id, last_ts in latest_by_thread.items()]
+        records.sort(key=lambda row: str(row.get("thread_id") or ""))
+        records.sort(key=lambda row: str(row.get("last_ts") or ""), reverse=True)
+        return records[:max_rows]
+
     def clear_thread_anchors(self, thread_id: str) -> None:
         self._conn.execute("DELETE FROM thread_anchors WHERE thread_id = ?", (thread_id,))
         self._commit_if_needed()
