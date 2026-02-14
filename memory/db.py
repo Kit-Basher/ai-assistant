@@ -93,6 +93,7 @@ class MemoryDB:
         self._ensure_preference_columns()
         self._ensure_user_prefs_table()
         self._ensure_thread_prefs_table()
+        self._ensure_thread_anchors_table()
         self._ensure_open_loop_columns()
         self._ensure_schema_meta()
         self._conn.commit()
@@ -323,6 +324,20 @@ class MemoryDB:
             """
         )
 
+    def _ensure_thread_anchors_table(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_anchors (
+                thread_id TEXT NOT NULL,
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at TEXT NOT NULL,
+                title TEXT NOT NULL,
+                bullets TEXT NOT NULL,
+                open_line TEXT NOT NULL
+            )
+            """
+        )
+
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
         cols = {row["name"] for row in cur.fetchall()}
@@ -428,6 +443,35 @@ class MemoryDB:
 
     def clear_thread_prefs(self, thread_id: str) -> None:
         self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ?", (thread_id,))
+        self._commit_if_needed()
+
+    def add_thread_anchor(self, thread_id: str, title: str, bullets_json: str, open_line: str) -> int:
+        created_at = self._now_iso()
+        cur = self._conn.execute(
+            """
+            INSERT INTO thread_anchors (thread_id, created_at, title, bullets, open_line)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (thread_id, created_at, title, bullets_json, open_line),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def list_thread_anchors(self, thread_id: str, limit: int = 10) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT thread_id, id, created_at, title, bullets, open_line
+            FROM thread_anchors
+            WHERE thread_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (thread_id, int(limit)),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def clear_thread_anchors(self, thread_id: str) -> None:
+        self._conn.execute("DELETE FROM thread_anchors WHERE thread_id = ?", (thread_id,))
         self._commit_if_needed()
 
     def log_activity(self, event_type: str, payload: dict[str, Any]) -> None:

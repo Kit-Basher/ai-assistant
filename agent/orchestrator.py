@@ -33,6 +33,7 @@ from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
+from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
     get_pref_effective,
@@ -1327,6 +1328,47 @@ class Orchestrator:
                             f"- {entry['created_at']} {entry['action_type']}:{entry['action_id']} {entry['status']}"
                         )
                     return OrchestratorResponse("\n".join(lines))
+
+                if cmd.name in {"anchor", "checkpoint"}:
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    parsed = parse_anchor_input(cmd.args)
+                    if parsed is None:
+                        return OrchestratorResponse(
+                            "Usage: /anchor <title>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    title, bullets, open_line = parsed
+                    anchor_id = create_anchor(self.db, thread_id, title, bullets, open_line)
+                    return OrchestratorResponse(
+                        f"Saved checkpoint {anchor_id}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "anchors":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    anchors = list_anchors(self.db, thread_id, limit=5)
+                    lines = [f"Anchors (thread {thread_id}):"]
+                    if not anchors:
+                        lines.append("(none)")
+                    else:
+                        for anchor in anchors:
+                            lines.append(f"#{anchor.id} {anchor.created_at} — {anchor.title}")
+                            for bullet in anchor.bullets:
+                                lines.append(f"  - {bullet}")
+                            if anchor.open_line:
+                                lines.append(f"  {anchor.open_line}")
+                    return OrchestratorResponse(
+                        "\n".join(lines),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "anchors_reset":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    reset_anchors(self.db, thread_id)
+                    return OrchestratorResponse(
+                        "Cleared anchors for this thread.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
 
                 if cmd.name == "prefs":
                     prefs = list_prefs(self.db)

@@ -75,6 +75,15 @@ CREATE TABLE IF NOT EXISTS thread_prefs (
     PRIMARY KEY (thread_id, key)
 );
 
+CREATE TABLE IF NOT EXISTS thread_anchors (
+    thread_id TEXT NOT NULL,
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    title TEXT NOT NULL,
+    bullets TEXT NOT NULL,
+    open_line TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
