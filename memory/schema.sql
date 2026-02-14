@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS preferences (
     updated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS user_prefs (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,

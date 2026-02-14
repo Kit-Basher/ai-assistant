@@ -33,6 +33,7 @@ from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_summary
+from agent.prefs import ALLOWED_PREF_KEYS, get_bool_pref, list_prefs, reset_prefs, set_pref
 from agent.epistemics import (
     CandidateContract,
     Claim,
@@ -62,6 +63,27 @@ _ASK_ADVICE_PHRASES = (
     "please advise",
     "suggest",
 )
+_COMMAND_STARTERS = {
+    "pytest",
+    "python",
+    "python3",
+    "git",
+    "npm",
+    "pnpm",
+    "yarn",
+    "make",
+    "cargo",
+    "go",
+    "uv",
+    "pip",
+    "poetry",
+    "bash",
+    "sh",
+    "node",
+    "npx",
+    "ruff",
+    "mypy",
+}
 
 
 @dataclass
@@ -117,6 +139,56 @@ class Orchestrator:
         if not raw:
             return True
         return raw not in {"0", "false", "off", "no"}
+
+    @staticmethod
+    def _is_command_line(line: str) -> bool:
+        stripped = (line or "").strip()
+        if not stripped or stripped.startswith("- ") or stripped.startswith("In short:") or stripped.startswith("Next:"):
+            return False
+        command = stripped[2:].strip() if stripped.startswith("$ ") else stripped
+        if not command:
+            return False
+        first = command.split(" ", 1)[0].strip().lower()
+        if first in _COMMAND_STARTERS:
+            return True
+        if command.startswith("./") or command.startswith("/") or command.endswith(".sh") or command.endswith(".py"):
+            return True
+        return False
+
+    def _apply_commands_in_codeblock_pref(self, text: str, enabled: bool) -> str:
+        if not enabled:
+            return text
+        lines = text.splitlines()
+        indices = [idx for idx, line in enumerate(lines) if self._is_command_line(line)]
+        if len(indices) != 1:
+            return text
+        idx = indices[0]
+        command = lines[idx].strip()
+        if command.startswith("$ "):
+            command = command[2:].strip()
+        if not command:
+            return text
+        replacement = f"```bash\n{command}\n```"
+        updated = list(lines)
+        updated[idx] = replacement
+        return "\n".join(updated)
+
+    @staticmethod
+    def _apply_terse_mode_pref(body: str, enabled: bool) -> str:
+        if not enabled:
+            return body
+        paragraphs = [segment.strip() for segment in re.split(r"\n\s*\n", body or "") if segment.strip()]
+        if len(paragraphs) <= 1:
+            return body
+        return paragraphs[0]
+
+    def _formatting_prefs(self) -> dict[str, bool]:
+        return {
+            "show_next_action": get_bool_pref(self.db, "show_next_action", True),
+            "show_summary": get_bool_pref(self.db, "show_summary", True),
+            "terse_mode": get_bool_pref(self.db, "terse_mode", False),
+            "commands_in_codeblock": get_bool_pref(self.db, "commands_in_codeblock", False),
+        }
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -671,24 +743,24 @@ class Orchestrator:
         candidate = self._build_epistemic_candidate(response, ctx)
         decision = apply_epistemic_gate(user_text, ctx, candidate)
         user_visible_text = decision.user_text
-        if (
-            not decision.intercepted
-            and self._summary_enabled()
-            and isinstance(candidate, CandidateContract)
-            and not user_visible_text.startswith("In short: ")
-        ):
-            summary_line = compute_summary(candidate, user_visible_text)
+        if not decision.intercepted and isinstance(candidate, CandidateContract):
+            prefs = self._formatting_prefs()
+            show_summary = prefs["show_summary"] and self._summary_enabled()
+            show_next = prefs["show_next_action"] and self._next_action_enabled()
+            body_text = self._apply_commands_in_codeblock_pref(
+                user_visible_text,
+                prefs["commands_in_codeblock"],
+            )
+            summary_line = compute_summary(candidate, body_text) if show_summary else None
+            body_text = self._apply_terse_mode_pref(body_text, prefs["terse_mode"])
+            next_action = compute_next_action(user_text, ctx, candidate) if show_next else None
+            parts: list[str] = []
             if summary_line:
-                user_visible_text = f"{summary_line}\n\n{user_visible_text}"
-        if (
-            not decision.intercepted
-            and self._next_action_enabled()
-            and isinstance(candidate, CandidateContract)
-            and "Next:" not in user_visible_text
-        ):
-            next_action = compute_next_action(user_text, ctx, candidate)
+                parts.append(summary_line)
+            parts.append(body_text)
             if next_action:
-                user_visible_text = f"{user_visible_text}\n\nNext: {next_action}"
+                parts.append(f"Next: {next_action}")
+            user_visible_text = "\n\n".join(part for part in parts if part and part.strip())
         try:
             self._epistemic_monitor.record(user_id, decision, active_thread_id=ctx.active_thread_id)
         except Exception:
@@ -1175,6 +1247,33 @@ class Orchestrator:
                             f"- {entry['created_at']} {entry['action_type']}:{entry['action_id']} {entry['status']}"
                         )
                     return OrchestratorResponse("\n".join(lines))
+
+                if cmd.name == "prefs":
+                    prefs = list_prefs(self.db)
+                    lines = []
+                    for key in ALLOWED_PREF_KEYS:
+                        value = "on" if prefs.get(key, "off") == "on" else "off"
+                        lines.append(f"{key}: {value}")
+                    return OrchestratorResponse("\n".join(lines))
+
+                if cmd.name == "prefs_set":
+                    parts = (cmd.args or "").strip().split()
+                    if len(parts) != 2:
+                        return OrchestratorResponse("Usage: /prefs_set <key> <on|off>")
+                    key = parts[0].strip()
+                    value = parts[1].strip().lower()
+                    if key not in ALLOWED_PREF_KEYS:
+                        return OrchestratorResponse(
+                            "Unknown preference key. Allowed: " + ", ".join(ALLOWED_PREF_KEYS)
+                        )
+                    if value not in {"on", "off"}:
+                        return OrchestratorResponse("Usage: /prefs_set <key> <on|off>")
+                    set_pref(self.db, key, value)
+                    return OrchestratorResponse(f"{key}: {value}")
+
+                if cmd.name == "prefs_reset":
+                    reset_prefs(self.db)
+                    return OrchestratorResponse("Preferences reset to defaults.")
 
                 if cmd.name == "epistemics_report":
                     return OrchestratorResponse(build_epistemics_report(self.db))

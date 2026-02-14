@@ -91,6 +91,7 @@ class MemoryDB:
         self._conn.executescript(script)
         self._ensure_reminder_columns()
         self._ensure_preference_columns()
+        self._ensure_user_prefs_table()
         self._ensure_open_loop_columns()
         self._ensure_schema_meta()
         self._conn.commit()
@@ -297,6 +298,17 @@ class MemoryDB:
         if "updated_at" not in cols:
             self._conn.execute("ALTER TABLE preferences ADD COLUMN updated_at TEXT")
 
+    def _ensure_user_prefs_table(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_prefs (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
         cols = {row["name"] for row in cur.fetchall()}
@@ -342,6 +354,35 @@ class MemoryDB:
     def list_preferences(self) -> list[dict[str, Any]]:
         cur = self._conn.execute("SELECT key, value, updated_at FROM preferences ORDER BY key ASC")
         return [dict(row) for row in cur.fetchall()]
+
+    def set_user_pref(self, key: str, value: str) -> None:
+        now = self._now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO user_prefs (key, value, updated_at) VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+        self._commit_if_needed()
+
+    def get_user_pref(self, key: str) -> str | None:
+        cur = self._conn.execute(
+            "SELECT value FROM user_prefs WHERE key = ?",
+            (key,),
+        )
+        row = cur.fetchone()
+        return row["value"] if row else None
+
+    def list_user_prefs(self) -> list[dict[str, Any]]:
+        cur = self._conn.execute("SELECT key, value, updated_at FROM user_prefs ORDER BY key ASC")
+        return [dict(row) for row in cur.fetchall()]
+
+    def clear_user_prefs(self) -> None:
+        self._conn.execute("DELETE FROM user_prefs")
+        self._commit_if_needed()
 
     def log_activity(self, event_type: str, payload: dict[str, Any]) -> None:
         ts = self._now_iso()
