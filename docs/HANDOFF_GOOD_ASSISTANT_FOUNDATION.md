@@ -1,5 +1,32 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.2 — Path B Continuity (Plan/Options/Anchors/Resume)
+
+Since `v0.2.1-good-assistant-foundation`, the following deterministic continuity features were added:
+
+- Deterministic `Plan:` section on pass-path replies when planning-oriented (`agent/friction/plan.py`).
+- Deterministic `Options:` section for safe decision forks without `?` (`agent/friction/options.py`).
+- Per-thread anchors/checkpoints:
+  - `/anchor <title>` (and `/checkpoint` alias) to save checkpoints
+  - `/anchors` to list recent checkpoints
+  - `/resume` for anchor-driven kickoff
+- `/anchors` continuity header now includes:
+  - `Current focus: <latest title>`
+  - `Next: <latest open text>` when available
+- `/resume` is fully deterministic and anchor-derived:
+  - no LLM call
+  - no new claims
+  - no cross-thread blending
+  - no `?` in output
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## 1) Overview
 
 This checkpoint captures the stable "Good Assistant foundation" on branch `brief-v0.2-clean`.
