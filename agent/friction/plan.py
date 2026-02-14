@@ -121,8 +121,9 @@ def _planning_phrase_trigger(user_text: str) -> bool:
     return any(phrase in lowered for phrase in _PLANNING_PHRASES)
 
 
-def _answer_imperative_trigger(candidate: CandidateContract) -> bool:
-    return len(_extract_imperative_steps(candidate.final_answer or "")) >= 2
+def _answer_imperative_trigger(candidate: CandidateContract, min_sentences: int) -> bool:
+    threshold = max(1, int(min_sentences))
+    return len(_extract_imperative_steps(candidate.final_answer or "")) >= threshold
 
 
 def _step_supported(step: str, supported_claims: tuple[str, ...]) -> bool:
@@ -138,7 +139,13 @@ def _step_supported(step: str, supported_claims: tuple[str, ...]) -> bool:
     return False
 
 
-def compute_plan(user_text: str, candidate: CandidateContract, rendered_answer: str) -> list[str] | None:
+def compute_plan(
+    user_text: str,
+    candidate: CandidateContract,
+    rendered_answer: str,
+    min_imperative_sentences: int = 2,
+    min_steps: int = 2,
+) -> list[str] | None:
     if candidate.kind != "answer":
         return None
 
@@ -146,7 +153,10 @@ def compute_plan(user_text: str, candidate: CandidateContract, rendered_answer: 
     if not supported_claims:
         return None
 
-    planning_oriented = _planning_phrase_trigger(user_text) or _answer_imperative_trigger(candidate)
+    planning_oriented = _planning_phrase_trigger(user_text) or _answer_imperative_trigger(
+        candidate,
+        min_imperative_sentences,
+    )
     if not planning_oriented:
         return None
 
@@ -157,7 +167,9 @@ def compute_plan(user_text: str, candidate: CandidateContract, rendered_answer: 
         if len(steps) >= _MAX_STEPS:
             break
 
-    if len(steps) < 2:
+    required_steps = max(1, int(min_steps))
+
+    if len(steps) < required_steps:
         fallback: list[str] = []
         for step in _extract_imperative_steps("\n".join(supported_claims)):
             fallback.append(step)
@@ -165,6 +177,6 @@ def compute_plan(user_text: str, candidate: CandidateContract, rendered_answer: 
                 break
         steps = fallback
 
-    if len(steps) < 2:
+    if len(steps) < required_steps:
         return None
     return steps[:_MAX_STEPS]

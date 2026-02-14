@@ -14,6 +14,7 @@ PREF_DEFAULTS: "OrderedDict[str, str]" = OrderedDict(
 )
 
 ALLOWED_PREF_KEYS = tuple(PREF_DEFAULTS.keys())
+THREAD_ONLY_PREF_KEYS = ("project_mode",)
 _TRUE_VALUES = {"1", "true", "on", "yes"}
 _FALSE_VALUES = {"0", "false", "off", "no"}
 
@@ -120,7 +121,7 @@ def get_pref_effective_with_source(db: Any, thread_id: str | None, key: str) -> 
 
 
 def set_thread_pref(db: Any, thread_id: str, key: str, value: str) -> None:
-    if key not in PREF_DEFAULTS:
+    if key not in PREF_DEFAULTS and key not in THREAD_ONLY_PREF_KEYS:
         raise ValueError(f"Unsupported preference key: {key}")
     normalized = _normalize_pref_value(value)
     if normalized not in {"on", "off"}:
@@ -141,6 +142,13 @@ def list_thread_prefs(db: Any, thread_id: str) -> dict[str, str]:
         if normalized in {"on", "off"}:
             output[key] = normalized
     return dict(output)
+
+
+def get_project_mode(db: Any, thread_id: str | None) -> bool:
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        return False
+    value = _get_thread_pref(db, thread_id.strip(), "project_mode")
+    return value == "on"
 
 
 def reset_prefs(db: Any) -> None:

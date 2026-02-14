@@ -37,6 +37,7 @@ from agent.friction import compute_next_action, compute_options, compute_plan, c
 from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
+    get_project_mode,
     get_pref_effective,
     get_pref_effective_with_source,
     list_prefs,
@@ -315,12 +316,20 @@ class Orchestrator:
         return final_label, pref_flags, body_text
 
     def _formatting_prefs(self, thread_id: str | None) -> dict[str, bool]:
-        return {
+        project_mode = bool(get_project_mode(self.db, thread_id))
+        prefs = {
             "show_next_action": bool(get_pref_effective(self.db, thread_id, "show_next_action", True)),
             "show_summary": bool(get_pref_effective(self.db, thread_id, "show_summary", True)),
             "terse_mode": bool(get_pref_effective(self.db, thread_id, "terse_mode", False)),
             "commands_in_codeblock": bool(get_pref_effective(self.db, thread_id, "commands_in_codeblock", False)),
+            "project_mode": project_mode,
         }
+        if project_mode:
+            prefs["show_summary"] = False
+            prefs["show_next_action"] = True
+            prefs["terse_mode"] = False
+            prefs["commands_in_codeblock"] = True
+        return prefs
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
@@ -892,11 +901,30 @@ class Orchestrator:
             body_text = self._apply_terse_mode_pref(body_text, prefs["terse_mode"])
             if prefs["terse_mode"] and summary_line:
                 show_plan = False
-            plan_steps = compute_plan(user_text, candidate, body_text) if show_plan else None
+            plan_steps = (
+                compute_plan(
+                    user_text,
+                    candidate,
+                    body_text,
+                    min_imperative_sentences=1 if prefs["project_mode"] else 2,
+                    min_steps=1 if prefs["project_mode"] else 2,
+                )
+                if show_plan
+                else None
+            )
             if prefs["terse_mode"] and plan_steps:
                 show_options = False
             next_action = compute_next_action(user_text, ctx, candidate) if show_next else None
-            options = compute_options(user_text, candidate, body_text) if show_options else None
+            options = (
+                compute_options(
+                    user_text,
+                    candidate,
+                    body_text,
+                    project_mode=prefs["project_mode"],
+                )
+                if show_options
+                else None
+            )
             if options:
                 plan_norm = {
                     self._normalize_friction_text(step)
@@ -1732,6 +1760,31 @@ class Orchestrator:
                     set_thread_pref(self.db, thread_id, key, value)
                     return OrchestratorResponse(
                         f"{key}: {value} (thread)",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "project_mode":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    raw = (cmd.args or "").strip().lower()
+                    if not raw:
+                        status = "on" if get_project_mode(self.db, thread_id) else "off"
+                        return OrchestratorResponse(
+                            f"Project mode: {status}",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    if raw not in {"on", "off"}:
+                        return OrchestratorResponse(
+                            "Usage: /project_mode <on|off>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    set_thread_pref(self.db, thread_id, "project_mode", raw)
+                    if raw == "on":
+                        return OrchestratorResponse(
+                            f"Project mode enabled for {thread_id}.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Project mode disabled for {thread_id}.",
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 

@@ -190,7 +190,12 @@ def _choose_options(
     return options
 
 
-def compute_options(user_text: str, candidate: CandidateContract, rendered_answer: str) -> list[str] | None:
+def compute_options(
+    user_text: str,
+    candidate: CandidateContract,
+    rendered_answer: str,
+    project_mode: bool = False,
+) -> list[str] | None:
     if candidate.kind != "answer":
         return None
 
@@ -207,7 +212,10 @@ def compute_options(user_text: str, candidate: CandidateContract, rendered_answe
     trigger_a = len(distinct_verbs) >= 2 and len(imperative_supported) >= 2
     trigger_b = len(structured_supported) >= 2
     trigger_c = _user_trigger(user_text)
-    if not (trigger_a or trigger_b or trigger_c):
+    if project_mode:
+        if not trigger_a:
+            return None
+    elif not (trigger_a or trigger_b or trigger_c):
         return None
 
     options = _choose_options(imperative_supported, structured_supported)
