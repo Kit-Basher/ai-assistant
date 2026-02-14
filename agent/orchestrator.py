@@ -1351,12 +1351,28 @@ class Orchestrator:
                     if not anchors:
                         lines.append("(none)")
                     else:
+                        latest = anchors[0]
+                        focus_title = (latest.title or "").replace("?", "").strip() or "Checkpoint"
+                        lines.append(f"Current focus: {focus_title}")
+                        latest_open = (latest.open_line or "").replace("?", "").strip()
+                        if latest_open:
+                            if latest_open.lower().startswith("open:"):
+                                latest_open = latest_open[5:].strip()
+                            if latest_open:
+                                lines.append(f"Next: {latest_open}")
+                        lines.append("---")
                         for anchor in anchors:
-                            lines.append(f"#{anchor.id} {anchor.created_at} — {anchor.title}")
+                            title = (anchor.title or "").replace("?", "").strip()
+                            created_at = (anchor.created_at or "").replace("?", "").strip()
+                            lines.append(f"#{anchor.id} {created_at} — {title}")
                             for bullet in anchor.bullets:
-                                lines.append(f"  - {bullet}")
+                                bullet_text = (bullet or "").replace("?", "").strip()
+                                if bullet_text:
+                                    lines.append(f"  - {bullet_text}")
                             if anchor.open_line:
-                                lines.append(f"  {anchor.open_line}")
+                                open_line = (anchor.open_line or "").replace("?", "").strip()
+                                if open_line:
+                                    lines.append(f"  {open_line}")
                     return OrchestratorResponse(
                         "\n".join(lines),
                         {"skip_friction_formatting": True, "thread_id": thread_id},

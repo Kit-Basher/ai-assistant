@@ -64,6 +64,7 @@ class TestAnchors(unittest.TestCase):
 
         anchors_a = orch.handle_message("/anchors", "user1")
         self.assertIn("Anchors (thread thread-a):", anchors_a.text)
+        self.assertIn("Current focus: Sprint check", anchors_a.text)
         self.assertIn("#1 ", anchors_a.text)
         self.assertIn("  - Ship docs", anchors_a.text)
 
@@ -79,10 +80,36 @@ class TestAnchors(unittest.TestCase):
         response = orch.handle_message("/anchors", "user1")
         lines = response.text.splitlines()
         self.assertEqual("Anchors (thread thread-a):", lines[0])
-        self.assertRegex(lines[1], r"^#2 .+ — Second$")
-        self.assertEqual("  - two", lines[2])
-        self.assertRegex(lines[3], r"^#1 .+ — First$")
-        self.assertEqual("  - one", lines[4])
+        self.assertEqual("Current focus: Second", lines[1])
+        self.assertEqual("---", lines[2])
+        self.assertRegex(lines[3], r"^#2 .+ — Second$")
+        self.assertEqual("  - two", lines[4])
+        self.assertRegex(lines[5], r"^#1 .+ — First$")
+        self.assertEqual("  - one", lines[6])
+        self.assertTrue(all("?" not in line for line in lines))
+
+    def test_continuity_header_includes_next_when_open_line_present(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message("/anchor Earlier\n- one\nOpen: old", "user1")
+        orch.handle_message("/anchor Latest\n- two\nOpen: ship docs soon", "user1")
+        response = orch.handle_message("/anchors", "user1")
+        lines = response.text.splitlines()
+        self.assertEqual("Anchors (thread thread-a):", lines[0])
+        self.assertEqual("Current focus: Latest", lines[1])
+        self.assertEqual("Next: ship docs soon", lines[2])
+        self.assertEqual("---", lines[3])
+        self.assertTrue(all("?" not in line for line in lines))
+
+    def test_continuity_header_omits_next_when_open_line_empty(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message("/anchor Latest\n- two", "user1")
+        response = orch.handle_message("/anchors", "user1")
+        lines = response.text.splitlines()
+        self.assertEqual("Anchors (thread thread-a):", lines[0])
+        self.assertEqual("Current focus: Latest", lines[1])
+        self.assertEqual("---", lines[2])
         self.assertTrue(all("?" not in line for line in lines))
 
     def test_open_line_normalization_strips_question_mark(self) -> None:
