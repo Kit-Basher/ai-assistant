@@ -67,6 +67,11 @@ class EpistemicMonitor:
             "hard_reasons": hard_reasons,
             "candidate_kind": decision.candidate_kind,
             "contract_errors": list(decision.contract_errors),
+            "claims_summary": [
+                {"support": support, "count": int(count)} for support, count in decision.claims_summary
+            ],
+            "unsupported_claims_count": int(decision.unsupported_claims_count),
+            "claim_provenance_refs": list(decision.claim_provenance_refs),
         }
         try:
             self.db.audit_log_create(
@@ -89,6 +94,10 @@ class EpistemicMonitor:
                     "uncertainty_score": float(decision.score),
                     "reasons": reasons,
                     "hard_reasons": hard_reasons,
+                    "claims_summary": [
+                        {"support": support, "count": int(count)} for support, count in decision.claims_summary
+                    ],
+                    "unsupported_claims_count": int(decision.unsupported_claims_count),
                 },
             )
         except Exception:

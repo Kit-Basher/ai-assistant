@@ -165,9 +165,13 @@ def detect_cross_thread_risk(user_text: str, ctx: ContextPack, candidate: Candid
         )
     out_of_scope_set = set(ctx.out_of_scope_memory)
     memory_claim_refs = tuple(
-        claim.ref.strip()
+        (str(claim.memory_id).strip() if claim.memory_id is not None else claim.ref.strip())
         for claim in candidate.claims
-        if claim.support == "memory" and isinstance(claim.ref, str) and claim.ref.strip()
+        if claim.support == "memory"
+        and (
+            claim.memory_id is not None
+            or (isinstance(claim.ref, str) and claim.ref.strip())
+        )
     )
     if out_of_scope_set and any(ref in out_of_scope_set for ref in memory_claim_refs):
         reasons.append(

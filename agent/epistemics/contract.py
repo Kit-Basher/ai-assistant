@@ -4,7 +4,7 @@ import json
 import re
 from typing import Any
 
-from agent.epistemics.types import CandidateContract, Claim, ThreadRef
+from agent.epistemics.types import CandidateContract, Claim, ContextPack, ThreadRef
 
 
 _REQUIRED_KEYS = (
@@ -73,6 +73,9 @@ def parse_candidate_json(raw: str) -> tuple[CandidateContract | None, tuple[str,
             text = item.get("text")
             support = item.get("support")
             ref = item.get("ref")
+            user_turn_id = item.get("user_turn_id")
+            memory_id = item.get("memory_id")
+            tool_event_id = item.get("tool_event_id")
             if not isinstance(text, str):
                 errors.append(f"INVALID_CLAIM_TEXT:{idx}")
                 continue
@@ -82,7 +85,27 @@ def parse_candidate_json(raw: str) -> tuple[CandidateContract | None, tuple[str,
             if ref is not None and not isinstance(ref, str):
                 errors.append(f"INVALID_CLAIM_REF:{idx}")
                 continue
-            claims.append(Claim(text=text, support=support, ref=ref))
+            if user_turn_id is not None and not isinstance(user_turn_id, str):
+                errors.append(f"INVALID_CLAIM_USER_TURN_ID:{idx}")
+                continue
+            if memory_id is not None and not (
+                isinstance(memory_id, str) or (isinstance(memory_id, int) and not isinstance(memory_id, bool))
+            ):
+                errors.append(f"INVALID_CLAIM_MEMORY_ID:{idx}")
+                continue
+            if tool_event_id is not None and not isinstance(tool_event_id, str):
+                errors.append(f"INVALID_CLAIM_TOOL_EVENT_ID:{idx}")
+                continue
+            claims.append(
+                Claim(
+                    text=text,
+                    support=support,
+                    ref=ref,
+                    user_turn_id=user_turn_id,
+                    memory_id=memory_id,
+                    tool_event_id=tool_event_id,
+                )
+            )
 
     raw_assumptions = payload.get("assumptions")
     assumptions: list[str] = []
@@ -135,7 +158,7 @@ def parse_candidate_json(raw: str) -> tuple[CandidateContract | None, tuple[str,
     return candidate, tuple()
 
 
-def validate_candidate(candidate: CandidateContract) -> tuple[str, ...]:
+def validate_candidate(candidate: CandidateContract, ctx: ContextPack | None = None) -> tuple[str, ...]:
     errors: list[str] = []
     is_clarify = candidate.kind == "clarify"
 
@@ -160,6 +183,49 @@ def validate_candidate(candidate: CandidateContract) -> tuple[str, ...]:
 
     if any(ref.needs_confirmation for ref in candidate.thread_refs) and not is_clarify:
         errors.append("THREAD_REF_REQUIRES_CLARIFY")
+
+    recent_turn_ids = set(ctx.recent_turn_ids) if ctx else set()
+    in_scope_memory_ids = {str(value) for value in (ctx.in_scope_memory_ids if ctx else tuple())}
+    tool_event_ids = set(ctx.tool_event_ids) if ctx else set()
+    for claim in candidate.claims:
+        provenance_count = sum(
+            [
+                1 if claim.user_turn_id else 0,
+                1 if claim.memory_id is not None else 0,
+                1 if claim.tool_event_id else 0,
+            ]
+        )
+        if claim.support == "none":
+            if provenance_count != 0:
+                errors.append("PROVENANCE_FOR_NONE_SUPPORT_MUST_BE_EMPTY")
+            continue
+
+        if provenance_count != 1:
+            errors.append("PROVENANCE_REQUIRED_FOR_SUPPORTED_CLAIM")
+
+        if claim.support == "user":
+            if not claim.user_turn_id:
+                errors.append("USER_PROVENANCE_REQUIRED")
+            if claim.memory_id is not None or claim.tool_event_id:
+                errors.append("PROVENANCE_MUST_MATCH_SUPPORT")
+            if ctx and claim.user_turn_id and claim.user_turn_id not in recent_turn_ids:
+                errors.append("USER_PROVENANCE_NOT_IN_CONTEXT")
+
+        if claim.support == "memory":
+            if claim.memory_id is None:
+                errors.append("MEMORY_PROVENANCE_REQUIRED")
+            if claim.user_turn_id or claim.tool_event_id:
+                errors.append("PROVENANCE_MUST_MATCH_SUPPORT")
+            if ctx and claim.memory_id is not None and str(claim.memory_id) not in in_scope_memory_ids:
+                errors.append("MEMORY_PROVENANCE_NOT_IN_CONTEXT")
+
+        if claim.support == "tool":
+            if not claim.tool_event_id:
+                errors.append("TOOL_PROVENANCE_REQUIRED")
+            if claim.user_turn_id or claim.memory_id is not None:
+                errors.append("PROVENANCE_MUST_MATCH_SUPPORT")
+            if ctx and claim.tool_event_id and claim.tool_event_id not in tool_event_ids:
+                errors.append("TOOL_PROVENANCE_NOT_IN_CONTEXT")
 
     if is_clarify:
         question = (candidate.clarifying_question or "").strip()

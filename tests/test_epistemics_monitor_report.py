@@ -48,6 +48,9 @@ class TestEpistemicsMonitorReport(unittest.TestCase):
             question="Which one?",
             contract_errors=("ERR_A",),
             candidate_kind="clarify",
+            claims_summary=(("memory", 1), ("none", 0), ("tool", 1), ("user", 2)),
+            unsupported_claims_count=0,
+            claim_provenance_refs=("memory:1", "tool:audit-1", "user:thread-1:u:2"),
         )
         monitor.record("user-1", decision, active_thread_id="thread-7")
         self.assertEqual(1, len(db.audit_calls))
@@ -57,6 +60,20 @@ class TestEpistemicsMonitorReport(unittest.TestCase):
         self.assertEqual(["A_REASON", "Z_REASON"], details["reasons"])
         self.assertEqual(["HARD_A", "HARD_B"], details["hard_reasons"])
         self.assertEqual("clarify", details["candidate_kind"])
+        self.assertEqual(
+            [
+                {"support": "memory", "count": 1},
+                {"support": "none", "count": 0},
+                {"support": "tool", "count": 1},
+                {"support": "user", "count": 2},
+            ],
+            details["claims_summary"],
+        )
+        self.assertEqual(0, details["unsupported_claims_count"])
+        self.assertEqual(
+            ["memory:1", "tool:audit-1", "user:thread-1:u:2"],
+            details["claim_provenance_refs"],
+        )
 
     def test_report_output_stable_ordering(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

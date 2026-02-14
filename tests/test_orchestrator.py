@@ -176,6 +176,7 @@ class TestOrchestrator(unittest.TestCase):
             {
                 "thread_id": "thread-a",
                 "thread_label": "Focus",
+                "audit_ref": "audit-7",
                 "memory_items": [
                     {"ref": "mem:local-a", "thread_id": "thread-a", "relevant": True},
                     {"ref": "mem:global-style", "scope": "global", "relevant": True},
@@ -187,8 +188,11 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("thread-a", ctx.active_thread_id)
         self.assertEqual("Focus", ctx.thread_label)
         self.assertEqual(("mem:global-style", "mem:local-a"), ctx.in_scope_memory)
+        self.assertEqual(("mem:global-style", "mem:local-a"), ctx.in_scope_memory_ids)
         self.assertEqual(("mem:other-b",), ctx.out_of_scope_memory)
         self.assertTrue(ctx.out_of_scope_relevant_memory)
+        self.assertEqual(("audit-7",), ctx.tool_event_ids)
+        self.assertEqual(("thread-a:u:1",), ctx.recent_turn_ids)
 
     def test_starting_new_thread_resets_turn_count(self) -> None:
         orch = self._orchestrator()
@@ -209,7 +213,42 @@ class TestOrchestrator(unittest.TestCase):
             payload = row.get("payload") or {}
             self.assertEqual("user1", payload.get("user_id"))
             self.assertTrue(str(payload.get("thread_id") or "").strip())
+            self.assertTrue(str(payload.get("turn_id") or "").strip())
             self.assertIn(payload.get("role"), {"user", "assistant"})
+
+    def test_build_epistemic_candidate_populates_missing_provenance(self) -> None:
+        orch = self._orchestrator()
+        response = OrchestratorResponse(
+            "ok",
+            {
+                "thread_id": "thread-a",
+                "audit_ref": "audit-3",
+                "memory_items": [{"id": 11, "ref": "mem:11", "thread_id": "thread-a", "relevant": True}],
+                "epistemic_candidate_json": json.dumps(
+                    {
+                        "kind": "answer",
+                        "final_answer": "Confirmed.",
+                        "clarifying_question": None,
+                        "claims": [
+                            {"text": "From user", "support": "user", "ref": None},
+                            {"text": "From memory", "support": "memory", "ref": "mem:11"},
+                            {"text": "From tool", "support": "tool", "ref": None},
+                        ],
+                        "assumptions": [],
+                        "unresolved_refs": [],
+                        "thread_refs": [],
+                    },
+                    ensure_ascii=True,
+                ),
+            },
+        )
+        ctx = orch._build_epistemic_context("user1", response)
+        candidate = orch._build_epistemic_candidate(response, ctx)
+        self.assertFalse(isinstance(candidate, str))
+        assert not isinstance(candidate, str)
+        self.assertEqual("thread-a:u:1", candidate.claims[0].user_turn_id)
+        self.assertEqual("11", candidate.claims[1].memory_id)
+        self.assertEqual("audit-3", candidate.claims[2].tool_event_id)
 
 
 if __name__ == "__main__":

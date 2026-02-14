@@ -15,14 +15,17 @@ def _base_ctx(**kwargs) -> ContextPack:
         "user_id": "user-1",
         "active_thread_id": "thread-1",
         "recent_messages": tuple(),
+        "recent_turn_ids": tuple(),
         "memory_hits": tuple(),
         "memory_ambiguous": tuple(),
         "memory_miss": False,
         "in_scope_memory": tuple(),
+        "in_scope_memory_ids": tuple(),
         "out_of_scope_memory": tuple(),
         "out_of_scope_relevant_memory": False,
         "thread_turn_count": 0,
         "tools_available": ("core",),
+        "tool_event_ids": tuple(),
         "tool_failures": tuple(),
         "referents": tuple(),
     }
@@ -148,6 +151,7 @@ class TestEpistemicGate(unittest.TestCase):
                     text="You planned to launch this month.",
                     support="memory",
                     ref="mem:thread-2-plan",
+                    memory_id="mem:thread-2-plan",
                 ),
             ),
             assumptions=tuple(),
@@ -168,6 +172,7 @@ class TestEpistemicGate(unittest.TestCase):
         ctx = _base_ctx(
             active_thread_id="thread-1",
             in_scope_memory=("global:response_style",),
+            in_scope_memory_ids=("global:response_style",),
             out_of_scope_memory=tuple(),
             out_of_scope_relevant_memory=False,
             thread_turn_count=1,
@@ -181,6 +186,7 @@ class TestEpistemicGate(unittest.TestCase):
                     text="Preference is concise answers.",
                     support="memory",
                     ref="global:response_style",
+                    memory_id="global:response_style",
                 ),
             ),
             assumptions=tuple(),
@@ -209,6 +215,97 @@ class TestEpistemicGate(unittest.TestCase):
         new_thread_decision = apply_epistemic_gate("status", new_thread_ctx, candidate)
         self.assertTrue(new_thread_decision.intercepted)
         self.assertIn("CROSS_THREAD_RISK", new_thread_decision.reasons)
+
+    def test_memory_support_missing_memory_id_rejected(self) -> None:
+        ctx = _base_ctx(in_scope_memory_ids=("mem:1",))
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="Loaded memory detail.",
+            clarifying_question=None,
+            claims=(Claim(text="From memory", support="memory"),),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("recall that", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("CONTRACT_INVALID", decision.reasons)
+        self.assertIn("MEMORY_PROVENANCE_REQUIRED", decision.contract_errors)
+        _assert_intercept_shape(self, decision.user_text)
+
+    def test_memory_id_not_in_scope_rejected(self) -> None:
+        ctx = _base_ctx(in_scope_memory_ids=("mem:1",))
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="Loaded memory detail.",
+            clarifying_question=None,
+            claims=(Claim(text="From memory", support="memory", memory_id="mem:2"),),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("recall that", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("CONTRACT_INVALID", decision.reasons)
+        self.assertIn("MEMORY_PROVENANCE_NOT_IN_CONTEXT", decision.contract_errors)
+
+    def test_user_provenance_must_be_in_recent_turn_ids(self) -> None:
+        ctx = _base_ctx(recent_turn_ids=("thread-1:u:1",))
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="You asked about uptime.",
+            clarifying_question=None,
+            claims=(Claim(text="User asked uptime", support="user", user_turn_id="thread-1:u:99"),),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("what did I ask", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("USER_PROVENANCE_NOT_IN_CONTEXT", decision.contract_errors)
+
+    def test_tool_provenance_must_be_in_tool_event_ids(self) -> None:
+        ctx = _base_ctx(tool_event_ids=("audit:1",))
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="Tool returned success.",
+            clarifying_question=None,
+            claims=(Claim(text="Tool output ok", support="tool", tool_event_id="audit:2"),),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("run the check", ctx, candidate)
+        self.assertTrue(decision.intercepted)
+        self.assertIn("TOOL_PROVENANCE_NOT_IN_CONTEXT", decision.contract_errors)
+
+    def test_valid_candidate_with_provenance_passes_unchanged(self) -> None:
+        ctx = _base_ctx(
+            recent_turn_ids=("thread-1:u:2",),
+            in_scope_memory_ids=("mem:1",),
+            tool_event_ids=("audit:9",),
+        )
+        candidate = CandidateContract(
+            kind="answer",
+            final_answer="Confirmed.",
+            clarifying_question=None,
+            claims=(
+                Claim(text="From user", support="user", user_turn_id="thread-1:u:2"),
+                Claim(text="From memory", support="memory", memory_id="mem:1"),
+                Claim(text="From tool", support="tool", tool_event_id="audit:9"),
+            ),
+            assumptions=tuple(),
+            unresolved_refs=tuple(),
+            thread_refs=tuple(),
+            raw_json=None,
+        )
+        decision = apply_epistemic_gate("confirm", ctx, candidate)
+        self.assertFalse(decision.intercepted)
+        self.assertEqual("Confirmed.", decision.user_text)
 
 
 if __name__ == "__main__":

@@ -34,12 +34,14 @@ from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.epistemics import (
     CandidateContract,
+    Claim,
     ContextPack,
     EpistemicMonitor,
     MessageTurn,
     apply_epistemic_gate,
     build_plain_answer_candidate,
     build_epistemics_report,
+    parse_candidate_json,
 )
 from memory.db import MemoryDB
 
@@ -308,12 +310,28 @@ class Orchestrator:
         turns = self._epistemic_history.get((user_id, thread_id), [])
         return tuple(turns[-max(1, int(limit)):])
 
-    def _epistemic_append_turn(self, user_id: str, thread_id: str, role: str, text: str) -> None:
+    def _next_turn_id(self, user_id: str, thread_id: str, role: str) -> str:
+        turns = self._epistemic_history.get((user_id, thread_id), [])
+        seq = len(turns) + 1
+        role_tag = "u" if role == "user" else "a"
+        return f"{thread_id}:{role_tag}:{seq}"
+
+    def _epistemic_append_turn(
+        self,
+        user_id: str,
+        thread_id: str,
+        role: str,
+        text: str,
+        turn_id: str | None = None,
+    ) -> None:
         cleaned = " ".join((text or "").split())
         if not cleaned or role not in {"user", "assistant"}:
             return
+        resolved_turn_id = turn_id.strip() if isinstance(turn_id, str) and turn_id.strip() else self._next_turn_id(
+            user_id, thread_id, role
+        )
         turns = self._epistemic_history.setdefault((user_id, thread_id), [])
-        turns.append(MessageTurn(role=role, text=cleaned))
+        turns.append(MessageTurn(role=role, text=cleaned, turn_id=resolved_turn_id))
         if len(turns) > 12:
             del turns[:-12]
         try:
@@ -322,6 +340,7 @@ class Orchestrator:
                 {
                     "user_id": user_id,
                     "thread_id": thread_id,
+                    "turn_id": resolved_turn_id,
                     "role": role,
                     "text": cleaned,
                 },
@@ -369,17 +388,43 @@ class Orchestrator:
                 signals.append(error.strip().lower())
         return tuple(sorted(set(signals)))
 
+    def _epistemic_tool_event_ids(self, response: OrchestratorResponse) -> tuple[str, ...]:
+        ids: set[str] = set()
+        containers: list[dict[str, Any]] = []
+        if isinstance(response.data, dict):
+            containers.append(response.data)
+            nested = response.data.get("data")
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for container in containers:
+            for key in ("tool_event_id", "audit_ref", "audit_id", "action_id"):
+                value = container.get(key)
+                if isinstance(value, (str, int)) and not isinstance(value, bool):
+                    normalized = str(value).strip()
+                    if normalized:
+                        ids.add(normalized)
+            audit = container.get("audit")
+            if isinstance(audit, dict):
+                for key in ("action_id", "audit_id"):
+                    value = audit.get(key)
+                    if isinstance(value, (str, int)) and not isinstance(value, bool):
+                        normalized = str(value).strip()
+                        if normalized:
+                            ids.add(normalized)
+        return tuple(sorted(ids))
+
     def _epistemic_memory_signals(
         self,
         response: OrchestratorResponse,
         active_thread_id: str,
-    ) -> tuple[tuple[str, ...], tuple[str, ...], bool, tuple[str, ...], tuple[str, ...], bool]:
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool, tuple[str, ...], tuple[str, ...], bool, tuple[str, ...]]:
         text = (response.text or "").strip()
         lower = text.lower()
         hits: list[str] = []
         ambiguous: list[str] = []
         miss = False
         in_scope: list[str] = []
+        in_scope_ids: list[str] = []
         out_of_scope: list[str] = []
         out_of_scope_relevant = False
 
@@ -405,10 +450,18 @@ class Orchestrator:
                 for item in memory_items:
                     if not isinstance(item, dict):
                         continue
+                    raw_id = item.get("id")
+                    memory_id = (
+                        str(raw_id).strip()
+                        if isinstance(raw_id, (str, int)) and not isinstance(raw_id, bool) and str(raw_id).strip()
+                        else None
+                    )
                     raw_ref = item.get("ref")
-                    if not isinstance(raw_ref, str) or not raw_ref.strip():
+                    if memory_id is None and (not isinstance(raw_ref, str) or not raw_ref.strip()):
                         continue
-                    ref = raw_ref.strip()
+                    ref = raw_ref.strip() if isinstance(raw_ref, str) and raw_ref.strip() else memory_id
+                    if ref is None:
+                        continue
                     is_global = bool(item.get("global")) or str(item.get("scope", "")).strip().lower() == "global"
                     raw_thread = item.get("thread_id")
                     item_thread = raw_thread.strip() if isinstance(raw_thread, str) and raw_thread.strip() else None
@@ -416,8 +469,9 @@ class Orchestrator:
                     is_relevant = True if relevant is None else bool(relevant)
                     if is_global or item_thread == active_thread_id:
                         in_scope.append(ref)
+                        in_scope_ids.append(memory_id or ref)
                     else:
-                        out_of_scope.append(ref)
+                        out_of_scope.append(memory_id or ref)
                         if is_relevant:
                             out_of_scope_relevant = True
 
@@ -428,53 +482,186 @@ class Orchestrator:
             tuple(sorted(set(in_scope))),
             tuple(sorted(set(out_of_scope))),
             bool(out_of_scope_relevant),
+            tuple(sorted(set(in_scope_ids))),
         )
 
     def _build_epistemic_context(self, user_id: str, response: OrchestratorResponse) -> ContextPack:
         active_thread_id, thread_created_at, thread_label = self._resolve_epistemic_thread(user_id, response)
         recent_messages = self._epistemic_recent_messages(user_id, active_thread_id, limit=8)
-        hits, ambiguous, miss, in_scope, out_of_scope, out_of_scope_relevant = self._epistemic_memory_signals(
+        hits, ambiguous, miss, in_scope, out_of_scope, out_of_scope_relevant, in_scope_ids = self._epistemic_memory_signals(
             response, active_thread_id
         )
+        recent_turn_ids = tuple(
+            turn_id
+            for turn_id in (turn.turn_id for turn in recent_messages)
+            if isinstance(turn_id, str) and turn_id.strip()
+        )
+        pending_user_turn_id = self._next_turn_id(user_id, active_thread_id, "user")
+        if pending_user_turn_id not in recent_turn_ids:
+            recent_turn_ids = tuple(list(recent_turn_ids) + [pending_user_turn_id])
         return ContextPack(
             user_id=user_id,
             active_thread_id=active_thread_id,
             thread_created_at=thread_created_at,
             thread_label=thread_label,
             recent_messages=recent_messages,
+            recent_turn_ids=recent_turn_ids,
             memory_hits=hits,
             memory_ambiguous=ambiguous,
             memory_miss=miss,
             in_scope_memory=in_scope,
+            in_scope_memory_ids=in_scope_ids,
             out_of_scope_memory=out_of_scope,
             out_of_scope_relevant_memory=out_of_scope_relevant,
             thread_turn_count=len(recent_messages),
             tools_available=tuple(sorted(self.skills.keys())),
+            tool_event_ids=self._epistemic_tool_event_ids(response),
             tool_failures=self._epistemic_tool_failures(response),
             referents=self._epistemic_extract_referents(user_id, active_thread_id),
         )
 
-    def _build_epistemic_candidate(self, response: OrchestratorResponse) -> CandidateContract | str:
+    def _build_epistemic_candidate(self, response: OrchestratorResponse, ctx: ContextPack) -> CandidateContract | str:
         if isinstance(response.data, dict):
             candidate_json = response.data.get("epistemic_candidate_json")
             if isinstance(candidate_json, str) and candidate_json.strip():
+                parsed, errors = parse_candidate_json(candidate_json.strip())
+                if parsed is not None and not errors:
+                    return self._populate_candidate_provenance(parsed, ctx)
                 return candidate_json.strip()
         text = (response.text or "").strip()
         if text.startswith("{") and '"kind"' in text:
+            parsed, errors = parse_candidate_json(text)
+            if parsed is not None and not errors:
+                return self._populate_candidate_provenance(parsed, ctx)
             return text
-        return build_plain_answer_candidate(response.text or "")
+        return self._populate_candidate_provenance(build_plain_answer_candidate(response.text or ""), ctx)
+
+    def _populate_candidate_provenance(self, candidate: CandidateContract, ctx: ContextPack) -> CandidateContract:
+        if not candidate.claims:
+            return candidate
+        default_user_turn_id = ctx.recent_turn_ids[-1] if ctx.recent_turn_ids else None
+        default_memory_id = ctx.in_scope_memory_ids[0] if len(ctx.in_scope_memory_ids) == 1 else None
+        default_tool_event_id = ctx.tool_event_ids[0] if len(ctx.tool_event_ids) == 1 else None
+        hydrated_claims: list[Claim] = []
+        for claim in candidate.claims:
+            if claim.support == "none":
+                hydrated_claims.append(
+                    Claim(
+                        text=claim.text,
+                        support="none",
+                        ref=None,
+                        user_turn_id=None,
+                        memory_id=None,
+                        tool_event_id=None,
+                    )
+                )
+                continue
+            if claim.support == "user":
+                user_turn_id = claim.user_turn_id or default_user_turn_id
+                if not user_turn_id:
+                    hydrated_claims.append(
+                        Claim(
+                            text=claim.text,
+                            support="none",
+                            ref=None,
+                            user_turn_id=None,
+                            memory_id=None,
+                            tool_event_id=None,
+                        )
+                    )
+                    continue
+                hydrated_claims.append(
+                    Claim(
+                        text=claim.text,
+                        support="user",
+                        ref=claim.ref,
+                        user_turn_id=user_turn_id,
+                        memory_id=None,
+                        tool_event_id=None,
+                    )
+                )
+                continue
+            if claim.support == "memory":
+                memory_id = claim.memory_id
+                if memory_id is None and isinstance(claim.ref, str) and claim.ref.strip():
+                    candidate_memory_id = claim.ref.strip()
+                    if candidate_memory_id in set(ctx.in_scope_memory_ids):
+                        memory_id = candidate_memory_id
+                if memory_id is None:
+                    memory_id = default_memory_id
+                if memory_id is None:
+                    hydrated_claims.append(
+                        Claim(
+                            text=claim.text,
+                            support="none",
+                            ref=None,
+                            user_turn_id=None,
+                            memory_id=None,
+                            tool_event_id=None,
+                        )
+                    )
+                    continue
+                hydrated_claims.append(
+                    Claim(
+                        text=claim.text,
+                        support="memory",
+                        ref=claim.ref,
+                        user_turn_id=None,
+                        memory_id=memory_id,
+                        tool_event_id=None,
+                    )
+                )
+                continue
+            if claim.support == "tool":
+                tool_event_id = claim.tool_event_id or default_tool_event_id
+                if not tool_event_id:
+                    hydrated_claims.append(
+                        Claim(
+                            text=claim.text,
+                            support="none",
+                            ref=None,
+                            user_turn_id=None,
+                            memory_id=None,
+                            tool_event_id=None,
+                        )
+                    )
+                    continue
+                hydrated_claims.append(
+                    Claim(
+                        text=claim.text,
+                        support="tool",
+                        ref=claim.ref,
+                        user_turn_id=None,
+                        memory_id=None,
+                        tool_event_id=tool_event_id,
+                    )
+                )
+                continue
+            hydrated_claims.append(claim)
+        return CandidateContract(
+            kind=candidate.kind,
+            final_answer=candidate.final_answer,
+            clarifying_question=candidate.clarifying_question,
+            claims=tuple(hydrated_claims),
+            assumptions=candidate.assumptions,
+            unresolved_refs=candidate.unresolved_refs,
+            thread_refs=candidate.thread_refs,
+            raw_json=candidate.raw_json,
+        )
 
     def _apply_epistemic_layer(self, user_id: str, user_text: str, response: OrchestratorResponse) -> OrchestratorResponse:
         ctx = self._build_epistemic_context(user_id, response)
-        candidate = self._build_epistemic_candidate(response)
+        candidate = self._build_epistemic_candidate(response, ctx)
         decision = apply_epistemic_gate(user_text, ctx, candidate)
         try:
             self._epistemic_monitor.record(user_id, decision, active_thread_id=ctx.active_thread_id)
         except Exception:
             pass
         thread_id = ctx.active_thread_id or self._default_thread_id(user_id)
-        self._epistemic_append_turn(user_id, thread_id, "user", user_text)
-        self._epistemic_append_turn(user_id, thread_id, "assistant", decision.user_text)
+        user_turn_id = ctx.recent_turn_ids[-1] if ctx.recent_turn_ids else self._next_turn_id(user_id, thread_id, "user")
+        self._epistemic_append_turn(user_id, thread_id, "user", user_text, turn_id=user_turn_id)
+        assistant_turn_id = self._next_turn_id(user_id, thread_id, "assistant")
+        self._epistemic_append_turn(user_id, thread_id, "assistant", decision.user_text, turn_id=assistant_turn_id)
         return OrchestratorResponse(decision.user_text, response.data)
 
     def _deliver_pending_opinion(

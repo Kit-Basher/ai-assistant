@@ -4,6 +4,7 @@ import os
 
 from agent.epistemics.contract import (
     build_plain_answer_candidate,
+    is_trivially_definitional,
     parse_candidate_json,
     validate_candidate,
 )
@@ -13,6 +14,7 @@ from agent.epistemics.types import CandidateContract, ContextPack, GateDecision
 
 
 _INTERCEPT_TEXT_PREFIX = "I’m not sure."
+_CLAIM_SUPPORT_ORDER = ("memory", "none", "tool", "user")
 
 
 def _safe_env_float(name: str, default: float, low: float, high: float) -> float:
@@ -68,9 +70,24 @@ def apply_epistemic_gate(
     else:
         parsed = candidate
 
-    validation_errors = validate_candidate(parsed)
+    validation_errors = validate_candidate(parsed, ctx)
     detector_result = run_detectors(user_text, ctx, parsed)
     reason_set = {reason.code for reason in detector_result.reasons}
+    claims_summary_map = {support: 0 for support in _CLAIM_SUPPORT_ORDER}
+    claim_provenance: set[str] = set()
+    unsupported_claims_count = 0
+    for claim in parsed.claims:
+        claims_summary_map[claim.support] = claims_summary_map.get(claim.support, 0) + 1
+        if claim.support == "none" and not is_trivially_definitional(claim.text):
+            unsupported_claims_count += 1
+        if claim.user_turn_id:
+            claim_provenance.add(f"user:{claim.user_turn_id}")
+        if claim.memory_id is not None:
+            claim_provenance.add(f"memory:{claim.memory_id}")
+        if claim.tool_event_id:
+            claim_provenance.add(f"tool:{claim.tool_event_id}")
+    claims_summary = tuple((support, claims_summary_map.get(support, 0)) for support in _CLAIM_SUPPORT_ORDER)
+    claim_provenance_refs = tuple(sorted(claim_provenance))
 
     if contract_errors or validation_errors:
         reason_set.add("CONTRACT_INVALID")
@@ -100,6 +117,9 @@ def apply_epistemic_gate(
             question=question,
             contract_errors=tuple(sorted(set(contract_errors + validation_errors))),
             candidate_kind=parsed.kind,
+            claims_summary=claims_summary,
+            unsupported_claims_count=unsupported_claims_count,
+            claim_provenance_refs=claim_provenance_refs,
         )
 
     return GateDecision(
@@ -111,4 +131,7 @@ def apply_epistemic_gate(
         question=None,
         contract_errors=tuple(sorted(set(contract_errors + validation_errors))),
         candidate_kind=parsed.kind,
+        claims_summary=claims_summary,
+        unsupported_claims_count=unsupported_claims_count,
+        claim_provenance_refs=claim_provenance_refs,
     )
