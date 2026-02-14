@@ -32,7 +32,7 @@ from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
-from agent.friction import compute_next_action, compute_summary
+from agent.friction import compute_next_action, compute_plan, compute_summary
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
     get_pref_effective,
@@ -145,6 +145,13 @@ class Orchestrator:
     @staticmethod
     def _summary_enabled() -> bool:
         raw = (os.getenv("FRICTION_SUMMARY", "") or "").strip().lower()
+        if not raw:
+            return True
+        return raw not in {"0", "false", "off", "no"}
+
+    @staticmethod
+    def _plan_enabled() -> bool:
+        raw = (os.getenv("FRICTION_PLAN", "") or "").strip().lower()
         if not raw:
             return True
         return raw not in {"0", "false", "off", "no"}
@@ -766,17 +773,24 @@ class Orchestrator:
             prefs = self._formatting_prefs(ctx.active_thread_id)
             show_summary = prefs["show_summary"] and self._summary_enabled()
             show_next = prefs["show_next_action"] and self._next_action_enabled()
+            show_plan = self._plan_enabled()
             body_text = self._apply_commands_in_codeblock_pref(
                 user_visible_text,
                 prefs["commands_in_codeblock"],
             )
             summary_line = compute_summary(candidate, body_text) if show_summary else None
             body_text = self._apply_terse_mode_pref(body_text, prefs["terse_mode"])
+            if prefs["terse_mode"] and summary_line:
+                show_plan = False
+            plan_steps = compute_plan(user_text, candidate, body_text) if show_plan else None
             next_action = compute_next_action(user_text, ctx, candidate) if show_next else None
             parts: list[str] = []
             if summary_line:
                 parts.append(summary_line)
             parts.append(body_text)
+            if plan_steps:
+                lines = [f"{idx}. {step}" for idx, step in enumerate(plan_steps, start=1)]
+                parts.append("Plan:\n" + "\n".join(lines))
             if next_action:
                 parts.append(f"Next: {next_action}")
             user_visible_text = "\n\n".join(part for part in parts if part and part.strip())
