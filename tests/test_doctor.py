@@ -6,6 +6,7 @@ from pathlib import Path
 
 from agent.doctor import (
     _check_db,
+    _check_daily_brief_timer,
     _check_version,
     _check_systemd_units,
     expected_schema_from_version,
@@ -92,6 +93,42 @@ class TestDoctor(unittest.TestCase):
             return _Proc(1)
 
         result = _check_systemd_units(fake_run, "/nonexistent/doctor.db")
+        self.assertFalse(result.ok)
+
+    def test_daily_brief_timer_passes_when_active(self) -> None:
+        def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+            cmd = args[0]
+            if cmd[:2] == ["systemctl", "--version"]:
+                return _Proc(0, "systemd 253")
+            if cmd[:2] == ["systemctl", "cat"]:
+                return _Proc(0, "unit")
+            if cmd[:2] == ["systemctl", "is-enabled"]:
+                if cmd[2].endswith(".timer"):
+                    return _Proc(0, "enabled\n")
+                return _Proc(0, "disabled\n")
+            if cmd[:2] == ["systemctl", "is-active"]:
+                if cmd[2].endswith(".timer"):
+                    return _Proc(0, "active\n")
+                return _Proc(0, "inactive\n")
+            if cmd[:3] == ["systemctl", "show", "personal-agent-daily-brief.service"]:
+                return _Proc(0, "0\n")
+            return _Proc(1)
+
+        result = _check_daily_brief_timer(fake_run)
+        self.assertTrue(result.ok)
+
+    def test_daily_brief_timer_fails_when_missing(self) -> None:
+        def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+            cmd = args[0]
+            if cmd[:2] == ["systemctl", "--version"]:
+                return _Proc(0, "systemd 253")
+            if cmd[:2] == ["systemctl", "cat"]:
+                if cmd[2] == "personal-agent-daily-brief.service":
+                    return _Proc(0, "unit")
+                return _Proc(1)
+            return _Proc(1)
+
+        result = _check_daily_brief_timer(fake_run)
         self.assertFalse(result.ok)
 
 

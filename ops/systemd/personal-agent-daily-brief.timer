@@ -1,0 +1,10 @@
+[Unit]
+Description=Run Personal Agent daily brief at 07:00
+
+[Timer]
+OnCalendar=*-*-* 07:00:00
+Persistent=true
+Unit=personal-agent-daily-brief.service
+
+[Install]
+WantedBy=timers.target

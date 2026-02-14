@@ -7,6 +7,7 @@ It runs on your machine, uses explicit confirmations for sensitive actions, and 
 ## Current Status (Authoritative)
 - Use `PROJECT_STATUS.md` for current branch status, active work, and latest test health.
 - If another status/tracking doc conflicts, prefer `PROJECT_STATUS.md`.
+- Use `CANONICAL_HANDOFF_V3.md` for mission, behavioral guardrails, and long-horizon direction.
 
 ## Safety Model (Plain English)
 - No surprise actions: sensitive operations require explicit confirmation.
@@ -30,27 +31,18 @@ Try these in Telegram:
 - “largest directory growth in /home”
 
 ## Slash Commands (Telegram)
-Core:
+Source of truth: `README.md` command list (kept in sync with `telegram_adapter/bot.py`).
+
+Most used:
+- `/brief`
+- `/today`
+- `/task_add <title>`
+- `/done <id>`
+- `/open_loops [all|due|important]`
+- `/daily_brief_status`
+- `/health`
 - `/remind <YYYY-MM-DD HH:MM> | <text>`
 - `/status`
-- `/runtime_status`
-- `/weekly`
-
-Storage/Reports:
-- `/storage_snapshot`
-- `/storage_report`
-- `/resource_report`
-- `/network_report`
-- `/weekly_reflection`
-
-Ask/Opinion:
-- `/ask <question>`
-- `/ask_opinion <question>`
-
-Ops (if enabled):
-- `/restart` (requires confirmation via `/confirm`)
-- `/service_status`
-- `/logs [lines]`
 
 ## Logs (Where To Look)
 Application event log (JSONL):
@@ -95,6 +87,14 @@ Journal logs:
   - `daily_brief_enabled` (`on|off`)
   - `daily_brief_time` (`HH:MM`, local agent timezone)
 - Daily brief sends Telegram cards only; it does not run actions.
+
+### Migration Note (Scheduler)
+- Daily brief scheduling now runs from systemd timer (`personal-agent-daily-brief.timer`), not Telegram in-process repeat jobs.
+- Reinstall/refresh units:
+  - `bash ops/install.sh --user`
+- Enable timer:
+  - `systemctl --user daemon-reload`
+  - `systemctl --user enable --now personal-agent-daily-brief.timer`
 
 ## Open Loops (Explicit Only)
 - Add: `remember that I need to <title> by <YYYY-MM-DD>`

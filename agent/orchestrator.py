@@ -529,9 +529,64 @@ class Orchestrator:
                     return OrchestratorResponse("Project created.") if result.data else result
 
                 if cmd.name == "task_add":
-                    project, title, effort, impact = split_pipe_args(cmd.args, 4)
-                    effort_mins = int(effort) if effort else None
-                    impact_1to5 = int(impact) if impact else None
+                    raw_args = (cmd.args or "").strip()
+                    if "|" in raw_args:
+                        project, title, effort, impact = split_pipe_args(raw_args, 4)
+                    else:
+                        project, title, effort, impact = "", raw_args, "", ""
+                    title = (title or "").strip()
+                    if not title:
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-add-usage",
+                                    "title": "Task add",
+                                    "lines": ["Usage: /task_add <title>"],
+                                    "severity": "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Could not add task.",
+                            confidence=1.0,
+                            next_questions=["Try: /task_add Write report"],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    effort_clean = (effort or "").strip()
+                    impact_clean = (impact or "").strip()
+                    if effort_clean and not effort_clean.isdigit():
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-add-effort-invalid",
+                                    "title": "Task add",
+                                    "lines": ["Effort must be an integer number of minutes."],
+                                    "severity": "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Could not add task.",
+                            confidence=1.0,
+                            next_questions=["Try: /task_add Project|Title|30|4"],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    if impact_clean and not impact_clean.isdigit():
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-add-impact-invalid",
+                                    "title": "Task add",
+                                    "lines": ["Impact must be an integer from 1 to 5."],
+                                    "severity": "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Could not add task.",
+                            confidence=1.0,
+                            next_questions=["Try: /task_add Project|Title|30|4"],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    effort_mins = int(effort_clean) if effort_clean else None
+                    impact_1to5 = int(impact_clean) if impact_clean else None
                     result = self._call_skill(
                         user_id,
                         "core",
@@ -545,7 +600,12 @@ class Orchestrator:
                         ["db:write"],
                         action_type="insert",
                     )
-                    return OrchestratorResponse("Task added.") if result.data else result
+                    if not result.data:
+                        return result
+                    task_id = result.data.get("task_id") if isinstance(result.data, dict) else None
+                    if isinstance(task_id, int):
+                        return OrchestratorResponse(f"Task added: [{task_id}] {title}")
+                    return OrchestratorResponse("Task added.")
 
                 if cmd.name == "remind":
                     when_local, text = split_pipe_args(cmd.args, 2)
@@ -569,7 +629,91 @@ class Orchestrator:
                     return OrchestratorResponse("Weekly review is coming soon.")
 
                 if cmd.name == "done":
-                    return OrchestratorResponse("Logged. Mapping to tasks coming soon.")
+                    arg = (cmd.args or "").strip()
+                    if not re.fullmatch(r"\d+", arg):
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-done-usage",
+                                    "title": "Task done",
+                                    "lines": ["Usage: /done <id>"],
+                                    "severity": "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Could not mark task done.",
+                            confidence=1.0,
+                            next_questions=["Try: /done 1"],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    task_id = int(arg)
+                    task = self.db.get_task(task_id)
+                    if not task:
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-done-not-found",
+                                    "title": "Task done",
+                                    "lines": [f"Task not found: {task_id}"],
+                                    "severity": "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Could not mark task done.",
+                            confidence=1.0,
+                            next_questions=["Use /task_add <title> to add a task."],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    title = str(task.get("title") or "").strip()
+                    status = str(task.get("status") or "").strip().lower()
+                    if status == "done":
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-done-already",
+                                    "title": "Task done",
+                                    "lines": [f"Already done: [{task_id}] {title}"],
+                                    "severity": "ok",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Task already completed.",
+                            confidence=1.0,
+                            next_questions=["Use /task_add <title> for a new task."],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    updated = self.db.mark_task_done(task_id)
+                    if not updated:
+                        cards_payload = build_cards_payload(
+                            [
+                                {
+                                    "key": "task-done-not-found-race",
+                                    "title": "Task done",
+                                    "lines": [f"Task not found: {task_id}"],
+                                    "severity": "warn",
+                                }
+                            ],
+                            raw_available=False,
+                            summary="Could not mark task done.",
+                            confidence=1.0,
+                            next_questions=["Try again with /done <id>."],
+                        )
+                        return self._cards_response(user_id, cards_payload)
+                    cards_payload = build_cards_payload(
+                        [
+                            {
+                                "key": "task-done",
+                                "title": "Task done",
+                                "lines": [f"Done: [{task_id}] {title}"],
+                                "severity": "ok",
+                            }
+                        ],
+                        raw_available=False,
+                        summary="Task updated.",
+                        confidence=1.0,
+                        next_questions=["Use /today to review remaining tasks."],
+                    )
+                    return self._cards_response(user_id, cards_payload)
 
                 if cmd.name == "audit":
                     entries = self.db.audit_log_list_recent(user_id, limit=10)

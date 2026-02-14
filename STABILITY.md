@@ -1,5 +1,8 @@
 # Stability Guarantees (v0.6.x)
 
+> Stability baseline from earlier phase.  
+> Confirm live branch behavior against `PROJECT_STATUS.md` + tests.
+
 This document lists the current, shipped invariants for v0.6.x. It is factual and intentionally conservative.
 
 ## Invariants / Guarantees

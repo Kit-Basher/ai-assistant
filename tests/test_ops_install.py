@@ -40,6 +40,8 @@ class TestOpsInstallScript(unittest.TestCase):
             "enable --now",
             "personal-agent-supervisor.service",
             "personal-agent.service",
+            "personal-agent-daily-brief.service",
+            "personal-agent-daily-brief.timer",
             "install -m 600",
         ):
             self.assertIn(snippet, content)

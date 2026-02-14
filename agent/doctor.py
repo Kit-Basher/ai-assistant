@@ -166,6 +166,33 @@ def _check_systemd_units(run: Callable[..., subprocess.CompletedProcess[str]], d
     return CheckResult("systemd", True, msg)
 
 
+def _check_daily_brief_timer(run: Callable[..., subprocess.CompletedProcess[str]]) -> CheckResult:
+    svc = "personal-agent-daily-brief.service"
+    timer = "personal-agent-daily-brief.timer"
+    if not _systemd_available(run):
+        return CheckResult("daily_brief_timer", True, "systemd unavailable (skipped)")
+    if not _unit_exists(svc, run):
+        return CheckResult("daily_brief_timer", False, f"{svc} missing")
+    if not _unit_exists(timer, run):
+        return CheckResult("daily_brief_timer", False, f"{timer} missing")
+    _svc_enabled, svc_active = _unit_state(svc, run)
+    timer_enabled, timer_active = _unit_state(timer, run)
+    if timer_enabled != "enabled" or timer_active != "active":
+        return CheckResult(
+            "daily_brief_timer",
+            False,
+            f"timer enabled={timer_enabled} active={timer_active}",
+        )
+    if svc_active == "failed":
+        return CheckResult("daily_brief_timer", False, f"service active={svc_active}")
+    exec_main_status = _systemd_show_value(svc, "ExecMainStatus", run) or "unknown"
+    msg = (
+        f"service active={svc_active}; timer enabled={timer_enabled} "
+        f"active={timer_active}; last_exit={exec_main_status}"
+    )
+    return CheckResult("daily_brief_timer", True, msg)
+
+
 def _check_version(version_path: str, schema_version: int | None) -> CheckResult:
     if not os.path.isfile(version_path):
         return CheckResult("version", False, "VERSION missing")
@@ -218,6 +245,7 @@ def run_doctor(repo_root: str, db_path: str, version_path: str) -> list[CheckRes
     results.append(_check_db(db_path))
     schema_version = _read_schema_version(db_path)
     results.append(_check_systemd_units(subprocess.run, db_path))
+    results.append(_check_daily_brief_timer(subprocess.run))
     results.append(_check_version(version_path, schema_version))
     results.append(_check_observe_now_dry_run(repo_root))
     return results

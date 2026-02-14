@@ -24,25 +24,22 @@ class TestOrchestrator(unittest.TestCase):
         self.db.close()
         self.tmpdir.cleanup()
 
-    def test_handle_message_no_longer_raises(self) -> None:
-        orchestrator = Orchestrator(
+    def _orchestrator(self) -> Orchestrator:
+        return Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=None,
         )
+
+    def test_handle_message_no_longer_raises(self) -> None:
+        orchestrator = self._orchestrator()
         response = orchestrator.handle_message("hello there", "user1")
         self.assertIsInstance(response, OrchestratorResponse)
 
     def test_knowledge_query_cache_and_cta(self) -> None:
-        orchestrator = Orchestrator(
-            db=self.db,
-            skills_path=self.skills_path,
-            log_path=self.log_path,
-            timezone="UTC",
-            llm_client=None,
-        )
+        orchestrator = self._orchestrator()
         response = orchestrator.handle_message("what changed this week", "user1")
         self.assertIn("Want my opinion", response.text)
         entry = orchestrator._knowledge_cache.get_recent("user1")
@@ -50,13 +47,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(entry.facts_hash, facts_hash(entry.facts))
 
     def test_opinion_followup_uses_cached_facts(self) -> None:
-        orchestrator = Orchestrator(
-            db=self.db,
-            skills_path=self.skills_path,
-            log_path=self.log_path,
-            timezone="UTC",
-            llm_client=None,
-        )
+        orchestrator = self._orchestrator()
         orchestrator.handle_message("what changed this week", "user1")
         entry = orchestrator._knowledge_cache.get_recent("user1")
         response = orchestrator.handle_message("opinion", "user1")
@@ -150,6 +141,33 @@ class TestOrchestrator(unittest.TestCase):
 
         second = orch.handle_message("yes please", "user1")
         self.assertIn("baseline created", second.text.lower())
+
+    def test_done_invalid_id(self) -> None:
+        orch = self._orchestrator()
+        response = orch.handle_message("/done abc", "user1")
+        self.assertIsInstance(response.data, dict)
+        self.assertEqual("Usage: /done <id>", response.data["cards"][0]["lines"][0])
+
+    def test_done_nonexistent_id(self) -> None:
+        orch = self._orchestrator()
+        response = orch.handle_message("/done 9999", "user1")
+        self.assertIsInstance(response.data, dict)
+        self.assertEqual("Task not found: 9999", response.data["cards"][0]["lines"][0])
+
+    def test_done_marks_done_then_reports_already_done(self) -> None:
+        orch = self._orchestrator()
+        task_id = self.db.add_task(None, "Write report", 30, 4)
+
+        first = orch.handle_message(f"/done {task_id}", "user1")
+        self.assertIsInstance(first.data, dict)
+        self.assertEqual(f"Done: [{task_id}] Write report", first.data["cards"][0]["lines"][0])
+        task = self.db.get_task(task_id)
+        self.assertIsNotNone(task)
+        self.assertEqual("done", task["status"])
+
+        second = orch.handle_message(f"/done {task_id}", "user1")
+        self.assertIsInstance(second.data, dict)
+        self.assertEqual(f"Already done: [{task_id}] Write report", second.data["cards"][0]["lines"][0])
 
 
 if __name__ == "__main__":

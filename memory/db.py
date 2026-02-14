@@ -225,6 +225,27 @@ class MemoryDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def get_task(self, task_id: int) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT id, project_id, title, details, effort_mins, impact_1to5, status, due_date, created_at, updated_at
+            FROM tasks
+            WHERE id = ?
+            """,
+            (int(task_id),),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def mark_task_done(self, task_id: int) -> bool:
+        now = self._now_iso()
+        cur = self._conn.execute(
+            "UPDATE tasks SET status = 'done', updated_at = ? WHERE id = ?",
+            (now, int(task_id)),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
     def add_reminder(self, when_ts: str, text: str) -> int:
         created_at = self._now_iso()
         cur = self._conn.execute(

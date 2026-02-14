@@ -216,6 +216,30 @@ async def _handle_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_task_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    text = update.effective_message.text or ""
+    content = _command_payload(text, "/task_add")
+    prompt = f"/task_add {content}".strip()
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message(prompt, user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    text = update.effective_message.text or ""
+    content = _command_payload(text, "/done")
+    prompt = f"/done {content}".strip()
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message(prompt, user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
 async def _handle_open_loops(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
         return
@@ -545,6 +569,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("network_report", _handle_network_report))
     app.add_handler(CommandHandler("weekly_reflection", _handle_weekly_reflection))
     app.add_handler(CommandHandler("today", _handle_today))
+    app.add_handler(CommandHandler("task_add", _handle_task_add))
+    app.add_handler(CommandHandler("done", _handle_done))
     app.add_handler(CommandHandler("open_loops", _handle_open_loops))
     app.add_handler(CommandHandler("health", _handle_health))
     app.add_handler(CommandHandler("daily_brief_status", _handle_daily_brief_status))
@@ -562,7 +588,6 @@ def build_app() -> Application:
     app.bot_data["timezone"] = config.agent_timezone
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
-    app.job_queue.run_repeating(_scheduled_daily_brief, interval=60, first=10)
     if config.enable_scheduled_snapshots:
         run_time = time(9, 0, tzinfo=ZoneInfo(config.agent_timezone))
         app.job_queue.run_daily(_scheduled_disk_snapshot, time=run_time, name="disk_snapshot_daily")

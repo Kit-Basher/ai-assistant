@@ -1,5 +1,8 @@
 # Architecture (v0.8)
 
+> Architecture reference baseline.  
+> For what is currently wired in this branch, verify against `PROJECT_STATUS.md`.
+
 This document explains the stable architecture spine and how new features must fit into it.
 
 ## Core Spine (Plain Terms)

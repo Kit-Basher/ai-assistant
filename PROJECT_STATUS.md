@@ -1,152 +1,182 @@
-# Project Status
+# PERSONAL AGENT - AUTHORITATIVE PROJECT STATUS
 
 Last updated: 2026-02-14
-Repo path: `~/personal-agent`
-Branch: `brief-v0.2-clean`
-HEAD: `6f65804`
 
-## 1) What this project is
-Personal Agent is a local-first, Telegram-first assistant built to be predictable and auditable.
+A living snapshot of where the project stands, what exists, and what the next logical steps are. Designed to be honest, concise, and grounded in reality, not aspiration.
 
-Core runtime flow:
-Telegram input -> orchestrator -> manifested skill handler -> SQLite + audit -> deterministic report/cards -> optional narration.
+## A. Project Overview
 
-## 2) Current architecture (live code)
-- Telegram entrypoint: `telegram_adapter/bot.py`
-- Core behavior and routing: `agent/orchestrator.py`
-- Skill discovery/loading: `agent/skills_loader.py`
-- Persistence layer: `memory/db.py` + `memory/schema.sql`
-- Ops control plane: `ops/supervisor.py` + `agent/ops/supervisor_client.py`
-- Health checks: `scripts/doctor.py` + `agent/doctor.py`
+Name: Personal Agent  
+Purpose: A local-first digital companion that helps organize life, remembers context, and interacts via Telegram.
 
-## 3) User-facing capability surface today
-### Telegram slash commands currently registered
-- `/remind`
-- `/status`
-- `/runtime_status`
-- `/disk_grow`
-- `/audit`
-- `/storage_snapshot`
-- `/storage_report`
-- `/resource_report`
-- `/brief`
-- `/network_report`
-- `/weekly_reflection`
-- `/today`
-- `/open_loops`
-- `/health`
-- `/daily_brief_status`
-- `/ask`
-- `/ask_opinion`
+Key characteristics:
+- Runs locally (Python + SQLite)
+- Uses systemd timers for scheduling
+- Predictable behavior; no hidden autonomy
+- Friendly, evolving personality potential
+- Memory that can be reinforced and retrieved
 
-### Natural language support (high level)
-- Observe/report prompts (disk, resource, network, service health)
-- Preference updates (daily brief config, display preferences)
-- Open loop add/done/list
-- Daily brief status explanation
-- Basic conversational fallback/chitchat
+Philosophy:  
+We are building a companion that is:
+- useful
+- safe
+- persistent
+- adaptive but not emotionally manipulative
+- able to grow in capability and subtle personality shift
 
-## 4) Active manifested skills
-Only folders with both `manifest.json` and `handler.py` are loaded.
+## B. Current Implementation (Code Reality)
 
-Active skills (15):
-- `core`
-- `disk_pressure_report`
-- `git`
-- `knowledge_query`
-- `network_governor`
-- `observe_now`
-- `opinion`
-- `opinion_on_report`
-- `ops_supervisor`
-- `recall`
-- `reflection`
-- `resource_governor`
-- `runtime_status`
-- `service_health_report`
-- `storage_governor`
+### Branch and Version
+- Current branch: `brief-v0.2-clean`
+- HEAD: `c5420da`
+- Active version: `v0.2.0`
+- Daily brief and core responses are implemented.
 
-Note: `skills/` also contains non-manifest directories that are not part of runtime skill loading.
+### Dependencies
+- `python-telegram-bot >=22.6`
+- `openai >=1.0.0`
 
-## 5) Data model and persistence
-Primary DB entities include:
-- core memory: `projects`, `tasks`, `notes`, `reminders`, `preferences`
-- workflow/safety: `pending_clarifications`, `audit_log`, `activity_log`
-- observation data: disk/resource/network snapshots + scan stats
-- anomaly tracking: `anomaly_events`
-- unified brief/delta snapshots: `system_facts_snapshots`
+## C. Commands Surface
 
-Versioning:
-- App version file: `VERSION` (currently `0.2.0`)
-- Doctor expects schema minor to match DB schema version.
+Registered Telegram commands:
 
-## 6) Safety and control boundaries
-- Telegram input is treated as untrusted.
-- Policy layer enforces permission checks and confirmation requirements for sensitive actions.
-- `action_gate` is effectively disabled in this build.
-- `runner` is not configured for real command execution (`runner_not_configured` path).
-- Ops supervisor uses HMAC signature validation + nonce replay protection + timestamp skew checks.
-- Allowed supervisor ops are constrained (`restart`, `status`, `logs`).
+| Command | Purpose |
+| --- | --- |
+| `/ask` | Ask a question (LLM) |
+| `/ask_opinion` | Ask for opinion synthesis |
+| `/audit` | Show recent audit log |
+| `/brief` | Manual daily brief |
+| `/daily_brief_status` | Check scheduled brief |
+| `/disk_grow` | Disk growth view for a target path |
+| `/health` | System health summary |
+| `/network_report` | Network report |
+| `/open_loops` | List open loops |
+| `/remind` | Set a reminder |
+| `/resource_report` | Resource usage summary |
+| `/runtime_status` | Runtime diagnostics |
+| `/storage_snapshot` | Trigger storage snapshot collection |
+| `/storage_report` | Storage usage summary |
+| `/task_add` | Add a task |
+| `/done` | Mark a task done by id |
+| `/status` | Agent runtime status |
+| `/today` | Show today's view |
+| `/weekly_reflection` | Weekly reflection prompt |
 
-## 7) Systemd/ops state in repo
-Unit files present under `ops/systemd/`:
-- `personal-agent.service`
-- `personal-agent-supervisor.service`
-- `personal-agent-observe.service`
-- `personal-agent-observe.timer`
-- `personal-agent-daily-brief.service` (in-progress)
-- `personal-agent-daily-brief.timer` (in-progress)
+Other command logic exists in orchestrator that is not Telegram-registered yet (for example: `/project_new`, `/remember`, `/plan`, `/next`).
 
-Installer:
-- `ops/install.sh` supports system and `--user` mode installation.
+## D. Storage and Schema
 
-Doctor checks:
-- DB/schema readability
-- observe timer/service health proof
-- version/schema compatibility
-- observe-now dry-run
-- daily brief timer/service check (in-progress changes in working tree)
+DB: SQLite (`memory/agent.db`)  
+Schema: Loaded from `memory/schema.sql`
 
-## 8) Test status
-Current full suite run on this branch:
-- `pytest -q` -> `162 passed` (2026-02-14)
+Tables include:
+- `projects`
+- `tasks`
+- `open_loops`
+- `reminders`
+- `preferences`
+- `activity_log`
+- `audit_log`
+- various metric/snapshot tables (`resource_`, `network_`)
+- `schema_meta` for versioning
+- `last_report_registry`, `report_history`
 
-## 9) Work in progress right now
-Goal in progress: stable public daily brief scheduler entrypoint + user timer at 07:00.
+Important: Tasks already exist and are used by brief logic; task planning UI is still stubbed.
 
-Uncommitted files currently in progress:
-- `agent/scheduled_daily_brief.py` (new public entrypoint)
-- `ops/systemd/personal-agent-daily-brief.service` (new)
-- `ops/systemd/personal-agent-daily-brief.timer` (new, `OnCalendar=*-*-* 07:00:00`)
-- `ops/install.sh` (install/enable wiring)
-- `agent/doctor.py` (daily brief timer health check)
-- `tests/test_scheduled_daily_brief_entrypoint.py` (new)
-- `tests/test_doctor.py` (updated)
-- `tests/test_ops_install.py` (updated)
+## E. Daily Brief - What Exists
 
-Current target behavior for this workstream:
-- Entry point invokable as `python -m agent.scheduled_daily_brief`
-- Must not call private `_scheduled_daily_brief`
-- Exit `0` on disabled/outside-time-window skip paths
-- Log decisions to stdout for journald
-- Support env from `~/.config/personal-agent/agent.env` via systemd `EnvironmentFile`
+Daily brief functionality now runs via systemd only, not in-process Telegram scheduler.
 
-## 10) Known gaps / cleanup backlog
-- Some docs are stale vs current branch reality (notably frozen tracking docs and older README sections).
-- Command surface mismatch: orchestrator has additional slash command logic not all exposed by Telegram command handlers.
-- Placeholder responses remain for some flows (`/next`, `/plan`, `/weekly`, `/done`).
-- Runtime scaffolding directories in `skills/` can create confusion (not loaded unless manifest+handler exist).
+What it does:
+- Reads open tasks and open loops
+- Filters by due dates
+- Builds structured Markdown summary
+- Sends Telegram message once per day
+- Prevents duplicate sends via `daily_brief_last_sent_date`
 
-## 11) Immediate next steps
-1. Commit the in-progress daily-brief scheduler/timer changes.
-2. Add short docs update in `LOOKHERE.md`/`README.md` for the new daily brief timer usage.
-3. Optionally align Telegram command registration with orchestrator-supported commands.
-4. Refresh stale project tracking docs after merge to avoid future context drift.
+Sections generated:
+- Today
+- Top tasks (sorted by due/impact)
+- Due soon
+- Open loops
+- A single nudge (oldest item)
 
-## 12) How to refresh this status file
-Use this quick checklist before updating:
-1. `git branch --show-current && git rev-parse --short HEAD`
-2. `git status --short`
-3. `pytest -q`
-4. Verify active skills by checking manifest+handler pairs in `skills/`
-5. Reconcile docs with actual command handlers in `telegram_adapter/bot.py`
+## F. What Works Today
+
+- Tasks can be added via `/task_add`
+- Tasks can be marked done (`/done`)
+- Daily brief sends with summary
+- Systemd services are installed via `ops/install.sh`
+- Doctor service checks daily brief timer health
+- Preferences stored in DB for config
+- Open loops tracked
+
+## G. Known Gaps / Stubs
+
+The following commands are present in orchestrator but the UX is currently stubbed or incomplete:
+- `/next` -> placeholder
+- `/plan` -> placeholder
+- `/weekly` -> placeholder
+- Task editing / rich task workflows
+- More expressive daily interaction beyond a report
+
+## H. Agent Identity, Memory and Personality (Intent)
+
+This section does not yet exist in code but defines the vision.
+
+Memory system goals:
+- Multi-tier memory (working / episodic / semantic)
+- Decay and reinforcement
+- Tagging + retrieval
+- Pinning for non-forget
+
+Personality and evolution:
+- Adapt tone to user preferences
+- Allow personality drift based on interaction history
+- Never use emotional punishment mechanics
+- Preferences override personality drift
+
+This will be a focus of the next iteration.
+
+## I. Next Logical Steps (Concrete)
+
+### Foundational
+- Finalize Telegram handlers for important commands.
+- Keep `/task_add` and `/done` behavior stable as command surface evolves.
+- Fix any malformed test files.
+- Ensure naming, imports, and `if __name__ == "__main__"` are correct.
+- Clean up orchestrator stub handlers.
+- Fill out `/next`, `/plan`, `/weekly` in simple iterations.
+
+### Memory and Personality
+- Build Memory Layer Tier 0.
+- Start with a table for episodic events + reinforcement counts.
+- Build simple retrieval.
+- Tag + retrieve relevant memories for daily check-ins.
+- Daily companion message.
+- Replace or extend daily brief with friend-like check-in.
+
+### Vision Phase
+- Adaptive personality.
+- Slow drift based on user interaction.
+- Style preferences in DB.
+- Controlled sandbox actions.
+
+## J. Testing Reality
+
+- 168 tests passing
+- New tests added for daily brief entrypoint + scheduler
+- Doctor tests include daily brief timer health
+- If tests fail after changes, new behavior should be documented.
+
+## K. Definition of Done (Current Goals)
+
+- Tasks/states are stored and retrievable
+- Daily companion message version exists
+- Memory can be recalled and reinforced
+- Personality evolves slowly over time
+- Telegram UX is consistent and helpful
+
+## L. What This Project Actually Is
+
+A companion you raise: a semi-autonomous agent with memory, personality, and a sense of continuity that helps you organize your life, and grows in capability over time without ever punishing you emotionally.

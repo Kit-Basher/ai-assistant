@@ -64,6 +64,8 @@ AGENT_UNIT="personal-agent.service"
 SUPERVISOR_UNIT="personal-agent-supervisor.service"
 OBSERVE_UNIT="personal-agent-observe.service"
 OBSERVE_TIMER="personal-agent-observe.timer"
+DAILY_BRIEF_UNIT="personal-agent-daily-brief.service"
+DAILY_BRIEF_TIMER="personal-agent-daily-brief.timer"
 
 AGENT_ENV="${ENV_DIR}/agent.env"
 SUPERVISOR_ENV="${ENV_DIR}/supervisor.env"
@@ -183,6 +185,7 @@ Actions:
 - Create systemd drop-ins for user/group + working dir
 - systemctl daemon-reload
 - systemctl enable --now ${SUPERVISOR_UNIT} then ${AGENT_UNIT}
+- systemctl enable --now ${OBSERVE_TIMER} and ${DAILY_BRIEF_TIMER}
 EOF
 }
 
@@ -201,13 +204,13 @@ if [[ "${ACTION}" == "uninstall" ]]; then
   print_plan_uninstall
   confirm "Proceed with uninstall?" || exit 0
   if [[ "${MODE}" == "system" ]]; then
-    sudo_cmd "${SYSTEMCTL_CMD[@]}" disable --now "${AGENT_UNIT}" "${SUPERVISOR_UNIT}" "${OBSERVE_TIMER}" || true
-    sudo_cmd rm -f "${UNIT_DIR_TARGET}/${AGENT_UNIT}" "${UNIT_DIR_TARGET}/${SUPERVISOR_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_TIMER}"
+    sudo_cmd "${SYSTEMCTL_CMD[@]}" disable --now "${AGENT_UNIT}" "${SUPERVISOR_UNIT}" "${OBSERVE_TIMER}" "${DAILY_BRIEF_TIMER}" || true
+    sudo_cmd rm -f "${UNIT_DIR_TARGET}/${AGENT_UNIT}" "${UNIT_DIR_TARGET}/${SUPERVISOR_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_TIMER}" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_UNIT}" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_TIMER}"
     sudo_cmd rm -rf "${DROPIN_AGENT_DIR}" "${DROPIN_SUPERVISOR_DIR}"
     sudo_cmd "${SYSTEMCTL_CMD[@]}" daemon-reload
   else
-    run_cmd "${SYSTEMCTL_CMD[@]}" disable --now "${AGENT_UNIT}" "${SUPERVISOR_UNIT}" "${OBSERVE_TIMER}" || true
-    run_cmd rm -f "${UNIT_DIR_TARGET}/${AGENT_UNIT}" "${UNIT_DIR_TARGET}/${SUPERVISOR_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_TIMER}"
+    run_cmd "${SYSTEMCTL_CMD[@]}" disable --now "${AGENT_UNIT}" "${SUPERVISOR_UNIT}" "${OBSERVE_TIMER}" "${DAILY_BRIEF_TIMER}" || true
+    run_cmd rm -f "${UNIT_DIR_TARGET}/${AGENT_UNIT}" "${UNIT_DIR_TARGET}/${SUPERVISOR_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_UNIT}" "${UNIT_DIR_TARGET}/${OBSERVE_TIMER}" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_UNIT}" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_TIMER}"
     run_cmd rm -rf "${DROPIN_AGENT_DIR}" "${DROPIN_SUPERVISOR_DIR}"
     run_cmd "${SYSTEMCTL_CMD[@]}" daemon-reload
   fi
@@ -288,11 +291,15 @@ if [[ "${MODE}" == "system" ]]; then
   sudo_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-supervisor.service" "${UNIT_DIR_TARGET}/${SUPERVISOR_UNIT}"
   sudo_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-observe.service" "${UNIT_DIR_TARGET}/${OBSERVE_UNIT}"
   sudo_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-observe.timer" "${UNIT_DIR_TARGET}/${OBSERVE_TIMER}"
+  sudo_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-daily-brief.service" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_UNIT}"
+  sudo_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-daily-brief.timer" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_TIMER}"
 else
   run_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent.service" "${UNIT_DIR_TARGET}/${AGENT_UNIT}"
   run_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-supervisor.service" "${UNIT_DIR_TARGET}/${SUPERVISOR_UNIT}"
   run_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-observe.service" "${UNIT_DIR_TARGET}/${OBSERVE_UNIT}"
   run_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-observe.timer" "${UNIT_DIR_TARGET}/${OBSERVE_TIMER}"
+  run_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-daily-brief.service" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_UNIT}"
+  run_cmd install -m 644 "${REPO_ROOT}/ops/systemd/personal-agent-daily-brief.timer" "${UNIT_DIR_TARGET}/${DAILY_BRIEF_TIMER}"
 fi
 
 DROPIN_AGENT_CONTENT="[Service]
@@ -318,11 +325,13 @@ if [[ "${MODE}" == "system" ]]; then
   sudo_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${SUPERVISOR_UNIT}"
   sudo_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${AGENT_UNIT}"
   sudo_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${OBSERVE_TIMER}"
+  sudo_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${DAILY_BRIEF_TIMER}"
 else
   run_cmd "${SYSTEMCTL_CMD[@]}" daemon-reload
   run_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${SUPERVISOR_UNIT}"
   run_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${AGENT_UNIT}"
   run_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${OBSERVE_TIMER}"
+  run_cmd "${SYSTEMCTL_CMD[@]}" enable --now "${DAILY_BRIEF_TIMER}"
 fi
 
 cat <<EOF
@@ -331,5 +340,6 @@ Next steps:
 - Check status: ${SYSTEMCTL_CMD[*]} status ${AGENT_UNIT}
 - Check supervisor: ${SYSTEMCTL_CMD[*]} status ${SUPERVISOR_UNIT}
 - Check observe timer: ${SYSTEMCTL_CMD[*]} status ${OBSERVE_TIMER}
+- Check daily brief timer: ${SYSTEMCTL_CMD[*]} status ${DAILY_BRIEF_TIMER}
 - Logs: ${SYSTEMCTL_CMD[*]} status ${AGENT_UNIT}; journalctl -u ${AGENT_UNIT} -n 50 --no-pager
 EOF

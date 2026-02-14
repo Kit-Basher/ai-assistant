@@ -26,6 +26,20 @@ class TestDBInit(unittest.TestCase):
             db.init_schema(schema_path)
             self.assertEqual(MemoryDB.SCHEMA_VERSION, db.get_schema_version())
 
+            task_id = db.add_task(None, "Write report", 30, 4)
+            task = db.get_task(task_id)
+            self.assertIsNotNone(task)
+            self.assertEqual("todo", task["status"])
+            self.assertEqual("Write report", task["title"])
+
+            self.assertTrue(db.mark_task_done(task_id))
+            done_task = db.get_task(task_id)
+            self.assertIsNotNone(done_task)
+            self.assertEqual("done", done_task["status"])
+
+            self.assertFalse(db.mark_task_done(999999))
+            self.assertIsNone(db.get_task(999999))
+
             db.close()
 
 

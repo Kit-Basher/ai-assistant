@@ -1,5 +1,9 @@
 ## Final Check Report (Personal Agent)
 
+> Status: one-time historical verification report.  
+> Not a living source of truth.  
+> Use `PROJECT_STATUS.md` for current state.
+
 ### What I Checked
 - systemd unit content and drop‑ins
 - service status (running user + command line)
@@ -45,4 +49,3 @@
 ### Issues Found
 - None critical.
 - Pending manual checks: `/etc/personal-agent/agent.env` permissions and Telegram smoke test.
-
