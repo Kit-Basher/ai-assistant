@@ -94,6 +94,7 @@ class MemoryDB:
         self._ensure_user_prefs_table()
         self._ensure_thread_prefs_table()
         self._ensure_thread_anchors_table()
+        self._ensure_thread_labels_table()
         self._ensure_open_loop_columns()
         self._ensure_schema_meta()
         self._conn.commit()
@@ -338,6 +339,17 @@ class MemoryDB:
             """
         )
 
+    def _ensure_thread_labels_table(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_labels (
+                thread_id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
         cols = {row["name"] for row in cur.fetchall()}
@@ -486,6 +498,55 @@ class MemoryDB:
             return None
         title = str(row["title"] or "").strip()
         return title if title else None
+
+    def set_thread_label(self, thread_id: str, label: str) -> None:
+        now = self._now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO thread_labels (thread_id, label, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                label = excluded.label,
+                updated_at = excluded.updated_at
+            """,
+            (thread_id, label, now),
+        )
+        self._commit_if_needed()
+
+    def get_thread_label(self, thread_id: str) -> str | None:
+        cur = self._conn.execute(
+            "SELECT label FROM thread_labels WHERE thread_id = ?",
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        value = str(row["label"] or "").strip()
+        return value if value else None
+
+    def clear_thread_label(self, thread_id: str) -> None:
+        self._conn.execute("DELETE FROM thread_labels WHERE thread_id = ?", (thread_id,))
+        self._commit_if_needed()
+
+    def list_thread_labels(self, thread_ids: list[str]) -> dict[str, str]:
+        normalized = sorted({str(thread_id).strip() for thread_id in thread_ids if str(thread_id).strip()})
+        if not normalized:
+            return {}
+        placeholders = ",".join("?" for _ in normalized)
+        cur = self._conn.execute(
+            f"""
+            SELECT thread_id, label
+            FROM thread_labels
+            WHERE thread_id IN ({placeholders})
+            ORDER BY thread_id ASC
+            """,
+            tuple(normalized),
+        )
+        return {
+            str(row["thread_id"]): str(row["label"])
+            for row in cur.fetchall()
+            if str(row["thread_id"]).strip() and str(row["label"]).strip()
+        }
 
     def list_recent_threads(self, limit: int = 10) -> list[dict[str, Any]]:
         max_rows = max(1, int(limit))

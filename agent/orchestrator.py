@@ -172,6 +172,13 @@ class Orchestrator:
         return re.sub(r"[^a-z0-9 ./_\\-]+", " ", value).strip()
 
     @staticmethod
+    def _normalize_thread_label(label: str) -> str:
+        cleaned = " ".join((label or "").replace("?", "").split()).strip()
+        if len(cleaned) > 60:
+            cleaned = cleaned[:60].rstrip()
+        return cleaned
+
+    @staticmethod
     def _is_command_line(line: str) -> bool:
         stripped = (line or "").strip()
         if not stripped or stripped.startswith("- ") or stripped.startswith("In short:") or stripped.startswith("Next:"):
@@ -1396,14 +1403,24 @@ class Orchestrator:
                     if not rows:
                         lines.append("(none)")
                     else:
+                        thread_ids = [
+                            str(row.get("thread_id") or "").strip()
+                            for row in rows
+                            if isinstance(row, dict) and str(row.get("thread_id") or "").strip()
+                        ]
+                        labels_by_thread = self.db.list_thread_labels(thread_ids)
                         for idx, row in enumerate(rows, start=1):
                             listed_thread_id = str(row.get("thread_id") or "").replace("?", "").strip()
                             last_ts = str(row.get("last_ts") or "").replace("?", "").strip()
                             if not listed_thread_id or not last_ts:
                                 continue
+                            label = labels_by_thread.get(listed_thread_id)
+                            label_text = self._normalize_thread_label(str(label or "(none)")) or "(none)"
                             focus = self.db.get_latest_anchor_title(listed_thread_id)
                             focus_text = str(focus or "(none)").replace("?", "").strip() or "(none)"
-                            lines.append(f"{idx}) {listed_thread_id} {last_ts} Focus: {focus_text}")
+                            lines.append(
+                                f"{idx}) {listed_thread_id}  {last_ts}  Label: {label_text}  Focus: {focus_text}"
+                            )
                     return OrchestratorResponse(
                         "\n".join(lines),
                         {"skip_friction_formatting": True, "thread_id": thread_id},
@@ -1433,6 +1450,28 @@ class Orchestrator:
                     return OrchestratorResponse(
                         f"Active thread set to {target_thread_id}.",
                         {"skip_friction_formatting": True, "thread_id": target_thread_id},
+                    )
+
+                if cmd.name == "thread_label":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    normalized = self._normalize_thread_label(cmd.args or "")
+                    if not normalized:
+                        return OrchestratorResponse(
+                            "Usage: /thread_label <label>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    self.db.set_thread_label(thread_id, normalized)
+                    return OrchestratorResponse(
+                        f"Label set for {thread_id}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "thread_unlabel":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    self.db.clear_thread_label(thread_id)
+                    return OrchestratorResponse(
+                        f"Label cleared for {thread_id}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
                 if cmd.name == "resume":

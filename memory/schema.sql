@@ -84,6 +84,12 @@ CREATE TABLE IF NOT EXISTS thread_anchors (
     open_line TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS thread_labels (
+    thread_id TEXT PRIMARY KEY,
+    label TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
