@@ -1,5 +1,28 @@
 # Good Assistant Foundation Handoff
 
+## v0.3.0 — Memory Constraints (Typed + Enforced)
+
+This milestone establishes structural integrity controls for the memory graph.
+
+Included:
+- typed relations with per-thread strict mode
+- per-relation constraints
+- current supported constraint: `acyclic`
+- deterministic cycle detection
+- enforcement across `/link`, `/graph_import`, `/graph_pack_import`, and `/graph_clone`
+- deterministic traversal caps during constraint checks
+- transaction-safe validation (no partial writes)
+- no inference and no new LLM usage
+- thread-scoped guarantees
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.9 — Typed Relations (Schema + Strict Mode)
 
 This milestone adds explicit per-thread relation schemas and strict enforcement controls for graph links.
