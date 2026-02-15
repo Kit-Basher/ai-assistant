@@ -134,6 +134,14 @@ CREATE TABLE IF NOT EXISTS graph_relation_mode (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS graph_relation_constraints (
+    thread_id TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    "constraint" TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, relation, "constraint")
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,

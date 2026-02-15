@@ -418,6 +418,17 @@ class MemoryDB:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_relation_constraints (
+                thread_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                "constraint" TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, relation, "constraint")
+            )
+            """
+        )
 
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
@@ -928,6 +939,186 @@ class MemoryDB:
         )
         return cur.fetchone() is not None
 
+    def add_relation_constraint(self, thread_id: str, relation: str, constraint: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized_relation = self._normalize_graph_relation(relation)
+        normalized_constraint = str(constraint or "").strip().lower()
+        if not tid or not normalized_relation or normalized_constraint != "acyclic":
+            return False
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO graph_relation_constraints (thread_id, relation, "constraint", created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (tid, normalized_relation, normalized_constraint, self._now_iso()),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def remove_relation_constraint(self, thread_id: str, relation: str, constraint: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized_relation = self._normalize_graph_relation(relation)
+        normalized_constraint = str(constraint or "").strip().lower()
+        if not tid or not normalized_relation or normalized_constraint != "acyclic":
+            return False
+        cur = self._conn.execute(
+            """
+            DELETE FROM graph_relation_constraints
+            WHERE thread_id = ? AND relation = ? AND "constraint" = ?
+            """,
+            (tid, normalized_relation, normalized_constraint),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def list_relation_constraints(self, thread_id: str) -> list[tuple[str, str]]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT relation, "constraint" AS constraint_value
+            FROM graph_relation_constraints
+            WHERE thread_id = ?
+            ORDER BY relation ASC, "constraint" ASC
+            """,
+            (tid,),
+        )
+        return [
+            (str(row["relation"]).strip(), str(row["constraint_value"]).strip())
+            for row in cur.fetchall()
+            if str(row["relation"]).strip() and str(row["constraint_value"]).strip()
+        ]
+
+    def has_relation_constraint(self, thread_id: str, relation: str, constraint: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized_relation = self._normalize_graph_relation(relation)
+        normalized_constraint = str(constraint or "").strip().lower()
+        if not tid or not normalized_relation or normalized_constraint != "acyclic":
+            return False
+        cur = self._conn.execute(
+            """
+            SELECT 1
+            FROM graph_relation_constraints
+            WHERE thread_id = ? AND relation = ? AND "constraint" = ?
+            LIMIT 1
+            """,
+            (tid, normalized_relation, normalized_constraint),
+        )
+        return cur.fetchone() is not None
+
+    def would_create_cycle(self, thread_id: str, relation: str, from_node: str, to_node: str) -> bool:
+        tid = str(thread_id or "").strip()
+        rel = self._normalize_graph_relation(relation)
+        src = self._normalize_graph_node_id(from_node)
+        dst = self._normalize_graph_node_id(to_node)
+        if not tid or not rel or not src or not dst:
+            return True
+        if src == dst:
+            return True
+
+        cur = self._conn.execute(
+            """
+            SELECT from_node, to_node
+            FROM graph_edges
+            WHERE thread_id = ? AND relation = ?
+            ORDER BY from_node ASC, to_node ASC
+            """,
+            (tid, rel),
+        )
+        adjacency: dict[str, list[str]] = {}
+        for row in cur.fetchall():
+            edge_src = self._normalize_graph_node_id(str(row["from_node"] or ""))
+            edge_dst = self._normalize_graph_node_id(str(row["to_node"] or ""))
+            if not edge_src or not edge_dst:
+                continue
+            adjacency.setdefault(edge_src, []).append(edge_dst)
+
+        visited: set[str] = {dst}
+        queue: list[str] = [dst]
+        visited_count = 1
+        while queue:
+            current = queue.pop(0)
+            for neighbor in adjacency.get(current, []):
+                if neighbor == src:
+                    return True
+                if neighbor in visited:
+                    continue
+                visited.add(neighbor)
+                visited_count += 1
+                if visited_count > 500:
+                    return True
+                queue.append(neighbor)
+        return False
+
+    def validate_acyclic_constraints(self, thread_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return True
+        constrained_relations = [
+            relation
+            for relation, constraint in self.list_relation_constraints(tid)
+            if constraint == "acyclic"
+        ]
+        if not constrained_relations:
+            return True
+
+        for relation in constrained_relations:
+            rel = self._normalize_graph_relation(relation)
+            if not rel:
+                return False
+            cur = self._conn.execute(
+                """
+                SELECT from_node, to_node
+                FROM graph_edges
+                WHERE thread_id = ? AND relation = ?
+                ORDER BY from_node ASC, to_node ASC
+                """,
+                (tid, rel),
+            )
+            nodes: set[str] = set()
+            adjacency: dict[str, list[str]] = {}
+            indegree: dict[str, int] = {}
+            edge_count = 0
+            for row in cur.fetchall():
+                edge_count += 1
+                if edge_count > 1000:
+                    return False
+                src = self._normalize_graph_node_id(str(row["from_node"] or ""))
+                dst = self._normalize_graph_node_id(str(row["to_node"] or ""))
+                if not src or not dst:
+                    continue
+                nodes.add(src)
+                nodes.add(dst)
+                indegree.setdefault(src, 0)
+                indegree[dst] = indegree.get(dst, 0) + 1
+                adjacency.setdefault(src, []).append(dst)
+
+            if len(nodes) > 500:
+                return False
+            if not nodes:
+                continue
+
+            for node in nodes:
+                indegree.setdefault(node, 0)
+                adjacency.setdefault(node, [])
+
+            queue = sorted([node for node in nodes if indegree.get(node, 0) == 0])
+            processed = 0
+            while queue:
+                node = queue.pop(0)
+                processed += 1
+                for neighbor in adjacency.get(node, []):
+                    indegree[neighbor] = indegree.get(neighbor, 0) - 1
+                    if indegree[neighbor] == 0:
+                        queue.append(neighbor)
+                queue.sort()
+
+            if processed != len(nodes):
+                return False
+
+        return True
+
     def clear_graph(self, thread_id: str) -> None:
         tid = str(thread_id or "").strip()
         if not tid:
@@ -1426,6 +1617,8 @@ class MemoryDB:
         try:
             with self.transaction():
                 self._apply_graph_replace_normalized(tid, normalized)
+                if not self.validate_acyclic_constraints(tid):
+                    raise ValueError("acyclic_constraint_violation")
         except Exception:
             return False
         return True
@@ -1443,6 +1636,8 @@ class MemoryDB:
         try:
             with self.transaction():
                 self._apply_graph_merge_normalized(tid, normalized)
+                if not self.validate_acyclic_constraints(tid):
+                    raise ValueError("acyclic_constraint_violation")
         except Exception:
             return False
         return True
@@ -1549,6 +1744,8 @@ class MemoryDB:
             with self.transaction():
                 for thread_id, normalized_graph in normalized_entries:
                     self._apply_graph_replace_normalized(thread_id, normalized_graph)
+                    if not self.validate_acyclic_constraints(thread_id):
+                        raise ValueError("acyclic_constraint_violation")
         except Exception:
             return False
         return True
@@ -1561,6 +1758,8 @@ class MemoryDB:
             with self.transaction():
                 for thread_id, normalized_graph in normalized_entries:
                     self._apply_graph_merge_normalized(thread_id, normalized_graph)
+                    if not self.validate_acyclic_constraints(thread_id):
+                        raise ValueError("acyclic_constraint_violation")
         except Exception:
             return False
         return True

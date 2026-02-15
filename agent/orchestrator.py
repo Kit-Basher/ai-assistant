@@ -1620,6 +1620,13 @@ class Orchestrator:
                             "Cannot create link.",
                             {"skip_friction_formatting": True, "thread_id": thread_id},
                         )
+                    if self.db.has_relation_constraint(thread_id, relation, "acyclic") and self.db.would_create_cycle(
+                        thread_id, relation, from_node, to_node
+                    ):
+                        return OrchestratorResponse(
+                            "Cannot create link.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
                     created = self.db.create_graph_edge(thread_id, from_node, to_node, relation)
                     if not created:
                         return OrchestratorResponse(
@@ -1713,6 +1720,80 @@ class Orchestrator:
                         )
                     return OrchestratorResponse(
                         "Usage: /relation_mode strict|open",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "relation_constraint_add":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) != 2:
+                        return OrchestratorResponse(
+                            "Invalid constraint.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    relation = self.db.normalize_relation(parts[0])
+                    constraint = (parts[1] or "").strip().lower()
+                    if constraint != "acyclic" or not relation:
+                        return OrchestratorResponse(
+                            "Invalid constraint.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    if self.db.get_relation_strict_mode(thread_id) and relation not in set(
+                        self.db.list_relation_types(thread_id)
+                    ):
+                        return OrchestratorResponse(
+                            "Relation type not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    self.db.add_relation_constraint(thread_id, relation, constraint)
+                    return OrchestratorResponse(
+                        f"Constraint added: {relation} {constraint}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "relation_constraint_remove":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) != 2:
+                        return OrchestratorResponse(
+                            "Constraint not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    relation = self.db.normalize_relation(parts[0])
+                    constraint = (parts[1] or "").strip().lower()
+                    if constraint != "acyclic" or not relation:
+                        return OrchestratorResponse(
+                            "Constraint not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    removed = self.db.remove_relation_constraint(thread_id, relation, constraint)
+                    if not removed:
+                        return OrchestratorResponse(
+                            "Constraint not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Constraint removed: {relation} {constraint}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "relation_constraints":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    items = self.db.list_relation_constraints(thread_id)
+                    lines = [f"Relation constraints (thread {thread_id}):"]
+                    if not items:
+                        lines.append("(none)")
+                    else:
+                        for relation, constraint in items:
+                            lines.append(f"- {relation} {constraint}")
+                    return OrchestratorResponse(
+                        "\n".join(lines).replace("?", ""),
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
