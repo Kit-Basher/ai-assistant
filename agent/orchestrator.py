@@ -1673,6 +1673,50 @@ class Orchestrator:
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
+                if cmd.name == "graph_pack_export":
+                    active_thread_id = self._active_thread_id_for_user(user_id)
+                    raw_args = (cmd.args or "").strip()
+                    if not raw_args:
+                        thread_ids = [active_thread_id]
+                    else:
+                        try:
+                            tokens = shlex.split(raw_args)
+                        except Exception:
+                            tokens = raw_args.split()
+                        if len(tokens) != 2 or tokens[0] != "--threads":
+                            return OrchestratorResponse(
+                                "Export failed.",
+                                {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                            )
+                        requested = [
+                            item.replace("?", "").strip()
+                            for item in tokens[1].split(",")
+                            if item.replace("?", "").strip()
+                        ]
+                        thread_ids = sorted(set(requested))
+                        if not thread_ids or len(thread_ids) > self.db.GRAPH_PACK_MAX_THREADS:
+                            return OrchestratorResponse(
+                                "Export failed.",
+                                {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                            )
+                        recent_ids = {
+                            str(row.get("thread_id") or "").strip()
+                            for row in self.db.list_recent_threads(limit=5000)
+                            if isinstance(row, dict) and str(row.get("thread_id") or "").strip()
+                        }
+                        for target_thread_id in thread_ids:
+                            if not self.db.thread_exists_for_graph_ops(target_thread_id, recent_ids):
+                                return OrchestratorResponse(
+                                    "Export failed.",
+                                    {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                                )
+                    payload = self.db.export_graph_pack(thread_ids)
+                    text_out = self._render_pretty_json(payload).replace("?", "")
+                    return OrchestratorResponse(
+                        text_out,
+                        {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                    )
+
                 if cmd.name == "graph_import":
                     thread_id = self._active_thread_id_for_user(user_id)
                     raw_args = cmd.args or ""
@@ -1714,6 +1758,86 @@ class Orchestrator:
                     return OrchestratorResponse(
                         "Graph merged." if is_merge else "Graph imported.",
                         {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_pack_import":
+                    active_thread_id = self._active_thread_id_for_user(user_id)
+                    raw_args = cmd.args or ""
+                    stripped = raw_args.lstrip()
+                    is_merge = False
+                    if stripped.startswith("--merge"):
+                        suffix = stripped[len("--merge"):]
+                        if not suffix or suffix[0].isspace():
+                            is_merge = True
+                            payload_text = suffix.strip()
+                        else:
+                            payload_text = raw_args.strip()
+                    else:
+                        payload_text = raw_args.strip()
+                    if not payload_text:
+                        return OrchestratorResponse(
+                            "Import failed.",
+                            {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                        )
+                    try:
+                        payload = json.loads(payload_text)
+                    except Exception:
+                        payload = None
+                    if not isinstance(payload, dict):
+                        return OrchestratorResponse(
+                            "Import failed.",
+                            {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                        )
+                    imported = (
+                        self.db.import_graph_pack_merge(payload)
+                        if is_merge
+                        else self.db.import_graph_pack_replace(payload)
+                    )
+                    if not imported:
+                        return OrchestratorResponse(
+                            "Import failed.",
+                            {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                        )
+                    return OrchestratorResponse(
+                        "Pack merged." if is_merge else "Pack imported.",
+                        {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                    )
+
+                if cmd.name == "graph_clone":
+                    active_thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if not parts:
+                        return OrchestratorResponse(
+                            "Clone failed.",
+                            {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                        )
+                    from_thread_id = parts[0].replace("?", "").strip()
+                    is_merge = False
+                    if len(parts) == 2:
+                        if parts[1] == "--merge":
+                            is_merge = True
+                        else:
+                            return OrchestratorResponse(
+                                "Clone failed.",
+                                {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                            )
+                    elif len(parts) > 2:
+                        return OrchestratorResponse(
+                            "Clone failed.",
+                            {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                        )
+                    cloned = self.db.clone_graph(from_thread_id, active_thread_id, merge=is_merge)
+                    if not cloned:
+                        return OrchestratorResponse(
+                            "Clone failed.",
+                            {"skip_friction_formatting": True, "thread_id": active_thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Graph merged from {from_thread_id}." if is_merge else "Graph cloned.",
+                        {"skip_friction_formatting": True, "thread_id": active_thread_id},
                     )
 
                 if cmd.name == "node_rename":
