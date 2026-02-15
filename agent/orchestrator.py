@@ -1613,8 +1613,13 @@ class Orchestrator:
                             {"skip_friction_formatting": True, "thread_id": thread_id},
                         )
                     from_node = self.db.resolve_graph_ref(thread_id, parts[0])
-                    relation = self._normalize_graph_text(parts[1], 40, lower=True)
+                    relation = self.db.normalize_relation(parts[1])
                     to_node = self.db.resolve_graph_ref(thread_id, parts[2])
+                    if not self.db.validate_relation_allowed(thread_id, relation):
+                        return OrchestratorResponse(
+                            "Cannot create link.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
                     created = self.db.create_graph_edge(thread_id, from_node, to_node, relation)
                     if not created:
                         return OrchestratorResponse(
@@ -1626,12 +1631,104 @@ class Orchestrator:
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
+                if cmd.name == "relation_add":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    raw = (cmd.args or "").strip()
+                    normalized = self.db.normalize_relation(raw)
+                    if not normalized:
+                        return OrchestratorResponse(
+                            "Invalid relation.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    existing = set(self.db.list_relation_types(thread_id))
+                    if normalized in existing:
+                        return OrchestratorResponse(
+                            "Relation type already exists.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    added = self.db.add_relation_type(thread_id, normalized)
+                    if not added:
+                        return OrchestratorResponse(
+                            "Invalid relation.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Relation type added: {normalized}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "relation_remove":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    raw = (cmd.args or "").strip()
+                    normalized = self.db.normalize_relation(raw)
+                    if not normalized:
+                        return OrchestratorResponse(
+                            "Relation type not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    removed = self.db.remove_relation_type(thread_id, normalized)
+                    if not removed:
+                        return OrchestratorResponse(
+                            "Relation type not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Relation type removed: {normalized}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "relations":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    strict = self.db.get_relation_strict_mode(thread_id)
+                    types = self.db.list_relation_types(thread_id)
+                    lines = [
+                        f"Relations (thread {thread_id}):",
+                        f"Mode: {'strict' if strict else 'open'}",
+                        "Types:",
+                    ]
+                    if not types:
+                        lines.append("  (none)")
+                    else:
+                        for relation in types:
+                            lines.append(f"  - {relation}")
+                    return OrchestratorResponse(
+                        "\n".join(lines).replace("?", ""),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "relation_mode":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    raw = (cmd.args or "").strip().lower()
+                    if raw == "strict":
+                        self.db.set_relation_strict_mode(thread_id, True)
+                        return OrchestratorResponse(
+                            "Relation mode set to strict.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    if raw == "open":
+                        self.db.set_relation_strict_mode(thread_id, False)
+                        return OrchestratorResponse(
+                            "Relation mode set to open.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        "Usage: /relation_mode strict|open",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
                 if cmd.name == "graph":
                     thread_id = self._active_thread_id_for_user(user_id)
                     nodes = self.db.list_graph_nodes(thread_id)
                     aliases = self.db.list_graph_aliases(thread_id)
                     edges = self.db.list_graph_edges(thread_id)
-                    lines = [f"Graph (thread {thread_id}):", "Nodes:"]
+                    strict = self.db.get_relation_strict_mode(thread_id)
+                    relation_count = len(self.db.list_relation_types(thread_id))
+                    lines = [
+                        f"Graph (thread {thread_id}):",
+                        f"Mode: {'strict' if strict else 'open'}",
+                        f"Declared relations: {relation_count}",
+                        "Nodes:",
+                    ]
                     if not nodes:
                         lines.append("  - (none)")
                     else:

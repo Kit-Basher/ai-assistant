@@ -399,6 +399,25 @@ class MemoryDB:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_relation_types (
+                thread_id TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, relation)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_relation_mode (
+                thread_id TEXT PRIMARY KEY,
+                strict INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
@@ -613,7 +632,8 @@ class MemoryDB:
 
     @staticmethod
     def _normalize_graph_relation(relation: str) -> str:
-        cleaned = " ".join((relation or "").replace("?", "").split()).strip().lower()
+        cleaned = "_".join((relation or "").replace("?", "").split()).strip().lower()
+        cleaned = "".join(ch for ch in cleaned if ch.isalnum() or ch == "_")
         if len(cleaned) > 40:
             cleaned = cleaned[:40].rstrip()
         return cleaned
@@ -808,6 +828,105 @@ class MemoryDB:
             return None
         value = self._normalize_graph_label(str(node.get("label") or ""))
         return value if value else None
+
+    def normalize_relation(self, relation: str) -> str:
+        return self._normalize_graph_relation(relation)
+
+    def add_relation_type(self, thread_id: str, relation: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized = self._normalize_graph_relation(relation)
+        if not tid or not normalized:
+            return False
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO graph_relation_types (thread_id, relation, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (tid, normalized, self._now_iso()),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def remove_relation_type(self, thread_id: str, relation: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized = self._normalize_graph_relation(relation)
+        if not tid or not normalized:
+            return False
+        cur = self._conn.execute(
+            """
+            DELETE FROM graph_relation_types
+            WHERE thread_id = ? AND relation = ?
+            """,
+            (tid, normalized),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def list_relation_types(self, thread_id: str) -> list[str]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT relation
+            FROM graph_relation_types
+            WHERE thread_id = ?
+            ORDER BY relation ASC
+            """,
+            (tid,),
+        )
+        return [str(row["relation"]) for row in cur.fetchall() if str(row["relation"]).strip()]
+
+    def set_relation_strict_mode(self, thread_id: str, strict: bool) -> None:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return
+        strict_int = 1 if strict else 0
+        self._conn.execute(
+            """
+            INSERT INTO graph_relation_mode (thread_id, strict, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                strict = excluded.strict,
+                updated_at = excluded.updated_at
+            """,
+            (tid, strict_int, self._now_iso()),
+        )
+        self._commit_if_needed()
+
+    def get_relation_strict_mode(self, thread_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return False
+        cur = self._conn.execute(
+            "SELECT strict FROM graph_relation_mode WHERE thread_id = ? LIMIT 1",
+            (tid,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        try:
+            return int(row["strict"]) == 1
+        except Exception:
+            return False
+
+    def validate_relation_allowed(self, thread_id: str, relation: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized = self._normalize_graph_relation(relation)
+        if not tid or not normalized:
+            return False
+        if not self.get_relation_strict_mode(tid):
+            return True
+        cur = self._conn.execute(
+            """
+            SELECT 1
+            FROM graph_relation_types
+            WHERE thread_id = ? AND relation = ?
+            LIMIT 1
+            """,
+            (tid, normalized),
+        )
+        return cur.fetchone() is not None
 
     def clear_graph(self, thread_id: str) -> None:
         tid = str(thread_id or "").strip()

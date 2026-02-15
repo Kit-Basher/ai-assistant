@@ -107,7 +107,7 @@ class TestMemoryGraph(unittest.TestCase):
         orch.handle_message('/link NoDe-1!? ReL??AtioN-Type!? node_two', "user1")
         graph = orch.handle_message("/graph", "user1").text
         self.assertIn("  - node1: Label with spaces", graph)
-        self.assertIn("  - node1 --relation-type!--> node_two", graph)
+        self.assertIn("  - node1 --relationtype--> node_two", graph)
         self.assertNotIn("?", graph)
 
     def test_graph_clear_removes_all(self) -> None:
