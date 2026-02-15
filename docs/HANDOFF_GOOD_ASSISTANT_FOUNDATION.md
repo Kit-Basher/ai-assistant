@@ -1,5 +1,35 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.5 — Project Mode (Per-Thread Preset)
+
+Purpose: deterministic per-thread behavior preset for focused project work.
+
+Command syntax:
+- `/project_mode`
+- `/project_mode on`
+- `/project_mode off`
+
+Runtime behavior when ON:
+- `show_summary` forced off
+- `show_next_action` forced on
+- `terse_mode` forced off
+- `commands_in_codeblock` forced on
+- Plan threshold lowered (`>=1` imperative sentence)
+- Options shown when `>=2` distinct imperative first verbs
+
+Clarifications:
+- overrides are runtime-only and do not mutate stored prefs
+- intercept replies are unaffected
+- no new LLM usage introduced
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.4 — Thread Workflow Template (/thread_new)
 
 Purpose: explicit thread lifecycle initialization for intentional setup.
