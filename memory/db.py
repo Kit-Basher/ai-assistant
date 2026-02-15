@@ -56,6 +56,9 @@ class PendingClarificationRecord:
 
 class MemoryDB:
     SCHEMA_VERSION = 2
+    GRAPH_IMPORT_MAX_NODES = 200
+    GRAPH_IMPORT_MAX_EDGES = 500
+    GRAPH_IMPORT_MAX_ALIASES = 300
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
@@ -1116,6 +1119,12 @@ class MemoryDB:
         normalized = self._validate_graph_import_payload(payload_dict, allowed_existing_node_ids=None)
         if normalized is None:
             return False
+        if (
+            len(normalized["nodes"]) > self.GRAPH_IMPORT_MAX_NODES
+            or len(normalized["edges"]) > self.GRAPH_IMPORT_MAX_EDGES
+            or len(normalized["aliases"]) > self.GRAPH_IMPORT_MAX_ALIASES
+        ):
+            return False
         try:
             with self.transaction():
                 self._conn.execute("DELETE FROM thread_focus WHERE thread_id = ?", (tid,))
@@ -1174,6 +1183,12 @@ class MemoryDB:
         }
         normalized = self._validate_graph_import_payload(payload_dict, allowed_existing_node_ids=existing_node_ids)
         if normalized is None:
+            return False
+        if (
+            len(normalized["nodes"]) > self.GRAPH_IMPORT_MAX_NODES
+            or len(normalized["edges"]) > self.GRAPH_IMPORT_MAX_EDGES
+            or len(normalized["aliases"]) > self.GRAPH_IMPORT_MAX_ALIASES
+        ):
             return False
         try:
             with self.transaction():

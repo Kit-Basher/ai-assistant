@@ -59,6 +59,15 @@ class TestGraphExportImport(unittest.TestCase):
     def _payload_text(payload: dict[str, object]) -> str:
         return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=False)
 
+    def _stable_graph_state(self, thread_id: str) -> dict[str, object]:
+        exported = self.db.export_graph(thread_id)
+        return {
+            "nodes": exported.get("nodes", []),
+            "aliases": exported.get("aliases", []),
+            "edges": exported.get("edges", []),
+            "focus_node": exported.get("focus_node"),
+        }
+
     def test_graph_export_shape_and_ordering(self) -> None:
         orch = self._orchestrator()
         self._set_active_thread(orch, "user1", "thread-a")
@@ -194,7 +203,7 @@ class TestGraphExportImport(unittest.TestCase):
         orch.handle_message('/node beta "Beta"', "user1")
         orch.handle_message("/link alpha rel beta", "user1")
         orch.handle_message("/focus_node alpha", "user1")
-        before = self.db.export_graph("thread-a")
+        before = self._stable_graph_state("thread-a")
 
         invalid_payload = {
             "thread_id": "thread-a",
@@ -217,11 +226,40 @@ class TestGraphExportImport(unittest.TestCase):
         self.assertNotIn("In short:", response.text)
         self.assertNotIn("Next:", response.text)
 
-        after = self.db.export_graph("thread-a")
-        self.assertEqual(before["nodes"], after["nodes"])
-        self.assertEqual(before["aliases"], after["aliases"])
-        self.assertEqual(before["edges"], after["edges"])
-        self.assertEqual(before["focus_node"], after["focus_node"])
+        after = self._stable_graph_state("thread-a")
+        self.assertEqual(before, after)
+
+    def test_import_fails_when_node_cap_exceeded_and_graph_unchanged(self) -> None:
+        orch = self._orchestrator()
+        self._set_active_thread(orch, "user1", "thread-a")
+        orch.handle_message('/node base "Base"', "user1")
+        orch.handle_message("/focus_node base", "user1")
+        before = self._stable_graph_state("thread-a")
+
+        nodes = [
+            {
+                "node_id": f"n_{idx:03d}",
+                "label": f"Node {idx:03d}",
+                "created_at": "2026-02-15T10:00:00+00:00",
+            }
+            for idx in range(201)
+        ]
+        payload = {
+            "thread_id": "thread-a",
+            "exported_at": "2026-02-15T10:00:00+00:00",
+            "nodes": nodes,
+            "aliases": [],
+            "edges": [],
+            "focus_node": None,
+        }
+        payload_text = self._payload_text(payload)
+        for command in ("/graph_import ", "/graph_import --merge "):
+            with self.subTest(command=command.strip()):
+                response = orch.handle_message(command + payload_text, "user1")
+                self.assertEqual("Import failed.", response.text)
+                self.assertNotIn("?", response.text)
+                after = self._stable_graph_state("thread-a")
+                self.assertEqual(before, after)
 
 
 if __name__ == "__main__":
