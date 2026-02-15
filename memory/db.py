@@ -913,6 +913,312 @@ class MemoryDB:
                 break
         return results
 
+    def export_graph(self, thread_id: str) -> dict[str, Any]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return {
+                "thread_id": "",
+                "exported_at": self._now_iso(),
+                "nodes": [],
+                "aliases": [],
+                "edges": [],
+                "focus_node": None,
+            }
+
+        cur_nodes = self._conn.execute(
+            """
+            SELECT node_id, label, created_at
+            FROM graph_nodes
+            WHERE thread_id = ?
+            ORDER BY node_id ASC
+            """,
+            (tid,),
+        )
+        nodes = [
+            {
+                "node_id": str(row["node_id"]),
+                "label": str(row["label"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in cur_nodes.fetchall()
+        ]
+
+        cur_aliases = self._conn.execute(
+            """
+            SELECT alias, node_id, created_at
+            FROM graph_aliases
+            WHERE thread_id = ?
+            ORDER BY alias ASC
+            """,
+            (tid,),
+        )
+        aliases = [
+            {
+                "alias": str(row["alias"]),
+                "node_id": str(row["node_id"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in cur_aliases.fetchall()
+        ]
+
+        cur_edges = self._conn.execute(
+            """
+            SELECT from_node, relation, to_node, created_at
+            FROM graph_edges
+            WHERE thread_id = ?
+            ORDER BY from_node ASC, relation ASC, to_node ASC
+            """,
+            (tid,),
+        )
+        edges = [
+            {
+                "from": str(row["from_node"]),
+                "relation": str(row["relation"]),
+                "to": str(row["to_node"]),
+                "created_at": str(row["created_at"]),
+            }
+            for row in cur_edges.fetchall()
+        ]
+
+        cur_focus = self._conn.execute(
+            """
+            SELECT node_id, updated_at
+            FROM thread_focus
+            WHERE thread_id = ?
+            LIMIT 1
+            """,
+            (tid,),
+        )
+        focus_row = cur_focus.fetchone()
+        focus_node = (
+            {
+                "node_id": str(focus_row["node_id"]),
+                "updated_at": str(focus_row["updated_at"]),
+            }
+            if focus_row is not None
+            else None
+        )
+
+        return {
+            "thread_id": tid,
+            "exported_at": self._now_iso(),
+            "nodes": nodes,
+            "aliases": aliases,
+            "edges": edges,
+            "focus_node": focus_node,
+        }
+
+    def _validate_graph_import_payload(
+        self,
+        payload: Any,
+        *,
+        allowed_existing_node_ids: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("nodes", "aliases", "edges", "focus_node"):
+            if key not in payload:
+                return None
+
+        raw_nodes = payload.get("nodes")
+        raw_aliases = payload.get("aliases")
+        raw_edges = payload.get("edges")
+        raw_focus = payload.get("focus_node")
+        if not isinstance(raw_nodes, list) or not isinstance(raw_aliases, list) or not isinstance(raw_edges, list):
+            return None
+
+        nodes: list[tuple[str, str, str]] = []
+        node_ids: set[str] = set()
+        for item in raw_nodes:
+            if not isinstance(item, dict):
+                return None
+            node_id = self._normalize_graph_node_id(str(item.get("node_id") or ""))
+            label = self._normalize_graph_label(str(item.get("label") or ""))
+            created_at = str(item.get("created_at") or "").strip()
+            if not node_id or not label or not created_at:
+                return None
+            if node_id in node_ids:
+                return None
+            node_ids.add(node_id)
+            nodes.append((node_id, label, created_at))
+        nodes.sort(key=lambda row: row[0])
+
+        aliases: list[tuple[str, str, str]] = []
+        alias_keys: set[str] = set()
+        for item in raw_aliases:
+            if not isinstance(item, dict):
+                return None
+            alias = self._normalize_graph_node_id(str(item.get("alias") or ""))
+            node_id = self._normalize_graph_node_id(str(item.get("node_id") or ""))
+            created_at = str(item.get("created_at") or "").strip()
+            if not alias or not node_id or not created_at:
+                return None
+            if alias in alias_keys:
+                return None
+            alias_keys.add(alias)
+            aliases.append((alias, node_id, created_at))
+        aliases.sort(key=lambda row: row[0])
+
+        edges: list[tuple[str, str, str, str]] = []
+        edge_keys: set[tuple[str, str, str]] = set()
+        for item in raw_edges:
+            if not isinstance(item, dict):
+                return None
+            from_node = self._normalize_graph_node_id(str(item.get("from") or ""))
+            relation = self._normalize_graph_relation(str(item.get("relation") or ""))
+            to_node = self._normalize_graph_node_id(str(item.get("to") or ""))
+            created_at = str(item.get("created_at") or "").strip()
+            if not from_node or not relation or not to_node or not created_at:
+                return None
+            edge_key = (from_node, relation, to_node)
+            if edge_key in edge_keys:
+                return None
+            edge_keys.add(edge_key)
+            edges.append((from_node, relation, to_node, created_at))
+        edges.sort(key=lambda row: (row[0], row[1], row[2]))
+
+        focus_node: tuple[str, str] | None
+        if raw_focus is None:
+            focus_node = None
+        else:
+            if not isinstance(raw_focus, dict):
+                return None
+            focus_id = self._normalize_graph_node_id(str(raw_focus.get("node_id") or ""))
+            updated_at = str(raw_focus.get("updated_at") or "").strip()
+            if not focus_id or not updated_at:
+                return None
+            focus_node = (focus_id, updated_at)
+
+        allowed_node_ids = set(node_ids)
+        if allowed_existing_node_ids:
+            allowed_node_ids.update(allowed_existing_node_ids)
+
+        for _, node_id, _ in aliases:
+            if node_id not in allowed_node_ids:
+                return None
+        for from_node, _, to_node, _ in edges:
+            if from_node not in allowed_node_ids or to_node not in allowed_node_ids:
+                return None
+        if focus_node is not None and focus_node[0] not in allowed_node_ids:
+            return None
+
+        return {
+            "nodes": nodes,
+            "aliases": aliases,
+            "edges": edges,
+            "focus_node": focus_node,
+        }
+
+    def import_graph_replace(self, thread_id: str, payload_dict: dict[str, Any]) -> bool:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return False
+        normalized = self._validate_graph_import_payload(payload_dict, allowed_existing_node_ids=None)
+        if normalized is None:
+            return False
+        try:
+            with self.transaction():
+                self._conn.execute("DELETE FROM thread_focus WHERE thread_id = ?", (tid,))
+                self._conn.execute("DELETE FROM graph_edges WHERE thread_id = ?", (tid,))
+                self._conn.execute("DELETE FROM graph_aliases WHERE thread_id = ?", (tid,))
+                self._conn.execute("DELETE FROM graph_nodes WHERE thread_id = ?", (tid,))
+                for node_id, label, created_at in normalized["nodes"]:
+                    self._conn.execute(
+                        """
+                        INSERT INTO graph_nodes (thread_id, node_id, label, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (tid, node_id, label, created_at),
+                    )
+                for alias, node_id, created_at in normalized["aliases"]:
+                    self._conn.execute(
+                        """
+                        INSERT INTO graph_aliases (thread_id, alias, node_id, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (tid, alias, node_id, created_at),
+                    )
+                for from_node, relation, to_node, created_at in normalized["edges"]:
+                    self._conn.execute(
+                        """
+                        INSERT INTO graph_edges (thread_id, from_node, to_node, relation, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (tid, from_node, to_node, relation, created_at),
+                    )
+                focus_node = normalized["focus_node"]
+                if focus_node is not None:
+                    self._conn.execute(
+                        """
+                        INSERT INTO thread_focus (thread_id, node_id, updated_at)
+                        VALUES (?, ?, ?)
+                        """,
+                        (tid, focus_node[0], focus_node[1]),
+                    )
+        except Exception:
+            return False
+        return True
+
+    def import_graph_merge(self, thread_id: str, payload_dict: dict[str, Any]) -> bool:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return False
+        cur_existing_nodes = self._conn.execute(
+            "SELECT node_id FROM graph_nodes WHERE thread_id = ? ORDER BY node_id ASC",
+            (tid,),
+        )
+        existing_node_ids = {
+            self._normalize_graph_node_id(str(row["node_id"] or ""))
+            for row in cur_existing_nodes.fetchall()
+            if self._normalize_graph_node_id(str(row["node_id"] or ""))
+        }
+        normalized = self._validate_graph_import_payload(payload_dict, allowed_existing_node_ids=existing_node_ids)
+        if normalized is None:
+            return False
+        try:
+            with self.transaction():
+                for node_id, label, created_at in normalized["nodes"]:
+                    self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO graph_nodes (thread_id, node_id, label, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (tid, node_id, label, created_at),
+                    )
+                for alias, node_id, created_at in normalized["aliases"]:
+                    self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO graph_aliases (thread_id, alias, node_id, created_at)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (tid, alias, node_id, created_at),
+                    )
+                for from_node, relation, to_node, created_at in normalized["edges"]:
+                    self._conn.execute(
+                        """
+                        INSERT OR IGNORE INTO graph_edges (thread_id, from_node, to_node, relation, created_at)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (tid, from_node, to_node, relation, created_at),
+                    )
+                focus_node = normalized["focus_node"]
+                if focus_node is not None:
+                    cur_focus = self._conn.execute(
+                        "SELECT 1 FROM thread_focus WHERE thread_id = ? LIMIT 1",
+                        (tid,),
+                    )
+                    if cur_focus.fetchone() is None:
+                        self._conn.execute(
+                            """
+                            INSERT INTO thread_focus (thread_id, node_id, updated_at)
+                            VALUES (?, ?, ?)
+                            """,
+                            (tid, focus_node[0], focus_node[1]),
+                        )
+        except Exception:
+            return False
+        return True
+
     def list_recent_threads(self, limit: int = 10) -> list[dict[str, Any]]:
         max_rows = max(1, int(limit))
         latest_by_thread: dict[str, str] = {}

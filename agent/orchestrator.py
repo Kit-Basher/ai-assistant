@@ -195,6 +195,10 @@ class Orchestrator:
         return text
 
     @staticmethod
+    def _render_pretty_json(payload: dict[str, Any]) -> str:
+        return json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=False)
+
+    @staticmethod
     def _is_command_line(line: str) -> bool:
         stripped = (line or "").strip()
         if not stripped or stripped.startswith("- ") or stripped.startswith("In short:") or stripped.startswith("Next:"):
@@ -1657,6 +1661,58 @@ class Orchestrator:
                     out = "\n".join(lines).replace("?", "")
                     return OrchestratorResponse(
                         out,
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_export":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    payload = self.db.export_graph(thread_id)
+                    text_out = self._render_pretty_json(payload).replace("?", "")
+                    return OrchestratorResponse(
+                        text_out,
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_import":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    raw_args = cmd.args or ""
+                    stripped = raw_args.lstrip()
+                    is_merge = False
+                    if stripped.startswith("--merge"):
+                        suffix = stripped[len("--merge"):]
+                        if not suffix or suffix[0].isspace():
+                            is_merge = True
+                            payload_text = suffix.strip()
+                        else:
+                            payload_text = raw_args.strip()
+                    else:
+                        payload_text = raw_args.strip()
+                    if not payload_text:
+                        return OrchestratorResponse(
+                            "Import failed.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    try:
+                        payload = json.loads(payload_text)
+                    except Exception:
+                        payload = None
+                    if not isinstance(payload, dict):
+                        return OrchestratorResponse(
+                            "Import failed.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    imported = (
+                        self.db.import_graph_merge(thread_id, payload)
+                        if is_merge
+                        else self.db.import_graph_replace(thread_id, payload)
+                    )
+                    if not imported:
+                        return OrchestratorResponse(
+                            "Import failed.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        "Graph merged." if is_merge else "Graph imported.",
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
