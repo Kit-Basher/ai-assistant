@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS graph_edges (
     PRIMARY KEY (thread_id, from_node, to_node, relation)
 );
 
+CREATE TABLE IF NOT EXISTS graph_aliases (
+    thread_id TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, alias)
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,

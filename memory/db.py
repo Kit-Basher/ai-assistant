@@ -375,6 +375,17 @@ class MemoryDB:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_aliases (
+                thread_id TEXT NOT NULL,
+                alias TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, alias)
+            )
+            """
+        )
 
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
@@ -614,6 +625,19 @@ class MemoryDB:
         self._commit_if_needed()
         return True
 
+    def set_graph_node_label(self, thread_id: str, node_id: str, new_label: str) -> bool:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        label = self._normalize_graph_label(new_label)
+        if not tid or not nid or not label:
+            return False
+        cur = self._conn.execute(
+            "UPDATE graph_nodes SET label = ? WHERE thread_id = ? AND node_id = ?",
+            (label, tid, nid),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
     def list_graph_nodes(self, thread_id: str) -> list[dict[str, Any]]:
         tid = str(thread_id or "").strip()
         if not tid:
@@ -680,8 +704,117 @@ class MemoryDB:
         if not tid:
             return
         self._conn.execute("DELETE FROM graph_edges WHERE thread_id = ?", (tid,))
+        self._conn.execute("DELETE FROM graph_aliases WHERE thread_id = ?", (tid,))
         self._conn.execute("DELETE FROM graph_nodes WHERE thread_id = ?", (tid,))
         self._commit_if_needed()
+
+    def delete_graph_node(self, thread_id: str, node_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        if not tid or not nid:
+            return False
+        cur = self._conn.execute(
+            "DELETE FROM graph_nodes WHERE thread_id = ? AND node_id = ?",
+            (tid, nid),
+        )
+        if cur.rowcount != 1:
+            self._commit_if_needed()
+            return False
+        self._conn.execute(
+            "DELETE FROM graph_edges WHERE thread_id = ? AND (from_node = ? OR to_node = ?)",
+            (tid, nid, nid),
+        )
+        self._conn.execute(
+            "DELETE FROM graph_aliases WHERE thread_id = ? AND node_id = ?",
+            (tid, nid),
+        )
+        self._commit_if_needed()
+        return True
+
+    def add_graph_alias(self, thread_id: str, alias: str, node_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized_alias = self._normalize_graph_node_id(alias)
+        nid = self._normalize_graph_node_id(node_id)
+        if not tid or not normalized_alias or not nid:
+            return False
+        cur = self._conn.execute(
+            """
+            SELECT 1
+            FROM graph_nodes
+            WHERE thread_id = ? AND node_id = ?
+            LIMIT 1
+            """,
+            (tid, nid),
+        )
+        if cur.fetchone() is None:
+            return False
+        cur = self._conn.execute(
+            """
+            INSERT OR IGNORE INTO graph_aliases (thread_id, alias, node_id, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (tid, normalized_alias, nid, self._now_iso()),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def remove_graph_alias(self, thread_id: str, alias: str) -> bool:
+        tid = str(thread_id or "").strip()
+        normalized_alias = self._normalize_graph_node_id(alias)
+        if not tid or not normalized_alias:
+            return False
+        cur = self._conn.execute(
+            "DELETE FROM graph_aliases WHERE thread_id = ? AND alias = ?",
+            (tid, normalized_alias),
+        )
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def resolve_graph_ref(self, thread_id: str, ref: str) -> str | None:
+        tid = str(thread_id or "").strip()
+        normalized = self._normalize_graph_node_id(ref)
+        if not tid or not normalized:
+            return None
+        cur = self._conn.execute(
+            """
+            SELECT node_id
+            FROM graph_nodes
+            WHERE thread_id = ? AND node_id = ?
+            LIMIT 1
+            """,
+            (tid, normalized),
+        )
+        row = cur.fetchone()
+        if row is not None:
+            return str(row["node_id"])
+        cur = self._conn.execute(
+            """
+            SELECT node_id
+            FROM graph_aliases
+            WHERE thread_id = ? AND alias = ?
+            LIMIT 1
+            """,
+            (tid, normalized),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return str(row["node_id"])
+
+    def list_graph_aliases(self, thread_id: str) -> list[tuple[str, str]]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT alias, node_id
+            FROM graph_aliases
+            WHERE thread_id = ?
+            ORDER BY alias ASC
+            """,
+            (tid,),
+        )
+        return [(str(row["alias"]), str(row["node_id"])) for row in cur.fetchall()]
 
     def list_recent_threads(self, limit: int = 10) -> list[dict[str, Any]]:
         max_rows = max(1, int(limit))

@@ -1607,9 +1607,9 @@ class Orchestrator:
                             "Usage: /link <from_node> <relation> <to_node>",
                             {"skip_friction_formatting": True, "thread_id": thread_id},
                         )
-                    from_node = self._normalize_graph_node_id(parts[0])
+                    from_node = self.db.resolve_graph_ref(thread_id, parts[0])
                     relation = self._normalize_graph_text(parts[1], 40, lower=True)
-                    to_node = self._normalize_graph_node_id(parts[2])
+                    to_node = self.db.resolve_graph_ref(thread_id, parts[2])
                     created = self.db.create_graph_edge(thread_id, from_node, to_node, relation)
                     if not created:
                         return OrchestratorResponse(
@@ -1624,6 +1624,7 @@ class Orchestrator:
                 if cmd.name == "graph":
                     thread_id = self._active_thread_id_for_user(user_id)
                     nodes = self.db.list_graph_nodes(thread_id)
+                    aliases = self.db.list_graph_aliases(thread_id)
                     edges = self.db.list_graph_edges(thread_id)
                     lines = [f"Graph (thread {thread_id}):", "Nodes:"]
                     if not nodes:
@@ -1634,6 +1635,15 @@ class Orchestrator:
                             label = self._normalize_graph_text(str(node.get("label") or ""), 80, lower=False)
                             if node_id and label:
                                 lines.append(f"  - {node_id}: {label}")
+                    lines.append("Aliases:")
+                    if not aliases:
+                        lines.append("  (none)")
+                    else:
+                        for alias, node_id in aliases:
+                            normalized_alias = self._normalize_graph_node_id(alias)
+                            normalized_node_id = self._normalize_graph_node_id(node_id)
+                            if normalized_alias and normalized_node_id:
+                                lines.append(f"  - {normalized_alias} -> {normalized_node_id}")
                     lines.append("Edges:")
                     if not edges:
                         lines.append("  - (none)")
@@ -1647,6 +1657,109 @@ class Orchestrator:
                     out = "\n".join(lines).replace("?", "")
                     return OrchestratorResponse(
                         out,
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "node_rename":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) < 2:
+                        return OrchestratorResponse(
+                            'Usage: /node_rename <node_or_alias> "<new label>"',
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    ref = parts[0]
+                    new_label = self._normalize_graph_text(" ".join(parts[1:]), 80, lower=False)
+                    node_id = self.db.resolve_graph_ref(thread_id, ref)
+                    if not node_id:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    updated = self.db.set_graph_node_label(thread_id, node_id, new_label)
+                    if not updated:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Node {node_id} renamed.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "node_alias":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) != 2:
+                        return OrchestratorResponse(
+                            "Usage: /node_alias <node_id> <alias>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    node_id = self._normalize_graph_node_id(parts[0])
+                    alias = self._normalize_graph_node_id(parts[1])
+                    if not alias:
+                        return OrchestratorResponse(
+                            "Invalid alias.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    if not self.db.resolve_graph_ref(thread_id, node_id):
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    if self.db.resolve_graph_ref(thread_id, alias):
+                        return OrchestratorResponse(
+                            "Alias already exists.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    added = self.db.add_graph_alias(thread_id, alias, node_id)
+                    if not added:
+                        return OrchestratorResponse(
+                            "Alias already exists.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Alias {alias} added to {node_id}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "node_unalias":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    alias = self._normalize_graph_node_id(cmd.args or "")
+                    removed = self.db.remove_graph_alias(thread_id, alias)
+                    if not removed:
+                        return OrchestratorResponse(
+                            "Alias not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Alias {alias} removed.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "node_delete":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    ref = (cmd.args or "").strip()
+                    node_id = self.db.resolve_graph_ref(thread_id, ref)
+                    if not node_id:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    deleted = self.db.delete_graph_node(thread_id, node_id)
+                    if not deleted:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Node {node_id} deleted.",
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
