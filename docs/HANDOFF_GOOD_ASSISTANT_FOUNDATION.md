@@ -1,5 +1,32 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.9 — Typed Relations (Schema + Strict Mode)
+
+This milestone adds explicit per-thread relation schemas and strict enforcement controls for graph links.
+
+New commands:
+- `/relation_add <relation>`
+- `/relation_remove <relation>`
+- `/relations`
+- `/relation_mode strict`
+- `/relation_mode open`
+
+Behavior:
+- per-thread declared relation types
+- deterministic normalization (`lowercase`, underscores, max length)
+- strict mode enforces declared relation types for `/link`
+- open mode allows any relation
+- deterministic ordering of relation type lists
+- no inference and no new LLM usage
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.8 — Graph Queries (out/in/path)
 
 This milestone adds explicit, deterministic graph traversal/query commands.
