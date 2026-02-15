@@ -386,6 +386,15 @@ class MemoryDB:
             )
             """
         )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_focus (
+                thread_id TEXT PRIMARY KEY,
+                node_id TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
 
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
@@ -653,6 +662,23 @@ class MemoryDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def get_graph_node(self, thread_id: str, node_id: str) -> dict[str, Any] | None:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        if not tid or not nid:
+            return None
+        cur = self._conn.execute(
+            """
+            SELECT thread_id, node_id, label, created_at
+            FROM graph_nodes
+            WHERE thread_id = ? AND node_id = ?
+            LIMIT 1
+            """,
+            (tid, nid),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def create_graph_edge(self, thread_id: str, from_node: str, to_node: str, relation: str) -> bool:
         tid = str(thread_id or "").strip()
         src = self._normalize_graph_node_id(from_node)
@@ -815,6 +841,77 @@ class MemoryDB:
             (tid,),
         )
         return [(str(row["alias"]), str(row["node_id"])) for row in cur.fetchall()]
+
+    def set_thread_focus_node(self, thread_id: str, node_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        if not tid or not nid:
+            return False
+        exists = self.get_graph_node(tid, nid)
+        if exists is None:
+            return False
+        now = self._now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO thread_focus (thread_id, node_id, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(thread_id) DO UPDATE SET
+                node_id = excluded.node_id,
+                updated_at = excluded.updated_at
+            """,
+            (tid, nid, now),
+        )
+        self._commit_if_needed()
+        return True
+
+    def clear_thread_focus_node(self, thread_id: str) -> bool:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return False
+        cur = self._conn.execute("DELETE FROM thread_focus WHERE thread_id = ?", (tid,))
+        self._commit_if_needed()
+        return cur.rowcount == 1
+
+    def get_thread_focus_node(self, thread_id: str) -> str | None:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return None
+        cur = self._conn.execute(
+            "SELECT node_id FROM thread_focus WHERE thread_id = ? LIMIT 1",
+            (tid,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        value = self._normalize_graph_node_id(str(row["node_id"] or ""))
+        return value if value else None
+
+    def list_related_nodes(self, thread_id: str, node_id: str, limit: int = 3) -> list[str]:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        max_rows = max(1, int(limit))
+        if not tid or not nid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT relation, to_node
+            FROM graph_edges
+            WHERE thread_id = ? AND from_node = ?
+            ORDER BY relation ASC, to_node ASC
+            """,
+            (tid, nid),
+        )
+        results: list[str] = []
+        seen: set[str] = set()
+        for row in cur.fetchall():
+            to_node = self._normalize_graph_node_id(str(row["to_node"] or ""))
+            if not to_node or to_node in seen:
+                continue
+            seen.add(to_node)
+            results.append(to_node)
+            if len(results) >= max_rows:
+                break
+        return results
 
     def list_recent_threads(self, limit: int = 10) -> list[dict[str, Any]]:
         max_rows = max(1, int(limit))

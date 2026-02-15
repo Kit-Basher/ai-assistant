@@ -1763,6 +1763,49 @@ class Orchestrator:
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
+                if cmd.name == "focus_node":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    raw = (cmd.args or "").strip()
+                    if not raw:
+                        node_id = self.db.get_thread_focus_node(thread_id)
+                        if not node_id:
+                            return OrchestratorResponse(
+                                "Focus node: (none)",
+                                {"skip_friction_formatting": True, "thread_id": thread_id},
+                            )
+                        node = self.db.get_graph_node(thread_id, node_id)
+                        label = self._normalize_graph_text(str((node or {}).get("label") or ""), 80, lower=False)
+                        if not label:
+                            label = "(none)"
+                        return OrchestratorResponse(
+                            f"Focus node: {node_id} ({label})",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    resolved = self.db.resolve_graph_ref(thread_id, raw)
+                    if not resolved:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    set_ok = self.db.set_thread_focus_node(thread_id, resolved)
+                    if not set_ok:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Focus node set to {resolved}.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "focus_node_clear":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    self.db.clear_thread_focus_node(thread_id)
+                    return OrchestratorResponse(
+                        "Focus node cleared.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
                 if cmd.name == "graph_clear":
                     thread_id = self._active_thread_id_for_user(user_id)
                     self.db.clear_graph(thread_id)
@@ -1885,6 +1928,22 @@ class Orchestrator:
                             lines.append(f"- {note}")
 
                     lines.append("Tip: Add a new checkpoint with /anchor when you make progress.")
+                    focus_node = self.db.get_thread_focus_node(thread_id)
+                    if focus_node:
+                        related_nodes = self.db.list_related_nodes(thread_id, focus_node, limit=3)
+                        lines.append("Related nodes:")
+                        if not related_nodes:
+                            lines.append("(none)")
+                        else:
+                            for node_id in related_nodes:
+                                node = self.db.get_graph_node(thread_id, node_id)
+                                label = self._normalize_graph_text(
+                                    str((node or {}).get("label") or ""),
+                                    80,
+                                    lower=False,
+                                )
+                                label = label if label else "(none)"
+                                lines.append(f"- {node_id} ({label})")
                     return OrchestratorResponse(
                         "\n".join(lines),
                         {"skip_friction_formatting": True, "thread_id": thread_id},

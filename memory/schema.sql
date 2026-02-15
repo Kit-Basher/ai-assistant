@@ -115,6 +115,12 @@ CREATE TABLE IF NOT EXISTS graph_aliases (
     PRIMARY KEY (thread_id, alias)
 );
 
+CREATE TABLE IF NOT EXISTS thread_focus (
+    thread_id TEXT PRIMARY KEY,
+    node_id TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,
