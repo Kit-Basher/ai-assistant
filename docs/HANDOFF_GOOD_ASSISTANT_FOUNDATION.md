@@ -1,5 +1,30 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.8 — Graph Queries (out/in/path)
+
+This milestone adds explicit, deterministic graph traversal/query commands.
+
+New commands:
+- `/graph_out <node_or_alias>`
+- `/graph_in <node_or_alias>`
+- `/graph_path <a> <b> [--max 6]`
+
+Notes:
+- alias resolution is supported for all query commands
+- deterministic grouping and ordering in out/in outputs
+- directed BFS path traversal with default max depth `6`, clamped to `1..10`
+- deterministic neighbor expansion order (`relation asc`, `to_node asc`)
+- no inference and no new LLM usage
+- `skip_friction_formatting` applied
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.7 — Graph Packs (Multi-Thread Export/Import + Clone)
 
 This milestone adds explicit, deterministic multi-thread graph portability and copy flows.
