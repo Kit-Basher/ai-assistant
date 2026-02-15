@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict, deque
 from dataclasses import dataclass
 import re
 from typing import Any
@@ -1661,6 +1662,212 @@ class Orchestrator:
                     out = "\n".join(lines).replace("?", "")
                     return OrchestratorResponse(
                         out,
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_out":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    ref = (cmd.args or "").strip()
+                    node_id = self.db.resolve_graph_ref(thread_id, ref)
+                    if not node_id:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    node_label = self._normalize_graph_text(
+                        str(self.db.get_graph_node_label(thread_id, node_id) or "(none)"),
+                        80,
+                        lower=False,
+                    ) or "(none)"
+                    out_edges = self.db.list_out_edges(thread_id, node_id)
+                    lines = [
+                        f"Graph out (thread {thread_id}):",
+                        f"Node: {node_id} ({node_label})",
+                    ]
+                    if not out_edges:
+                        lines.append("  (none)")
+                    else:
+                        grouped: dict[str, list[str]] = defaultdict(list)
+                        for relation, to_node in out_edges:
+                            grouped[relation].append(to_node)
+                        for relation in sorted(grouped):
+                            lines.append(f"{relation}:")
+                            for to_node in grouped[relation]:
+                                to_label = self._normalize_graph_text(
+                                    str(self.db.get_graph_node_label(thread_id, to_node) or "(none)"),
+                                    80,
+                                    lower=False,
+                                ) or "(none)"
+                                lines.append(f"  - {to_node} ({to_label})")
+                    return OrchestratorResponse(
+                        "\n".join(lines).replace("?", ""),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_in":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    ref = (cmd.args or "").strip()
+                    node_id = self.db.resolve_graph_ref(thread_id, ref)
+                    if not node_id:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    node_label = self._normalize_graph_text(
+                        str(self.db.get_graph_node_label(thread_id, node_id) or "(none)"),
+                        80,
+                        lower=False,
+                    ) or "(none)"
+                    in_edges = self.db.list_in_edges(thread_id, node_id)
+                    lines = [
+                        f"Graph in (thread {thread_id}):",
+                        f"Node: {node_id} ({node_label})",
+                    ]
+                    if not in_edges:
+                        lines.append("  (none)")
+                    else:
+                        grouped: dict[str, list[str]] = defaultdict(list)
+                        for relation, from_node in in_edges:
+                            grouped[relation].append(from_node)
+                        for relation in sorted(grouped):
+                            lines.append(f"{relation}:")
+                            for from_node in grouped[relation]:
+                                from_label = self._normalize_graph_text(
+                                    str(self.db.get_graph_node_label(thread_id, from_node) or "(none)"),
+                                    80,
+                                    lower=False,
+                                ) or "(none)"
+                                lines.append(f"  - {from_node} ({from_label})")
+                    return OrchestratorResponse(
+                        "\n".join(lines).replace("?", ""),
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_path":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) < 2:
+                        return OrchestratorResponse(
+                            "Usage: /graph_path <from_ref> <to_ref> [--max <N>]",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    from_ref = parts[0]
+                    to_ref = parts[1]
+                    max_depth = 6
+                    if len(parts) > 2:
+                        if len(parts) == 4 and parts[2] == "--max":
+                            try:
+                                max_depth = int(parts[3])
+                            except Exception:
+                                return OrchestratorResponse(
+                                    "Usage: /graph_path <from_ref> <to_ref> [--max <N>]",
+                                    {"skip_friction_formatting": True, "thread_id": thread_id},
+                                )
+                        else:
+                            return OrchestratorResponse(
+                                "Usage: /graph_path <from_ref> <to_ref> [--max <N>]",
+                                {"skip_friction_formatting": True, "thread_id": thread_id},
+                            )
+                    max_depth = max(1, min(10, int(max_depth)))
+                    from_node = self.db.resolve_graph_ref(thread_id, from_ref)
+                    to_node = self.db.resolve_graph_ref(thread_id, to_ref)
+                    if not from_node or not to_node:
+                        return OrchestratorResponse(
+                            "Node not found.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+
+                    def _label(node_id: str) -> str:
+                        return self._normalize_graph_text(
+                            str(self.db.get_graph_node_label(thread_id, node_id) or "(none)"),
+                            80,
+                            lower=False,
+                        ) or "(none)"
+
+                    if from_node == to_node:
+                        label = _label(from_node)
+                        return OrchestratorResponse(
+                            "\n".join(
+                                [
+                                    f"Graph path (thread {thread_id}):",
+                                    f"From: {from_node} ({label})",
+                                    f"To: {to_node} ({label})",
+                                    "Depth: 0",
+                                    "Path:",
+                                    f"  1) {from_node} ({label})",
+                                ]
+                            ).replace("?", ""),
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+
+                    all_edges = self.db.list_all_edges(thread_id)
+                    adjacency: dict[str, list[tuple[str, str]]] = defaultdict(list)
+                    for src, relation, dst in all_edges:
+                        adjacency[src].append((relation, dst))
+                    for src in adjacency:
+                        adjacency[src].sort(key=lambda item: (item[0], item[1]))
+
+                    queue: deque[str] = deque([from_node])
+                    visited: set[str] = {from_node}
+                    depth_by_node: dict[str, int] = {from_node: 0}
+                    parent: dict[str, tuple[str, str] | None] = {from_node: None}
+                    found = False
+                    while queue:
+                        current = queue.popleft()
+                        current_depth = depth_by_node[current]
+                        if current_depth >= max_depth:
+                            continue
+                        for relation, neighbor in adjacency.get(current, []):
+                            if neighbor in visited:
+                                continue
+                            visited.add(neighbor)
+                            parent[neighbor] = (current, relation)
+                            depth_by_node[neighbor] = current_depth + 1
+                            if neighbor == to_node:
+                                found = True
+                                queue.clear()
+                                break
+                            queue.append(neighbor)
+
+                    if not found:
+                        return OrchestratorResponse(
+                            "\n".join(
+                                [
+                                    f"Graph path (thread {thread_id}):",
+                                    "No path found.",
+                                ]
+                            ).replace("?", ""),
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+
+                    node_path: list[str] = [to_node]
+                    edge_path: list[str] = []
+                    cursor = to_node
+                    while cursor != from_node:
+                        link = parent.get(cursor)
+                        if link is None:
+                            break
+                        prev_node, relation = link
+                        edge_path.append(relation)
+                        node_path.append(prev_node)
+                        cursor = prev_node
+                    node_path.reverse()
+                    edge_path.reverse()
+                    lines = [
+                        f"Graph path (thread {thread_id}):",
+                        f"From: {from_node} ({_label(from_node)})",
+                        f"To: {to_node} ({_label(to_node)})",
+                        f"Depth: {len(edge_path)}",
+                        "Path:",
+                        f"  1) {node_path[0]} ({_label(node_path[0])})",
+                    ]
+                    for idx, (relation, node_id) in enumerate(zip(edge_path, node_path[1:]), start=2):
+                        lines.append(f"  {idx}) --{relation}--> {node_id} ({_label(node_id)})")
+                    return OrchestratorResponse(
+                        "\n".join(lines).replace("?", ""),
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 

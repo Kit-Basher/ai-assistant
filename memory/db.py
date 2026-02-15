@@ -729,6 +729,86 @@ class MemoryDB:
         )
         return [dict(row) for row in cur.fetchall()]
 
+    def list_out_edges(self, thread_id: str, node_id: str) -> list[tuple[str, str]]:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        if not tid or not nid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT relation, to_node
+            FROM graph_edges
+            WHERE thread_id = ? AND from_node = ?
+            ORDER BY relation ASC, to_node ASC
+            """,
+            (tid, nid),
+        )
+        return [
+            (
+                self._normalize_graph_relation(str(row["relation"] or "")),
+                self._normalize_graph_node_id(str(row["to_node"] or "")),
+            )
+            for row in cur.fetchall()
+            if self._normalize_graph_relation(str(row["relation"] or ""))
+            and self._normalize_graph_node_id(str(row["to_node"] or ""))
+        ]
+
+    def list_in_edges(self, thread_id: str, node_id: str) -> list[tuple[str, str]]:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        if not tid or not nid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT relation, from_node
+            FROM graph_edges
+            WHERE thread_id = ? AND to_node = ?
+            ORDER BY relation ASC, from_node ASC
+            """,
+            (tid, nid),
+        )
+        return [
+            (
+                self._normalize_graph_relation(str(row["relation"] or "")),
+                self._normalize_graph_node_id(str(row["from_node"] or "")),
+            )
+            for row in cur.fetchall()
+            if self._normalize_graph_relation(str(row["relation"] or ""))
+            and self._normalize_graph_node_id(str(row["from_node"] or ""))
+        ]
+
+    def list_all_edges(self, thread_id: str) -> list[tuple[str, str, str]]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT from_node, relation, to_node
+            FROM graph_edges
+            WHERE thread_id = ?
+            ORDER BY from_node ASC, relation ASC, to_node ASC
+            """,
+            (tid,),
+        )
+        return [
+            (
+                self._normalize_graph_node_id(str(row["from_node"] or "")),
+                self._normalize_graph_relation(str(row["relation"] or "")),
+                self._normalize_graph_node_id(str(row["to_node"] or "")),
+            )
+            for row in cur.fetchall()
+            if self._normalize_graph_node_id(str(row["from_node"] or ""))
+            and self._normalize_graph_relation(str(row["relation"] or ""))
+            and self._normalize_graph_node_id(str(row["to_node"] or ""))
+        ]
+
+    def get_graph_node_label(self, thread_id: str, node_id: str) -> str | None:
+        node = self.get_graph_node(thread_id, node_id)
+        if not node:
+            return None
+        value = self._normalize_graph_label(str(node.get("label") or ""))
+        return value if value else None
+
     def clear_graph(self, thread_id: str) -> None:
         tid = str(thread_id or "").strip()
         if not tid:
