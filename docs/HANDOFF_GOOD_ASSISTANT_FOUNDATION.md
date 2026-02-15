@@ -1,5 +1,34 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.6 — Memory Graph (Explicit + Portable)
+
+This milestone adds deterministic, explicit, thread-scoped memory graph capabilities with no inference.
+
+Included command sets:
+- Explicit graph commands: `/node`, `/link`, `/graph`, `/graph_clear`
+- Hygiene commands: `/node_rename`, `/node_alias`, `/node_unalias`, `/node_delete`
+- Focus node commands: `/focus_node`, `/focus_node_clear`
+- Graph-aware resume: `/resume` can include `Related nodes` from explicit focus node edges
+- Portability commands: `/graph_export`, `/graph_import`, `/graph_import --merge`
+
+Import size cap limits (replace and merge):
+- `nodes <= 200`
+- `edges <= 500`
+- `aliases <= 300`
+
+Guarantees:
+- deterministic behavior and output ordering
+- thread-scoped operations
+- no inference and no automatic graph creation
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.5 — Project Mode (Per-Thread Preset)
 
 Purpose: deterministic per-thread behavior preset for focused project work.
