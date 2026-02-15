@@ -90,6 +90,23 @@ CREATE TABLE IF NOT EXISTS thread_labels (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    thread_id TEXT NOT NULL,
+    node_id TEXT NOT NULL,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, node_id)
+);
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+    thread_id TEXT NOT NULL,
+    from_node TEXT NOT NULL,
+    to_node TEXT NOT NULL,
+    relation TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (thread_id, from_node, to_node, relation)
+);
+
 CREATE TABLE IF NOT EXISTS activity_log (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts TEXT NOT NULL,

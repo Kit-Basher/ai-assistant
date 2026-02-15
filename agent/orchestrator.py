@@ -181,6 +181,20 @@ class Orchestrator:
         return cleaned
 
     @staticmethod
+    def _normalize_graph_node_id(node_id: str) -> str:
+        raw = (node_id or "").strip().lower()
+        return "".join(ch for ch in raw if ch.isalnum() or ch == "_")
+
+    @staticmethod
+    def _normalize_graph_text(value: str, limit: int, lower: bool = False) -> str:
+        text = " ".join((value or "").replace("?", "").split()).strip()
+        if lower:
+            text = text.lower()
+        if len(text) > limit:
+            text = text[:limit].rstrip()
+        return text
+
+    @staticmethod
     def _is_command_line(line: str) -> bool:
         stripped = (line or "").strip()
         if not stripped or stripped.startswith("- ") or stripped.startswith("In short:") or stripped.startswith("Next:"):
@@ -1554,6 +1568,94 @@ class Orchestrator:
                     return OrchestratorResponse(
                         f"Active thread set to {target_thread_id}.",
                         {"skip_friction_formatting": True, "thread_id": target_thread_id},
+                    )
+
+                if cmd.name == "node":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) < 2:
+                        return OrchestratorResponse(
+                            'Usage: /node <node_id> "<label>"',
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    raw_node_id = parts[0]
+                    raw_label = " ".join(parts[1:])
+                    node_id = self._normalize_graph_node_id(raw_node_id)
+                    label = self._normalize_graph_text(raw_label, 80, lower=False)
+                    created = self.db.create_graph_node(thread_id, node_id, label)
+                    if not created:
+                        return OrchestratorResponse(
+                            "Cannot create node.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        f"Node {node_id} created.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "link":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    try:
+                        parts = shlex.split((cmd.args or "").strip())
+                    except Exception:
+                        parts = (cmd.args or "").strip().split()
+                    if len(parts) != 3:
+                        return OrchestratorResponse(
+                            "Usage: /link <from_node> <relation> <to_node>",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    from_node = self._normalize_graph_node_id(parts[0])
+                    relation = self._normalize_graph_text(parts[1], 40, lower=True)
+                    to_node = self._normalize_graph_node_id(parts[2])
+                    created = self.db.create_graph_edge(thread_id, from_node, to_node, relation)
+                    if not created:
+                        return OrchestratorResponse(
+                            "Cannot create link.",
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
+                    return OrchestratorResponse(
+                        "Link created.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    nodes = self.db.list_graph_nodes(thread_id)
+                    edges = self.db.list_graph_edges(thread_id)
+                    lines = [f"Graph (thread {thread_id}):", "Nodes:"]
+                    if not nodes:
+                        lines.append("  - (none)")
+                    else:
+                        for node in nodes:
+                            node_id = self._normalize_graph_node_id(str(node.get("node_id") or ""))
+                            label = self._normalize_graph_text(str(node.get("label") or ""), 80, lower=False)
+                            if node_id and label:
+                                lines.append(f"  - {node_id}: {label}")
+                    lines.append("Edges:")
+                    if not edges:
+                        lines.append("  - (none)")
+                    else:
+                        for edge in edges:
+                            from_node = self._normalize_graph_node_id(str(edge.get("from_node") or ""))
+                            relation = self._normalize_graph_text(str(edge.get("relation") or ""), 40, lower=True)
+                            to_node = self._normalize_graph_node_id(str(edge.get("to_node") or ""))
+                            if from_node and relation and to_node:
+                                lines.append(f"  - {from_node} --{relation}--> {to_node}")
+                    out = "\n".join(lines).replace("?", "")
+                    return OrchestratorResponse(
+                        out,
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
+                    )
+
+                if cmd.name == "graph_clear":
+                    thread_id = self._active_thread_id_for_user(user_id)
+                    self.db.clear_graph(thread_id)
+                    return OrchestratorResponse(
+                        "Graph cleared for this thread.",
+                        {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
 
                 if cmd.name == "thread_new":

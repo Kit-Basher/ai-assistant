@@ -95,6 +95,7 @@ class MemoryDB:
         self._ensure_thread_prefs_table()
         self._ensure_thread_anchors_table()
         self._ensure_thread_labels_table()
+        self._ensure_graph_tables()
         self._ensure_open_loop_columns()
         self._ensure_schema_meta()
         self._conn.commit()
@@ -350,6 +351,31 @@ class MemoryDB:
             """
         )
 
+    def _ensure_graph_tables(self) -> None:
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_nodes (
+                thread_id TEXT NOT NULL,
+                node_id TEXT NOT NULL,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, node_id)
+            )
+            """
+        )
+        self._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS graph_edges (
+                thread_id TEXT NOT NULL,
+                from_node TEXT NOT NULL,
+                to_node TEXT NOT NULL,
+                relation TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (thread_id, from_node, to_node, relation)
+            )
+            """
+        )
+
     def _ensure_open_loop_columns(self) -> None:
         cur = self._conn.execute("PRAGMA table_info(open_loops)")
         cols = {row["name"] for row in cur.fetchall()}
@@ -547,6 +573,115 @@ class MemoryDB:
             for row in cur.fetchall()
             if str(row["thread_id"]).strip() and str(row["label"]).strip()
         }
+
+    @staticmethod
+    def _normalize_graph_node_id(node_id: str) -> str:
+        raw = (node_id or "").strip().lower()
+        normalized = "".join(ch for ch in raw if ch.isalnum() or ch == "_")
+        return normalized
+
+    @staticmethod
+    def _normalize_graph_label(label: str) -> str:
+        cleaned = " ".join((label or "").replace("?", "").split()).strip()
+        if len(cleaned) > 80:
+            cleaned = cleaned[:80].rstrip()
+        return cleaned
+
+    @staticmethod
+    def _normalize_graph_relation(relation: str) -> str:
+        cleaned = " ".join((relation or "").replace("?", "").split()).strip().lower()
+        if len(cleaned) > 40:
+            cleaned = cleaned[:40].rstrip()
+        return cleaned
+
+    def create_graph_node(self, thread_id: str, node_id: str, label: str) -> bool:
+        tid = str(thread_id or "").strip()
+        nid = self._normalize_graph_node_id(node_id)
+        normalized_label = self._normalize_graph_label(label)
+        if not tid or not nid or not normalized_label:
+            return False
+        now = self._now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO graph_nodes (thread_id, node_id, label, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(thread_id, node_id) DO UPDATE SET
+                label = excluded.label,
+                created_at = excluded.created_at
+            """,
+            (tid, nid, normalized_label, now),
+        )
+        self._commit_if_needed()
+        return True
+
+    def list_graph_nodes(self, thread_id: str) -> list[dict[str, Any]]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT thread_id, node_id, label, created_at
+            FROM graph_nodes
+            WHERE thread_id = ?
+            ORDER BY node_id ASC
+            """,
+            (tid,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def create_graph_edge(self, thread_id: str, from_node: str, to_node: str, relation: str) -> bool:
+        tid = str(thread_id or "").strip()
+        src = self._normalize_graph_node_id(from_node)
+        dst = self._normalize_graph_node_id(to_node)
+        rel = self._normalize_graph_relation(relation)
+        if not tid or not src or not dst or not rel:
+            return False
+        cur = self._conn.execute(
+            """
+            SELECT COUNT(*) AS cnt
+            FROM graph_nodes
+            WHERE thread_id = ? AND node_id IN (?, ?)
+            """,
+            (tid, src, dst),
+        )
+        row = cur.fetchone()
+        if int(row["cnt"] or 0) < 2:
+            return False
+        now = self._now_iso()
+        self._conn.execute(
+            """
+            INSERT INTO graph_edges (thread_id, from_node, to_node, relation, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(thread_id, from_node, to_node, relation) DO UPDATE SET
+                created_at = excluded.created_at
+            """,
+            (tid, src, dst, rel, now),
+        )
+        self._commit_if_needed()
+        return True
+
+    def list_graph_edges(self, thread_id: str) -> list[dict[str, Any]]:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return []
+        cur = self._conn.execute(
+            """
+            SELECT thread_id, from_node, to_node, relation, created_at
+            FROM graph_edges
+            WHERE thread_id = ?
+            ORDER BY from_node ASC, relation ASC, to_node ASC
+            """,
+            (tid,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def clear_graph(self, thread_id: str) -> None:
+        tid = str(thread_id or "").strip()
+        if not tid:
+            return
+        self._conn.execute("DELETE FROM graph_edges WHERE thread_id = ?", (tid,))
+        self._conn.execute("DELETE FROM graph_nodes WHERE thread_id = ?", (tid,))
+        self._commit_if_needed()
 
     def list_recent_threads(self, limit: int = 10) -> list[dict[str, Any]]:
         max_rows = max(1, int(limit))
