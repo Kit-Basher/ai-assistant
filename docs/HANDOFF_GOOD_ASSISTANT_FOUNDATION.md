@@ -1,5 +1,35 @@
 # Good Assistant Foundation Handoff
 
+## v0.2.7 — Graph Packs (Multi-Thread Export/Import + Clone)
+
+This milestone adds explicit, deterministic multi-thread graph portability and copy flows.
+
+Commands:
+- `/graph_pack_export` (exports active thread only)
+- `/graph_pack_export --threads <id1,id2>`
+- `/graph_pack_import <JSON pack>` and `/graph_pack_import --merge <JSON pack>`
+- `/graph_clone <thread_id>` and `/graph_clone <thread_id> --merge`
+
+Pack JSON shape:
+- top-level: `pack_version`, `exported_at`, `threads[]`
+- each thread entry: `thread_id`, `graph`
+- graph keys: `exported_at`, `nodes`, `aliases`, `edges`, `focus_node`
+
+Guarantees:
+- deterministic ordering (threads sorted by `thread_id`, graph lists sorted deterministically)
+- per-thread caps enforced during pack import (`nodes<=200`, `edges<=500`, `aliases<=300`)
+- transaction-safe pack import (all-or-nothing, no partial writes)
+- thread-scoped behavior with explicit cross-thread operations only via pack/clone commands
+- no inference and no new LLM usage
+
+Verification:
+
+```bash
+pytest -q
+python3 -m agent.epistemics.canary
+python3 -m agent.friction.canary
+```
+
 ## v0.2.6 — Memory Graph (Explicit + Portable)
 
 This milestone adds deterministic, explicit, thread-scoped memory graph capabilities with no inference.
