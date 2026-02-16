@@ -143,6 +143,58 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(current["allow_remote_fallback"])
         self.assertEqual("prefer_local_lowest_cost_capable", runtime._router.policy.mode)
 
+    def test_defaults_accepts_provider_scoped_model_name_and_returns_canonical(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "quality_rank": 3,
+            "cost_rank": 1,
+            "default_for": ["chat"],
+            "enabled": True,
+            "pricing": {
+                "input_per_million_tokens": None,
+                "output_per_million_tokens": None,
+            },
+            "max_context_tokens": 32768,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        ok, updated = runtime.update_defaults(
+            {
+                "default_provider": "ollama",
+                "default_model": "qwen2.5:3b-instruct",
+            }
+        )
+        self.assertTrue(ok)
+        self.assertEqual("ollama", updated["default_provider"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", updated["default_model"])
+
+        current = runtime.get_defaults()
+        self.assertEqual("ollama", current["default_provider"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", current["default_model"])
+
+    def test_refresh_models_marks_embedding_models_as_embedding_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        runtime._http_get_json = lambda *_args, **_kwargs: {  # type: ignore[assignment]
+            "data": [
+                {"id": "llama3.2"},
+                {"id": "nomic-embed-text"},
+            ]
+        }
+
+        ok, _response = runtime.refresh_models()
+        self.assertTrue(ok)
+
+        embed_model = runtime.registry_document["models"]["ollama:nomic-embed-text"]
+        self.assertEqual(["embedding"], embed_model["capabilities"])
+
     def test_root_route_serves_webui_index_html(self) -> None:
         webui_dist = os.path.join(self.tmpdir.name, "webui", "dist")
         os.makedirs(webui_dist, exist_ok=True)

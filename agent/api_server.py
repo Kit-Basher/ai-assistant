@@ -428,6 +428,8 @@ class AgentRuntime:
 
         document = self.registry_document
         defaults = self._ensure_defaults(document)
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        provider_override = str(payload.get("default_provider") or "").strip().lower() if "default_provider" in payload else None
 
         if "routing_mode" in payload:
             mode = str(payload.get("routing_mode") or "").strip().lower()
@@ -436,16 +438,40 @@ class AgentRuntime:
             defaults["routing_mode"] = mode
 
         if "default_provider" in payload:
-            provider = str(payload.get("default_provider") or "").strip().lower() or None
+            provider = provider_override or None
             if provider and provider not in self._sorted_provider_ids():
                 return False, {"ok": False, "error": "default_provider not found"}
             defaults["default_provider"] = provider
 
         if "default_model" in payload:
             model = str(payload.get("default_model") or "").strip() or None
-            if model and model not in (self.registry_document.get("models") or {}):
-                return False, {"ok": False, "error": "default_model not found"}
-            defaults["default_model"] = model
+            if model is None:
+                defaults["default_model"] = None
+            elif model in models:
+                defaults["default_model"] = model
+            else:
+                provider_for_model = defaults.get("default_provider")
+                provider_for_model = str(provider_for_model).strip().lower() if provider_for_model else None
+                if provider_for_model:
+                    scoped_model_id = f"{provider_for_model}:{model}"
+                else:
+                    scoped_model_id = None
+
+                if scoped_model_id and scoped_model_id in models:
+                    defaults["default_model"] = scoped_model_id
+                else:
+                    return False, {"ok": False, "error": "default_model not found"}
+        elif (
+            "default_provider" in payload
+            and defaults.get("default_model")
+            and str(defaults.get("default_provider") or "").strip()
+        ):
+            model_id = str(defaults.get("default_model") or "").strip()
+            if model_id and model_id in models:
+                existing_provider = str((models.get(model_id) or {}).get("provider") or "").strip().lower()
+                selected_provider = str(defaults.get("default_provider") or "").strip().lower()
+                if existing_provider and selected_provider and existing_provider != selected_provider:
+                    defaults["default_model"] = None
 
         if "allow_remote_fallback" in payload:
             defaults["allow_remote_fallback"] = bool(payload.get("allow_remote_fallback"))
@@ -453,6 +479,13 @@ class AgentRuntime:
         document["defaults"] = defaults
         self._save_registry_document(document)
         return True, {"ok": True, **self.get_defaults()}
+
+    @staticmethod
+    def _default_refreshed_capabilities(model_name: str) -> list[str]:
+        normalized_name = (model_name or "").strip().lower()
+        if "embed" in normalized_name:
+            return ["embedding"]
+        return ["chat"]
 
     @staticmethod
     def _normalize_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -576,7 +609,7 @@ class AgentRuntime:
                     **existing,
                     "provider": provider_id,
                     "model": model_name,
-                    "capabilities": list(existing.get("capabilities") or ["chat"]),
+                    "capabilities": list(existing.get("capabilities") or self._default_refreshed_capabilities(model_name)),
                     "quality_rank": int(existing.get("quality_rank", 2) or 2),
                     "cost_rank": int(existing.get("cost_rank", 0) or 0),
                     "default_for": list(existing.get("default_for") or ["chat"]),
