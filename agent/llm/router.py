@@ -12,10 +12,17 @@ from agent.config import Config, load_config
 from agent.llm.base import LLMResult
 from agent.llm.policy import RoutingPolicy, load_routing_policy
 from agent.llm.providers.base import Provider
-from agent.llm.providers.openai import OpenAIProvider
-from agent.llm.registry import ModelConfig, ProviderConfig, Registry, load_registry
+from agent.llm.providers.openai_compat import OpenAICompatProvider
+from agent.llm.registry import ModelConfig, Registry, load_registry
 from agent.llm.types import LLMError, Message, Request
+from agent.llm.usage_stats import (
+    UsageStatsStore,
+    default_usage_stats_path,
+    estimate_completion_tokens,
+    estimate_prompt_tokens,
+)
 from agent.logging_utils import log_event
+from agent.secret_store import SecretStore
 
 
 @dataclass
@@ -36,6 +43,9 @@ class _UnavailableProvider(Provider):
         return False
 
     def chat(self, request: Request, *, model: str, timeout_seconds: float):  # pragma: no cover - defensive
+        _ = request
+        _ = model
+        _ = timeout_seconds
         raise LLMError(
             kind="provider_unavailable",
             retriable=False,
@@ -58,42 +68,30 @@ class LLMRouter:
         rng: random.Random | None = None,
         time_fn=None,
         sleep_fn=None,
+        secret_store: SecretStore | None = None,
+        usage_stats: UsageStatsStore | None = None,
     ) -> None:
         self.config = config
         self.registry = registry or load_registry(config)
         self.policy = policy or load_routing_policy(config, self.registry)
+        self._secret_store = secret_store or SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
+        self._usage_stats = usage_stats or UsageStatsStore(
+            default_usage_stats_path(config.db_path, config.llm_usage_stats_path)
+        )
         self._providers = providers or self._build_default_providers()
         self._circuits: dict[str, CircuitBreakerState] = {}
-        self._rng = rng or random.Random()
+        self._rng = rng or random.Random(0)
         self._time_fn = time_fn or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
         self._log_path = log_path
 
     def _build_default_providers(self) -> dict[str, Provider]:
         providers: dict[str, Provider] = {}
-
-        openai_spec = self.registry.providers.get("openai")
-        if openai_spec:
-            providers["openai"] = OpenAIProvider(
-                api_key=self.config.openai_api_key,
-                base_url=openai_spec.base_url,
-                provider_name="openai",
-                enabled=openai_spec.enabled,
-            )
-
-        openrouter_spec = self.registry.providers.get("openrouter")
-        if openrouter_spec:
-            providers["openrouter"] = OpenAIProvider(
-                api_key=self.config.openrouter_api_key,
-                base_url=openrouter_spec.base_url,
-                provider_name="openrouter",
-                enabled=openrouter_spec.enabled,
-            )
-
-        # Reserved slot for future provider implementations.
-        if "ollama" in self.registry.providers and "ollama" not in providers:
-            providers["ollama"] = _UnavailableProvider("ollama")
-
+        for provider_id, provider_cfg in self.registry.providers.items():
+            if provider_cfg.provider_type in {"openai_compat", "openai"}:
+                providers[provider_id] = OpenAICompatProvider(provider_cfg, secret_store=self._secret_store)
+            else:
+                providers[provider_id] = _UnavailableProvider(provider_id)
         return providers
 
     @staticmethod
@@ -116,8 +114,7 @@ class LLMRouter:
 
     def enabled(self) -> bool:
         request = Request(messages=(), purpose="chat")
-        candidates = self._candidate_models(request)
-        return bool(candidates)
+        return bool(self._ordered_models(request))
 
     def intent_from_text(self, text: str) -> dict[str, Any] | None:
         _ = text
@@ -125,49 +122,49 @@ class LLMRouter:
 
     def set_routing_mode(self, mode: str) -> None:
         normalized = (mode or "").strip().lower()
-        if normalized not in {"auto", "prefer_cheap", "prefer_best"}:
-            raise ValueError("routing mode must be one of: auto, prefer_cheap, prefer_best")
+        if normalized not in {
+            "auto",
+            "prefer_cheap",
+            "prefer_best",
+            "prefer_local_lowest_cost_capable",
+        }:
+            raise ValueError(
+                "routing mode must be one of: auto, prefer_cheap, prefer_best, prefer_local_lowest_cost_capable"
+            )
         self.policy = replace(self.policy, mode=normalized)
+
+    def set_registry(self, registry: Registry) -> None:
+        self.registry = registry
+        self.policy = load_routing_policy(self.config, self.registry)
+        self._providers = self._build_default_providers()
 
     def set_provider_api_key(self, provider: str, api_key: str) -> bool:
         provider_name = (provider or "").strip().lower()
-        secret = (api_key or "").strip()
         if not provider_name:
             return False
 
-        spec = self.registry.providers.get(provider_name)
-        if not spec:
+        provider_cfg = self.registry.providers.get(provider_name)
+        if not provider_cfg:
             return False
 
         impl = self._providers.get(provider_name)
         if impl is None:
             return False
 
+        key = (api_key or "").strip()
         if hasattr(impl, "set_api_key"):
-            getattr(impl, "set_api_key")(secret)
+            getattr(impl, "set_api_key")(key)
 
-        if spec.auth_env_var:
-            if secret:
-                os.environ[spec.auth_env_var] = secret
+        source = provider_cfg.api_key_source
+        if source and source.source_type == "env":
+            if key:
+                os.environ[source.name] = key
             else:
-                os.environ.pop(spec.auth_env_var, None)
+                os.environ.pop(source.name, None)
+        elif source and source.source_type == "secret":
+            self._secret_store.set_secret(source.name, key)
 
         return True
-
-    def _candidate_models(self, request: Request) -> list[ModelConfig]:
-        all_models = self.registry.sorted_models()
-        allowed = self.policy.ordered_candidates(request, all_models)
-        candidates: list[ModelConfig] = []
-        for model in allowed:
-            if self._is_circuit_open(model.id):
-                continue
-            provider = self._providers.get(model.provider)
-            if provider is None:
-                continue
-            if not provider.available():
-                continue
-            candidates.append(model)
-        return candidates
 
     def _circuit(self, model_id: str) -> CircuitBreakerState:
         if model_id not in self._circuits:
@@ -200,6 +197,14 @@ class LLMRouter:
         if len(state.failures) >= int(self.policy.circuit_breaker_failures):
             state.opened_until = now + float(self.policy.circuit_breaker_cooldown_seconds)
 
+    def _sleep_retry(self, attempt_idx: int) -> None:
+        base = float(self.policy.retry_base_delay_ms) / 1000.0
+        if base <= 0:
+            return
+        delay = base * (2**attempt_idx)
+        jitter = self._rng.random() * base
+        self._sleep_fn(delay + jitter)
+
     @staticmethod
     def _normalize_unexpected_error(provider: str, exc: Exception) -> LLMError:
         message = str(exc) or exc.__class__.__name__
@@ -213,14 +218,6 @@ class LLMRouter:
             message=message,
             raw={"type": exc.__class__.__name__},
         )
-
-    def _sleep_retry(self, attempt_idx: int) -> None:
-        base = float(self.policy.retry_base_delay_ms) / 1000.0
-        if base <= 0:
-            return
-        delay = base * (2**attempt_idx)
-        jitter = self._rng.random() * base
-        self._sleep_fn(delay + jitter)
 
     def _call_with_retry(self, provider: Provider, model: ModelConfig, request: Request):
         attempts = max(1, int(self.policy.retry_attempts))
@@ -248,6 +245,93 @@ class LLMRouter:
             raw=None,
         )
 
+    def _context_capable(self, model: ModelConfig, request: Request) -> bool:
+        min_context_tokens = request.min_context_tokens
+        if min_context_tokens is None:
+            return True
+        if model.max_context_tokens is None:
+            return True
+        return int(model.max_context_tokens) >= int(min_context_tokens)
+
+    def _candidate_models(self, request: Request) -> list[ModelConfig]:
+        base_candidates = [
+            model
+            for model in self.registry.sorted_models()
+            if model.enabled and self.policy.allows_model(request, model) and self._context_capable(model, request)
+        ]
+
+        if not self.policy.allow_remote_fallback and not request.provider and not request.model:
+            base_candidates = [
+                model
+                for model in base_candidates
+                if self.registry.providers.get(model.provider) and self.registry.providers[model.provider].local
+            ]
+
+        return base_candidates
+
+    def _expected_tokens(self, request: Request, model: ModelConfig) -> tuple[float, float]:
+        task_type = request.task_type or request.purpose or "chat"
+        stats = self._usage_stats.get(task_type, model.provider, model.id)
+        if stats:
+            return stats.prompt_tokens, stats.completion_tokens
+
+        prompt_est = float(estimate_prompt_tokens(request.messages))
+        completion_est = float(estimate_completion_tokens(int(prompt_est)))
+        return prompt_est, completion_est
+
+    def _expected_cost(self, request: Request, model: ModelConfig) -> float:
+        provider_cfg = self.registry.providers.get(model.provider)
+        if provider_cfg is None:
+            return 10_000_000.0
+
+        prompt_tokens, completion_tokens = self._expected_tokens(request, model)
+
+        in_price = model.input_cost_per_million_tokens
+        out_price = model.output_cost_per_million_tokens
+
+        if provider_cfg.local and (in_price is None or out_price is None):
+            return 0.0
+        if in_price is None or out_price is None:
+            return 1_000_000.0 + float(model.cost_rank)
+
+        return (prompt_tokens * in_price / 1_000_000.0) + (completion_tokens * out_price / 1_000_000.0)
+
+    def _reliability_penalty(self, model: ModelConfig) -> float:
+        state = self._circuits.get(model.id)
+        if not state:
+            return 0.0
+        return float(len(state.failures)) / max(1, float(self.policy.circuit_breaker_failures))
+
+    def _ordered_models(self, request: Request) -> list[ModelConfig]:
+        candidates = self._candidate_models(request)
+        if self.policy.mode != "prefer_local_lowest_cost_capable":
+            return self.policy.ordered_candidates(request, candidates)
+
+        def sort_key(model: ModelConfig) -> tuple[int, float, float, str, str]:
+            provider_cfg = self.registry.providers.get(model.provider)
+            is_local = bool(provider_cfg.local) if provider_cfg else False
+            return (
+                0 if is_local else 1,
+                self._expected_cost(request, model),
+                self._reliability_penalty(model),
+                model.provider,
+                model.id,
+            )
+
+        return sorted(candidates, key=sort_key)
+
+    def _record_usage(self, request: Request, model: ModelConfig, response_text: str, usage: dict[str, Any]) -> None:
+        task_type = request.task_type or request.purpose or "chat"
+        prompt_tokens = int(usage.get("prompt_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or 0)
+
+        if prompt_tokens <= 0:
+            prompt_tokens = estimate_prompt_tokens(request.messages)
+        if completion_tokens <= 0:
+            completion_tokens = estimate_completion_tokens(prompt_tokens, response_text)
+
+        self._usage_stats.update(task_type, model.provider, model.id, prompt_tokens, completion_tokens)
+
     def chat(
         self,
         messages: list[dict[str, str]] | tuple[dict[str, str], ...],
@@ -259,6 +343,8 @@ class LLMRouter:
         require_tools: bool = False,
         require_json: bool = False,
         require_vision: bool = False,
+        min_context_tokens: int | None = None,
+        task_type: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         timeout_seconds: float | None = None,
         metadata: dict[str, Any] | None = None,
@@ -269,21 +355,23 @@ class LLMRouter:
         request = Request(
             messages=self._normalize_messages(messages),
             purpose=purpose,
+            task_type=task_type,
             provider=(provider_override or "").strip().lower() or None,
             model=(model_override or "").strip() or None,
             require_tools=bool(require_tools),
             require_json=bool(require_json),
             require_vision=bool(require_vision),
+            min_context_tokens=min_context_tokens,
             tools=tuple(tools or ()),
             timeout_seconds=timeout_seconds,
             metadata=metadata or {},
         )
 
-        all_candidates = self.policy.ordered_candidates(request, self.registry.sorted_models())
+        ordered_models = self._ordered_models(request)
         attempts: list[dict[str, Any]] = []
         last_error: LLMError | None = None
 
-        for model in all_candidates:
+        for model in ordered_models:
             provider = self._providers.get(model.provider)
             if provider is None:
                 attempts.append(
@@ -317,6 +405,12 @@ class LLMRouter:
                 response = self._call_with_retry(provider, model, request)
                 self._record_success(model.id)
                 duration_ms = int((float(self._time_fn()) - start) * 1000)
+                usage = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens,
+                }
+                self._record_usage(request, model, response.text, usage)
                 payload = {
                     "ok": True,
                     "text": response.text,
@@ -324,11 +418,7 @@ class LLMRouter:
                     "model": response.model,
                     "fallback_used": bool(attempts),
                     "attempts": attempts,
-                    "usage": {
-                        "prompt_tokens": response.usage.prompt_tokens,
-                        "completion_tokens": response.usage.completion_tokens,
-                        "total_tokens": response.usage.total_tokens,
-                    },
+                    "usage": usage,
                     "duration_ms": duration_ms,
                     "error_class": None,
                 }
@@ -338,11 +428,13 @@ class LLMRouter:
                         "llm_routing_decision",
                         {
                             "purpose": purpose,
+                            "task_type": task_type or purpose,
                             "required_capabilities": sorted(self.policy.required_capabilities(request)),
                             "selected_provider": response.provider,
                             "selected_model": response.model,
                             "fallback_used": bool(attempts),
                             "attempts": attempts,
+                            "routing_mode": self.policy.mode,
                         },
                     )
                 return payload
@@ -369,11 +461,13 @@ class LLMRouter:
                 "llm_routing_decision",
                 {
                     "purpose": purpose,
+                    "task_type": task_type or purpose,
                     "required_capabilities": sorted(self.policy.required_capabilities(request)),
                     "selected_provider": "none",
                     "selected_model": None,
                     "fallback_used": False,
                     "attempts": attempts,
+                    "routing_mode": self.policy.mode,
                     "error": error_class,
                 },
             )
@@ -397,7 +491,8 @@ class LLMRouter:
         tier_required: str,
         messages: list[dict[str, str]],
     ) -> dict[str, Any]:
-        result = self.chat(messages, purpose=task_kind, compute_tier=tier_required)
+        _ = tier_required
+        result = self.chat(messages, purpose=task_kind, task_type=task_kind)
         if not result.get("ok"):
             return {
                 "text": "",
@@ -432,19 +527,22 @@ class LLMRouter:
 
     def doctor_snapshot(self) -> dict[str, Any]:
         provider_rows: list[dict[str, Any]] = []
-        for name, spec in sorted(self.registry.providers.items()):
-            impl = self._providers.get(name)
+        for provider_id, spec in sorted(self.registry.providers.items()):
+            impl = self._providers.get(provider_id)
             env_present = None
             if spec.auth_env_var:
                 env_present = bool(os.getenv(spec.auth_env_var, "").strip())
             provider_rows.append(
                 {
-                    "name": name,
+                    "id": provider_id,
+                    "name": provider_id,
                     "type": spec.provider_type,
                     "base_url": spec.base_url,
+                    "chat_path": spec.chat_path,
                     "auth_env_var": spec.auth_env_var,
                     "env_present": env_present,
                     "enabled": spec.enabled,
+                    "local": spec.local,
                     "available": bool(impl.available()) if impl else False,
                 }
             )
@@ -460,6 +558,9 @@ class LLMRouter:
                     "capabilities": sorted(model.capabilities),
                     "enabled": model.enabled,
                     "available": bool(impl.available()) if impl else False,
+                    "input_cost_per_million_tokens": model.input_cost_per_million_tokens,
+                    "output_cost_per_million_tokens": model.output_cost_per_million_tokens,
+                    "max_context_tokens": model.max_context_tokens,
                 }
             )
 
@@ -469,6 +570,11 @@ class LLMRouter:
 
         return {
             "routing_mode": self.policy.mode,
+            "defaults": {
+                "default_provider": self.policy.default_provider,
+                "default_model": self.policy.default_model,
+                "allow_remote_fallback": self.policy.allow_remote_fallback,
+            },
             "providers": provider_rows,
             "models": model_rows,
             "env": {
@@ -476,6 +582,7 @@ class LLMRouter:
                 "missing": missing,
             },
             "circuits": self.circuit_states(),
+            "usage_stats": self._usage_stats.snapshot(),
         }
 
 

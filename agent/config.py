@@ -44,6 +44,7 @@ class Config:
     llm_circuit_breaker_failures: int = 3
     llm_circuit_breaker_window_seconds: int = 60
     llm_circuit_breaker_cooldown_seconds: int = 45
+    llm_usage_stats_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -159,8 +160,14 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     llm_circuit_breaker_cooldown_seconds = int(
         os.getenv("LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45") or 45
     )
+    llm_usage_stats_path = os.getenv("LLM_USAGE_STATS_PATH", "").strip() or None
 
-    if llm_routing_mode not in {"auto", "prefer_cheap", "prefer_best"}:
+    if llm_routing_mode not in {
+        "auto",
+        "prefer_cheap",
+        "prefer_best",
+        "prefer_local_lowest_cost_capable",
+    }:
         raise RuntimeError(f"Unsupported LLM_ROUTING_MODE: {llm_routing_mode}")
     if llm_retry_attempts < 1:
         raise RuntimeError("LLM_RETRY_ATTEMPTS must be >= 1.")
@@ -213,4 +220,5 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         llm_circuit_breaker_failures=llm_circuit_breaker_failures,
         llm_circuit_breaker_window_seconds=llm_circuit_breaker_window_seconds,
         llm_circuit_breaker_cooldown_seconds=llm_circuit_breaker_cooldown_seconds,
+        llm_usage_stats_path=llm_usage_stats_path,
     )

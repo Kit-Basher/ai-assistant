@@ -5,25 +5,10 @@ import unittest
 from agent.config import Config
 from agent.llm.policy import RoutingPolicy
 from agent.llm.providers.base import Provider
-from agent.llm.registry import ModelConfig, ProviderConfig, Registry
+from agent.llm.registry import DefaultsConfig, ModelConfig, ProviderConfig, Registry
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Request, Response, Usage
-
-
-class FakeClock:
-    def __init__(self) -> None:
-        self.now = 0.0
-        self.sleep_calls: list[float] = []
-
-    def time(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.sleep_calls.append(seconds)
-        self.now += seconds
-
-    def advance(self, seconds: float) -> None:
-        self.now += seconds
+from agent.llm.usage_stats import UsageStatsStore
 
 
 class FakeProvider(Provider):
@@ -45,11 +30,11 @@ class FakeProvider(Provider):
         _ = timeout_seconds
         self.calls += 1
         if not self._outcomes:
-            return Response(text="ok", provider=self._name, model=model, usage=Usage())
-        outcome = self._outcomes.pop(0)
-        if isinstance(outcome, LLMError):
-            raise outcome
-        return outcome
+            return Response(text="ok", provider=self._name, model=model, usage=Usage(20, 10, 30))
+        value = self._outcomes.pop(0)
+        if isinstance(value, LLMError):
+            raise value
+        return value
 
 
 def _config(**overrides) -> Config:
@@ -67,8 +52,8 @@ def _config(**overrides) -> Config:
         ollama_model_sentinel=None,
         ollama_model_worker=None,
         allow_cloud=True,
-        prefer_local=False,
-        llm_timeout_seconds=10,
+        prefer_local=True,
+        llm_timeout_seconds=12,
         llm_provider="none",
         enable_llm_presentation=False,
         openai_base_url=None,
@@ -83,244 +68,386 @@ def _config(**overrides) -> Config:
         openrouter_site_url=None,
         openrouter_app_name=None,
         llm_registry_path=None,
-        llm_routing_mode="auto",
-        llm_retry_attempts=2,
-        llm_retry_base_delay_ms=50,
+        llm_routing_mode="prefer_local_lowest_cost_capable",
+        llm_retry_attempts=1,
+        llm_retry_base_delay_ms=0,
         llm_circuit_breaker_failures=2,
         llm_circuit_breaker_window_seconds=60,
         llm_circuit_breaker_cooldown_seconds=30,
+        llm_usage_stats_path=None,
     )
     return base.__class__(**{**base.__dict__, **overrides})
 
 
 def _registry() -> Registry:
     providers = {
-        "openai": ProviderConfig(
-            name="openai",
-            provider_type="openai",
-            base_url="https://api.openai.com/v1",
-            auth_env_var="OPENAI_API_KEY",
+        "local": ProviderConfig(
+            id="local",
+            provider_type="openai_compat",
+            base_url="http://127.0.0.1:11434",
+            chat_path="/v1/chat/completions",
+            api_key_source=None,
+            default_headers={},
+            default_query_params={},
             enabled=True,
+            local=True,
         ),
-        "backup": ProviderConfig(
-            name="backup",
-            provider_type="openai",
-            base_url="https://api.example.test/v1",
-            auth_env_var="BACKUP_API_KEY",
+        "remote_a": ProviderConfig(
+            id="remote_a",
+            provider_type="openai_compat",
+            base_url="https://a.example/v1",
+            chat_path="/v1/chat/completions",
+            api_key_source=None,
+            default_headers={},
+            default_query_params={},
             enabled=True,
+            local=False,
+        ),
+        "remote_b": ProviderConfig(
+            id="remote_b",
+            provider_type="openai_compat",
+            base_url="https://b.example/v1",
+            chat_path="/v1/chat/completions",
+            api_key_source=None,
+            default_headers={},
+            default_query_params={},
+            enabled=True,
+            local=False,
         ),
     }
+
     models = {
-        "openai:cheap-chat": ModelConfig(
-            id="openai:cheap-chat",
-            provider="openai",
-            model="cheap-chat",
+        "local:chat": ModelConfig(
+            id="local:chat",
+            provider="local",
+            model="chat",
             capabilities=frozenset({"chat"}),
-            quality_rank=5,
-            cost_rank=1,
+            quality_rank=2,
+            cost_rank=0,
             default_for=("chat",),
             enabled=True,
+            input_cost_per_million_tokens=None,
+            output_cost_per_million_tokens=None,
+            max_context_tokens=8192,
         ),
-        "openai:tool-json": ModelConfig(
-            id="openai:tool-json",
-            provider="openai",
-            model="tool-json",
-            capabilities=frozenset({"chat", "tools", "json"}),
-            quality_rank=7,
-            cost_rank=3,
-            default_for=("chat", "presentation_rewrite"),
-            enabled=True,
-        ),
-        "openai:vision": ModelConfig(
-            id="openai:vision",
-            provider="openai",
-            model="vision",
+        "remote_a:cheap": ModelConfig(
+            id="remote_a:cheap",
+            provider="remote_a",
+            model="cheap",
             capabilities=frozenset({"chat", "vision"}),
-            quality_rank=8,
-            cost_rank=6,
-            default_for=("best_quality",),
-            enabled=True,
-        ),
-        "backup:stable": ModelConfig(
-            id="backup:stable",
-            provider="backup",
-            model="stable",
-            capabilities=frozenset({"chat"}),
-            quality_rank=6,
+            quality_rank=5,
             cost_rank=2,
             default_for=("chat",),
             enabled=True,
+            input_cost_per_million_tokens=0.2,
+            output_cost_per_million_tokens=0.8,
+            max_context_tokens=128000,
+        ),
+        "remote_b:expensive": ModelConfig(
+            id="remote_b:expensive",
+            provider="remote_b",
+            model="expensive",
+            capabilities=frozenset({"chat", "vision"}),
+            quality_rank=6,
+            cost_rank=4,
+            default_for=("chat",),
+            enabled=True,
+            input_cost_per_million_tokens=1.2,
+            output_cost_per_million_tokens=4.0,
+            max_context_tokens=128000,
+        ),
+        "remote_b:tool": ModelConfig(
+            id="remote_b:tool",
+            provider="remote_b",
+            model="tool",
+            capabilities=frozenset({"chat", "tools", "json"}),
+            quality_rank=7,
+            cost_rank=3,
+            default_for=("chat",),
+            enabled=True,
+            input_cost_per_million_tokens=0.4,
+            output_cost_per_million_tokens=1.2,
+            max_context_tokens=128000,
         ),
     }
-    return Registry(providers=providers, models=models, routing_defaults={"mode": "auto", "fallback_chain": ()})
+
+    defaults = DefaultsConfig(
+        routing_mode="prefer_local_lowest_cost_capable",
+        default_provider=None,
+        default_model=None,
+        allow_remote_fallback=True,
+    )
+
+    return Registry(
+        schema_version=2,
+        path=None,
+        providers=providers,
+        models=models,
+        defaults=defaults,
+        fallback_chain=("local:chat", "remote_a:cheap", "remote_b:expensive", "remote_b:tool"),
+    )
 
 
-def _policy(**overrides) -> RoutingPolicy:
-    base = RoutingPolicy(
-        mode="prefer_cheap",
-        retry_attempts=2,
-        retry_base_delay_ms=25,
+def _policy(mode: str = "prefer_local_lowest_cost_capable") -> RoutingPolicy:
+    return RoutingPolicy(
+        mode=mode,
+        retry_attempts=1,
+        retry_base_delay_ms=0,
         circuit_breaker_failures=2,
         circuit_breaker_window_seconds=60,
         circuit_breaker_cooldown_seconds=30,
         default_timeout_seconds=10,
-        fallback_chain=("openai:cheap-chat", "backup:stable", "openai:tool-json", "openai:vision"),
+        allow_remote_fallback=True,
+        fallback_chain=("local:chat", "remote_a:cheap", "remote_b:expensive", "remote_b:tool"),
     )
-    return base.__class__(**{**base.__dict__, **overrides})
 
 
 class TestLLMRouter(unittest.TestCase):
-    def test_deterministic_selection_with_same_health_state(self) -> None:
-        provider = FakeProvider("openai", [Response("a", "openai", "cheap-chat"), Response("b", "openai", "cheap-chat")])
-        router = LLMRouter(
-            _config(),
-            providers={"openai": provider, "backup": FakeProvider("backup", [])},
-            registry=_registry(),
-            policy=_policy(),
-        )
-
-        res1 = router.chat([{"role": "user", "content": "hi"}], purpose="chat")
-        res2 = router.chat([{"role": "user", "content": "hi"}], purpose="chat")
-
-        self.assertTrue(res1["ok"])
-        self.assertTrue(res2["ok"])
-        self.assertEqual(res1["provider"], res2["provider"])
-        self.assertEqual(res1["model"], res2["model"])
-
-    def test_capability_gating_prefers_tool_model(self) -> None:
-        provider = FakeProvider("openai", [Response("tool", "openai", "tool-json")])
-        router = LLMRouter(
-            _config(),
-            providers={"openai": provider, "backup": FakeProvider("backup", [])},
-            registry=_registry(),
-            policy=_policy(),
-        )
-
-        result = router.chat(
-            [{"role": "user", "content": "call a tool"}],
-            purpose="chat",
-            require_tools=True,
-            require_json=True,
-        )
-        self.assertTrue(result["ok"])
-        self.assertEqual("openai", result["provider"])
-        self.assertEqual("tool-json", result["model"])
-
-    def test_fallback_when_primary_fails(self) -> None:
-        failing = FakeProvider(
-            "openai",
-            [
-                LLMError(
-                    kind="server_error",
-                    retriable=False,
-                    provider="openai",
-                    status_code=500,
-                    message="boom",
-                )
-            ],
-        )
-        backup = FakeProvider("backup", [Response("from backup", "backup", "stable")])
-
-        router = LLMRouter(
-            _config(),
-            providers={"openai": failing, "backup": backup},
-            registry=_registry(),
-            policy=_policy(),
-        )
-
-        result = router.chat([{"role": "user", "content": "hello"}], purpose="chat")
-        self.assertTrue(result["ok"])
-        self.assertTrue(result["fallback_used"])
-        self.assertEqual("backup", result["provider"])
-        self.assertEqual("stable", result["model"])
-        self.assertEqual("server_error", result["attempts"][0]["reason"])
-
-    def test_circuit_breaker_opens_and_resets_after_cooldown(self) -> None:
-        clock = FakeClock()
-        primary = FakeProvider(
-            "openai",
-            [
-                LLMError(
-                    kind="server_error",
-                    retriable=False,
-                    provider="openai",
-                    status_code=500,
-                    message="fail-1",
-                ),
-                LLMError(
-                    kind="server_error",
-                    retriable=False,
-                    provider="openai",
-                    status_code=500,
-                    message="fail-2",
-                ),
-                Response("primary recovered", "openai", "cheap-chat"),
-            ],
-        )
-        backup = FakeProvider(
-            "backup",
-            [
-                Response("backup1", "backup", "stable"),
-                Response("backup2", "backup", "stable"),
-                Response("backup3", "backup", "stable"),
-            ],
-        )
-
-        router = LLMRouter(
-            _config(),
-            providers={"openai": primary, "backup": backup},
-            registry=_registry(),
-            policy=_policy(circuit_breaker_failures=2, circuit_breaker_cooldown_seconds=30),
-            time_fn=clock.time,
-            sleep_fn=clock.sleep,
-        )
-
-        first = router.chat([{"role": "user", "content": "hi"}], purpose="chat")
-        second = router.chat([{"role": "user", "content": "hi"}], purpose="chat")
-        third = router.chat([{"role": "user", "content": "hi"}], purpose="chat")
-
-        self.assertTrue(first["ok"])
-        self.assertTrue(second["ok"])
-        self.assertTrue(third["ok"])
-        self.assertEqual("backup", third["provider"])
-        self.assertEqual("circuit_open", third["attempts"][0]["reason"])
-
-        clock.advance(31)
-        fourth = router.chat([{"role": "user", "content": "hi"}], purpose="chat")
-        self.assertTrue(fourth["ok"])
-        self.assertEqual("openai", fourth["provider"])
-        self.assertEqual("cheap-chat", fourth["model"])
-
-    def test_retries_retriable_errors_with_backoff(self) -> None:
-        clock = FakeClock()
-        provider = FakeProvider(
-            "openai",
+    def test_retriable_error_retries_same_candidate(self) -> None:
+        local = FakeProvider(
+            "local",
             [
                 LLMError(
                     kind="timeout",
                     retriable=True,
-                    provider="openai",
+                    provider="local",
                     status_code=None,
-                    message="timeout",
+                    message="slow",
                 ),
-                Response("ok", "openai", "cheap-chat"),
+                Response("after-retry", "local", "chat", usage=Usage(20, 10, 30)),
             ],
+        )
+        router = LLMRouter(
+            _config(llm_retry_attempts=2),
+            providers={
+                "local": local,
+                "remote_a": FakeProvider("remote_a", []),
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=_registry(),
+            policy=RoutingPolicy(
+                mode="prefer_local_lowest_cost_capable",
+                retry_attempts=2,
+                retry_base_delay_ms=0,
+                circuit_breaker_failures=2,
+                circuit_breaker_window_seconds=60,
+                circuit_breaker_cooldown_seconds=30,
+                default_timeout_seconds=10,
+                allow_remote_fallback=True,
+                fallback_chain=("local:chat", "remote_a:cheap", "remote_b:expensive", "remote_b:tool"),
+            ),
+            usage_stats=UsageStatsStore(None),
+        )
+
+        result = router.chat([{"role": "user", "content": "hi"}], purpose="chat", task_type="chat")
+        self.assertTrue(result["ok"])
+        self.assertEqual("local", result["provider"])
+        self.assertEqual(2, local.calls)
+        self.assertFalse(result["fallback_used"])
+
+    def test_circuit_breaker_opens_and_resets_after_cooldown(self) -> None:
+        now = [10.0]
+        local = FakeProvider(
+            "local",
+            [
+                LLMError(
+                    kind="server_error",
+                    retriable=False,
+                    provider="local",
+                    status_code=500,
+                    message="boom-1",
+                ),
+                LLMError(
+                    kind="server_error",
+                    retriable=False,
+                    provider="local",
+                    status_code=500,
+                    message="boom-2",
+                ),
+                Response("local-recovered", "local", "chat", usage=Usage(18, 8, 26)),
+            ],
+        )
+        remote = FakeProvider(
+            "remote_a",
+            [
+                Response("remote-1", "remote_a", "cheap", usage=Usage(20, 10, 30)),
+                Response("remote-2", "remote_a", "cheap", usage=Usage(20, 10, 30)),
+                Response("remote-3", "remote_a", "cheap", usage=Usage(20, 10, 30)),
+            ],
+        )
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": local,
+                "remote_a": remote,
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+            time_fn=lambda: now[0],
+            sleep_fn=lambda _: None,
+        )
+
+        first = router.chat([{"role": "user", "content": "one"}], purpose="chat", task_type="chat")
+        self.assertTrue(first["ok"])
+        self.assertEqual("remote_a", first["provider"])
+
+        second = router.chat([{"role": "user", "content": "two"}], purpose="chat", task_type="chat")
+        self.assertTrue(second["ok"])
+        self.assertEqual("remote_a", second["provider"])
+
+        third = router.chat([{"role": "user", "content": "three"}], purpose="chat", task_type="chat")
+        self.assertTrue(third["ok"])
+        self.assertEqual("remote_a", third["provider"])
+        self.assertEqual("circuit_open", third["attempts"][0]["reason"])
+
+        now[0] += 31.0
+        fourth = router.chat([{"role": "user", "content": "four"}], purpose="chat", task_type="chat")
+        self.assertTrue(fourth["ok"])
+        self.assertEqual("local", fourth["provider"])
+        self.assertEqual(3, local.calls)
+
+    def test_local_model_wins_when_capable(self) -> None:
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": FakeProvider("local", [Response("local", "local", "chat", usage=Usage(20, 10, 30))]),
+                "remote_a": FakeProvider("remote_a", []),
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+        )
+
+        result = router.chat([{"role": "user", "content": "hi"}], purpose="chat", task_type="chat")
+        self.assertTrue(result["ok"])
+        self.assertEqual("local", result["provider"])
+
+    def test_cheapest_remote_wins_when_no_local_capable(self) -> None:
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": FakeProvider("local", []),
+                "remote_a": FakeProvider("remote_a", [Response("cheap", "remote_a", "cheap", usage=Usage(100, 20, 120))]),
+                "remote_b": FakeProvider("remote_b", [Response("exp", "remote_b", "expensive", usage=Usage(100, 20, 120))]),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+        )
+
+        result = router.chat(
+            [{"role": "user", "content": "vision request"}],
+            purpose="chat",
+            task_type="chat",
+            require_vision=True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("remote_a", result["provider"])
+        self.assertEqual("cheap", result["model"])
+
+    def test_capability_gating_enforced(self) -> None:
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": FakeProvider("local", []),
+                "remote_a": FakeProvider("remote_a", []),
+                "remote_b": FakeProvider("remote_b", [Response("tool", "remote_b", "tool")]),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+        )
+
+        result = router.chat(
+            [{"role": "user", "content": "need tool"}],
+            purpose="chat",
+            task_type="chat",
+            require_tools=True,
+            require_json=True,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual("remote_b", result["provider"])
+        self.assertEqual("tool", result["model"])
+
+    def test_deterministic_tie_break_by_provider_and_model(self) -> None:
+        registry = _registry()
+        # Make remote costs equal to force tie-break.
+        model_a = registry.models["remote_a:cheap"]
+        model_b = registry.models["remote_b:expensive"]
+        registry = Registry(
+            schema_version=registry.schema_version,
+            path=registry.path,
+            providers=registry.providers,
+            models={
+                **registry.models,
+                "remote_a:cheap": ModelConfig(
+                    **{**model_a.__dict__, "input_cost_per_million_tokens": 1.0, "output_cost_per_million_tokens": 1.0}
+                ),
+                "remote_b:expensive": ModelConfig(
+                    **{**model_b.__dict__, "input_cost_per_million_tokens": 1.0, "output_cost_per_million_tokens": 1.0}
+                ),
+                "local:chat": ModelConfig(
+                    **{**registry.models["local:chat"].__dict__, "enabled": False}
+                ),
+            },
+            defaults=registry.defaults,
+            fallback_chain=registry.fallback_chain,
         )
 
         router = LLMRouter(
             _config(),
-            providers={"openai": provider, "backup": FakeProvider("backup", [])},
-            registry=_registry(),
-            policy=_policy(retry_attempts=2, retry_base_delay_ms=50),
-            time_fn=clock.time,
-            sleep_fn=clock.sleep,
+            providers={
+                "local": FakeProvider("local", []),
+                "remote_a": FakeProvider("remote_a", [Response("a", "remote_a", "cheap")]),
+                "remote_b": FakeProvider("remote_b", [Response("b", "remote_b", "expensive")]),
+            },
+            registry=registry,
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
         )
 
-        result = router.chat([{"role": "user", "content": "hello"}], purpose="chat")
+        result = router.chat(
+            [{"role": "user", "content": "vision request"}],
+            purpose="chat",
+            task_type="chat",
+            require_vision=True,
+        )
         self.assertTrue(result["ok"])
-        self.assertEqual(2, provider.calls)
-        self.assertEqual(1, len(clock.sleep_calls))
-        self.assertGreater(clock.sleep_calls[0], 0)
+        self.assertEqual("remote_a", result["provider"])
+        self.assertEqual("cheap", result["model"])
+
+    def test_fallback_to_next_candidate_when_first_fails(self) -> None:
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": FakeProvider(
+                    "local",
+                    [
+                        LLMError(
+                            kind="server_error",
+                            retriable=False,
+                            provider="local",
+                            status_code=500,
+                            message="boom",
+                        )
+                    ],
+                ),
+                "remote_a": FakeProvider("remote_a", [Response("remote", "remote_a", "cheap")]),
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+        )
+
+        result = router.chat([{"role": "user", "content": "hello"}], purpose="chat", task_type="chat")
+        self.assertTrue(result["ok"])
+        self.assertEqual("remote_a", result["provider"])
+        self.assertTrue(result["fallback_used"])
+        self.assertEqual("server_error", result["attempts"][0]["reason"])
 
 
 if __name__ == "__main__":

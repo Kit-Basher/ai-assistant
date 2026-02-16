@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from agent.config import Config
 from agent.llm.registry import ModelConfig, Registry
 from agent.llm.types import Request
 
 
-_VALID_ROUTING_MODES = {"auto", "prefer_cheap", "prefer_best"}
+_VALID_ROUTING_MODES = {
+    "auto",
+    "prefer_cheap",
+    "prefer_best",
+    "prefer_local_lowest_cost_capable",
+}
 
 
 @dataclass(frozen=True)
@@ -19,6 +25,9 @@ class RoutingPolicy:
     circuit_breaker_window_seconds: int
     circuit_breaker_cooldown_seconds: int
     default_timeout_seconds: int
+    default_provider: str | None = None
+    default_model: str | None = None
+    allow_remote_fallback: bool = True
     fallback_chain: tuple[str, ...] = ()
 
     def required_capabilities(self, request: Request) -> frozenset[str]:
@@ -78,14 +87,20 @@ class RoutingPolicy:
 
 
 def load_routing_policy(config: Config, registry: Registry) -> RoutingPolicy:
-    mode = config.llm_routing_mode or str(registry.routing_defaults.get("mode") or "auto")
+    env_mode = os.getenv("LLM_ROUTING_MODE", "").strip().lower()
+    config_mode = (config.llm_routing_mode or "").strip().lower()
+
+    if env_mode:
+        mode = env_mode
+    elif config_mode and config_mode != "auto":
+        mode = config_mode
+    else:
+        mode = (registry.defaults.routing_mode or config_mode or "auto").strip().lower()
     mode = mode.strip().lower()
     if mode not in _VALID_ROUTING_MODES:
         mode = "auto"
 
-    fallback_chain = tuple(
-        item for item in registry.routing_defaults.get("fallback_chain", ()) if item in registry.models
-    )
+    fallback_chain = tuple(item for item in registry.fallback_chain if item in registry.models)
 
     return RoutingPolicy(
         mode=mode,
@@ -95,5 +110,8 @@ def load_routing_policy(config: Config, registry: Registry) -> RoutingPolicy:
         circuit_breaker_window_seconds=max(1, int(config.llm_circuit_breaker_window_seconds)),
         circuit_breaker_cooldown_seconds=max(1, int(config.llm_circuit_breaker_cooldown_seconds)),
         default_timeout_seconds=max(1, int(config.llm_timeout_seconds)),
+        default_provider=registry.defaults.default_provider,
+        default_model=registry.defaults.default_model,
+        allow_remote_fallback=bool(registry.defaults.allow_remote_fallback and config.allow_cloud),
         fallback_chain=fallback_chain,
     )

@@ -30,11 +30,13 @@ class Usage:
 class Request:
     messages: tuple[Message, ...]
     purpose: str = "chat"
+    task_type: str | None = None
     provider: str | None = None
     model: str | None = None
     require_tools: bool = False
     require_json: bool = False
     require_vision: bool = False
+    min_context_tokens: int | None = None
     tools: tuple[dict[str, Any], ...] = ()
     temperature: float | None = None
     max_tokens: int | None = None
