@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import json
+import mimetypes
 import os
 from pathlib import Path
 import re
@@ -22,16 +23,25 @@ from agent.secret_store import SecretStore
 _PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
 
 
+def _is_truthy(value: str | None) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 class AgentRuntime:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
+        self._repo_root = Path(__file__).resolve().parents[1]
 
         registry_path = config.llm_registry_path
         if not registry_path:
-            repo_root = Path(__file__).resolve().parents[1]
-            registry_path = str(repo_root / "llm_registry.json")
+            registry_path = str(self._repo_root / "llm_registry.json")
         self.registry_store = RegistryStore(registry_path)
+        self.webui_dist_path = Path(
+            os.getenv("AGENT_WEBUI_DIST_PATH", "").strip() or str(self._repo_root / "agent" / "webui" / "dist")
+        ).resolve()
+        self.webui_dev_proxy = _is_truthy(os.getenv("WEBUI_DEV_PROXY"))
+        self.webui_dev_url = os.getenv("WEBUI_DEV_URL", "http://127.0.0.1:1420").strip() or "http://127.0.0.1:1420"
 
         self.router: LLMRouter | None = None
         self.registry_document: dict[str, Any] = {}
@@ -600,6 +610,58 @@ class AgentRuntime:
             return False, updated
         return True, {"ok": True, "routing_mode": updated.get("routing_mode")}
 
+    def webui_dev_landing_html(self) -> str:
+        return (
+            "<!doctype html>"
+            "<html><head><meta charset='utf-8'><meta name='personal-agent-webui' content='1'>"
+            "<title>Personal Agent Web UI (Dev)</title></head>"
+            "<body style='font-family: sans-serif; padding: 2rem;'>"
+            "<h1>Personal Agent Web UI (Dev Mode)</h1>"
+            f"<p>WEBUI_DEV_PROXY=1 is enabled. Open <a href='{self.webui_dev_url}'>{self.webui_dev_url}</a>.</p>"
+            "<p>The API is still available at this host for /health, /providers, /chat, and related endpoints.</p>"
+            "</body></html>"
+        )
+
+    def webui_missing_html(self) -> str:
+        return (
+            "<!doctype html>"
+            "<html><head><meta charset='utf-8'><meta name='personal-agent-webui' content='1'>"
+            "<title>Personal Agent Web UI</title></head>"
+            "<body style='font-family: sans-serif; padding: 2rem;'>"
+            "<h1>Personal Agent Web UI</h1>"
+            "<p>UI assets are missing.</p>"
+            "<p>Build them with:</p>"
+            "<pre>./scripts/build_webui.sh</pre>"
+            "</body></html>"
+        )
+
+    def resolve_webui_file(self, request_path: str) -> tuple[Path, str] | None:
+        clean_path = (request_path or "/").split("?", 1)[0].split("#", 1)[0]
+        rel_path = clean_path.lstrip("/") or "index.html"
+
+        # Keep serving scope narrow and explicit.
+        if rel_path != "index.html" and not rel_path.startswith("assets/") and "/" in rel_path:
+            return None
+        if ".." in rel_path.split("/"):
+            return None
+
+        candidate = (self.webui_dist_path / rel_path).resolve()
+        try:
+            candidate.relative_to(self.webui_dist_path)
+        except ValueError:
+            return None
+
+        if not candidate.is_file():
+            return None
+
+        if rel_path.startswith("assets/"):
+            cache_control = "public, max-age=31536000, immutable"
+        elif rel_path == "index.html":
+            cache_control = "no-cache"
+        else:
+            cache_control = "public, max-age=3600"
+        return candidate, cache_control
+
 
 class APIServerHandler(BaseHTTPRequestHandler):
     runtime: AgentRuntime
@@ -616,6 +678,22 @@ class APIServerHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_bytes(
+        self,
+        status: int,
+        body: bytes,
+        *,
+        content_type: str,
+        cache_control: str | None = None,
+    ) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
         self.end_headers()
         self.wfile.write(body)
 
@@ -660,7 +738,58 @@ class APIServerHandler(BaseHTTPRequestHandler):
         if path == "/providers":
             self._send_json(200, self.runtime.list_providers())
             return
+
+        if self._try_serve_webui(path):
+            return
         self._send_json(404, {"ok": False, "error": "not_found", "path": path, "parts": parts})
+
+    def _try_serve_webui(self, path: str) -> bool:
+        if path == "/" and self.runtime.webui_dev_proxy:
+            html = self.runtime.webui_dev_landing_html().encode("utf-8")
+            self._send_bytes(
+                200,
+                html,
+                content_type="text/html; charset=utf-8",
+                cache_control="no-store",
+            )
+            return True
+
+        if path == "/":
+            resolved = self.runtime.resolve_webui_file(path)
+            if resolved is not None:
+                self._send_static_file(*resolved)
+            else:
+                fallback = self.runtime.webui_missing_html().encode("utf-8")
+                self._send_bytes(
+                    200,
+                    fallback,
+                    content_type="text/html; charset=utf-8",
+                    cache_control="no-store",
+                )
+            return True
+
+        if path.startswith("/assets/") or (path.count("/") == 1 and "." in path.rsplit("/", 1)[-1]):
+            resolved = self.runtime.resolve_webui_file(path)
+            if resolved is None:
+                return False
+            self._send_static_file(*resolved)
+            return True
+
+        return False
+
+    def _send_static_file(self, file_path: Path, cache_control: str) -> None:
+        try:
+            body = file_path.read_bytes()
+        except Exception:
+            self._send_json(500, {"ok": False, "error": "static_read_failed"})
+            return
+
+        guessed_content_type, _ = mimetypes.guess_type(str(file_path))
+        content_type = guessed_content_type or "application/octet-stream"
+        if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
+            content_type = f"{content_type}; charset=utf-8"
+
+        self._send_bytes(200, body, content_type=content_type, cache_control=cache_control)
 
     def do_POST(self) -> None:  # noqa: N802
         path, parts = self._path_parts()

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 
-from agent.api_server import AgentRuntime
+from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 
 
@@ -141,6 +142,51 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("ollama:llama3", current["default_model"])
         self.assertFalse(current["allow_remote_fallback"])
         self.assertEqual("prefer_local_lowest_cost_capable", runtime._router.policy.mode)
+
+    def test_root_route_serves_webui_index_html(self) -> None:
+        webui_dist = os.path.join(self.tmpdir.name, "webui", "dist")
+        os.makedirs(webui_dist, exist_ok=True)
+        with open(os.path.join(webui_dist, "index.html"), "w", encoding="utf-8") as handle:
+            handle.write("<!doctype html><html><head><meta name='personal-agent-webui' content='1'></head><body></body></html>")
+
+        os.environ["AGENT_WEBUI_DIST_PATH"] = webui_dist
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+        handler = _HandlerForTest(runtime, "/")
+        handler.do_GET()
+
+        body_text = handler.body.decode("utf-8", errors="replace").lower()
+        self.assertEqual(200, handler.status_code)
+        self.assertIn("text/html", handler.content_type)
+        self.assertIn("<html", body_text)
+        self.assertIn("personal-agent-webui", body_text)
 
 
 if __name__ == "__main__":
