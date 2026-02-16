@@ -270,6 +270,7 @@ export default function App() {
       setProviderSecrets((prev) => ({ ...prev, [providerId]: "" }));
       setProviderStatuses((prev) => ({ ...prev, [providerId]: "Secret saved." }));
       appendLog({ endpoint: `/providers/${providerId}/secret`, ok: true, detail: "Saved provider secret" });
+      await refreshRuntimeState();
     } catch (error) {
       const detail = asErrorText(error);
       setProviderStatuses((prev) => ({ ...prev, [providerId]: `Secret failed: ${detail}` }));
@@ -536,6 +537,8 @@ export default function App() {
 
             {providers.map((provider) => {
               const draftRow = providerDrafts[provider.id] || {};
+              const keySourceType = provider.api_key_source?.type || "none";
+              const keySourceName = provider.api_key_source?.name || "";
               return (
                 <div className="card" key={provider.id}>
                   <h2>{provider.id}</h2>
@@ -595,6 +598,10 @@ export default function App() {
                   </div>
 
                   <p className="status-line">{providerStatuses[provider.id] || ""}</p>
+                  <p className="help-text">
+                    Key source: {keySourceType}
+                    {keySourceName ? ` (${keySourceName})` : ""}
+                  </p>
                   <p className="help-text">
                     Models: {models.filter((model) => model.provider === provider.id).map((model) => model.id).join(", ") || "none"}
                   </p>
