@@ -23,10 +23,11 @@ Historical snapshots (not current truth):
 3. Run bot:
    - `TELEGRAM_BOT_TOKEN=... .venv/bin/python -m telegram_adapter`
 
-## Local API (Desktop Runtime)
+## Local API + Web UI
 Run local HTTP API (no Telegram token required):
 - `. .venv/bin/activate`
 - `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
+- Open browser: `http://127.0.0.1:8765`
 
 Endpoints:
 - `GET /health`
@@ -44,19 +45,22 @@ Endpoints:
 - `PUT /defaults`
 - `POST /models/refresh`
 
-## Desktop App (Tauri + React)
-Located in `desktop/`.
+UI behavior:
+- `GET /` serves the local web UI from `agent/webui/dist`.
+- Static assets (`/assets/*`) are served by the same API process.
+- Runtime installs do not require Node or Rust.
 
-Dev run:
-1. Start API: `.venv/bin/python -m agent.api_server`
-2. In another shell:
-   - `cd desktop`
-   - `npm install`
-   - `npm run tauri:dev`
+Web UI build (dev-time only):
+1. `./scripts/build_webui.sh`
+2. This runs:
+   - `npm ci`
+   - `npm run build`
+3. Build source lives in `desktop/`; output is written to `agent/webui/dist/`.
 
-Build:
-- `cd desktop`
-- `npm run tauri:build`
+Optional dev mode:
+- `WEBUI_DEV_PROXY=1 .venv/bin/python -m agent.api_server`
+- Then open the dev server URL shown on `/` (default `http://127.0.0.1:1420`).
+- For hot reload: `cd desktop && npm run dev` (requests use same-origin paths and Vite proxies API routes to `127.0.0.1:8765`).
 
 Secret storage:
 - Primary: OS keychain via `keyring` (if available in runtime environment)
@@ -112,6 +116,12 @@ Desktop/API optional:
 - `AGENT_API_HOST` (default `127.0.0.1`)
 - `AGENT_API_PORT` (default `8765`)
 - `AGENT_SECRET_STORE_PATH` (encrypted file fallback location)
+- `AGENT_WEBUI_DIST_PATH` (default `agent/webui/dist`)
+- `WEBUI_DEV_PROXY` (`1` to show dev server landing page on `/`)
+- `WEBUI_DEV_URL` (default `http://127.0.0.1:1420`)
+
+## Legacy/Optional
+- Legacy Tauri scaffold files remain under `desktop/src-tauri/`, but they are not used in the default install or runtime path.
 
 ## Install (systemd)
 Recommended user install:
@@ -162,7 +172,7 @@ User timer status:
 
 ## Testing
 - Full suite: `pytest -q`
-- Current local result (2026-02-16): `341 passed`
+- Current local result (2026-02-16): `342 passed`
 
 ## Architecture References
 - `ARCHITECTURE.md`
