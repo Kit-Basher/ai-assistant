@@ -21,7 +21,8 @@ Historical snapshots (not current truth):
 2. Install deps:
    - `pip install -r requirements.txt`
 3. Run bot:
-   - `TELEGRAM_BOT_TOKEN=... .venv/bin/python -m telegram_adapter`
+   - `.venv/bin/python -m telegram_adapter`
+   - Token source: `telegram:bot_token` in secret store (preferred) or `TELEGRAM_BOT_TOKEN` env var (fallback)
 
 ## Local API + Web UI
 Run local HTTP API (no Telegram token required):
@@ -32,6 +33,7 @@ Run local HTTP API (no Telegram token required):
 Endpoints:
 - `GET /health`
 - `GET /version`
+- `GET /telegram/status`
 - `GET /models`
 - `POST /chat`
 - `GET /config`
@@ -45,6 +47,8 @@ Endpoints:
 - `GET /defaults`
 - `PUT /defaults`
 - `POST /models/refresh`
+- `POST /telegram/secret`
+- `POST /telegram/test`
 
 UI behavior:
 - `GET /` serves the local web UI from `agent/webui/dist`.
@@ -66,6 +70,7 @@ Optional dev mode:
 Check running API identity:
 - `curl -s http://127.0.0.1:8765/health`
 - `curl -s http://127.0.0.1:8765/version`
+- `curl -s http://127.0.0.1:8765/telegram/status`
 
 ## API User Service (systemd)
 Install as a user service:
@@ -81,9 +86,15 @@ Check status/logs:
 - `systemctl --user status personal-agent-api.service`
 - `journalctl --user -u personal-agent-api.service -f`
 
+Telegram token setup (UI/API):
+- Open `http://127.0.0.1:8765` and use the `Telegram` tab, or:
+- `curl -X POST http://127.0.0.1:8765/telegram/secret -H 'Content-Type: application/json' -d '{"bot_token":"<token>"}'`
+- `curl -X POST http://127.0.0.1:8765/telegram/test`
+
 Secret storage:
 - Primary: OS keychain via `keyring` (if available in runtime environment)
 - Fallback: encrypted local file at `~/.local/share/personal-agent/secrets.enc.json`
+- Telegram bot token key: `telegram:bot_token`
 
 Provider/model registry:
 - File: `llm_registry.json` (schema v2, JSON on disk)
@@ -107,8 +118,9 @@ Side-by-side staging run:
    - `LLM_USAGE_STATS_PATH=/tmp/personal-agent-staging/llm_usage_stats.json`
 
 ## Environment Variables
-Required:
-- `TELEGRAM_BOT_TOKEN`
+Telegram token source:
+- Preferred: secret store key `telegram:bot_token` (configured via web UI/API)
+- Backward-compatible fallback: `TELEGRAM_BOT_TOKEN`
 
 Common optional:
 - `AGENT_TIMEZONE` (default `America/Regina`)
@@ -191,7 +203,7 @@ User timer status:
 
 ## Testing
 - Full suite: `pytest -q`
-- Current local result (2026-02-16): `346 passed`
+- Current local result (2026-02-16): `350 passed`
 
 ## Architecture References
 - `ARCHITECTURE.md`
