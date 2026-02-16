@@ -2,6 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 
 const ROUTING_MODES = ["auto", "prefer_cheap", "prefer_best", "prefer_local_lowest_cost_capable"];
 
+function healthStatus(entity) {
+  return entity?.health?.status || "ok";
+}
+
+function healthLabel(entity) {
+  const status = healthStatus(entity);
+  if (status === "down") return "down";
+  if (status === "degraded") return "degraded";
+  return "ok";
+}
+
 function asErrorText(error) {
   if (!error) return "Unknown error";
   if (typeof error === "string") return error;
@@ -153,6 +164,20 @@ export default function App() {
     () => models.filter((item) => !defaultProvider || item.provider === defaultProvider),
     [models, defaultProvider]
   );
+  const providerRecommendations = useMemo(() => {
+    const notes = [];
+    providers.forEach((provider) => {
+      const status = healthStatus(provider);
+      if (status === "down" && provider.enabled !== false && !provider.local) {
+        notes.push(`Disable ${provider.id} until credentials/connectivity recover.`);
+        return;
+      }
+      if (status === "degraded" && !provider.local) {
+        notes.push(`${provider.id} degraded: local models are recommended for now.`);
+      }
+    });
+    return notes;
+  }, [providers]);
 
   const saveDefaults = async () => {
     setSetupStatus("Saving defaults...");
@@ -479,14 +504,32 @@ export default function App() {
 
             <div className="card">
               <h2>Model Quick View</h2>
+              {providerRecommendations.length > 0 ? (
+                <div className="recommendations">
+                  {providerRecommendations.map((note) => (
+                    <p key={note} className="help-text">
+                      Recommendation: {note}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
               <div className="model-list">
                 {models.length === 0 ? <p className="empty">No models loaded.</p> : null}
                 {models.map((model) => (
                   <div key={model.id} className="model-row">
-                    <div>{model.id}</div>
-                    <div className="meta-line">
-                      {model.provider} · {model.available ? "available" : "unavailable"}
+                    <div className="model-head">
+                      <span>{model.id}</span>
+                      <span className={`badge health-${healthLabel(model)}`}>{healthLabel(model)}</span>
                     </div>
+                    <div className="meta-line">
+                      {model.provider} · {model.available ? "available" : "unavailable"} · {model.routable ? "routable" : "not routable"}
+                    </div>
+                    {model.health?.last_error_kind ? (
+                      <div className="meta-line">
+                        Last error: {model.health.last_error_kind}
+                        {model.health.status_code ? ` (${model.health.status_code})` : ""}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
@@ -541,7 +584,9 @@ export default function App() {
               const keySourceName = provider.api_key_source?.name || "";
               return (
                 <div className="card" key={provider.id}>
-                  <h2>{provider.id}</h2>
+                  <h2>
+                    {provider.id} <span className={`badge health-${healthLabel(provider)}`}>{healthLabel(provider)}</span>
+                  </h2>
                   <div className="grid two">
                     <label>
                       Base URL
@@ -598,6 +643,14 @@ export default function App() {
                   </div>
 
                   <p className="status-line">{providerStatuses[provider.id] || ""}</p>
+                  {provider.health?.last_error_kind ? (
+                    <p className="help-text">
+                      Health: {healthLabel(provider)} · Last error {provider.health.last_error_kind}
+                      {provider.health.status_code ? ` (${provider.health.status_code})` : ""}
+                    </p>
+                  ) : (
+                    <p className="help-text">Health: {healthLabel(provider)}</p>
+                  )}
                   <p className="help-text">
                     Key source: {keySourceType}
                     {keySourceName ? ` (${keySourceName})` : ""}
