@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
@@ -221,6 +222,53 @@ class TestAPIServerRuntime(unittest.TestCase):
 
         embed_model = runtime.registry_document["models"]["ollama:nomic-embed-text"]
         self.assertEqual(["embedding"], embed_model["capabilities"])
+
+    def test_telegram_secret_and_test_endpoints(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        status_before = runtime.telegram_status()
+        self.assertTrue(status_before["ok"])
+        self.assertFalse(status_before["configured"])
+
+        ok, saved = runtime.set_telegram_secret({"bot_token": "1234:abcd"})
+        self.assertTrue(ok)
+        self.assertTrue(saved["ok"])
+        self.assertEqual("1234:abcd", runtime.secret_store.get_secret("telegram:bot_token"))
+        self.assertTrue(runtime.telegram_status()["configured"])
+
+        class _FakeResponse:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                _ = exc_type
+                _ = exc
+                _ = tb
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps(
+                    {
+                        "ok": True,
+                        "result": {
+                            "id": 99,
+                            "is_bot": True,
+                            "first_name": "PA",
+                            "username": "personal_agent_bot",
+                        },
+                    }
+                ).encode("utf-8")
+
+        with patch("urllib.request.urlopen", return_value=_FakeResponse()):
+            ok, tested = runtime.test_telegram()
+
+        self.assertTrue(ok)
+        self.assertTrue(tested["ok"])
+        self.assertEqual(99, tested["telegram_user"]["id"])
+        self.assertEqual("personal_agent_bot", tested["telegram_user"]["username"])
+        self.assertNotIn("bot_token", json.dumps(tested, ensure_ascii=True))
 
     def test_version_endpoint_returns_runtime_metadata(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

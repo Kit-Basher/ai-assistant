@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import datetime, timezone, time
 from zoneinfo import ZoneInfo
 import os
+import sys
 
 try:
     from telegram import Update
@@ -30,7 +32,20 @@ from agent.debug_protocol import DebugProtocol
 from agent.orchestrator import Orchestrator
 from agent.cards import render_cards_markdown, validate_cards_payload
 from agent.daily_brief import should_send_daily_brief
+from agent.secret_store import SecretStore
 from memory.db import MemoryDB
+
+
+_TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
+
+
+def _resolve_telegram_bot_token() -> str | None:
+    secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
+    secret_token = (secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
+    if secret_token:
+        return secret_token
+    env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    return env_token or None
 
 
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -525,7 +540,16 @@ async def _scheduled_daily_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_app() -> Application:
-    config = load_config()
+    config = load_config(require_telegram_token=False)
+    token = _resolve_telegram_bot_token()
+    if not token:
+        print(
+            "Missing Telegram bot token. Save it in Web UI (telegram:bot_token) or set TELEGRAM_BOT_TOKEN.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(1)
+    config = replace(config, telegram_bot_token=token)
     db = MemoryDB(config.db_path)
 
     schema_path = "{}/memory/schema.sql".format(

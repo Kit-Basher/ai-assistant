@@ -23,6 +23,7 @@ from agent.secret_store import SecretStore
 
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
+_TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -209,6 +210,67 @@ class AgentRuntime:
             if isinstance(payload, dict)
         ]
         return {"providers": rows}
+
+    def telegram_status(self) -> dict[str, Any]:
+        token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
+        return {
+            "ok": True,
+            "configured": bool(token),
+            "token_source": "secret_store" if token else "none",
+        }
+
+    def set_telegram_secret(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        token = str(payload.get("bot_token") or "").strip()
+        if not token:
+            return False, {"ok": False, "error": "bot_token is required"}
+        self.secret_store.set_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY, token)
+        return True, {"ok": True}
+
+    def test_telegram(self) -> tuple[bool, dict[str, Any]]:
+        token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
+        if not token:
+            return False, {"ok": False, "error": "telegram token not configured"}
+
+        url = f"https://api.telegram.org/bot{token}/getMe"
+        req = urllib.request.Request(url, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=8.0) as response:
+                raw = response.read().decode("utf-8")
+                parsed = json.loads(raw or "{}")
+        except urllib.error.HTTPError as exc:
+            body_bytes = exc.read() if hasattr(exc, "read") else b""
+            body_text = body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
+            error_message = "telegram_api_error"
+            try:
+                parsed_body = json.loads(body_text or "{}")
+                if isinstance(parsed_body, dict):
+                    error_message = str(parsed_body.get("description") or error_message)
+            except Exception:
+                pass
+            return False, {"ok": False, "error": "telegram_api_error", "message": error_message}
+        except Exception as exc:
+            return False, {"ok": False, "error": "telegram_request_failed", "message": str(exc) or "request_failed"}
+
+        if not isinstance(parsed, dict):
+            return False, {"ok": False, "error": "telegram_invalid_response"}
+
+        if not bool(parsed.get("ok")):
+            return False, {
+                "ok": False,
+                "error": "telegram_api_error",
+                "message": str(parsed.get("description") or "request_failed"),
+            }
+
+        result = parsed.get("result") if isinstance(parsed.get("result"), dict) else {}
+        return True, {
+            "ok": True,
+            "telegram_user": {
+                "id": result.get("id"),
+                "username": result.get("username"),
+                "first_name": result.get("first_name"),
+                "is_bot": bool(result.get("is_bot")),
+            },
+        }
 
     @staticmethod
     def _normalize_model_payload(provider_id: str, raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -860,6 +922,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/version":
                 self._send_json(200, self.runtime.version_info())
                 return
+            if path == "/telegram/status":
+                self._send_json(200, self.runtime.telegram_status())
+                return
             if path == "/models":
                 self._send_json(200, self.runtime.models())
                 return
@@ -954,6 +1019,16 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
             if path == "/models/refresh":
                 ok, body = self.runtime.refresh_models()
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if path == "/telegram/secret":
+                ok, body = self.runtime.set_telegram_secret(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if path == "/telegram/test":
+                ok, body = self.runtime.test_telegram()
                 self._send_json(200 if ok else 400, body)
                 return
 
