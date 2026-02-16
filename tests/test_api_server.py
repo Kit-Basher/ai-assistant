@@ -297,6 +297,60 @@ class TestAPIServerRuntime(unittest.TestCase):
         embed_model = runtime.registry_document["models"]["ollama:nomic-embed-text"]
         self.assertEqual(["embedding"], embed_model["capabilities"])
 
+    def test_refresh_models_quarantines_stale_ollama_entries(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:stale-model"] = {
+            "provider": "ollama",
+            "model": "stale-model",
+            "capabilities": ["chat"],
+            "quality_rank": 2,
+            "cost_rank": 0,
+            "default_for": ["chat"],
+            "enabled": True,
+            "available": True,
+            "pricing": {
+                "input_per_million_tokens": None,
+                "output_per_million_tokens": None,
+            },
+            "max_context_tokens": 8192,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        def _fake_get(url: str, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            if url.endswith("/v1/models"):
+                return {"data": [{"id": "llama3.2"}, {"id": "stale-model"}]}
+            if url.endswith("/api/tags"):
+                return {"models": [{"name": "llama3.2"}]}
+            return {}
+
+        runtime._http_get_json = _fake_get  # type: ignore[assignment]
+        ok, _response = runtime.refresh_models()
+        self.assertTrue(ok)
+
+        available_model = runtime.registry_document["models"]["ollama:llama3.2"]
+        stale_model = runtime.registry_document["models"]["ollama:stale-model"]
+        self.assertTrue(available_model["available"])
+        self.assertFalse(stale_model["available"])
+
+    def test_providers_and_models_include_health_fields(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        providers_payload = runtime.list_providers()
+        self.assertTrue(providers_payload["providers"])
+        first_provider = providers_payload["providers"][0]
+        self.assertIn("health", first_provider)
+        self.assertIn("status", first_provider["health"])
+
+        models_payload = runtime.models()
+        self.assertTrue(models_payload["models"])
+        first_model = models_payload["models"][0]
+        self.assertIn("health", first_model)
+        self.assertIn("status", first_model["health"])
+
     def test_telegram_secret_and_test_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 

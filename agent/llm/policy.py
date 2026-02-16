@@ -49,7 +49,7 @@ class RoutingPolicy:
         return required.issubset(model.capabilities)
 
     def ordered_candidates(self, request: Request, models: list[ModelConfig]) -> list[ModelConfig]:
-        candidates = [model for model in models if self.allows_model(request, model) and model.enabled]
+        candidates = [model for model in models if self.allows_model(request, model) and model.enabled and model.available]
 
         chain_index = {model_id: idx for idx, model_id in enumerate(self.fallback_chain)}
 
@@ -100,7 +100,15 @@ def load_routing_policy(config: Config, registry: Registry) -> RoutingPolicy:
     if mode not in _VALID_ROUTING_MODES:
         mode = "auto"
 
-    fallback_chain = tuple(item for item in registry.fallback_chain if item in registry.models)
+    fallback_chain = tuple(
+        model_id
+        for model_id in registry.fallback_chain
+        if model_id in registry.models
+        and registry.models[model_id].enabled
+        and registry.models[model_id].available
+        and registry.providers.get(registry.models[model_id].provider) is not None
+        and registry.providers[registry.models[model_id].provider].enabled
+    )
 
     return RoutingPolicy(
         mode=mode,

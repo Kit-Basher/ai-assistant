@@ -449,6 +449,179 @@ class TestLLMRouter(unittest.TestCase):
         self.assertTrue(result["fallback_used"])
         self.assertEqual("server_error", result["attempts"][0]["reason"])
 
+    def test_disabled_or_unavailable_models_in_fallback_chain_are_never_attempted(self) -> None:
+        registry = _registry()
+        local_model = registry.models["local:chat"]
+        remote_a_model = registry.models["remote_a:cheap"]
+        remote_b_model = registry.models["remote_b:expensive"]
+        registry = Registry(
+            schema_version=registry.schema_version,
+            path=registry.path,
+            providers=registry.providers,
+            models={
+                **registry.models,
+                "local:chat": ModelConfig(
+                    **{**local_model.__dict__, "enabled": False}
+                ),
+                "remote_a:cheap": ModelConfig(
+                    **{**remote_a_model.__dict__, "available": False}
+                ),
+                "remote_b:expensive": ModelConfig(
+                    **{**remote_b_model.__dict__, "enabled": True, "available": True}
+                ),
+            },
+            defaults=DefaultsConfig(
+                routing_mode="auto",
+                default_provider=None,
+                default_model=None,
+                allow_remote_fallback=True,
+            ),
+            fallback_chain=("local:chat", "remote_a:cheap", "remote_b:expensive"),
+        )
+
+        local = FakeProvider("local", [Response("should-not-run", "local", "chat")])
+        remote_a = FakeProvider("remote_a", [Response("should-not-run", "remote_a", "cheap")])
+        remote_b = FakeProvider("remote_b", [Response("ok", "remote_b", "expensive")])
+
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": local,
+                "remote_a": remote_a,
+                "remote_b": remote_b,
+            },
+            registry=registry,
+            policy=RoutingPolicy(
+                mode="auto",
+                retry_attempts=1,
+                retry_base_delay_ms=0,
+                circuit_breaker_failures=2,
+                circuit_breaker_window_seconds=60,
+                circuit_breaker_cooldown_seconds=30,
+                default_timeout_seconds=10,
+                allow_remote_fallback=True,
+                fallback_chain=("local:chat", "remote_a:cheap", "remote_b:expensive"),
+            ),
+            usage_stats=UsageStatsStore(None),
+        )
+
+        result = router.chat([{"role": "user", "content": "hello"}], purpose="chat", task_type="chat")
+        self.assertTrue(result["ok"])
+        self.assertEqual("remote_b", result["provider"])
+        self.assertEqual(0, local.calls)
+        self.assertEqual(0, remote_a.calls)
+        self.assertEqual(1, remote_b.calls)
+
+    def test_server_error_triggers_cooldown_and_degraded_health(self) -> None:
+        remote = FakeProvider(
+            "remote_a",
+            [
+                LLMError(
+                    kind="server_error",
+                    retriable=False,
+                    provider="remote_a",
+                    status_code=502,
+                    message="bad_gateway",
+                ),
+            ],
+        )
+        local = FakeProvider("local", [Response("local-ok", "local", "chat"), Response("local-ok-2", "local", "chat")])
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": local,
+                "remote_a": remote,
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+            time_fn=lambda: 100.0,
+            sleep_fn=lambda _: None,
+        )
+
+        first = router.chat(
+            [{"role": "user", "content": "force remote"}],
+            purpose="chat",
+            task_type="chat",
+            provider_override="remote_a",
+        )
+        self.assertFalse(first["ok"])
+
+        second = router.chat([{"role": "user", "content": "normal"}], purpose="chat", task_type="chat")
+        self.assertTrue(second["ok"])
+        self.assertEqual("local", second["provider"])
+
+        state = router._outcomes["remote_a:cheap"]  # type: ignore[attr-defined]
+        self.assertIsNotNone(state.cooldown_until)
+        self.assertGreater(float(state.cooldown_until or 0.0), 100.0)
+        self.assertEqual("server_error", state.last_error_kind)
+
+        snapshot = router.doctor_snapshot()
+        provider_health = {item["id"]: item["health"] for item in snapshot["providers"]}
+        self.assertEqual("degraded", provider_health["remote_a"]["status"])
+
+    def test_rate_limit_candidate_is_deprioritized_when_alternative_exists(self) -> None:
+        registry = _registry()
+        local_model = registry.models["local:chat"]
+        registry = Registry(
+            schema_version=registry.schema_version,
+            path=registry.path,
+            providers=registry.providers,
+            models={
+                **registry.models,
+                "local:chat": ModelConfig(
+                    **{**local_model.__dict__, "enabled": False}
+                ),
+            },
+            defaults=registry.defaults,
+            fallback_chain=registry.fallback_chain,
+        )
+
+        remote_a = FakeProvider(
+            "remote_a",
+            [
+                LLMError(
+                    kind="rate_limit",
+                    retriable=False,
+                    provider="remote_a",
+                    status_code=429,
+                    message="too_many_requests",
+                ),
+                Response("should-not-be-picked-next", "remote_a", "cheap"),
+            ],
+        )
+        remote_b = FakeProvider(
+            "remote_b",
+            [
+                Response("fallback-success", "remote_b", "expensive"),
+                Response("preferred-after-rate-limit", "remote_b", "expensive"),
+            ],
+        )
+
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": FakeProvider("local", []),
+                "remote_a": remote_a,
+                "remote_b": remote_b,
+            },
+            registry=registry,
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+            time_fn=lambda: 200.0,
+            sleep_fn=lambda _: None,
+        )
+
+        first = router.chat([{"role": "user", "content": "first"}], purpose="chat", task_type="chat")
+        self.assertTrue(first["ok"])
+        self.assertEqual("remote_b", first["provider"])
+
+        second = router.chat([{"role": "user", "content": "second"}], purpose="chat", task_type="chat")
+        self.assertTrue(second["ok"])
+        self.assertEqual("remote_b", second["provider"])
+        self.assertEqual(1, remote_a.calls)
+
 
 if __name__ == "__main__":
     unittest.main()

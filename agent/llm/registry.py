@@ -53,6 +53,7 @@ class ModelConfig:
     cost_rank: int
     default_for: tuple[str, ...]
     enabled: bool
+    available: bool = True
     input_cost_per_million_tokens: float | None = None
     output_cost_per_million_tokens: float | None = None
     max_context_tokens: int | None = None
@@ -117,6 +118,7 @@ class Registry:
                 "cost_rank": model.cost_rank,
                 "default_for": list(model.default_for),
                 "enabled": model.enabled,
+                "available": model.available,
                 "pricing": {
                     "input_per_million_tokens": model.input_cost_per_million_tokens,
                     "output_per_million_tokens": model.output_cost_per_million_tokens,
@@ -185,6 +187,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "cost_rank": 4,
                 "default_for": ["chat", "presentation_rewrite"],
                 "enabled": True,
+                "available": True,
                 "pricing": {
                     "input_per_million_tokens": 0.4,
                     "output_per_million_tokens": 1.6,
@@ -199,6 +202,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "cost_rank": 8,
                 "default_for": ["best_quality"],
                 "enabled": True,
+                "available": True,
                 "pricing": {
                     "input_per_million_tokens": 2.0,
                     "output_per_million_tokens": 8.0,
@@ -213,6 +217,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "cost_rank": 3,
                 "default_for": ["chat"],
                 "enabled": True,
+                "available": True,
                 "pricing": {
                     "input_per_million_tokens": 0.15,
                     "output_per_million_tokens": 0.6,
@@ -227,6 +232,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "cost_rank": 3,
                 "default_for": ["chat"],
                 "enabled": True,
+                "available": True,
                 "pricing": {
                     "input_per_million_tokens": 0.15,
                     "output_per_million_tokens": 0.6,
@@ -241,6 +247,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "cost_rank": 1,
                 "default_for": ["cheap_local"],
                 "enabled": True,
+                "available": True,
                 "pricing": {
                     "input_per_million_tokens": None,
                     "output_per_million_tokens": None,
@@ -344,6 +351,7 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
             "cost_rank": int(payload.get("cost_rank", 0) or 0),
             "default_for": list(payload.get("default_for") or []),
             "enabled": bool(payload.get("enabled", True)),
+            "available": True,
             "pricing": {
                 "input_per_million_tokens": None,
                 "output_per_million_tokens": None,
@@ -426,6 +434,7 @@ def _upsert_config_model(data: dict[str, Any], provider: str, model: str | None)
         "cost_rank": cost_rank,
         "default_for": sorted(default_for),
         "enabled": bool(existing.get("enabled", True)),
+        "available": bool(existing.get("available", True)),
         "pricing": existing.get("pricing")
         or {
             "input_per_million_tokens": None,
@@ -533,6 +542,7 @@ def _parse_registry(data: dict[str, Any], path: str | None) -> Registry:
             cost_rank=int(payload.get("cost_rank", 0) or 0),
             default_for=tuple(str(item) for item in (payload.get("default_for") or [])),
             enabled=bool(payload.get("enabled", True)),
+            available=bool(payload.get("available", True)),
             input_cost_per_million_tokens=(float(input_price) if input_price is not None else None),
             output_cost_per_million_tokens=(float(output_price) if output_price is not None else None),
             max_context_tokens=max_ctx,

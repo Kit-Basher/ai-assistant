@@ -31,6 +31,18 @@ class CircuitBreakerState:
     opened_until: float | None = None
 
 
+@dataclass
+class OutcomeState:
+    successes: int = 0
+    failures: int = 0
+    last_error_kind: str | None = None
+    last_status_code: int | None = None
+    last_ts: float | None = None
+    cooldown_until: float | None = None
+    cooldown_reason: str | None = None
+    auth_down: bool = False
+
+
 class _UnavailableProvider(Provider):
     def __init__(self, name: str) -> None:
         self._name = name
@@ -80,6 +92,7 @@ class LLMRouter:
         )
         self._providers = providers or self._build_default_providers()
         self._circuits: dict[str, CircuitBreakerState] = {}
+        self._outcomes: dict[str, OutcomeState] = {}
         self._rng = rng or random.Random(0)
         self._time_fn = time_fn or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
@@ -137,6 +150,9 @@ class LLMRouter:
         self.registry = registry
         self.policy = load_routing_policy(self.config, self.registry)
         self._providers = self._build_default_providers()
+        active_model_ids = set(self.registry.models.keys())
+        self._circuits = {model_id: state for model_id, state in self._circuits.items() if model_id in active_model_ids}
+        self._outcomes = {model_id: state for model_id, state in self._outcomes.items() if model_id in active_model_ids}
 
     def set_provider_api_key(self, provider: str, api_key: str) -> bool:
         provider_name = (provider or "").strip().lower()
@@ -164,7 +180,34 @@ class LLMRouter:
         elif source and source.source_type == "secret":
             self._secret_store.set_secret(source.name, key)
 
+        self._clear_provider_auth_down(provider_name)
         return True
+
+    def _outcome(self, model_id: str) -> OutcomeState:
+        if model_id not in self._outcomes:
+            self._outcomes[model_id] = OutcomeState()
+        return self._outcomes[model_id]
+
+    def _clear_provider_auth_down(self, provider_id: str) -> None:
+        provider_key = (provider_id or "").strip().lower()
+        if not provider_key:
+            return
+        for model_id, model in self.registry.models.items():
+            if model.provider != provider_key:
+                continue
+            state = self._outcomes.get(model_id)
+            if state is None:
+                continue
+            state.auth_down = False
+            if state.last_error_kind == "auth_error":
+                state.last_error_kind = None
+                state.last_status_code = None
+            state.cooldown_until = None
+            state.cooldown_reason = None
+
+    def _is_auth_down(self, model_id: str) -> bool:
+        state = self._outcomes.get(model_id)
+        return bool(state.auth_down) if state else False
 
     def _circuit(self, model_id: str) -> CircuitBreakerState:
         if model_id not in self._circuits:
@@ -196,6 +239,48 @@ class LLMRouter:
             state.failures.popleft()
         if len(state.failures) >= int(self.policy.circuit_breaker_failures):
             state.opened_until = now + float(self.policy.circuit_breaker_cooldown_seconds)
+
+    def _rate_limit_cooldown_seconds(self) -> float:
+        return max(10.0, float(self.policy.circuit_breaker_cooldown_seconds))
+
+    def _server_error_cooldown_seconds(self) -> float:
+        return max(5.0, float(self.policy.circuit_breaker_cooldown_seconds) / 2.0)
+
+    def _record_outcome_success(self, model_id: str) -> None:
+        state = self._outcome(model_id)
+        state.successes += 1
+        state.last_ts = float(self._time_fn())
+        state.cooldown_until = None
+        state.cooldown_reason = None
+        state.last_error_kind = None
+        state.last_status_code = None
+
+    def _record_outcome_failure(self, model_id: str, error: LLMError) -> None:
+        state = self._outcome(model_id)
+        now = float(self._time_fn())
+        state.failures += 1
+        state.last_ts = now
+        state.last_error_kind = error.kind
+        state.last_status_code = error.status_code
+
+        if error.kind == "auth_error":
+            state.auth_down = True
+            state.cooldown_until = None
+            state.cooldown_reason = "auth_error"
+            return
+
+        status_code = int(error.status_code) if error.status_code is not None else None
+        if error.kind == "rate_limit" or status_code == 429:
+            state.cooldown_until = now + self._rate_limit_cooldown_seconds()
+            state.cooldown_reason = "rate_limit"
+            return
+        if (status_code is not None and 500 <= status_code <= 599) or error.kind == "server_error":
+            state.cooldown_until = now + self._server_error_cooldown_seconds()
+            state.cooldown_reason = "server_error"
+            return
+
+        state.cooldown_until = None
+        state.cooldown_reason = None
 
     def _sleep_retry(self, attempt_idx: int) -> None:
         base = float(self.policy.retry_base_delay_ms) / 1000.0
@@ -254,11 +339,18 @@ class LLMRouter:
         return int(model.max_context_tokens) >= int(min_context_tokens)
 
     def _candidate_models(self, request: Request) -> list[ModelConfig]:
-        base_candidates = [
-            model
-            for model in self.registry.sorted_models()
-            if model.enabled and self.policy.allows_model(request, model) and self._context_capable(model, request)
-        ]
+        base_candidates: list[ModelConfig] = []
+        for model in self.registry.sorted_models():
+            provider_cfg = self.registry.providers.get(model.provider)
+            if provider_cfg is None or not provider_cfg.enabled:
+                continue
+            if not model.enabled or not model.available:
+                continue
+            if self._is_auth_down(model.id):
+                continue
+            if not self.policy.allows_model(request, model) or not self._context_capable(model, request):
+                continue
+            base_candidates.append(model)
 
         if not self.policy.allow_remote_fallback and not request.provider and not request.model:
             base_candidates = [
@@ -296,11 +388,35 @@ class LLMRouter:
 
         return (prompt_tokens * in_price / 1_000_000.0) + (completion_tokens * out_price / 1_000_000.0)
 
-    def _reliability_penalty(self, model: ModelConfig) -> float:
-        state = self._circuits.get(model.id)
-        if not state:
+    def _health_penalty(self, model: ModelConfig) -> float:
+        provider_cfg = self.registry.providers.get(model.provider)
+        if provider_cfg is None or not provider_cfg.enabled:
+            return 1_000_000_000.0
+        if not model.enabled or not model.available:
+            return 1_000_000_000.0
+
+        outcome = self._outcomes.get(model.id)
+        if outcome is None:
             return 0.0
-        return float(len(state.failures)) / max(1, float(self.policy.circuit_breaker_failures))
+        if outcome.auth_down:
+            return 1_000_000_000.0
+
+        penalty = 0.0
+        now = float(self._time_fn())
+
+        if outcome.cooldown_until is not None and now < outcome.cooldown_until:
+            if outcome.cooldown_reason == "rate_limit":
+                penalty += 10_000.0
+            elif outcome.cooldown_reason == "server_error":
+                penalty += 1_000.0
+            else:
+                penalty += 500.0
+
+        total = outcome.successes + outcome.failures
+        if total > 0:
+            penalty += (float(outcome.failures) / float(total)) * 100.0
+        penalty += float(min(outcome.failures, 20))
+        return penalty
 
     def _ordered_models(self, request: Request) -> list[ModelConfig]:
         candidates = self._candidate_models(request)
@@ -312,8 +428,8 @@ class LLMRouter:
             is_local = bool(provider_cfg.local) if provider_cfg else False
             return (
                 0 if is_local else 1,
+                self._health_penalty(model),
                 self._expected_cost(request, model),
-                self._reliability_penalty(model),
                 model.provider,
                 model.id,
             )
@@ -404,6 +520,7 @@ class LLMRouter:
             try:
                 response = self._call_with_retry(provider, model, request)
                 self._record_success(model.id)
+                self._record_outcome_success(model.id)
                 duration_ms = int((float(self._time_fn()) - start) * 1000)
                 usage = {
                     "prompt_tokens": response.usage.prompt_tokens,
@@ -441,6 +558,7 @@ class LLMRouter:
             except LLMError as exc:
                 last_error = exc
                 self._record_failure(model.id)
+                self._record_outcome_failure(model.id, exc)
                 attempts.append(
                     {
                         "provider": model.provider,
@@ -525,10 +643,83 @@ class LLMRouter:
             }
         return states
 
+    def _model_health(self, model: ModelConfig, *, provider_available: bool) -> dict[str, Any]:
+        state = self._outcomes.get(model.id)
+        now = float(self._time_fn())
+
+        status = "ok"
+        if not model.enabled or not model.available:
+            status = "down"
+        elif self._is_auth_down(model.id):
+            status = "down"
+        elif not provider_available:
+            status = "down"
+        elif state and state.cooldown_until is not None and now < state.cooldown_until:
+            status = "degraded"
+        elif state and state.failures > state.successes:
+            status = "degraded"
+
+        return {
+            "status": status,
+            "last_error_kind": state.last_error_kind if state else None,
+            "status_code": state.last_status_code if state else None,
+            "last_status_code": state.last_status_code if state else None,
+            "last_ts": state.last_ts if state else None,
+            "successes": int(state.successes) if state else 0,
+            "failures": int(state.failures) if state else 0,
+        }
+
+    def _provider_health(self, provider_id: str, *, provider_available: bool) -> dict[str, Any]:
+        provider_cfg = self.registry.providers.get(provider_id)
+        provider_models = [model for model in self.registry.sorted_models() if model.provider == provider_id]
+        model_ids = sorted(model.id for model in provider_models)
+        model_states = [self._outcomes.get(model_id) for model_id in model_ids]
+
+        latest_state: OutcomeState | None = None
+        for state in model_states:
+            if state is None:
+                continue
+            if latest_state is None:
+                latest_state = state
+                continue
+            latest_ts = latest_state.last_ts if latest_state.last_ts is not None else -1.0
+            state_ts = state.last_ts if state.last_ts is not None else -1.0
+            if state_ts > latest_ts:
+                latest_state = state
+
+        status = "ok"
+        if provider_cfg is None or not provider_cfg.enabled or not provider_available:
+            status = "down"
+        else:
+            down_models = 0
+            degraded_models = 0
+            for model in provider_models:
+                health = self._model_health(model, provider_available=provider_available)
+                if health["status"] == "down":
+                    down_models += 1
+                elif health["status"] == "degraded":
+                    degraded_models += 1
+            total_models = len(provider_models)
+            if total_models > 0 and down_models > 0 and down_models == total_models:
+                status = "down"
+            elif down_models > 0 or degraded_models > 0:
+                status = "degraded"
+
+        return {
+            "status": status,
+            "last_error_kind": latest_state.last_error_kind if latest_state else None,
+            "status_code": latest_state.last_status_code if latest_state else None,
+            "last_status_code": latest_state.last_status_code if latest_state else None,
+            "last_ts": latest_state.last_ts if latest_state else None,
+            "successes": sum(int(state.successes) for state in model_states if state),
+            "failures": sum(int(state.failures) for state in model_states if state),
+        }
+
     def doctor_snapshot(self) -> dict[str, Any]:
         provider_rows: list[dict[str, Any]] = []
         for provider_id, spec in sorted(self.registry.providers.items()):
             impl = self._providers.get(provider_id)
+            provider_available = bool(impl.available()) if impl else False
             env_present = None
             if spec.auth_env_var:
                 env_present = bool(os.getenv(spec.auth_env_var, "").strip())
@@ -543,13 +734,15 @@ class LLMRouter:
                     "env_present": env_present,
                     "enabled": spec.enabled,
                     "local": spec.local,
-                    "available": bool(impl.available()) if impl else False,
+                    "available": provider_available,
+                    "health": self._provider_health(provider_id, provider_available=provider_available),
                 }
             )
 
         model_rows: list[dict[str, Any]] = []
         for model in self.registry.sorted_models():
             impl = self._providers.get(model.provider)
+            provider_available = bool(impl.available()) if impl else False
             model_rows.append(
                 {
                     "id": model.id,
@@ -557,10 +750,12 @@ class LLMRouter:
                     "model": model.model,
                     "capabilities": sorted(model.capabilities),
                     "enabled": model.enabled,
-                    "available": bool(impl.available()) if impl else False,
+                    "available": model.available,
+                    "routable": bool(model.enabled and model.available and provider_available),
                     "input_cost_per_million_tokens": model.input_cost_per_million_tokens,
                     "output_cost_per_million_tokens": model.output_cost_per_million_tokens,
                     "max_context_tokens": model.max_context_tokens,
+                    "health": self._model_health(model, provider_available=provider_available),
                 }
             )
 

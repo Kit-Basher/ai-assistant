@@ -210,11 +210,29 @@ class AgentRuntime:
         }
 
     def list_providers(self) -> dict[str, Any]:
+        snapshot = self._router.doctor_snapshot()
+        provider_health = {
+            str(item.get("id") or ""): item.get("health") or {}
+            for item in (snapshot.get("providers") or [])
+            if isinstance(item, dict)
+        }
+        model_health = {
+            str(item.get("id") or ""): item.get("health") or {}
+            for item in (snapshot.get("models") or [])
+            if isinstance(item, dict)
+        }
         providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
         rows = [
             {
                 **self._provider_public_payload(provider_id, payload),
-                "models": self._models_for_provider(provider_id),
+                "health": provider_health.get(provider_id, {}),
+                "models": [
+                    {
+                        **model_row,
+                        "health": model_health.get(str(model_row.get("id") or ""), {}),
+                    }
+                    for model_row in self._models_for_provider(provider_id)
+                ],
             }
             for provider_id, payload in sorted(providers.items())
             if isinstance(payload, dict)
@@ -298,6 +316,7 @@ class AgentRuntime:
             "cost_rank": int(raw.get("cost_rank", 5) or 5),
             "default_for": [str(item) for item in (raw.get("default_for") or ["chat"])],
             "enabled": bool(raw.get("enabled", True)),
+            "available": bool(raw.get("available", True)),
             "pricing": {
                 "input_per_million_tokens": pricing_raw.get("input_per_million_tokens"),
                 "output_per_million_tokens": pricing_raw.get("output_per_million_tokens"),
@@ -740,8 +759,7 @@ class AgentRuntime:
             if not base_url:
                 continue
 
-            discovered_models: list[str] = []
-            # Try OpenAI-compatible model listing first.
+            names_from_v1: set[str] = set()
             try:
                 parsed = self._http_get_json(base_url + "/v1/models")
                 data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
@@ -750,28 +768,25 @@ class AgentRuntime:
                         continue
                     model_name = str(item.get("id") or "").strip()
                     if model_name:
-                        discovered_models.append(model_name)
+                        names_from_v1.add(model_name)
             except Exception:
-                discovered_models = []
+                names_from_v1 = set()
 
-            if not discovered_models:
-                try:
-                    parsed = self._http_get_json(base_url + "/api/tags")
-                    tags = parsed.get("models") if isinstance(parsed.get("models"), list) else []
-                    for item in tags:
-                        if not isinstance(item, dict):
-                            continue
-                        model_name = str(item.get("name") or "").strip()
-                        if model_name:
-                            discovered_models.append(model_name)
-                except Exception:
-                    discovered_models = []
-
-            if not discovered_models:
-                continue
+            names_from_tags: set[str] = set()
+            try:
+                parsed = self._http_get_json(base_url + "/api/tags")
+                tags = parsed.get("models") if isinstance(parsed.get("models"), list) else []
+                for item in tags:
+                    if not isinstance(item, dict):
+                        continue
+                    model_name = str(item.get("name") or "").strip()
+                    if model_name:
+                        names_from_tags.add(model_name)
+            except Exception:
+                names_from_tags = set()
 
             refreshed[provider_id] = []
-            for model_name in sorted(set(discovered_models)):
+            for model_name in sorted(names_from_v1 | names_from_tags):
                 model_id = f"{provider_id}:{model_name}"
                 refreshed[provider_id].append(model_id)
                 existing = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
@@ -784,12 +799,29 @@ class AgentRuntime:
                     "cost_rank": int(existing.get("cost_rank", 0) or 0),
                     "default_for": list(existing.get("default_for") or ["chat"]),
                     "enabled": bool(existing.get("enabled", True)),
+                    "available": bool(model_name in names_from_tags),
                     "pricing": existing.get("pricing")
                     or {
                         "input_per_million_tokens": None,
                         "output_per_million_tokens": None,
                     },
                     "max_context_tokens": existing.get("max_context_tokens"),
+                }
+
+            # Quarantine stale local models that are no longer installed in Ollama tags.
+            for model_id, model_payload in sorted(list(models.items())):
+                if not isinstance(model_payload, dict):
+                    continue
+                if str(model_payload.get("provider") or "").strip().lower() != provider_id:
+                    continue
+                model_name = str(model_payload.get("model") or "").strip()
+                if not model_name:
+                    continue
+                if model_name in names_from_tags:
+                    continue
+                models[model_id] = {
+                    **model_payload,
+                    "available": False,
                 }
 
         document["models"] = models
