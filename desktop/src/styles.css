@@ -54,10 +54,6 @@ body,
   color: var(--muted);
 }
 
-.api-base {
-  min-width: 280px;
-}
-
 .tabs {
   display: flex;
   gap: 8px;
@@ -314,11 +310,6 @@ button:disabled {
 @media (max-width: 900px) {
   .topbar {
     flex-direction: column;
-  }
-
-  .api-base {
-    min-width: 0;
-    width: 100%;
   }
 
   .grid.two,

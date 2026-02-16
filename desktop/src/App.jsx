@@ -32,7 +32,6 @@ function MessageBubble({ message }) {
 }
 
 export default function App() {
-  const [apiBase, setApiBase] = useState("http://127.0.0.1:8765");
   const [activeTab, setActiveTab] = useState("setup");
 
   const [providers, setProviders] = useState([]);
@@ -75,7 +74,6 @@ export default function App() {
   };
 
   const request = async (method, path, body) => {
-    const url = `${apiBase}${path}`;
     const init = {
       method,
       headers: { "Content-Type": "application/json" }
@@ -83,7 +81,7 @@ export default function App() {
     if (body) {
       init.body = JSON.stringify(body);
     }
-    const response = await fetch(url, init);
+    const response = await fetch(path, init);
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(data.error || data.message || `${response.status} ${response.statusText}`);
@@ -357,13 +355,9 @@ export default function App() {
     <div className="app-shell">
       <header className="topbar">
         <div>
-          <h1>Personal Agent Desktop</h1>
-          <p>Manage providers, defaults, and chat through the local runtime API</p>
+          <h1>Personal Agent Web UI</h1>
+          <p>Manage providers, defaults, and chat via the local API on this host.</p>
         </div>
-        <label className="api-base">
-          API Base
-          <input value={apiBase} onChange={(event) => setApiBase(event.target.value)} placeholder="http://127.0.0.1:8765" />
-        </label>
       </header>
 
       <nav className="tabs">
