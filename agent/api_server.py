@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -19,6 +20,7 @@ import urllib.request
 from agent.config import Config, load_config
 from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
+from agent.llm.types import LLMError, Message, Request
 from agent.secret_store import SecretStore
 
 
@@ -434,6 +436,35 @@ class AgentRuntime:
             "provider": self._provider_public_payload(provider_key, current),
         }
 
+    def add_provider_model(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        provider_key = provider_id.strip().lower()
+        document = self.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        if provider_key not in providers:
+            return False, {"ok": False, "error": "provider not found"}
+
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        try:
+            model_id, model_payload = self._normalize_model_payload(provider_key, payload)
+        except ValueError as exc:
+            return False, {"ok": False, "error": str(exc)}
+
+        if ":" in model_id:
+            prefix = model_id.split(":", 1)[0].strip().lower()
+            if prefix != provider_key:
+                return False, {"ok": False, "error": "model id must be scoped to provider"}
+        else:
+            model_id = f"{provider_key}:{model_id}"
+
+        models[model_id] = model_payload
+        document["models"] = models
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
+
+        return True, {"ok": True, "model": {"id": model_id, **model_payload}}
+
     def delete_provider(self, provider_id: str) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
         document = self.registry_document
@@ -507,61 +538,258 @@ class AgentRuntime:
                 return str(model_id)
         return None
 
+    @staticmethod
+    def _normalize_provider_test_error(kind: str | None, status_code: int | None) -> str:
+        normalized = str(kind or "").strip().lower()
+        if normalized in {"auth_error", "rate_limit", "server_error", "bad_request"}:
+            return normalized
+        if status_code in {401, 403}:
+            return "auth_error"
+        if status_code == 429:
+            return "rate_limit"
+        if status_code is not None and 500 <= int(status_code) <= 599:
+            return "server_error"
+        return "bad_request"
+
+    @staticmethod
+    def _provider_test_message(kind: str) -> str:
+        return {
+            "auth_error": "Authentication failed for provider.",
+            "rate_limit": "Provider rate limit reached.",
+            "server_error": "Provider server error.",
+            "bad_request": "Provider rejected request.",
+        }.get(kind, "Provider connectivity test failed.")
+
+    def _resolve_provider_reference_value(self, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, dict):
+            return str(value)
+
+        if "value" in value:
+            static_value = value.get("value")
+            return str(static_value) if static_value is not None else None
+        if "from_env" in value:
+            env_name = str(value.get("from_env") or "").strip()
+            if not env_name:
+                return None
+            return (os.environ.get(env_name, "") or "").strip() or None
+        if "from_secret" in value:
+            secret_key = str(value.get("from_secret") or "").strip()
+            if not secret_key:
+                return None
+            return (self.secret_store.get_secret(secret_key) or "").strip() or None
+        if "from_secret_store" in value:
+            secret_key = str(value.get("from_secret_store") or "").strip()
+            if not secret_key:
+                return None
+            return (self.secret_store.get_secret(secret_key) or "").strip() or None
+        return None
+
+    def _provider_api_key(
+        self,
+        provider_payload: dict[str, Any],
+        *,
+        key_override: str | None = None,
+    ) -> str | None:
+        if key_override:
+            return key_override.strip() or None
+        source = provider_payload.get("api_key_source") if isinstance(provider_payload.get("api_key_source"), dict) else None
+        if not isinstance(source, dict):
+            return None
+        source_type = str(source.get("type") or "").strip().lower()
+        source_name = str(source.get("name") or "").strip()
+        if not source_name:
+            return None
+        if source_type == "env":
+            return (os.environ.get(source_name, "") or "").strip() or None
+        if source_type == "secret":
+            return (self.secret_store.get_secret(source_name) or "").strip() or None
+        return None
+
+    def _provider_request_headers(
+        self,
+        provider_payload: dict[str, Any],
+        *,
+        key_override: str | None = None,
+    ) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        api_key = self._provider_api_key(provider_payload, key_override=key_override)
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        default_headers = provider_payload.get("default_headers")
+        if isinstance(default_headers, dict):
+            for header_name, raw_value in default_headers.items():
+                value = self._resolve_provider_reference_value(raw_value)
+                if value is None or value == "":
+                    continue
+                headers[str(header_name)] = value
+        return headers
+
+    @staticmethod
+    def _canonical_model_name(provider_id: str, model_value: str, models: dict[str, Any]) -> str:
+        candidate = str(model_value or "").strip()
+        if not candidate:
+            return ""
+        model_payload = models.get(candidate) if isinstance(models.get(candidate), dict) else None
+        if isinstance(model_payload, dict):
+            if str(model_payload.get("provider") or "").strip().lower() == provider_id:
+                return str(model_payload.get("model") or candidate).strip()
+        if ":" in candidate:
+            prefix, remainder = candidate.split(":", 1)
+            if prefix.strip().lower() == provider_id:
+                return remainder.strip()
+        return candidate
+
+    def _probe_provider_models(
+        self,
+        provider_id: str,
+        provider_payload: dict[str, Any],
+        *,
+        key_override: str | None = None,
+        timeout_seconds: float = 6.0,
+    ) -> dict[str, Any]:
+        base_url = str(provider_payload.get("base_url") or "").strip().rstrip("/")
+        if not base_url:
+            return {"ok": False, "error": "bad_request", "message": "provider base_url is missing", "models": []}
+
+        headers = self._provider_request_headers(provider_payload, key_override=key_override)
+        try:
+            parsed = self._http_get_json(base_url + "/v1/models", timeout_seconds=timeout_seconds, headers=headers)
+            data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
+            model_names = [
+                str(item.get("id") or "").strip()
+                for item in data
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ]
+            return {"ok": True, "models": model_names, "count": len(model_names)}
+        except urllib.error.HTTPError as exc:
+            status_code = int(getattr(exc, "code", 0) or 0) or None
+            kind = self._normalize_provider_test_error(None, status_code)
+            return {
+                "ok": False,
+                "error": kind,
+                "status_code": status_code,
+                "message": self._provider_test_message(kind),
+                "models": [],
+            }
+        except Exception:
+            return {
+                "ok": False,
+                "error": "server_error",
+                "status_code": None,
+                "message": "Unable to query /v1/models.",
+                "models": [],
+            }
+
     def test_provider(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
-        model_override = str(payload.get("model") or "").strip() or self._provider_default_model(provider_key)
-        if not model_override:
-            return False, {"ok": False, "error": "No enabled model for provider"}
-
-        key_override = str(payload.get("api_key") or "").strip()
-        previous_source_key = None
         provider_entry = (
             self.registry_document.get("providers", {}).get(provider_key)
             if isinstance(self.registry_document.get("providers"), dict)
             else None
         )
-        if isinstance(provider_entry, dict):
-            source = provider_entry.get("api_key_source") if isinstance(provider_entry.get("api_key_source"), dict) else None
-            if isinstance(source, dict) and source.get("type") == "secret":
-                previous_source_key = self.secret_store.get_secret(str(source.get("name") or ""))
+        if not isinstance(provider_entry, dict):
+            return False, {"ok": False, "error": "provider not found"}
 
-        if key_override:
-            self._router.set_provider_api_key(provider_key, key_override)
-
-        result = self._router.chat(
-            [
-                {"role": "system", "content": "Reply with PONG."},
-                {"role": "user", "content": "ping"},
-            ],
-            purpose="diagnostics",
-            task_type="diagnostics",
-            provider_override=provider_key,
-            model_override=model_override,
-            timeout_seconds=float(payload.get("timeout_seconds") or 6.0),
+        timeout_seconds = float(payload.get("timeout_seconds") or 6.0)
+        key_override = str(payload.get("api_key") or "").strip() or None
+        models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
+        model_override = self._canonical_model_name(
+            provider_key,
+            str(payload.get("model") or "").strip() or self._provider_default_model(provider_key) or "",
+            models=models,
         )
+        models_probe = self._probe_provider_models(
+            provider_key,
+            provider_entry,
+            key_override=key_override,
+            timeout_seconds=timeout_seconds,
+        )
+        if not model_override:
+            discovered = models_probe.get("models") if isinstance(models_probe.get("models"), list) else []
+            if discovered:
+                model_override = str(discovered[0]).strip()
 
-        if not result.get("ok"):
-            if key_override and previous_source_key is not None:
-                self._router.set_provider_api_key(provider_key, previous_source_key)
+        if not model_override:
             response = {
                 "ok": False,
                 "provider": provider_key,
-                "model": model_override,
-                "error": result.get("error_class") or "provider_error",
-                "message": result.get("error") or "connectivity test failed",
+                "model": None,
+                "error": "bad_request",
+                "message": "No model available for provider test.",
+                "models_probe": models_probe,
             }
             self._log_request(f"/providers/{provider_key}/test", False, response)
             return False, response
 
-        if key_override and previous_source_key is None:
-            # ephemeral override, do not persist unless caller uses /secret
-            self._router.set_provider_api_key(provider_key, "")
+        impl = self._router._providers.get(provider_key)  # type: ignore[attr-defined]
+        if impl is None:
+            response = {
+                "ok": False,
+                "provider": provider_key,
+                "model": model_override,
+                "error": "server_error",
+                "message": "Provider is not available in router.",
+                "models_probe": models_probe,
+            }
+            self._log_request(f"/providers/{provider_key}/test", False, response)
+            return False, response
+
+        if key_override and hasattr(impl, "set_api_key"):
+            getattr(impl, "set_api_key")(key_override)
+
+        start = time.monotonic()
+        try:
+            response_obj = impl.chat(
+                Request(
+                    messages=(Message(role="user", content="ping"),),
+                    purpose="diagnostics",
+                    task_type="diagnostics",
+                ),
+                model=model_override,
+                timeout_seconds=timeout_seconds,
+            )
+        except LLMError as exc:
+            error_kind = self._normalize_provider_test_error(exc.kind, exc.status_code)
+            response = {
+                "ok": False,
+                "provider": provider_key,
+                "model": model_override,
+                "error": error_kind,
+                "status_code": exc.status_code,
+                "message": str(exc.message or self._provider_test_message(error_kind)),
+                "models_probe": models_probe,
+            }
+            self._log_request(f"/providers/{provider_key}/test", False, response)
+            return False, response
+        except Exception:
+            response = {
+                "ok": False,
+                "provider": provider_key,
+                "model": model_override,
+                "error": "server_error",
+                "status_code": None,
+                "message": self._provider_test_message("server_error"),
+                "models_probe": models_probe,
+            }
+            self._log_request(f"/providers/{provider_key}/test", False, response)
+            return False, response
+        finally:
+            if key_override and hasattr(impl, "set_api_key"):
+                getattr(impl, "set_api_key")(None)
 
         response = {
             "ok": True,
             "provider": provider_key,
-            "model": result.get("model"),
-            "duration_ms": int(result.get("duration_ms") or 0),
+            "model": response_obj.model or model_override,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "models_probe": models_probe,
         }
         self._log_request(f"/providers/{provider_key}/test", True, response)
         return True, response
@@ -731,8 +959,12 @@ class AgentRuntime:
         return bool(result.get("ok")), response
 
     @staticmethod
-    def _http_get_json(url: str, timeout_seconds: float = 4.0) -> dict[str, Any]:
-        req = urllib.request.Request(url, method="GET")
+    def _http_get_json(
+        url: str,
+        timeout_seconds: float = 4.0,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        req = urllib.request.Request(url, method="GET", headers=headers or {})
         with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
             raw = response.read().decode("utf-8")
         parsed = json.loads(raw or "{}")
@@ -740,28 +972,37 @@ class AgentRuntime:
             return parsed
         return {}
 
-    def refresh_models(self) -> tuple[bool, dict[str, Any]]:
+    def refresh_models(self, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+        payload = payload or {}
         document = self.registry_document
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
+
+        provider_filter = str(payload.get("provider") or "").strip().lower()
+        if provider_filter and provider_filter not in providers:
+            return False, {"ok": False, "error": "provider not found"}
 
         refreshed: dict[str, list[str]] = {}
 
         for provider_id, payload in sorted(providers.items()):
             if not isinstance(payload, dict):
                 continue
-            if not bool(payload.get("enabled", True)):
+            if provider_filter and provider_id != provider_filter:
                 continue
-            if not bool(payload.get("local", False)):
+            if not bool(payload.get("enabled", True)):
                 continue
 
             base_url = str(payload.get("base_url") or "").rstrip("/")
             if not base_url:
                 continue
 
+            request_headers = self._provider_request_headers(payload)
+            is_local = bool(payload.get("local", False))
+
             names_from_v1: set[str] = set()
+            v1_ok = False
             try:
-                parsed = self._http_get_json(base_url + "/v1/models")
+                parsed = self._http_get_json(base_url + "/v1/models", headers=request_headers)
                 data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
                 for item in data:
                     if not isinstance(item, dict):
@@ -769,12 +1010,15 @@ class AgentRuntime:
                     model_name = str(item.get("id") or "").strip()
                     if model_name:
                         names_from_v1.add(model_name)
+                v1_ok = True
             except Exception:
                 names_from_v1 = set()
+                v1_ok = False
 
             names_from_tags: set[str] = set()
+            tags_ok = False
             try:
-                parsed = self._http_get_json(base_url + "/api/tags")
+                parsed = self._http_get_json(base_url + "/api/tags", headers=request_headers)
                 tags = parsed.get("models") if isinstance(parsed.get("models"), list) else []
                 for item in tags:
                     if not isinstance(item, dict):
@@ -782,14 +1026,22 @@ class AgentRuntime:
                     model_name = str(item.get("name") or "").strip()
                     if model_name:
                         names_from_tags.add(model_name)
+                tags_ok = True
             except Exception:
                 names_from_tags = set()
+                tags_ok = False
 
             refreshed[provider_id] = []
             for model_name in sorted(names_from_v1 | names_from_tags):
                 model_id = f"{provider_id}:{model_name}"
                 refreshed[provider_id].append(model_id)
                 existing = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+                if is_local:
+                    available = bool(model_name in names_from_tags)
+                elif v1_ok:
+                    available = bool(model_name in names_from_v1)
+                else:
+                    available = bool(existing.get("available", True))
                 models[model_id] = {
                     **existing,
                     "provider": provider_id,
@@ -799,7 +1051,7 @@ class AgentRuntime:
                     "cost_rank": int(existing.get("cost_rank", 0) or 0),
                     "default_for": list(existing.get("default_for") or ["chat"]),
                     "enabled": bool(existing.get("enabled", True)),
-                    "available": bool(model_name in names_from_tags),
+                    "available": available,
                     "pricing": existing.get("pricing")
                     or {
                         "input_per_million_tokens": None,
@@ -808,7 +1060,7 @@ class AgentRuntime:
                     "max_context_tokens": existing.get("max_context_tokens"),
                 }
 
-            # Quarantine stale local models that are no longer installed in Ollama tags.
+            # Quarantine stale entries when listing endpoint is authoritative.
             for model_id, model_payload in sorted(list(models.items())):
                 if not isinstance(model_payload, dict):
                     continue
@@ -817,7 +1069,18 @@ class AgentRuntime:
                 model_name = str(model_payload.get("model") or "").strip()
                 if not model_name:
                     continue
-                if model_name in names_from_tags:
+                if is_local and tags_ok and model_name in names_from_tags:
+                    continue
+                if not is_local and v1_ok and model_name in names_from_v1:
+                    continue
+                if is_local and not tags_ok:
+                    # For local providers, treat unknown tags as unavailable.
+                    models[model_id] = {
+                        **model_payload,
+                        "available": False,
+                    }
+                    continue
+                if not is_local and not v1_ok:
                     continue
                 models[model_id] = {
                     **model_payload,
@@ -1079,7 +1342,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/models/refresh":
-                ok, body = self.runtime.refresh_models()
+                ok, body = self.runtime.refresh_models(payload)
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -1099,9 +1362,21 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
 
+            if len(parts) == 3 and parts[0] == "providers" and parts[2] == "models":
+                provider_id = parts[1]
+                ok, body = self.runtime.add_provider_model(provider_id, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
             if len(parts) == 3 and parts[0] == "providers" and parts[2] == "test":
                 provider_id = parts[1]
                 ok, body = self.runtime.test_provider(provider_id, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if len(parts) == 4 and parts[0] == "providers" and parts[2] == "models" and parts[3] == "refresh":
+                provider_id = parts[1]
+                ok, body = self.runtime.refresh_models({"provider": provider_id, **payload})
                 self._send_json(200 if ok else 400, body)
                 return
 

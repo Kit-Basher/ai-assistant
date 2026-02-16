@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.llm.types import LLMError, Response, Usage
 
 
 def _config(registry_path: str, db_path: str) -> Config:
@@ -100,25 +101,72 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("provider:acme:api_key", source["name"])
         self.assertEqual("sk-acme", runtime.secret_store.get_secret("provider:acme:api_key"))
 
-        original_chat = runtime._router.chat  # type: ignore[attr-defined]
-        runtime._router.chat = lambda *args, **kwargs: {  # type: ignore[assignment]
-            "ok": True,
-            "provider": "acme",
-            "model": "chat-model",
-            "duration_ms": 1,
-            "text": "PONG",
-            "fallback_used": False,
-            "attempts": [],
-            "error_class": None,
-        }
+        provider_impl = runtime._router._providers["acme"]  # type: ignore[attr-defined]
+        original_chat = provider_impl.chat
+        provider_impl.chat = lambda request, *, model, timeout_seconds: Response(  # type: ignore[assignment]
+            text="PONG",
+            provider="acme",
+            model=model,
+            usage=Usage(5, 2, 7),
+        )
         try:
             ok, tested = runtime.test_provider("acme", {"model": "acme:chat"})
         finally:
-            runtime._router.chat = original_chat  # type: ignore[assignment]
+            provider_impl.chat = original_chat  # type: ignore[assignment]
 
         self.assertTrue(ok)
         self.assertTrue(tested["ok"])
         self.assertEqual("acme", tested["provider"])
+        self.assertEqual("chat-model", tested["model"])
+
+    def test_add_provider_accepts_openai_compat_defaults_and_config_fields(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        ok, added = runtime.add_provider(
+            {
+                "id": "routerx",
+                "base_url": "https://routerx.example/api/v1",
+                "chat_path": "/chat/completions",
+                "local": False,
+                "enabled": True,
+                "default_headers": {"X-App": "personal-agent"},
+                "default_query_params": {"api-version": "2024-06-01"},
+                "requires_api_key": False,
+            }
+        )
+        self.assertTrue(ok)
+        self.assertEqual("openai_compat", added["provider"]["provider_type"])
+        self.assertEqual("https://routerx.example/api/v1", added["provider"]["base_url"])
+        self.assertEqual("/chat/completions", added["provider"]["chat_path"])
+        self.assertEqual({"X-App": "personal-agent"}, added["provider"]["default_headers"])
+        self.assertEqual({"api-version": "2024-06-01"}, added["provider"]["default_query_params"])
+        self.assertIsNone(added["provider"]["api_key_source"])
+
+    def test_add_provider_model_persists_for_manual_entry(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        ok, _added = runtime.add_provider(
+            {
+                "id": "manualx",
+                "base_url": "https://manualx.example",
+                "chat_path": "/v1/chat/completions",
+                "requires_api_key": False,
+            }
+        )
+        self.assertTrue(ok)
+
+        ok, response = runtime.add_provider_model(
+            "manualx",
+            {
+                "model": "custom-chat",
+                "capabilities": ["chat", "json", "tools"],
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual("manualx:custom-chat", response["model"]["id"])
+        with open(self.registry_path, "r", encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        self.assertIn("manualx:custom-chat", on_disk["models"])
 
     def test_provider_secret_flips_to_secret_source_and_persists(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -193,6 +241,77 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("registry_path not writable:", response["error"])
         self.assertIsNone(runtime.secret_store.get_secret("provider:openrouter:api_key"))
+
+    def test_provider_test_returns_structured_error_kinds(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        ok, _added = runtime.add_provider(
+            {
+                "id": "kindcheck",
+                "base_url": "https://kindcheck.example",
+                "chat_path": "/v1/chat/completions",
+                "models": [{"id": "kindcheck:chat", "model": "chat", "capabilities": ["chat"]}],
+                "requires_api_key": False,
+            }
+        )
+        self.assertTrue(ok)
+
+        provider_impl = runtime._router._providers["kindcheck"]  # type: ignore[attr-defined]
+        original_chat = provider_impl.chat
+        try:
+            cases = [
+                (
+                    LLMError(
+                        kind="auth_error",
+                        retriable=False,
+                        provider="kindcheck",
+                        status_code=401,
+                        message="unauthorized",
+                    ),
+                    "auth_error",
+                    401,
+                ),
+                (
+                    LLMError(
+                        kind="rate_limit",
+                        retriable=True,
+                        provider="kindcheck",
+                        status_code=429,
+                        message="limited",
+                    ),
+                    "rate_limit",
+                    429,
+                ),
+                (
+                    LLMError(
+                        kind="server_error",
+                        retriable=True,
+                        provider="kindcheck",
+                        status_code=502,
+                        message="bad_gateway",
+                    ),
+                    "server_error",
+                    502,
+                ),
+                (
+                    LLMError(
+                        kind="provider_error",
+                        retriable=False,
+                        provider="kindcheck",
+                        status_code=400,
+                        message="invalid",
+                    ),
+                    "bad_request",
+                    400,
+                ),
+            ]
+            for raised, expected_kind, expected_status in cases:
+                provider_impl.chat = lambda request, *, model, timeout_seconds, err=raised: (_ for _ in ()).throw(err)  # type: ignore[assignment]
+                ok, response = runtime.test_provider("kindcheck", {"model": "kindcheck:chat"})
+                self.assertFalse(ok)
+                self.assertEqual(expected_kind, response["error"])
+                self.assertEqual(expected_status, response["status_code"])
+        finally:
+            provider_impl.chat = original_chat  # type: ignore[assignment]
 
     def test_defaults_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

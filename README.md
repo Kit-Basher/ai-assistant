@@ -44,6 +44,8 @@ Endpoints:
 - `DELETE /providers/{id}`
 - `POST /providers/{id}/secret`
 - `POST /providers/{id}/test`
+- `POST /providers/{id}/models`
+- `POST /providers/{id}/models/refresh`
 - `GET /defaults`
 - `PUT /defaults`
 - `POST /models/refresh`
@@ -99,6 +101,24 @@ Secret storage:
 Provider/model registry:
 - File: `llm_registry.json` (schema v2, JSON on disk)
 - Backward compatibility: v1 files are loaded via migration/compat logic at runtime.
+
+Add any OpenAI-compatible provider:
+1. Open `http://127.0.0.1:8765` and go to `Providers`.
+2. Use `Add Provider (OpenAI-Compatible)`:
+   - `id` (e.g. `openrouter`, `myrouter`)
+   - `base_url` (e.g. `https://openrouter.ai/api/v1`)
+   - `chat_path` (default `/v1/chat/completions`; OpenRouter preset uses `/chat/completions`)
+   - optional default headers/query params as JSON objects
+   - optional API key (stored in secret store as `provider:<id>:api_key`)
+3. Save and test. Then fetch models or add a model manually if listing is unsupported.
+
+Examples:
+- OpenRouter:
+  - `base_url=https://openrouter.ai/api/v1`
+  - `chat_path=/chat/completions`
+- Generic router/OpenAI-compatible:
+  - `base_url=https://api.example.com`
+  - `chat_path=/v1/chat/completions`
 
 Routing (high-level):
 - `auto`: balanced quality/cost ordering.
