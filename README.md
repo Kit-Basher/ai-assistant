@@ -31,6 +31,7 @@ Run local HTTP API (no Telegram token required):
 
 Endpoints:
 - `GET /health`
+- `GET /version`
 - `GET /models`
 - `POST /chat`
 - `GET /config`
@@ -61,6 +62,24 @@ Optional dev mode:
 - `WEBUI_DEV_PROXY=1 .venv/bin/python -m agent.api_server`
 - Then open the dev server URL shown on `/` (default `http://127.0.0.1:1420`).
 - For hot reload: `cd desktop && npm run dev` (requests use same-origin paths and Vite proxies API routes to `127.0.0.1:8765`).
+
+Check running API identity:
+- `curl -s http://127.0.0.1:8765/health`
+- `curl -s http://127.0.0.1:8765/version`
+
+## API User Service (systemd)
+Install as a user service:
+- `mkdir -p ~/.config/systemd/user`
+- `cp systemd/personal-agent-api.service ~/.config/systemd/user/`
+- `systemctl --user daemon-reload`
+- `systemctl --user enable --now personal-agent-api.service`
+
+Or use helper script:
+- `./scripts/install_user_service.sh`
+
+Check status/logs:
+- `systemctl --user status personal-agent-api.service`
+- `journalctl --user -u personal-agent-api.service -f`
 
 Secret storage:
 - Primary: OS keychain via `keyring` (if available in runtime environment)
@@ -172,7 +191,7 @@ User timer status:
 
 ## Testing
 - Full suite: `pytest -q`
-- Current local result (2026-02-16): `342 passed`
+- Current local result (2026-02-16): `346 passed`
 
 ## Architecture References
 - `ARCHITECTURE.md`
