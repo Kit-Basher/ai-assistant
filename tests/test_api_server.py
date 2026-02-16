@@ -179,6 +179,33 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("ollama", current["default_provider"])
         self.assertEqual("ollama:qwen2.5:3b-instruct", current["default_model"])
 
+    def test_defaults_treats_known_provider_prefix_as_full_id(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        document = runtime.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        providers["acme"] = {
+            "provider_type": "openai_compat",
+            "base_url": "https://acme.example",
+            "chat_path": "/v1/chat/completions",
+            "api_key_source": None,
+            "default_headers": {},
+            "default_query_params": {},
+            "enabled": True,
+            "local": False,
+        }
+        document["providers"] = providers
+        runtime._save_registry_document(document)
+
+        ok, response = runtime.update_defaults(
+            {
+                "default_provider": "ollama",
+                "default_model": "acme:latest",
+            }
+        )
+        self.assertFalse(ok)
+        self.assertEqual("default_model not found", response["error"])
+
     def test_refresh_models_marks_embedding_models_as_embedding_only(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 

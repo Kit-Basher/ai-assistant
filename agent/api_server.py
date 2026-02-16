@@ -429,6 +429,8 @@ class AgentRuntime:
         document = self.registry_document
         defaults = self._ensure_defaults(document)
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
         provider_override = str(payload.get("default_provider") or "").strip().lower() if "default_provider" in payload else None
 
         if "routing_mode" in payload:
@@ -447,20 +449,18 @@ class AgentRuntime:
             model = str(payload.get("default_model") or "").strip() or None
             if model is None:
                 defaults["default_model"] = None
-            elif model in models:
-                defaults["default_model"] = model
             else:
                 provider_for_model = defaults.get("default_provider")
                 provider_for_model = str(provider_for_model).strip().lower() if provider_for_model else None
-                if provider_for_model:
-                    scoped_model_id = f"{provider_for_model}:{model}"
-                else:
-                    scoped_model_id = None
-
-                if scoped_model_id and scoped_model_id in models:
-                    defaults["default_model"] = scoped_model_id
-                else:
+                canonical_model = self._normalize_default_model_id(
+                    model,
+                    provider_for_model=provider_for_model,
+                    models=models,
+                    provider_ids=provider_ids,
+                )
+                if canonical_model is None:
                     return False, {"ok": False, "error": "default_model not found"}
+                defaults["default_model"] = canonical_model
         elif (
             "default_provider" in payload
             and defaults.get("default_model")
@@ -479,6 +479,35 @@ class AgentRuntime:
         document["defaults"] = defaults
         self._save_registry_document(document)
         return True, {"ok": True, **self.get_defaults()}
+
+    @staticmethod
+    def _normalize_default_model_id(
+        model_value: str,
+        *,
+        provider_for_model: str | None,
+        models: dict[str, Any],
+        provider_ids: set[str],
+    ) -> str | None:
+        candidate = (model_value or "").strip()
+        if not candidate:
+            return None
+
+        # Accept canonical full ids as-is.
+        if candidate in models:
+            return candidate
+
+        # Only treat "<provider>:<name>" as canonical if the prefix is a known provider id.
+        prefix = candidate.split(":", 1)[0].strip().lower() if ":" in candidate else ""
+        if prefix and prefix in provider_ids:
+            return None
+
+        if not provider_for_model:
+            return None
+
+        scoped_model_id = f"{provider_for_model}:{candidate}"
+        if scoped_model_id in models:
+            return scoped_model_id
+        return None
 
     @staticmethod
     def _default_refreshed_capabilities(model_name: str) -> list[str]:
