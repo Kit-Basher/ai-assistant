@@ -32,6 +32,7 @@ from agent.debug_protocol import DebugProtocol
 from agent.orchestrator import Orchestrator
 from agent.cards import render_cards_markdown, validate_cards_payload
 from agent.daily_brief import should_send_daily_brief
+from agent.model_scout import build_model_scout
 from agent.secret_store import SecretStore
 from memory.db import MemoryDB
 
@@ -313,6 +314,62 @@ async def _handle_ask_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.effective_message.reply_text(response.text)
 
 
+async def _handle_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    model_scout = context.application.bot_data.get("model_scout")
+    if model_scout is None:
+        await update.effective_message.reply_text("Model Scout is unavailable in this runtime.")
+        return
+
+    suggestions = model_scout.list_suggestions(status="new", limit=5)
+    message = model_scout.format_scout_details(suggestions, limit=5)
+    await update.effective_message.reply_text(message)
+
+
+async def _handle_scout_dismiss(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    model_scout = context.application.bot_data.get("model_scout")
+    if model_scout is None:
+        await update.effective_message.reply_text("Model Scout is unavailable in this runtime.")
+        return
+
+    text = update.effective_message.text or ""
+    suggestion_id = _command_payload(text, "/scout_dismiss").strip()
+    if not suggestion_id:
+        await update.effective_message.reply_text("Usage: /scout_dismiss <suggestion_id>")
+        return
+
+    if model_scout.dismiss(suggestion_id):
+        await update.effective_message.reply_text(f"Dismissed suggestion {suggestion_id}.")
+    else:
+        await update.effective_message.reply_text(f"Suggestion not found: {suggestion_id}")
+
+
+async def _handle_scout_installed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    model_scout = context.application.bot_data.get("model_scout")
+    if model_scout is None:
+        await update.effective_message.reply_text("Model Scout is unavailable in this runtime.")
+        return
+
+    text = update.effective_message.text or ""
+    suggestion_id = _command_payload(text, "/scout_installed").strip()
+    if not suggestion_id:
+        await update.effective_message.reply_text("Usage: /scout_installed <suggestion_id>")
+        return
+
+    if model_scout.mark_installed(suggestion_id):
+        await update.effective_message.reply_text(f"Marked suggestion as installed: {suggestion_id}.")
+    else:
+        await update.effective_message.reply_text(f"Suggestion not found: {suggestion_id}")
+
+
 async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     import logging
 
@@ -562,6 +619,7 @@ def build_app() -> Application:
     llm_client = LLMRouter(config, log_path=config.log_path)
 
     llm_broker, llm_broker_error = build_llm_broker(config)
+    model_scout = build_model_scout(config)
 
     orchestrator = Orchestrator(
         db=db,
@@ -600,6 +658,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("daily_brief_status", _handle_daily_brief_status))
     app.add_handler(CommandHandler("ask", _handle_ask))
     app.add_handler(CommandHandler("ask_opinion", _handle_ask_opinion))
+    app.add_handler(CommandHandler("scout", _handle_scout))
+    app.add_handler(CommandHandler("scout_dismiss", _handle_scout_dismiss))
+    app.add_handler(CommandHandler("scout_installed", _handle_scout_installed))
 
     # Non-command messages only.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
@@ -610,6 +671,7 @@ def build_app() -> Application:
     app.bot_data["log_path"] = config.log_path
     app.bot_data["home_path"] = os.path.expanduser("~")
     app.bot_data["timezone"] = config.agent_timezone
+    app.bot_data["model_scout"] = model_scout
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
     if config.enable_scheduled_snapshots:

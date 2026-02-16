@@ -1034,6 +1034,27 @@ class ModelScout:
         lines.append("Reply /scout for details")
         return "\n".join(lines)
 
+    @staticmethod
+    def format_scout_details(suggestions: list[dict[str, Any]], limit: int = 5) -> str:
+        if not suggestions:
+            return "No new Model Scout suggestions right now."
+        lines = ["Model Scout suggestions:"]
+        for item in suggestions[: max(1, int(limit))]:
+            suggestion_id = str(item.get("id") or "")
+            kind = str(item.get("kind") or "")
+            if kind == "local":
+                name = str(item.get("repo_id") or "local model")
+            else:
+                name = str(item.get("model_id") or item.get("repo_id") or "remote model")
+            rationale = str(item.get("rationale") or "")
+            install_cmd = str(item.get("install_cmd") or "").strip()
+            lines.append(f"- [{suggestion_id}] {name}")
+            if rationale:
+                lines.append(f"  why: {rationale}")
+            if install_cmd:
+                lines.append(f"  try: {install_cmd}")
+        return "\n".join(lines)
+
 
 def load_model_scout_settings(config) -> ModelScoutSettings:
     allowlist = frozenset(str(item).strip().lower() for item in (config.model_scout_license_allowlist or ()) if str(item).strip())
