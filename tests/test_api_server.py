@@ -222,6 +222,45 @@ class TestAPIServerRuntime(unittest.TestCase):
         embed_model = runtime.registry_document["models"]["ollama:nomic-embed-text"]
         self.assertEqual(["embedding"], embed_model["capabilities"])
 
+    def test_version_endpoint_returns_runtime_metadata(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+        handler = _HandlerForTest(runtime, "/version")
+        handler.do_GET()
+
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertIsInstance(payload["pid"], int)
+        self.assertTrue(str(payload.get("version") or ""))
+
     def test_root_route_serves_webui_index_html(self) -> None:
         webui_dist = os.path.join(self.tmpdir.name, "webui", "dist")
         os.makedirs(webui_dist, exist_ok=True)

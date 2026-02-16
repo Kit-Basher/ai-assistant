@@ -9,6 +9,8 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 from typing import Any
 import urllib.error
 import urllib.parse
@@ -32,6 +34,11 @@ class AgentRuntime:
         self.config = config
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
         self._repo_root = Path(__file__).resolve().parents[1]
+        self.started_at = datetime.now(timezone.utc)
+        self.started_at_iso = self.started_at.isoformat()
+        self.pid = os.getpid()
+        self.version = self._read_version()
+        self.git_commit = self._read_git_commit()
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -42,12 +49,48 @@ class AgentRuntime:
         ).resolve()
         self.webui_dev_proxy = _is_truthy(os.getenv("WEBUI_DEV_PROXY"))
         self.webui_dev_url = os.getenv("WEBUI_DEV_URL", "http://127.0.0.1:1420").strip() or "http://127.0.0.1:1420"
+        self.listening_url = self._default_listening_url()
 
         self.router: LLMRouter | None = None
         self.registry_document: dict[str, Any] = {}
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
         self._reload_router()
+
+    def _default_listening_url(self) -> str:
+        host = os.getenv("AGENT_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
+        port = os.getenv("AGENT_API_PORT", "8765").strip() or "8765"
+        return f"http://{host}:{port}"
+
+    def set_listening(self, host: str, port: int) -> None:
+        self.listening_url = f"http://{host}:{int(port)}"
+
+    def _read_version(self) -> str:
+        version_file = self._repo_root / "VERSION"
+        try:
+            if version_file.is_file():
+                version = version_file.read_text(encoding="utf-8").strip()
+                if version:
+                    return version
+        except Exception:
+            pass
+        return "unknown"
+
+    def _read_git_commit(self) -> str | None:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(self._repo_root), "rev-parse", "--short", "HEAD"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                commit = (result.stdout or "").strip()
+                if commit:
+                    return commit
+        except Exception:
+            pass
+        return None
 
     def _reload_router(self) -> None:
         self.registry_document = self.registry_store.read_document()
@@ -143,6 +186,16 @@ class AgentRuntime:
             "routing_mode": snapshot.get("routing_mode"),
             "defaults": snapshot.get("defaults") or {},
             "circuits": snapshot.get("circuits") or {},
+        }
+
+    def version_info(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "version": self.version,
+            "git_commit": self.git_commit,
+            "started_at": self.started_at_iso,
+            "pid": self.pid,
+            "listening": self.listening_url,
         }
 
     def list_providers(self) -> dict[str, Any]:
@@ -774,6 +827,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return {}
         return {}
 
+    def _handle_internal_error(self, method: str, exc: Exception) -> None:
+        print(
+            f"api_server internal_error method={method} path={getattr(self, 'path', '')} "
+            f"error={exc.__class__.__name__}",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            self._send_json(500, {"ok": False, "error": "internal_error"})
+        except Exception:
+            pass
+
     def _path_parts(self) -> tuple[str, list[str]]:
         parsed = urllib.parse.urlparse(self.path)
         clean_path = parsed.path or "/"
@@ -781,29 +846,38 @@ class APIServerHandler(BaseHTTPRequestHandler):
         return clean_path, parts
 
     def do_OPTIONS(self) -> None:  # noqa: N802
-        self._send_json(200, {"ok": True})
+        try:
+            self._send_json(200, {"ok": True})
+        except Exception as exc:
+            self._handle_internal_error("OPTIONS", exc)
 
     def do_GET(self) -> None:  # noqa: N802
-        path, parts = self._path_parts()
-        if path == "/health":
-            self._send_json(200, self.runtime.health())
-            return
-        if path == "/models":
-            self._send_json(200, self.runtime.models())
-            return
-        if path == "/config":
-            self._send_json(200, self.runtime.get_config())
-            return
-        if path == "/defaults":
-            self._send_json(200, self.runtime.get_defaults())
-            return
-        if path == "/providers":
-            self._send_json(200, self.runtime.list_providers())
-            return
+        try:
+            path, parts = self._path_parts()
+            if path == "/health":
+                self._send_json(200, self.runtime.health())
+                return
+            if path == "/version":
+                self._send_json(200, self.runtime.version_info())
+                return
+            if path == "/models":
+                self._send_json(200, self.runtime.models())
+                return
+            if path == "/config":
+                self._send_json(200, self.runtime.get_config())
+                return
+            if path == "/defaults":
+                self._send_json(200, self.runtime.get_defaults())
+                return
+            if path == "/providers":
+                self._send_json(200, self.runtime.list_providers())
+                return
 
-        if self._try_serve_webui(path):
-            return
-        self._send_json(404, {"ok": False, "error": "not_found", "path": path, "parts": parts})
+            if self._try_serve_webui(path):
+                return
+            self._send_json(404, {"ok": False, "error": "not_found", "path": path, "parts": parts})
+        except Exception as exc:
+            self._handle_internal_error("GET", exc)
 
     def _try_serve_webui(self, path: str) -> bool:
         if path == "/" and self.runtime.webui_dev_proxy:
@@ -854,78 +928,87 @@ class APIServerHandler(BaseHTTPRequestHandler):
         self._send_bytes(200, body, content_type=content_type, cache_control=cache_control)
 
     def do_POST(self) -> None:  # noqa: N802
-        path, parts = self._path_parts()
-        payload = self._read_json()
+        try:
+            path, parts = self._path_parts()
+            payload = self._read_json()
 
-        if path == "/chat":
-            ok, body = self.runtime.chat(payload)
-            self._send_json(200 if ok else 400, body)
-            return
-
-        if path == "/providers":
-            ok, body = self.runtime.add_provider(payload)
-            self._send_json(200 if ok else 400, body)
-            return
-
-        if path == "/providers/test":
-            # backward-compatible endpoint
-            provider_id = str(payload.get("provider") or "").strip().lower()
-            if not provider_id:
-                self._send_json(400, {"ok": False, "error": "provider is required"})
+            if path == "/chat":
+                ok, body = self.runtime.chat(payload)
+                self._send_json(200 if ok else 400, body)
                 return
-            ok, body = self.runtime.test_provider(provider_id, payload)
-            self._send_json(200 if ok else 400, body)
-            return
 
-        if path == "/models/refresh":
-            ok, body = self.runtime.refresh_models()
-            self._send_json(200 if ok else 400, body)
-            return
+            if path == "/providers":
+                ok, body = self.runtime.add_provider(payload)
+                self._send_json(200 if ok else 400, body)
+                return
 
-        if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
-            provider_id = parts[1]
-            ok, body = self.runtime.set_provider_secret(provider_id, payload)
-            self._send_json(200 if ok else 400, body)
-            return
+            if path == "/providers/test":
+                # backward-compatible endpoint
+                provider_id = str(payload.get("provider") or "").strip().lower()
+                if not provider_id:
+                    self._send_json(400, {"ok": False, "error": "provider is required"})
+                    return
+                ok, body = self.runtime.test_provider(provider_id, payload)
+                self._send_json(200 if ok else 400, body)
+                return
 
-        if len(parts) == 3 and parts[0] == "providers" and parts[2] == "test":
-            provider_id = parts[1]
-            ok, body = self.runtime.test_provider(provider_id, payload)
-            self._send_json(200 if ok else 400, body)
-            return
+            if path == "/models/refresh":
+                ok, body = self.runtime.refresh_models()
+                self._send_json(200 if ok else 400, body)
+                return
 
-        self._send_json(404, {"ok": False, "error": "not_found"})
+            if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
+                provider_id = parts[1]
+                ok, body = self.runtime.set_provider_secret(provider_id, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if len(parts) == 3 and parts[0] == "providers" and parts[2] == "test":
+                provider_id = parts[1]
+                ok, body = self.runtime.test_provider(provider_id, payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
+            self._send_json(404, {"ok": False, "error": "not_found"})
+        except Exception as exc:
+            self._handle_internal_error("POST", exc)
 
     def do_PUT(self) -> None:  # noqa: N802
-        path, parts = self._path_parts()
-        payload = self._read_json()
+        try:
+            path, parts = self._path_parts()
+            payload = self._read_json()
 
-        if path == "/config":
-            ok, body = self.runtime.update_config(payload)
-            self._send_json(200 if ok else 400, body)
-            return
+            if path == "/config":
+                ok, body = self.runtime.update_config(payload)
+                self._send_json(200 if ok else 400, body)
+                return
 
-        if path == "/defaults":
-            ok, body = self.runtime.update_defaults(payload)
-            self._send_json(200 if ok else 400, body)
-            return
+            if path == "/defaults":
+                ok, body = self.runtime.update_defaults(payload)
+                self._send_json(200 if ok else 400, body)
+                return
 
-        if len(parts) == 2 and parts[0] == "providers":
-            provider_id = parts[1]
-            ok, body = self.runtime.update_provider(provider_id, payload)
-            self._send_json(200 if ok else 400, body)
-            return
+            if len(parts) == 2 and parts[0] == "providers":
+                provider_id = parts[1]
+                ok, body = self.runtime.update_provider(provider_id, payload)
+                self._send_json(200 if ok else 400, body)
+                return
 
-        self._send_json(404, {"ok": False, "error": "not_found"})
+            self._send_json(404, {"ok": False, "error": "not_found"})
+        except Exception as exc:
+            self._handle_internal_error("PUT", exc)
 
     def do_DELETE(self) -> None:  # noqa: N802
-        path, parts = self._path_parts()
-        if len(parts) == 2 and parts[0] == "providers":
-            provider_id = parts[1]
-            ok, body = self.runtime.delete_provider(provider_id)
-            self._send_json(200 if ok else 400, body)
-            return
-        self._send_json(404, {"ok": False, "error": "not_found"})
+        try:
+            path, parts = self._path_parts()
+            if len(parts) == 2 and parts[0] == "providers":
+                provider_id = parts[1]
+                ok, body = self.runtime.delete_provider(provider_id)
+                self._send_json(200 if ok else 400, body)
+                return
+            self._send_json(404, {"ok": False, "error": "not_found"})
+        except Exception as exc:
+            self._handle_internal_error("DELETE", exc)
 
 
 def build_runtime(config: Config | None = None) -> AgentRuntime:
@@ -935,14 +1018,29 @@ def build_runtime(config: Config | None = None) -> AgentRuntime:
 
 def run_server(host: str, port: int) -> None:
     runtime = build_runtime()
+    runtime.set_listening(host, port)
 
     class _Handler(APIServerHandler):
         pass
 
     _Handler.runtime = runtime
 
-    server = ThreadingHTTPServer((host, port), _Handler)
-    print(f"Personal Agent API listening on http://{host}:{port}")
+    try:
+        server = ThreadingHTTPServer((host, port), _Handler)
+    except OSError as exc:
+        print(
+            f"Failed to bind Personal Agent API on {runtime.listening_url}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(1) from exc
+
+    print(
+        f"Personal Agent API started pid={runtime.pid} listening={runtime.listening_url} "
+        f"registry_path={runtime.registry_store.path} version={runtime.version} "
+        f"git_commit={runtime.git_commit or 'unknown'}",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:
