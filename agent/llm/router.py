@@ -643,6 +643,9 @@ class LLMRouter:
             }
         return states
 
+    def usage_stats_snapshot(self) -> dict[str, dict[str, Any]]:
+        return self._usage_stats.snapshot()
+
     def _model_health(self, model: ModelConfig, *, provider_available: bool) -> dict[str, Any]:
         state = self._outcomes.get(model.id)
         now = float(self._time_fn())

@@ -45,6 +45,13 @@ class Config:
     llm_circuit_breaker_window_seconds: int = 60
     llm_circuit_breaker_cooldown_seconds: int = 45
     llm_usage_stats_path: str | None = None
+    model_scout_enabled: bool = True
+    model_scout_notify_delta: float = 15.0
+    model_scout_absolute_threshold: float = 80.0
+    model_scout_max_suggestions_per_notify: int = 2
+    model_scout_license_allowlist: tuple[str, ...] = ("apache-2.0", "mit", "bsd-3-clause")
+    model_scout_size_max_b: float = 12.0
+    model_scout_state_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +168,31 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         os.getenv("LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45") or 45
     )
     llm_usage_stats_path = os.getenv("LLM_USAGE_STATS_PATH", "").strip() or None
+    model_scout_enabled = os.getenv("MODEL_SCOUT_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    model_scout_notify_delta = float(os.getenv("MODEL_SCOUT_NOTIFY_DELTA", "15") or 15)
+    model_scout_absolute_threshold = float(os.getenv("MODEL_SCOUT_ABSOLUTE_THRESHOLD", "80") or 80)
+    model_scout_max_suggestions_per_notify = int(os.getenv("MODEL_SCOUT_MAX_SUGGESTIONS_PER_NOTIFY", "2") or 2)
+    model_scout_license_allowlist_raw = os.getenv(
+        "MODEL_SCOUT_LICENSE_ALLOWLIST",
+        "apache-2.0,mit,bsd-3-clause",
+    )
+    model_scout_license_allowlist = tuple(
+        sorted(
+            {
+                item.strip().lower()
+                for item in model_scout_license_allowlist_raw.split(",")
+                if item.strip()
+            }
+        )
+    ) or ("apache-2.0", "mit", "bsd-3-clause")
+    model_scout_size_max_b = float(os.getenv("MODEL_SCOUT_SIZE_MAX_B", "12") or 12)
+    model_scout_state_path = os.getenv("AGENT_MODEL_SCOUT_STATE_PATH", "").strip() or None
 
     if llm_routing_mode not in {
         "auto",
@@ -181,6 +213,14 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS must be >= 1.")
     if llm_registry_path and not os.path.isfile(llm_registry_path):
         raise RuntimeError("LLM_REGISTRY_PATH is missing or not readable.")
+    if model_scout_notify_delta < 0:
+        raise RuntimeError("MODEL_SCOUT_NOTIFY_DELTA must be >= 0.")
+    if model_scout_absolute_threshold < 0:
+        raise RuntimeError("MODEL_SCOUT_ABSOLUTE_THRESHOLD must be >= 0.")
+    if model_scout_max_suggestions_per_notify < 1:
+        raise RuntimeError("MODEL_SCOUT_MAX_SUGGESTIONS_PER_NOTIFY must be >= 1.")
+    if model_scout_size_max_b <= 0:
+        raise RuntimeError("MODEL_SCOUT_SIZE_MAX_B must be > 0.")
 
     return Config(
         telegram_bot_token=telegram_bot_token,
@@ -221,4 +261,11 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         llm_circuit_breaker_window_seconds=llm_circuit_breaker_window_seconds,
         llm_circuit_breaker_cooldown_seconds=llm_circuit_breaker_cooldown_seconds,
         llm_usage_stats_path=llm_usage_stats_path,
+        model_scout_enabled=model_scout_enabled,
+        model_scout_notify_delta=model_scout_notify_delta,
+        model_scout_absolute_threshold=model_scout_absolute_threshold,
+        model_scout_max_suggestions_per_notify=model_scout_max_suggestions_per_notify,
+        model_scout_license_allowlist=model_scout_license_allowlist,
+        model_scout_size_max_b=model_scout_size_max_b,
+        model_scout_state_path=model_scout_state_path,
     )
