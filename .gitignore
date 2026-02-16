@@ -2,4 +2,8 @@ __pycache__/
 *.pyc
 logs/agent.jsonl
 memory/agent.db
+memory/ui_config.json
 packaging/.env
+desktop/node_modules/
+desktop/dist/
+desktop/src-tauri/target/

@@ -23,6 +23,37 @@ Historical snapshots (not current truth):
 3. Run bot:
    - `TELEGRAM_BOT_TOKEN=... .venv/bin/python -m telegram_adapter`
 
+## Local API (Desktop Runtime)
+Run local HTTP API (no Telegram token required):
+- `. .venv/bin/activate`
+- `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
+
+Endpoints:
+- `GET /health`
+- `GET /models`
+- `POST /chat`
+- `GET /config`
+- `PUT /config`
+- `POST /providers/test`
+
+## Desktop App (Tauri + React)
+Located in `desktop/`.
+
+Dev run:
+1. Start API: `.venv/bin/python -m agent.api_server`
+2. In another shell:
+   - `cd desktop`
+   - `npm install`
+   - `npm run tauri:dev`
+
+Build:
+- `cd desktop`
+- `npm run tauri:build`
+
+Secret storage:
+- Primary: OS keychain via `keyring` (if available in runtime environment)
+- Fallback: encrypted local file at `~/.local/share/personal-agent/secrets.enc.json`
+
 ## Environment Variables
 Required:
 - `TELEGRAM_BOT_TOKEN`
@@ -39,6 +70,19 @@ LLM/provider optional:
 - `OPENAI_API_KEY`, `OPENAI_MODEL`
 - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`
 - `OLLAMA_HOST`, `OLLAMA_MODEL`
+- `LLM_REGISTRY_PATH` (defaults to `llm_registry.json` if present)
+- `LLM_ROUTING_MODE` (`auto`, `prefer_cheap`, `prefer_best`)
+- `LLM_RETRY_ATTEMPTS`
+- `LLM_RETRY_BASE_DELAY_MS`
+- `LLM_CIRCUIT_BREAKER_FAILURES`
+- `LLM_CIRCUIT_BREAKER_WINDOW_SECONDS`
+- `LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS`
+
+Desktop/API optional:
+- `AGENT_API_HOST` (default `127.0.0.1`)
+- `AGENT_API_PORT` (default `8765`)
+- `AGENT_SECRET_STORE_PATH` (encrypted file fallback location)
+- `AGENT_UI_CONFIG_PATH` (desktop/API non-secret config file)
 
 ## Install (systemd)
 Recommended user install:
