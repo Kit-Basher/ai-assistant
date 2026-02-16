@@ -21,6 +21,36 @@ class CheckResult:
     message: str
 
 
+def _check_llm_router() -> CheckResult:
+    try:
+        from agent.config import load_config
+        from agent.llm.router import LLMRouter
+
+        config = load_config(require_telegram_token=False)
+        router = LLMRouter(config)
+        snapshot = router.doctor_snapshot()
+    except Exception as exc:
+        return CheckResult("llm", False, f"llm diagnostics unavailable ({exc})")
+
+    providers = snapshot.get("providers") or []
+    models = snapshot.get("models") or []
+    env = snapshot.get("env") or {}
+    circuits = snapshot.get("circuits") or {}
+
+    provider_names = ",".join(sorted(item.get("name", "") for item in providers if item.get("name"))) or "none"
+    model_ids = ",".join(sorted(item.get("id", "") for item in models if item.get("id"))) or "none"
+    env_present = ",".join(sorted(env.get("present") or [])) or "none"
+    env_missing = ",".join(sorted(env.get("missing") or [])) or "none"
+    open_circuits = sorted(model_id for model_id, state in circuits.items() if state.get("open"))
+    circuit_state = "open=" + ",".join(open_circuits) if open_circuits else "open=none"
+
+    message = (
+        f"providers={provider_names}; models={model_ids}; "
+        f"env_present={env_present}; env_missing={env_missing}; circuits={circuit_state}"
+    )
+    return CheckResult("llm", True, message)
+
+
 def expected_schema_from_version(version_text: str) -> int | None:
     match = re.match(r"^\s*(\d+)\.(\d+)\.(\d+)\s*$", version_text or "")
     if not match:
@@ -243,6 +273,7 @@ def _check_observe_now_dry_run(repo_root: str) -> CheckResult:
 def run_doctor(repo_root: str, db_path: str, version_path: str) -> list[CheckResult]:
     results: list[CheckResult] = []
     results.append(_check_db(db_path))
+    results.append(_check_llm_router())
     schema_version = _read_schema_version(db_path)
     results.append(_check_systemd_units(subprocess.run, db_path))
     results.append(_check_daily_brief_timer(subprocess.run))

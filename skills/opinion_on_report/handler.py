@@ -56,6 +56,22 @@ def _fallback_text() -> str:
 
 
 def _run_llm(context: dict[str, Any], prompt: str) -> str:
+    router = (context or {}).get("llm_router")
+    if router is not None and hasattr(router, "chat"):
+        try:
+            result = router.chat(
+                [
+                    {"role": "system", "content": "Provide concise opinion text only."},
+                    {"role": "user", "content": prompt},
+                ],
+                purpose="presentation_rewrite",
+                compute_tier="mid",
+            )
+            if result.get("ok"):
+                return result.get("text") or ""
+        except Exception:
+            return ""
+
     broker = (context or {}).get("llm_broker")
     if broker is not None:
         try:

@@ -37,6 +37,13 @@ class Config:
     openrouter_model: str | None = None
     openrouter_site_url: str | None = None
     openrouter_app_name: str | None = None
+    llm_registry_path: str | None = None
+    llm_routing_mode: str = "auto"
+    llm_retry_attempts: int = 3
+    llm_retry_base_delay_ms: int = 200
+    llm_circuit_breaker_failures: int = 3
+    llm_circuit_breaker_window_seconds: int = 60
+    llm_circuit_breaker_cooldown_seconds: int = 45
 
 
 @dataclass(frozen=True)
@@ -52,10 +59,12 @@ def load_observe_config() -> ObserveConfig:
     return ObserveConfig(db_path=db_path)
 
 
-def load_config() -> Config:
+def load_config(*, require_telegram_token: bool = True) -> Config:
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    if not telegram_bot_token:
+    if require_telegram_token and not telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
+    if not telegram_bot_token:
+        telegram_bot_token = "local-api"
 
     openai_api_key = os.getenv("OPENAI_API_KEY", "").strip() or None
     openai_model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -134,6 +143,37 @@ def load_config() -> Config:
     allow_cloud = os.getenv("ALLOW_CLOUD", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
     prefer_local = os.getenv("PREFER_LOCAL", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
     llm_timeout_seconds = int(os.getenv("LLM_TIMEOUT_SECONDS", "20") or 20)
+    registry_env = os.getenv("LLM_REGISTRY_PATH", "").strip()
+    default_registry_path = os.path.join(base_dir, "llm_registry.json")
+    if registry_env:
+        llm_registry_path = registry_env
+    elif os.path.isfile(default_registry_path):
+        llm_registry_path = default_registry_path
+    else:
+        llm_registry_path = None
+    llm_routing_mode = os.getenv("LLM_ROUTING_MODE", "auto").strip().lower() or "auto"
+    llm_retry_attempts = int(os.getenv("LLM_RETRY_ATTEMPTS", "3") or 3)
+    llm_retry_base_delay_ms = int(os.getenv("LLM_RETRY_BASE_DELAY_MS", "200") or 200)
+    llm_circuit_breaker_failures = int(os.getenv("LLM_CIRCUIT_BREAKER_FAILURES", "3") or 3)
+    llm_circuit_breaker_window_seconds = int(os.getenv("LLM_CIRCUIT_BREAKER_WINDOW_SECONDS", "60") or 60)
+    llm_circuit_breaker_cooldown_seconds = int(
+        os.getenv("LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS", "45") or 45
+    )
+
+    if llm_routing_mode not in {"auto", "prefer_cheap", "prefer_best"}:
+        raise RuntimeError(f"Unsupported LLM_ROUTING_MODE: {llm_routing_mode}")
+    if llm_retry_attempts < 1:
+        raise RuntimeError("LLM_RETRY_ATTEMPTS must be >= 1.")
+    if llm_retry_base_delay_ms < 0:
+        raise RuntimeError("LLM_RETRY_BASE_DELAY_MS must be >= 0.")
+    if llm_circuit_breaker_failures < 1:
+        raise RuntimeError("LLM_CIRCUIT_BREAKER_FAILURES must be >= 1.")
+    if llm_circuit_breaker_window_seconds < 1:
+        raise RuntimeError("LLM_CIRCUIT_BREAKER_WINDOW_SECONDS must be >= 1.")
+    if llm_circuit_breaker_cooldown_seconds < 1:
+        raise RuntimeError("LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS must be >= 1.")
+    if llm_registry_path and not os.path.isfile(llm_registry_path):
+        raise RuntimeError("LLM_REGISTRY_PATH is missing or not readable.")
 
     return Config(
         telegram_bot_token=telegram_bot_token,
@@ -166,4 +206,11 @@ def load_config() -> Config:
         openrouter_model=openrouter_model,
         openrouter_site_url=openrouter_site_url,
         openrouter_app_name=openrouter_app_name,
+        llm_registry_path=llm_registry_path,
+        llm_routing_mode=llm_routing_mode,
+        llm_retry_attempts=llm_retry_attempts,
+        llm_retry_base_delay_ms=llm_retry_base_delay_ms,
+        llm_circuit_breaker_failures=llm_circuit_breaker_failures,
+        llm_circuit_breaker_window_seconds=llm_circuit_breaker_window_seconds,
+        llm_circuit_breaker_cooldown_seconds=llm_circuit_breaker_cooldown_seconds,
     )

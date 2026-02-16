@@ -1,0 +1,68 @@
+{
+  "providers": {
+    "openai": {
+      "provider_type": "openai",
+      "base_url": "https://api.openai.com/v1",
+      "auth_env_var": "OPENAI_API_KEY",
+      "enabled": true
+    },
+    "openrouter": {
+      "provider_type": "openai",
+      "base_url": "https://openrouter.ai/api/v1",
+      "auth_env_var": "OPENROUTER_API_KEY",
+      "enabled": true
+    },
+    "ollama": {
+      "provider_type": "ollama",
+      "base_url": "http://127.0.0.1:11434",
+      "auth_env_var": null,
+      "enabled": true
+    }
+  },
+  "models": {
+    "openai:gpt-4.1-mini": {
+      "provider": "openai",
+      "model": "gpt-4.1-mini",
+      "capabilities": ["chat", "json", "tools"],
+      "quality_rank": 7,
+      "cost_rank": 4,
+      "default_for": ["chat", "presentation_rewrite"],
+      "enabled": true
+    },
+    "openai:gpt-4.1": {
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "capabilities": ["chat", "json", "tools", "vision"],
+      "quality_rank": 9,
+      "cost_rank": 8,
+      "default_for": ["best_quality"],
+      "enabled": true
+    },
+    "openrouter:openai/gpt-4o-mini": {
+      "provider": "openrouter",
+      "model": "openai/gpt-4o-mini",
+      "capabilities": ["chat", "json", "tools"],
+      "quality_rank": 6,
+      "cost_rank": 3,
+      "default_for": ["chat"],
+      "enabled": true
+    },
+    "ollama:llama3": {
+      "provider": "ollama",
+      "model": "llama3",
+      "capabilities": ["chat"],
+      "quality_rank": 3,
+      "cost_rank": 1,
+      "default_for": ["cheap_local"],
+      "enabled": true
+    }
+  },
+  "routing": {
+    "mode": "auto",
+    "fallback_chain": [
+      "openai:gpt-4.1-mini",
+      "openrouter:openai/gpt-4o-mini",
+      "openai:gpt-4.1"
+    ]
+  }
+}

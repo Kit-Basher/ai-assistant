@@ -456,12 +456,60 @@ def _maybe_rewrite_presentation(
 
     must_keep_lines = [timeframe_line, *domain_lines]
     prompt = _presentation_prompt(deterministic_text, must_keep_lines)
+    router = (context or {}).get("llm_router")
     client = (context or {}).get("llm_presentation_client")
     broker = (context or {}).get("llm_broker")
 
     llm_text = None
     decision = None
-    if selector == "broker":
+    failure_reason = None
+    if router and hasattr(router, "chat"):
+        provider_override = provider if selector == "single" and provider != "none" else None
+        route_result = router.chat(
+            [
+                {"role": "system", "content": "Rewrite for presentation only. Preserve facts exactly."},
+                {"role": "user", "content": prompt},
+            ],
+            purpose="presentation_rewrite",
+            provider_override=provider_override,
+            compute_tier="mid",
+        )
+        attempts = route_result.get("attempts") or []
+        decision = {
+            "winner_id": route_result.get("model"),
+            "winner": {
+                "provider": route_result.get("provider"),
+                "model": route_result.get("model"),
+                "score": None,
+                "remote": route_result.get("provider") not in {"ollama", None},
+                "id": route_result.get("model"),
+            },
+            "candidates": [
+                {
+                    "id": item.get("model"),
+                    "provider": item.get("provider"),
+                    "model": item.get("model"),
+                    "score": None,
+                }
+                for item in attempts
+                if not item.get("reason")
+            ],
+            "rejected": [
+                {
+                    "id": item.get("model"),
+                    "reason": item.get("reason"),
+                }
+                for item in attempts
+                if item.get("reason")
+            ],
+            "candidates_count": len(attempts) + (1 if route_result.get("ok") else 0),
+        }
+        if route_result.get("ok"):
+            llm_text = route_result.get("text")
+            provider = route_result.get("provider") or provider
+        else:
+            failure_reason = route_result.get("error_class") or "router_error"
+    elif selector == "broker":
         if broker is None:
             return {
                 "text": deterministic_text,
@@ -505,6 +553,7 @@ def _maybe_rewrite_presentation(
             llm_text = client.generate(prompt)
     else:
         llm_text = None
+        failure_reason = "router_unavailable"
 
     if not llm_text:
         return {
@@ -515,7 +564,7 @@ def _maybe_rewrite_presentation(
             "provider": provider,
             "selector_mode": selector,
             "decision": decision,
-            "failure_reason": "no_llm_output",
+            "failure_reason": failure_reason or "no_llm_output",
         }
 
     ok, reason = _validate_llm_output(

@@ -5,7 +5,14 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
-SECRET_KEYS = {"openai_api_key", "telegram_bot_token", "authorization", "api_key"}
+SECRET_KEYS = {
+    "openai_api_key",
+    "openrouter_api_key",
+    "anthropic_api_key",
+    "telegram_bot_token",
+    "authorization",
+    "api_key",
+}
 
 
 def _redact(obj: Any) -> Any:

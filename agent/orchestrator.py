@@ -15,7 +15,6 @@ from agent.intent_router import route_message
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
 from agent.runner import Runner
-from agent.llm.router import LLMNarrationRouter
 from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
 from agent.commands import parse_command, split_pipe_args
@@ -415,24 +414,56 @@ class Orchestrator:
         return context
 
     def _maybe_add_narration(self, kind: str, payload: dict[str, Any], text: str) -> str:
-        router = LLMNarrationRouter()
-        result = router.summarize(kind, payload)
-        if not result or not result.text:
+        if not self._narration_enabled():
             return text
-        provider = result.provider or "unknown"
+        if not self.llm_client or not hasattr(self.llm_client, "chat"):
+            return text
+        result = self.llm_client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "Summarize the payload in 2-4 concise bullet lines with no recommendations.",
+                },
+                {"role": "user", "content": json.dumps({"kind": kind, "payload": payload}, ensure_ascii=True)},
+            ],
+            purpose="narration",
+            compute_tier="low",
+        )
+        if not result.get("ok") or not result.get("text"):
+            return text
+        provider = result.get("provider") or "unknown"
         scope = "local" if provider == "ollama" else "cloud" if provider == "openai" else provider
         header = f"Narration ({scope})"
-        return f"{header}\n{result.text}\n\n{text}"
+        return f"{header}\n{result.get('text')}\n\n{text}"
 
     def _maybe_add_narration_from_text(self, kind: str, text: str) -> str:
-        router = LLMNarrationRouter()
-        result = router.summarize(kind, {"report_text": text})
-        if not result or not result.text:
+        if not self._narration_enabled():
             return text
-        provider = result.provider or "unknown"
+        if not self.llm_client or not hasattr(self.llm_client, "chat"):
+            return text
+        result = self.llm_client.chat(
+            [
+                {
+                    "role": "system",
+                    "content": "Summarize the report in 2-4 concise bullet lines with no recommendations.",
+                },
+                {"role": "user", "content": json.dumps({"kind": kind, "report_text": text}, ensure_ascii=True)},
+            ],
+            purpose="narration",
+            compute_tier="low",
+        )
+        if not result.get("ok") or not result.get("text"):
+            return text
+        provider = result.get("provider") or "unknown"
         scope = "local" if provider == "ollama" else "cloud" if provider == "openai" else provider
         header = f"Narration ({scope})"
-        return f"{header}\n{result.text}\n\n{text}"
+        return f"{header}\n{result.get('text')}\n\n{text}"
+
+    @staticmethod
+    def _narration_enabled() -> bool:
+        narration_flag = os.getenv("ENABLE_NARRATION", "").strip().lower()
+        legacy_flag = os.getenv("LLM_NARRATION_ENABLED", "").strip().lower()
+        return (narration_flag or legacy_flag) in {"1", "true", "yes", "y", "on"}
 
     def _extract_opinion_facts(
         self, skill_name: str, function_name: str, result: dict[str, Any]
