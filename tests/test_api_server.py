@@ -120,6 +120,80 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(tested["ok"])
         self.assertEqual("acme", tested["provider"])
 
+    def test_provider_secret_flips_to_secret_source_and_persists(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        initial_source = runtime.registry_document["providers"]["openrouter"]["api_key_source"]
+        self.assertEqual("env", initial_source["type"])
+
+        ok, response = runtime.set_provider_secret("openrouter", {"api_key": "sk-openrouter"})
+        self.assertTrue(ok)
+        self.assertTrue(response["ok"])
+
+        source = runtime.registry_document["providers"]["openrouter"]["api_key_source"]
+        self.assertEqual("secret", source["type"])
+        self.assertEqual("provider:openrouter:api_key", source["name"])
+
+        with open(self.registry_path, "r", encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        disk_source = on_disk["providers"]["openrouter"]["api_key_source"]
+        self.assertEqual("secret", disk_source["type"])
+        self.assertEqual("provider:openrouter:api_key", disk_source["name"])
+
+        restarted = AgentRuntime(_config(self.registry_path, self.db_path))
+        restarted_source = restarted.registry_document["providers"]["openrouter"]["api_key_source"]
+        self.assertEqual("secret", restarted_source["type"])
+        self.assertEqual("provider:openrouter:api_key", restarted_source["name"])
+
+    def test_update_provider_persists_and_survives_restart(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        ok, updated = runtime.update_provider(
+            "openrouter",
+            {
+                "base_url": "https://openrouter.example/api",
+                "chat_path": "v2/chat/completions",
+                "enabled": True,
+                "local": False,
+                "default_headers": {"X-Test": "1"},
+            },
+        )
+        self.assertTrue(ok)
+        self.assertEqual("https://openrouter.example/api", updated["provider"]["base_url"])
+        self.assertEqual("/v2/chat/completions", updated["provider"]["chat_path"])
+
+        with open(self.registry_path, "r", encoding="utf-8") as handle:
+            on_disk = json.load(handle)
+        provider_disk = on_disk["providers"]["openrouter"]
+        self.assertEqual("https://openrouter.example/api", provider_disk["base_url"])
+        self.assertEqual("/v2/chat/completions", provider_disk["chat_path"])
+        self.assertEqual({"X-Test": "1"}, provider_disk["default_headers"])
+
+        restarted = AgentRuntime(_config(self.registry_path, self.db_path))
+        provider_after_restart = restarted.registry_document["providers"]["openrouter"]
+        self.assertEqual("https://openrouter.example/api", provider_after_restart["base_url"])
+        self.assertEqual("/v2/chat/completions", provider_after_restart["chat_path"])
+        self.assertEqual({"X-Test": "1"}, provider_after_restart["default_headers"])
+        self.assertEqual(
+            "https://openrouter.example/api",
+            restarted._router.registry.providers["openrouter"].base_url,  # type: ignore[attr-defined]
+        )
+
+    def test_update_provider_returns_clear_error_when_registry_not_writable(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch.object(runtime.registry_store, "write_document", side_effect=PermissionError("denied")):
+            ok, response = runtime.update_provider("openrouter", {"base_url": "https://example.invalid"})
+        self.assertFalse(ok)
+        self.assertIn("registry_path not writable:", response["error"])
+
+    def test_set_provider_secret_returns_clear_error_when_registry_not_writable(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch.object(runtime.registry_store, "write_document", side_effect=PermissionError("denied")):
+            ok, response = runtime.set_provider_secret("openrouter", {"api_key": "sk-should-not-save"})
+        self.assertFalse(ok)
+        self.assertIn("registry_path not writable:", response["error"])
+        self.assertIsNone(runtime.secret_store.get_secret("provider:openrouter:api_key"))
+
     def test_defaults_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 

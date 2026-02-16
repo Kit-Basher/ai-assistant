@@ -109,8 +109,18 @@ class AgentRuntime:
         return self.router
 
     def _save_registry_document(self, document: dict[str, Any]) -> None:
-        self.registry_store.write_document(document)
+        try:
+            self.registry_store.write_document(document)
+        except OSError as exc:
+            raise RuntimeError(f"registry_path not writable: {self.registry_store.path}") from exc
         self._reload_router()
+
+    def _persist_registry_document(self, document: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
+        try:
+            self._save_registry_document(document)
+        except RuntimeError as exc:
+            return False, {"ok": False, "error": str(exc)}
+        return True, None
 
     def _log_request(self, endpoint: str, ok: bool, payload: dict[str, Any]) -> None:
         record = {
@@ -357,7 +367,10 @@ class AgentRuntime:
         document["providers"] = providers
         document["models"] = models
         self._ensure_defaults(document)
-        self._save_registry_document(document)
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
 
         return True, {
             "ok": True,
@@ -393,7 +406,10 @@ class AgentRuntime:
 
         providers[provider_key] = current
         document["providers"] = providers
-        self._save_registry_document(document)
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
         return True, {
             "ok": True,
             "provider": self._provider_public_payload(provider_key, current),
@@ -425,7 +441,10 @@ class AgentRuntime:
         document["providers"] = providers
         document["models"] = models
         document["defaults"] = defaults
-        self._save_registry_document(document)
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
 
         response = {"ok": True, "deleted": provider_key}
         if warning:
@@ -444,15 +463,19 @@ class AgentRuntime:
         if not isinstance(provider_payload, dict):
             return False, {"ok": False, "error": "provider not found"}
 
+        secret_key = f"provider:{provider_key}:api_key"
+        desired_source = {"type": "secret", "name": secret_key}
         source = provider_payload.get("api_key_source") if isinstance(provider_payload.get("api_key_source"), dict) else None
-        if source is None or source.get("type") != "secret":
-            source = {"type": "secret", "name": f"provider:{provider_key}:api_key"}
-            provider_payload["api_key_source"] = source
+        if source != desired_source:
+            provider_payload["api_key_source"] = desired_source
             providers[provider_key] = provider_payload
             document["providers"] = providers
-            self._save_registry_document(document)
+            saved, error = self._persist_registry_document(document)
+            if not saved:
+                assert error is not None
+                return False, error
 
-        self.secret_store.set_secret(str(source.get("name") or ""), api_key)
+        self.secret_store.set_secret(secret_key, api_key)
         self._router.set_provider_api_key(provider_key, api_key)
         return True, {"ok": True, "provider": provider_key}
 
@@ -592,7 +615,10 @@ class AgentRuntime:
             defaults["allow_remote_fallback"] = bool(payload.get("allow_remote_fallback"))
 
         document["defaults"] = defaults
-        self._save_registry_document(document)
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
         return True, {"ok": True, **self.get_defaults()}
 
     @staticmethod
@@ -767,7 +793,10 @@ class AgentRuntime:
                 }
 
         document["models"] = models
-        self._save_registry_document(document)
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
         return True, {"ok": True, "refreshed": refreshed, "models": self.models().get("models")}
 
     def get_config(self) -> dict[str, Any]:

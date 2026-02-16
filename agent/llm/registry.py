@@ -5,6 +5,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from agent.config import Config
@@ -438,20 +439,22 @@ def _apply_legacy_env_overrides(data: dict[str, Any], config: Config) -> None:
     providers = data.get("providers") or {}
 
     if "openai" in providers:
+        configured_base_url = str(providers["openai"].get("base_url") or "").strip() or config.openai_base_url
         providers["openai"] = {
             **providers["openai"],
             "provider_type": "openai_compat",
-            "base_url": config.openai_base_url or providers["openai"].get("base_url"),
+            "base_url": configured_base_url,
             "api_key_source": providers["openai"].get("api_key_source") or {"type": "env", "name": "OPENAI_API_KEY"},
             "enabled": bool(providers["openai"].get("enabled", True)),
             "local": bool(providers["openai"].get("local", False)),
         }
 
     if "openrouter" in providers:
+        configured_base_url = str(providers["openrouter"].get("base_url") or "").strip() or config.openrouter_base_url
         providers["openrouter"] = {
             **providers["openrouter"],
             "provider_type": "openai_compat",
-            "base_url": config.openrouter_base_url or providers["openrouter"].get("base_url"),
+            "base_url": configured_base_url,
             "api_key_source": providers["openrouter"].get("api_key_source")
             or {"type": "env", "name": "OPENROUTER_API_KEY"},
             "enabled": bool(providers["openrouter"].get("enabled", True)),
@@ -459,10 +462,13 @@ def _apply_legacy_env_overrides(data: dict[str, Any], config: Config) -> None:
         }
 
     if "ollama" in providers:
+        configured_base_url = (
+            str(providers["ollama"].get("base_url") or "").strip() or config.ollama_base_url or config.ollama_host
+        )
         providers["ollama"] = {
             **providers["ollama"],
             "provider_type": "openai_compat",
-            "base_url": config.ollama_base_url or config.ollama_host or providers["ollama"].get("base_url"),
+            "base_url": configured_base_url,
             "api_key_source": None,
             "enabled": bool(providers["ollama"].get("enabled", True)),
             "local": True,
@@ -572,7 +578,19 @@ def save_registry_document(path: str, document: dict[str, Any]) -> None:
     normalized = _normalize_document(document)
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps(normalized, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=str(target.parent))
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(normalized, ensure_ascii=True, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, target)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 class RegistryStore:
