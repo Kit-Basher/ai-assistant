@@ -1,68 +1,62 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
+import urllib.error
+import urllib.parse
+import urllib.request
 
 from agent.config import Config, load_config
+from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
 from agent.secret_store import SecretStore
 
 
-@dataclass
-class RuntimeSettings:
-    routing_mode: str
-
-
-class SettingsStore:
-    def __init__(self, path: str) -> None:
-        self._path = Path(path)
-
-    def load(self, default_mode: str) -> RuntimeSettings:
-        if not self._path.is_file():
-            return RuntimeSettings(routing_mode=default_mode)
-        try:
-            parsed = json.loads(self._path.read_text(encoding="utf-8"))
-            if not isinstance(parsed, dict):
-                return RuntimeSettings(routing_mode=default_mode)
-            mode = str(parsed.get("routing_mode") or default_mode).strip().lower() or default_mode
-            if mode not in {"auto", "prefer_cheap", "prefer_best"}:
-                mode = default_mode
-            return RuntimeSettings(routing_mode=mode)
-        except Exception:
-            return RuntimeSettings(routing_mode=default_mode)
-
-    def save(self, settings: RuntimeSettings) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"routing_mode": settings.routing_mode}
-        self._path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+_PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
 
 
 class AgentRuntime:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.router = LLMRouter(config, log_path=config.log_path)
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
-        settings_path = os.getenv("AGENT_UI_CONFIG_PATH", "").strip() or str(
-            Path(config.db_path).resolve().parent / "ui_config.json"
-        )
-        self.settings_store = SettingsStore(settings_path)
-        self.settings = self.settings_store.load(default_mode=self.router.policy.mode)
-        self.router.set_routing_mode(self.settings.routing_mode)
+
+        registry_path = config.llm_registry_path
+        if not registry_path:
+            repo_root = Path(__file__).resolve().parents[1]
+            registry_path = str(repo_root / "llm_registry.json")
+        self.registry_store = RegistryStore(registry_path)
+
+        self.router: LLMRouter | None = None
+        self.registry_document: dict[str, Any] = {}
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
+        self._reload_router()
 
-        # Load previously saved provider keys into the live runtime.
-        for provider_name in ("openai", "openrouter"):
-            key = self.secret_store.get_provider_api_key(provider_name)
-            if key:
-                self.router.set_provider_api_key(provider_name, key)
+    def _reload_router(self) -> None:
+        self.registry_document = self.registry_store.read_document()
+        registry = self.registry_store.load(self.config)
+        self.router = LLMRouter(
+            self.config,
+            registry=registry,
+            log_path=self.config.log_path,
+            secret_store=self.secret_store,
+        )
+
+    @property
+    def _router(self) -> LLMRouter:
+        assert self.router is not None
+        return self.router
+
+    def _save_registry_document(self, document: dict[str, Any]) -> None:
+        self.registry_store.write_document(document)
+        self._reload_router()
 
     def _log_request(self, endpoint: str, ok: bool, payload: dict[str, Any]) -> None:
         record = {
@@ -73,41 +67,382 @@ class AgentRuntime:
         }
         self._request_log.appendleft(record)
 
+    @staticmethod
+    def _provider_public_payload(provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        api_source = payload.get("api_key_source") if isinstance(payload.get("api_key_source"), dict) else None
+        return {
+            "id": provider_id,
+            "provider_type": payload.get("provider_type"),
+            "base_url": payload.get("base_url"),
+            "chat_path": payload.get("chat_path"),
+            "enabled": bool(payload.get("enabled", True)),
+            "local": bool(payload.get("local", False)),
+            "api_key_source": {
+                "type": (api_source or {}).get("type"),
+                "name": (api_source or {}).get("name"),
+            }
+            if api_source
+            else None,
+            "default_headers": payload.get("default_headers") or {},
+            "default_query_params": payload.get("default_query_params") or {},
+        }
+
+    def _sorted_provider_ids(self) -> list[str]:
+        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        return sorted(str(provider_id) for provider_id in providers.keys())
+
+    def _models_for_provider(self, provider_id: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
+        for model_id, payload in sorted(models.items()):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("provider") or "").strip().lower() != provider_id:
+                continue
+            rows.append({"id": model_id, **payload})
+        return rows
+
+    def _ensure_defaults(self, document: dict[str, Any]) -> dict[str, Any]:
+        defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
+        if not isinstance(defaults, dict):
+            defaults = {}
+        defaults.setdefault("routing_mode", "auto")
+        defaults.setdefault("default_provider", None)
+        defaults.setdefault("default_model", None)
+        defaults.setdefault("allow_remote_fallback", True)
+        defaults.setdefault("fallback_chain", [])
+        document["defaults"] = defaults
+        return defaults
+
     def health(self) -> dict[str, Any]:
-        snapshot = self.router.doctor_snapshot()
+        snapshot = self._router.doctor_snapshot()
         return {
             "ok": True,
             "service": "personal-agent-api",
             "time": datetime.now(timezone.utc).isoformat(),
             "routing_mode": snapshot.get("routing_mode"),
-            "configured_providers": [item.get("name") for item in snapshot.get("providers") or []],
+            "configured_providers": [item.get("id") for item in snapshot.get("providers") or []],
+            "registry_path": self.registry_store.path,
         }
 
     def models(self) -> dict[str, Any]:
-        snapshot = self.router.doctor_snapshot()
+        snapshot = self._router.doctor_snapshot()
         return {
             "providers": snapshot.get("providers") or [],
             "models": snapshot.get("models") or [],
             "routing_mode": snapshot.get("routing_mode"),
+            "defaults": snapshot.get("defaults") or {},
             "circuits": snapshot.get("circuits") or {},
         }
 
-    def get_config(self) -> dict[str, Any]:
-        return {
-            "routing_mode": self.router.policy.mode,
-            "retry_attempts": self.router.policy.retry_attempts,
-            "timeout_seconds": self.router.policy.default_timeout_seconds,
-            "secret_storage": self.secret_store.backend_name,
+    def list_providers(self) -> dict[str, Any]:
+        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        rows = [
+            {
+                **self._provider_public_payload(provider_id, payload),
+                "models": self._models_for_provider(provider_id),
+            }
+            for provider_id, payload in sorted(providers.items())
+            if isinstance(payload, dict)
+        ]
+        return {"providers": rows}
+
+    @staticmethod
+    def _normalize_model_payload(provider_id: str, raw: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+        model_name = str(raw.get("model") or raw.get("name") or "").strip()
+        if not model_name:
+            raise ValueError("model is required")
+        model_id = str(raw.get("id") or f"{provider_id}:{model_name}").strip()
+        capabilities = raw.get("capabilities") if isinstance(raw.get("capabilities"), list) else ["chat"]
+        pricing_raw = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else {}
+        payload = {
+            "provider": provider_id,
+            "model": model_name,
+            "capabilities": [str(item).strip().lower() for item in capabilities if str(item).strip()],
+            "quality_rank": int(raw.get("quality_rank", 5) or 5),
+            "cost_rank": int(raw.get("cost_rank", 5) or 5),
+            "default_for": [str(item) for item in (raw.get("default_for") or ["chat"])],
+            "enabled": bool(raw.get("enabled", True)),
+            "pricing": {
+                "input_per_million_tokens": pricing_raw.get("input_per_million_tokens"),
+                "output_per_million_tokens": pricing_raw.get("output_per_million_tokens"),
+            },
+            "max_context_tokens": raw.get("max_context_tokens"),
+        }
+        return model_id, payload
+
+    def add_provider(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        provider_id = str(payload.get("id") or payload.get("provider_id") or "").strip().lower()
+        if not _PROVIDER_ID_RE.match(provider_id):
+            return False, {"ok": False, "error": "provider id must match [a-z0-9_-]{2,64}"}
+
+        provider_type = str(payload.get("provider_type") or "openai_compat").strip().lower()
+        if provider_type not in {"openai_compat"}:
+            return False, {"ok": False, "error": "provider_type must be openai_compat"}
+
+        base_url = str(payload.get("base_url") or "").strip()
+        if not base_url:
+            return False, {"ok": False, "error": "base_url is required"}
+
+        chat_path = str(payload.get("chat_path") or "/v1/chat/completions").strip() or "/v1/chat/completions"
+        if not chat_path.startswith("/"):
+            chat_path = "/" + chat_path
+
+        document = self.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        if provider_id in providers:
+            return False, {"ok": False, "error": f"provider already exists: {provider_id}"}
+
+        api_key_source = payload.get("api_key_source") if isinstance(payload.get("api_key_source"), dict) else None
+        if api_key_source is None:
+            auth_env_var = str(payload.get("auth_env_var") or "").strip()
+            if auth_env_var:
+                api_key_source = {"type": "env", "name": auth_env_var}
+            elif bool(payload.get("requires_api_key", True)):
+                api_key_source = {"type": "secret", "name": f"provider:{provider_id}:api_key"}
+
+        providers[provider_id] = {
+            "provider_type": provider_type,
+            "base_url": base_url,
+            "chat_path": chat_path,
+            "api_key_source": api_key_source,
+            "default_headers": payload.get("default_headers") if isinstance(payload.get("default_headers"), dict) else {},
+            "default_query_params": payload.get("default_query_params")
+            if isinstance(payload.get("default_query_params"), dict)
+            else {},
+            "enabled": bool(payload.get("enabled", True)),
+            "local": bool(payload.get("local", False)),
         }
 
-    def update_config(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        mode = str((payload or {}).get("routing_mode") or "").strip().lower()
-        if mode not in {"auto", "prefer_cheap", "prefer_best"}:
-            return False, {"ok": False, "error": "routing_mode must be auto, prefer_cheap, or prefer_best"}
-        self.router.set_routing_mode(mode)
-        self.settings = RuntimeSettings(routing_mode=mode)
-        self.settings_store.save(self.settings)
-        return True, {"ok": True, "routing_mode": mode}
+        model_items = payload.get("models") if isinstance(payload.get("models"), list) else []
+        single_model = str(payload.get("model") or "").strip()
+        if single_model:
+            model_items.append({"model": single_model, "id": payload.get("model_id")})
+
+        for model_raw in model_items:
+            if not isinstance(model_raw, dict):
+                continue
+            try:
+                model_id, model_payload = self._normalize_model_payload(provider_id, model_raw)
+            except ValueError:
+                continue
+            models[model_id] = model_payload
+
+        document["providers"] = providers
+        document["models"] = models
+        self._ensure_defaults(document)
+        self._save_registry_document(document)
+
+        return True, {
+            "ok": True,
+            "provider": self._provider_public_payload(provider_id, providers[provider_id]),
+            "models": self._models_for_provider(provider_id),
+        }
+
+    def update_provider(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        provider_key = provider_id.strip().lower()
+        document = self.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        if provider_key not in providers:
+            return False, {"ok": False, "error": "provider not found"}
+
+        current = dict(providers[provider_key])
+        if "base_url" in payload:
+            current["base_url"] = str(payload.get("base_url") or "").strip() or current.get("base_url")
+        if "chat_path" in payload:
+            chat_path = str(payload.get("chat_path") or "").strip() or current.get("chat_path")
+            if not str(chat_path).startswith("/"):
+                chat_path = "/" + str(chat_path)
+            current["chat_path"] = chat_path
+        if "enabled" in payload:
+            current["enabled"] = bool(payload.get("enabled"))
+        if "local" in payload:
+            current["local"] = bool(payload.get("local"))
+        if isinstance(payload.get("default_headers"), dict):
+            current["default_headers"] = payload.get("default_headers")
+        if isinstance(payload.get("default_query_params"), dict):
+            current["default_query_params"] = payload.get("default_query_params")
+        if isinstance(payload.get("api_key_source"), dict):
+            current["api_key_source"] = payload.get("api_key_source")
+
+        providers[provider_key] = current
+        document["providers"] = providers
+        self._save_registry_document(document)
+        return True, {
+            "ok": True,
+            "provider": self._provider_public_payload(provider_key, current),
+        }
+
+    def delete_provider(self, provider_id: str) -> tuple[bool, dict[str, Any]]:
+        provider_key = provider_id.strip().lower()
+        document = self.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        defaults = self._ensure_defaults(document)
+
+        if provider_key not in providers:
+            return False, {"ok": False, "error": "provider not found"}
+
+        warning = None
+        if str(defaults.get("default_provider") or "").strip().lower() == provider_key:
+            warning = "removed provider was default_provider"
+            defaults["default_provider"] = None
+            if str(defaults.get("default_model") or "").startswith(f"{provider_key}:"):
+                defaults["default_model"] = None
+
+        providers.pop(provider_key, None)
+        for model_id in list(models.keys()):
+            model_payload = models.get(model_id)
+            if isinstance(model_payload, dict) and str(model_payload.get("provider") or "").strip().lower() == provider_key:
+                models.pop(model_id, None)
+
+        document["providers"] = providers
+        document["models"] = models
+        document["defaults"] = defaults
+        self._save_registry_document(document)
+
+        response = {"ok": True, "deleted": provider_key}
+        if warning:
+            response["warning"] = warning
+        return True, response
+
+    def set_provider_secret(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        provider_key = provider_id.strip().lower()
+        api_key = str(payload.get("api_key") or "").strip()
+        if not api_key:
+            return False, {"ok": False, "error": "api_key is required"}
+
+        document = self.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_payload = providers.get(provider_key)
+        if not isinstance(provider_payload, dict):
+            return False, {"ok": False, "error": "provider not found"}
+
+        source = provider_payload.get("api_key_source") if isinstance(provider_payload.get("api_key_source"), dict) else None
+        if source is None or source.get("type") != "secret":
+            source = {"type": "secret", "name": f"provider:{provider_key}:api_key"}
+            provider_payload["api_key_source"] = source
+            providers[provider_key] = provider_payload
+            document["providers"] = providers
+            self._save_registry_document(document)
+
+        self.secret_store.set_secret(str(source.get("name") or ""), api_key)
+        self._router.set_provider_api_key(provider_key, api_key)
+        return True, {"ok": True, "provider": provider_key}
+
+    def _provider_default_model(self, provider_id: str) -> str | None:
+        models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
+        for model_id, payload in sorted(models.items()):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("provider") or "").strip().lower() == provider_id and bool(payload.get("enabled", True)):
+                return str(model_id)
+        return None
+
+    def test_provider(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        provider_key = provider_id.strip().lower()
+        model_override = str(payload.get("model") or "").strip() or self._provider_default_model(provider_key)
+        if not model_override:
+            return False, {"ok": False, "error": "No enabled model for provider"}
+
+        key_override = str(payload.get("api_key") or "").strip()
+        previous_source_key = None
+        provider_entry = (
+            self.registry_document.get("providers", {}).get(provider_key)
+            if isinstance(self.registry_document.get("providers"), dict)
+            else None
+        )
+        if isinstance(provider_entry, dict):
+            source = provider_entry.get("api_key_source") if isinstance(provider_entry.get("api_key_source"), dict) else None
+            if isinstance(source, dict) and source.get("type") == "secret":
+                previous_source_key = self.secret_store.get_secret(str(source.get("name") or ""))
+
+        if key_override:
+            self._router.set_provider_api_key(provider_key, key_override)
+
+        result = self._router.chat(
+            [
+                {"role": "system", "content": "Reply with PONG."},
+                {"role": "user", "content": "ping"},
+            ],
+            purpose="diagnostics",
+            task_type="diagnostics",
+            provider_override=provider_key,
+            model_override=model_override,
+            timeout_seconds=float(payload.get("timeout_seconds") or 6.0),
+        )
+
+        if not result.get("ok"):
+            if key_override and previous_source_key is not None:
+                self._router.set_provider_api_key(provider_key, previous_source_key)
+            response = {
+                "ok": False,
+                "provider": provider_key,
+                "model": model_override,
+                "error": result.get("error_class") or "provider_error",
+                "message": result.get("error") or "connectivity test failed",
+            }
+            self._log_request(f"/providers/{provider_key}/test", False, response)
+            return False, response
+
+        if key_override and previous_source_key is None:
+            # ephemeral override, do not persist unless caller uses /secret
+            self._router.set_provider_api_key(provider_key, "")
+
+        response = {
+            "ok": True,
+            "provider": provider_key,
+            "model": result.get("model"),
+            "duration_ms": int(result.get("duration_ms") or 0),
+        }
+        self._log_request(f"/providers/{provider_key}/test", True, response)
+        return True, response
+
+    def get_defaults(self) -> dict[str, Any]:
+        defaults = self._ensure_defaults(self.registry_document)
+        return {
+            "routing_mode": defaults.get("routing_mode") or self._router.policy.mode,
+            "default_provider": defaults.get("default_provider"),
+            "default_model": defaults.get("default_model"),
+            "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
+        }
+
+    def update_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        valid_modes = {
+            "auto",
+            "prefer_cheap",
+            "prefer_best",
+            "prefer_local_lowest_cost_capable",
+        }
+
+        document = self.registry_document
+        defaults = self._ensure_defaults(document)
+
+        if "routing_mode" in payload:
+            mode = str(payload.get("routing_mode") or "").strip().lower()
+            if mode not in valid_modes:
+                return False, {"ok": False, "error": "invalid routing_mode"}
+            defaults["routing_mode"] = mode
+
+        if "default_provider" in payload:
+            provider = str(payload.get("default_provider") or "").strip().lower() or None
+            if provider and provider not in self._sorted_provider_ids():
+                return False, {"ok": False, "error": "default_provider not found"}
+            defaults["default_provider"] = provider
+
+        if "default_model" in payload:
+            model = str(payload.get("default_model") or "").strip() or None
+            if model and model not in (self.registry_document.get("models") or {}):
+                return False, {"ok": False, "error": "default_model not found"}
+            defaults["default_model"] = model
+
+        if "allow_remote_fallback" in payload:
+            defaults["allow_remote_fallback"] = bool(payload.get("allow_remote_fallback"))
+
+        document["defaults"] = defaults
+        self._save_registry_document(document)
+        return True, {"ok": True, **self.get_defaults()}
 
     @staticmethod
     def _normalize_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -128,17 +463,20 @@ class AgentRuntime:
         if not messages:
             return False, {"ok": False, "error": "messages must be a non-empty list"}
 
-        model_override = (payload.get("model") or "").strip() or None
-        provider_override = (payload.get("provider") or "").strip().lower() or None
+        defaults = self.get_defaults()
+        model_override = str(payload.get("model") or "").strip() or defaults.get("default_model")
+        provider_override = str(payload.get("provider") or "").strip().lower() or defaults.get("default_provider")
 
-        result = self.router.chat(
+        result = self._router.chat(
             messages,
             purpose=str(payload.get("purpose") or "chat"),
+            task_type=str(payload.get("task_type") or payload.get("purpose") or "chat"),
             provider_override=provider_override,
             model_override=model_override,
             require_tools=bool(payload.get("require_tools")),
             require_json=bool(payload.get("require_json")),
             require_vision=bool(payload.get("require_vision")),
+            min_context_tokens=int(payload.get("min_context_tokens") or 0) or None,
             timeout_seconds=float(payload.get("timeout_seconds") or 0) or None,
         )
 
@@ -160,64 +498,107 @@ class AgentRuntime:
         self._log_request("/chat", bool(result.get("ok")), response["meta"])
         return bool(result.get("ok")), response
 
-    def _model_for_provider(self, provider: str, preferred_model: str | None = None) -> str | None:
-        if preferred_model:
-            return preferred_model
-        for model in self.router.registry.sorted_models():
-            if model.provider == provider and model.enabled:
-                return model.id
-        return None
+    @staticmethod
+    def _http_get_json(url: str, timeout_seconds: float = 4.0) -> dict[str, Any]:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8")
+        parsed = json.loads(raw or "{}")
+        if isinstance(parsed, dict):
+            return parsed
+        return {}
 
-    def test_provider(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        provider = str((payload or {}).get("provider") or "").strip().lower()
-        if not provider:
-            return False, {"ok": False, "error": "provider is required"}
+    def refresh_models(self) -> tuple[bool, dict[str, Any]]:
+        document = self.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
 
-        model_override = self._model_for_provider(provider, str(payload.get("model") or "").strip() or None)
-        if not model_override:
-            return False, {"ok": False, "error": "No enabled model found for provider"}
+        refreshed: dict[str, list[str]] = {}
 
-        previous_key = self.secret_store.get_provider_api_key(provider) or ""
-        candidate_key = str(payload.get("api_key") or "").strip()
+        for provider_id, payload in sorted(providers.items()):
+            if not isinstance(payload, dict):
+                continue
+            if not bool(payload.get("enabled", True)):
+                continue
+            if not bool(payload.get("local", False)):
+                continue
 
-        if candidate_key:
-            if not self.router.set_provider_api_key(provider, candidate_key):
-                return False, {"ok": False, "error": "Unknown provider"}
+            base_url = str(payload.get("base_url") or "").rstrip("/")
+            if not base_url:
+                continue
 
-        result = self.router.chat(
-            [
-                {"role": "system", "content": "Reply with PONG."},
-                {"role": "user", "content": "ping"},
-            ],
-            purpose="diagnostics",
-            provider_override=provider,
-            model_override=model_override,
-            timeout_seconds=float(payload.get("timeout_seconds") or 5.0),
-        )
+            discovered_models: list[str] = []
+            # Try OpenAI-compatible model listing first.
+            try:
+                parsed = self._http_get_json(base_url + "/v1/models")
+                data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    model_name = str(item.get("id") or "").strip()
+                    if model_name:
+                        discovered_models.append(model_name)
+            except Exception:
+                discovered_models = []
 
-        if result.get("ok"):
-            if candidate_key:
-                self.secret_store.set_provider_api_key(provider, candidate_key)
-            response = {
-                "ok": True,
-                "provider": provider,
-                "model": result.get("model"),
-                "duration_ms": int(result.get("duration_ms") or 0),
-            }
-            self._log_request("/providers/test", True, response)
-            return True, response
+            if not discovered_models:
+                try:
+                    parsed = self._http_get_json(base_url + "/api/tags")
+                    tags = parsed.get("models") if isinstance(parsed.get("models"), list) else []
+                    for item in tags:
+                        if not isinstance(item, dict):
+                            continue
+                        model_name = str(item.get("name") or "").strip()
+                        if model_name:
+                            discovered_models.append(model_name)
+                except Exception:
+                    discovered_models = []
 
-        if candidate_key:
-            self.router.set_provider_api_key(provider, previous_key)
-        response = {
-            "ok": False,
-            "provider": provider,
-            "model": result.get("model"),
-            "error": result.get("error_class") or "provider_error",
-            "message": result.get("error") or "connection test failed",
+            if not discovered_models:
+                continue
+
+            refreshed[provider_id] = []
+            for model_name in sorted(set(discovered_models)):
+                model_id = f"{provider_id}:{model_name}"
+                refreshed[provider_id].append(model_id)
+                existing = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+                models[model_id] = {
+                    **existing,
+                    "provider": provider_id,
+                    "model": model_name,
+                    "capabilities": list(existing.get("capabilities") or ["chat"]),
+                    "quality_rank": int(existing.get("quality_rank", 2) or 2),
+                    "cost_rank": int(existing.get("cost_rank", 0) or 0),
+                    "default_for": list(existing.get("default_for") or ["chat"]),
+                    "enabled": bool(existing.get("enabled", True)),
+                    "pricing": existing.get("pricing")
+                    or {
+                        "input_per_million_tokens": None,
+                        "output_per_million_tokens": None,
+                    },
+                    "max_context_tokens": existing.get("max_context_tokens"),
+                }
+
+        document["models"] = models
+        self._save_registry_document(document)
+        return True, {"ok": True, "refreshed": refreshed, "models": self.models().get("models")}
+
+    def get_config(self) -> dict[str, Any]:
+        defaults = self.get_defaults()
+        return {
+            "routing_mode": defaults.get("routing_mode"),
+            "retry_attempts": self._router.policy.retry_attempts,
+            "timeout_seconds": self._router.policy.default_timeout_seconds,
+            "secret_storage": self.secret_store.backend_name,
         }
-        self._log_request("/providers/test", False, response)
-        return False, response
+
+    def update_config(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        if "routing_mode" not in payload:
+            return False, {"ok": False, "error": "routing_mode is required"}
+        ok, updated = self.update_defaults({"routing_mode": payload.get("routing_mode")})
+        if not ok:
+            return False, updated
+        return True, {"ok": True, "routing_mode": updated.get("routing_mode")}
 
 
 class APIServerHandler(BaseHTTPRequestHandler):
@@ -233,7 +614,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
         self.wfile.write(body)
@@ -253,40 +634,107 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return {}
         return {}
 
+    def _path_parts(self) -> tuple[str, list[str]]:
+        parsed = urllib.parse.urlparse(self.path)
+        clean_path = parsed.path or "/"
+        parts = [part for part in clean_path.split("/") if part]
+        return clean_path, parts
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         self._send_json(200, {"ok": True})
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
+        path, parts = self._path_parts()
+        if path == "/health":
             self._send_json(200, self.runtime.health())
             return
-        if self.path == "/models":
+        if path == "/models":
             self._send_json(200, self.runtime.models())
             return
-        if self.path == "/config":
+        if path == "/config":
             self._send_json(200, self.runtime.get_config())
             return
-        self._send_json(404, {"ok": False, "error": "not_found"})
+        if path == "/defaults":
+            self._send_json(200, self.runtime.get_defaults())
+            return
+        if path == "/providers":
+            self._send_json(200, self.runtime.list_providers())
+            return
+        self._send_json(404, {"ok": False, "error": "not_found", "path": path, "parts": parts})
 
     def do_POST(self) -> None:  # noqa: N802
+        path, parts = self._path_parts()
         payload = self._read_json()
-        if self.path == "/chat":
+
+        if path == "/chat":
             ok, body = self.runtime.chat(payload)
             self._send_json(200 if ok else 400, body)
             return
-        if self.path == "/providers/test":
-            ok, body = self.runtime.test_provider(payload)
+
+        if path == "/providers":
+            ok, body = self.runtime.add_provider(payload)
             self._send_json(200 if ok else 400, body)
             return
+
+        if path == "/providers/test":
+            # backward-compatible endpoint
+            provider_id = str(payload.get("provider") or "").strip().lower()
+            if not provider_id:
+                self._send_json(400, {"ok": False, "error": "provider is required"})
+                return
+            ok, body = self.runtime.test_provider(provider_id, payload)
+            self._send_json(200 if ok else 400, body)
+            return
+
+        if path == "/models/refresh":
+            ok, body = self.runtime.refresh_models()
+            self._send_json(200 if ok else 400, body)
+            return
+
+        if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
+            provider_id = parts[1]
+            ok, body = self.runtime.set_provider_secret(provider_id, payload)
+            self._send_json(200 if ok else 400, body)
+            return
+
+        if len(parts) == 3 and parts[0] == "providers" and parts[2] == "test":
+            provider_id = parts[1]
+            ok, body = self.runtime.test_provider(provider_id, payload)
+            self._send_json(200 if ok else 400, body)
+            return
+
         self._send_json(404, {"ok": False, "error": "not_found"})
 
     def do_PUT(self) -> None:  # noqa: N802
-        if self.path != "/config":
-            self._send_json(404, {"ok": False, "error": "not_found"})
-            return
+        path, parts = self._path_parts()
         payload = self._read_json()
-        ok, body = self.runtime.update_config(payload)
-        self._send_json(200 if ok else 400, body)
+
+        if path == "/config":
+            ok, body = self.runtime.update_config(payload)
+            self._send_json(200 if ok else 400, body)
+            return
+
+        if path == "/defaults":
+            ok, body = self.runtime.update_defaults(payload)
+            self._send_json(200 if ok else 400, body)
+            return
+
+        if len(parts) == 2 and parts[0] == "providers":
+            provider_id = parts[1]
+            ok, body = self.runtime.update_provider(provider_id, payload)
+            self._send_json(200 if ok else 400, body)
+            return
+
+        self._send_json(404, {"ok": False, "error": "not_found"})
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        path, parts = self._path_parts()
+        if len(parts) == 2 and parts[0] == "providers":
+            provider_id = parts[1]
+            ok, body = self.runtime.delete_provider(provider_id)
+            self._send_json(200 if ok else 400, body)
+            return
+        self._send_json(404, {"ok": False, "error": "not_found"})
 
 
 def build_runtime(config: Config | None = None) -> AgentRuntime:
