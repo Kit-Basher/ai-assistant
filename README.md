@@ -34,7 +34,15 @@ Endpoints:
 - `POST /chat`
 - `GET /config`
 - `PUT /config`
-- `POST /providers/test`
+- `GET /providers`
+- `POST /providers`
+- `PUT /providers/{id}`
+- `DELETE /providers/{id}`
+- `POST /providers/{id}/secret`
+- `POST /providers/{id}/test`
+- `GET /defaults`
+- `PUT /defaults`
+- `POST /models/refresh`
 
 ## Desktop App (Tauri + React)
 Located in `desktop/`.
@@ -54,6 +62,27 @@ Secret storage:
 - Primary: OS keychain via `keyring` (if available in runtime environment)
 - Fallback: encrypted local file at `~/.local/share/personal-agent/secrets.enc.json`
 
+Provider/model registry:
+- File: `llm_registry.json` (schema v2, JSON on disk)
+- Backward compatibility: v1 files are loaded via migration/compat logic at runtime.
+
+Routing (high-level):
+- `auto`: balanced quality/cost ordering.
+- `prefer_cheap`: prioritize lower-cost models.
+- `prefer_best`: prioritize higher-quality models.
+- `prefer_local_lowest_cost_capable`: local-capable models first; otherwise lowest expected token-cost among capable remote models.
+  - Expected cost uses rolling usage averages per `(task_type, provider, model)` from `llm_usage_stats.json` (next to DB by default).
+  - Local models with unknown pricing are treated as zero-cost for ranking.
+
+Side-by-side staging run:
+1. Use a different API port:
+   - `.venv/bin/python -m agent.api_server --port 8876`
+2. Use separate data/config paths:
+   - `AGENT_DB_PATH=/tmp/personal-agent-staging/agent.db`
+   - `LLM_REGISTRY_PATH=/tmp/personal-agent-staging/llm_registry.json`
+   - `AGENT_SECRET_STORE_PATH=/tmp/personal-agent-staging/secrets.enc.json`
+   - `LLM_USAGE_STATS_PATH=/tmp/personal-agent-staging/llm_usage_stats.json`
+
 ## Environment Variables
 Required:
 - `TELEGRAM_BOT_TOKEN`
@@ -71,18 +100,18 @@ LLM/provider optional:
 - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`
 - `OLLAMA_HOST`, `OLLAMA_MODEL`
 - `LLM_REGISTRY_PATH` (defaults to `llm_registry.json` if present)
-- `LLM_ROUTING_MODE` (`auto`, `prefer_cheap`, `prefer_best`)
+- `LLM_ROUTING_MODE` (`auto`, `prefer_cheap`, `prefer_best`, `prefer_local_lowest_cost_capable`)
 - `LLM_RETRY_ATTEMPTS`
 - `LLM_RETRY_BASE_DELAY_MS`
 - `LLM_CIRCUIT_BREAKER_FAILURES`
 - `LLM_CIRCUIT_BREAKER_WINDOW_SECONDS`
 - `LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS`
+- `LLM_USAGE_STATS_PATH` (default: `llm_usage_stats.json` next to DB)
 
 Desktop/API optional:
 - `AGENT_API_HOST` (default `127.0.0.1`)
 - `AGENT_API_PORT` (default `8765`)
 - `AGENT_SECRET_STORE_PATH` (encrypted file fallback location)
-- `AGENT_UI_CONFIG_PATH` (desktop/API non-secret config file)
 
 ## Install (systemd)
 Recommended user install:
@@ -133,7 +162,7 @@ User timer status:
 
 ## Testing
 - Full suite: `pytest -q`
-- Current local result (2026-02-14): `168 passed`
+- Current local result (2026-02-16): `341 passed`
 
 ## Architecture References
 - `ARCHITECTURE.md`
