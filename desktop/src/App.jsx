@@ -1,6 +1,29 @@
 import { useEffect, useMemo, useState } from "react";
 
 const ROUTING_MODES = ["auto", "prefer_cheap", "prefer_best", "prefer_local_lowest_cost_capable"];
+const PROVIDER_PRESETS = {
+  custom: {
+    label: "Custom OpenAI-Compatible",
+    id: "",
+    base_url: "",
+    chat_path: "/v1/chat/completions",
+    local: false
+  },
+  openrouter: {
+    label: "OpenRouter",
+    id: "openrouter",
+    base_url: "https://openrouter.ai/api/v1",
+    chat_path: "/chat/completions",
+    local: false
+  },
+  ollama: {
+    label: "Ollama (Local)",
+    id: "ollama",
+    base_url: "http://127.0.0.1:11434",
+    chat_path: "/v1/chat/completions",
+    local: true
+  }
+};
 
 function healthStatus(entity) {
   return entity?.health?.status || "ok";
@@ -18,6 +41,20 @@ function asErrorText(error) {
   if (typeof error === "string") return error;
   if (error.message) return error.message;
   return JSON.stringify(error);
+}
+
+function parseJsonObject(rawText, fieldLabel) {
+  const value = String(rawText || "").trim();
+  if (!value) return { ok: true, value: {} };
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { ok: false, error: `${fieldLabel} must be a JSON object` };
+    }
+    return { ok: true, value: parsed };
+  } catch (_error) {
+    return { ok: false, error: `${fieldLabel} must be valid JSON` };
+  }
 }
 
 function formatNow() {
@@ -59,17 +96,28 @@ export default function App() {
   const [providerDrafts, setProviderDrafts] = useState({});
   const [providerSecrets, setProviderSecrets] = useState({});
   const [providerStatuses, setProviderStatuses] = useState({});
+  const [addProviderForm, setAddProviderForm] = useState({
+    preset: "custom",
+    id: "",
+    base_url: "",
+    chat_path: "/v1/chat/completions",
+    local: false,
+    enabled: true,
+    api_key: "",
+    default_headers_text: "",
+    default_query_params_text: "",
+    initial_model: ""
+  });
+  const [addProviderStatus, setAddProviderStatus] = useState("");
+  const [addProviderBusy, setAddProviderBusy] = useState(false);
+  const [activeProviderForModels, setActiveProviderForModels] = useState("");
+  const [manualModelDraft, setManualModelDraft] = useState({
+    model: "",
+    capabilities: "chat,json,tools"
+  });
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [telegramStatus, setTelegramStatus] = useState("");
-
-  const [newProvider, setNewProvider] = useState({
-    id: "",
-    base_url: "",
-    model: "",
-    local: false,
-    enabled: true
-  });
 
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -144,6 +192,11 @@ export default function App() {
       if (!selectedModel && modelRows.length > 0) {
         setSelectedModel(defaultsPayload.default_model || modelRows[0].id);
       }
+      if (!activeProviderForModels && providerRows.length > 0) {
+        setActiveProviderForModels(providerRows[0].id);
+      } else if (activeProviderForModels && !providerRows.find((item) => item.id === activeProviderForModels)) {
+        setActiveProviderForModels(providerRows[0]?.id || "");
+      }
 
       appendLog({ endpoint: "bootstrap", ok: true, detail: "Loaded /providers, /models, /defaults" });
     } catch (error) {
@@ -178,6 +231,10 @@ export default function App() {
     });
     return notes;
   }, [providers]);
+  const activeProviderModels = useMemo(
+    () => models.filter((model) => model.provider === activeProviderForModels),
+    [models, activeProviderForModels]
+  );
 
   const saveDefaults = async () => {
     setSetupStatus("Saving defaults...");
@@ -201,44 +258,155 @@ export default function App() {
   const refreshModels = async () => {
     try {
       await request("POST", "/models/refresh", {});
-      appendLog({ endpoint: "/models/refresh", ok: true, detail: "Refreshed local models" });
+      appendLog({ endpoint: "/models/refresh", ok: true, detail: "Refreshed models" });
       await refreshRuntimeState();
     } catch (error) {
       appendLog({ endpoint: "/models/refresh", ok: false, detail: asErrorText(error) });
     }
   };
 
-  const addProvider = async () => {
-    if (!newProvider.id.trim() || !newProvider.base_url.trim() || !newProvider.model.trim()) {
-      setSetupStatus("Provider id, base URL, and initial model are required.");
+  const applyProviderPreset = (presetId) => {
+    const preset = PROVIDER_PRESETS[presetId] || PROVIDER_PRESETS.custom;
+    setAddProviderForm((prev) => ({
+      ...prev,
+      preset: presetId,
+      id: preset.id || prev.id,
+      base_url: preset.base_url,
+      chat_path: preset.chat_path,
+      local: preset.local
+    }));
+  };
+
+  const updateAddProviderField = (field, value) => {
+    setAddProviderForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const saveOrTestProvider = async ({ runTest = false } = {}) => {
+    const providerId = addProviderForm.id.trim().toLowerCase();
+    const baseUrl = addProviderForm.base_url.trim();
+    const chatPath = addProviderForm.chat_path.trim() || "/v1/chat/completions";
+    const initialModel = addProviderForm.initial_model.trim();
+    const apiKey = addProviderForm.api_key.trim();
+
+    if (!providerId || !baseUrl) {
+      setAddProviderStatus("Provider id and base URL are required.");
       return;
     }
+
+    const headersParsed = parseJsonObject(addProviderForm.default_headers_text, "Headers");
+    if (!headersParsed.ok) {
+      setAddProviderStatus(headersParsed.error);
+      return;
+    }
+    const queryParsed = parseJsonObject(addProviderForm.default_query_params_text, "Query params");
+    if (!queryParsed.ok) {
+      setAddProviderStatus(queryParsed.error);
+      return;
+    }
+
+    setAddProviderBusy(true);
+    setAddProviderStatus("Saving provider...");
     try {
-      await request("POST", "/providers", {
-        id: newProvider.id.trim().toLowerCase(),
+      const providerPayload = {
+        id: providerId,
         provider_type: "openai_compat",
-        base_url: newProvider.base_url.trim(),
-        chat_path: "/v1/chat/completions",
-        local: !!newProvider.local,
-        enabled: !!newProvider.enabled,
-        models: [
-          {
-            id: `${newProvider.id.trim().toLowerCase()}:${newProvider.model.trim()}`,
-            model: newProvider.model.trim(),
-            capabilities: ["chat", "json", "tools"],
-            pricing: {
-              input_per_million_tokens: null,
-              output_per_million_tokens: null
-            }
-          }
-        ]
-      });
-      setNewProvider({ id: "", base_url: "", model: "", local: false, enabled: true });
-      appendLog({ endpoint: "/providers", ok: true, detail: "Added provider" });
+        base_url: baseUrl,
+        chat_path: chatPath,
+        local: !!addProviderForm.local,
+        enabled: !!addProviderForm.enabled,
+        default_headers: headersParsed.value,
+        default_query_params: queryParsed.value
+      };
+
+      const providerExists = providers.some((item) => item.id === providerId);
+      if (!providerExists) {
+        await request("POST", "/providers", providerPayload);
+      } else {
+        await request("PUT", `/providers/${providerId}`, {
+          base_url: baseUrl,
+          chat_path: chatPath,
+          local: !!addProviderForm.local,
+          enabled: !!addProviderForm.enabled,
+          default_headers: headersParsed.value,
+          default_query_params: queryParsed.value
+        });
+      }
+
+      if (apiKey) {
+        await request("POST", `/providers/${providerId}/secret`, { api_key: apiKey });
+      }
+
+      if (initialModel) {
+        await request("POST", `/providers/${providerId}/models`, {
+          model: initialModel,
+          capabilities: ["chat", "json", "tools"],
+          available: true
+        });
+      }
+
+      if (runTest) {
+        const testPayload = {};
+        if (initialModel) {
+          testPayload.model = `${providerId}:${initialModel}`;
+        }
+        const testResult = await request("POST", `/providers/${providerId}/test`, testPayload);
+        setAddProviderStatus(`Connected: ${testResult.provider}/${testResult.model}`);
+      } else {
+        setAddProviderStatus("Provider saved.");
+      }
+
+      setAddProviderForm((prev) => ({ ...prev, api_key: "" }));
+      setActiveProviderForModels(providerId);
+      appendLog({ endpoint: "/providers", ok: true, detail: runTest ? "Saved and tested provider" : "Saved provider" });
       await refreshRuntimeState();
     } catch (error) {
-      appendLog({ endpoint: "/providers", ok: false, detail: asErrorText(error) });
-      setSetupStatus(`Add provider failed: ${asErrorText(error)}`);
+      const detail = asErrorText(error);
+      setAddProviderStatus(`Failed: ${detail}`);
+      appendLog({ endpoint: "/providers", ok: false, detail });
+    } finally {
+      setAddProviderBusy(false);
+    }
+  };
+
+  const refreshProviderModels = async (providerId) => {
+    if (!providerId) return;
+    try {
+      await request("POST", `/providers/${providerId}/models/refresh`, {});
+      setAddProviderStatus(`Fetched models for ${providerId}.`);
+      appendLog({ endpoint: `/providers/${providerId}/models/refresh`, ok: true, detail: "Fetched models" });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setAddProviderStatus(`Fetch failed: ${detail}`);
+      appendLog({ endpoint: `/providers/${providerId}/models/refresh`, ok: false, detail });
+    }
+  };
+
+  const addManualModel = async (providerId) => {
+    if (!providerId) return;
+    const modelName = manualModelDraft.model.trim();
+    if (!modelName) {
+      setAddProviderStatus("Manual model name is required.");
+      return;
+    }
+    const capabilities = manualModelDraft.capabilities
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean);
+    try {
+      await request("POST", `/providers/${providerId}/models`, {
+        model: modelName,
+        capabilities: capabilities.length ? capabilities : ["chat"],
+        available: true
+      });
+      setAddProviderStatus(`Added model ${providerId}:${modelName}.`);
+      setManualModelDraft((prev) => ({ ...prev, model: "" }));
+      appendLog({ endpoint: `/providers/${providerId}/models`, ok: true, detail: `Added model ${modelName}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setAddProviderStatus(`Manual add failed: ${detail}`);
+      appendLog({ endpoint: `/providers/${providerId}/models`, ok: false, detail });
     }
   };
 
@@ -540,42 +708,157 @@ export default function App() {
         {activeTab === "providers" ? (
           <section className="grid">
             <div className="card">
-              <h2>Add Provider</h2>
+              <h2>Add Provider (OpenAI-Compatible)</h2>
               <div className="grid two">
+                <label>
+                  Preset
+                  <select value={addProviderForm.preset} onChange={(event) => applyProviderPreset(event.target.value)}>
+                    {Object.entries(PROVIDER_PRESETS).map(([id, preset]) => (
+                      <option key={id} value={id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label>
                   Provider ID
                   <input
-                    value={newProvider.id}
-                    onChange={(event) => setNewProvider((prev) => ({ ...prev, id: event.target.value }))}
-                    placeholder="acme"
+                    value={addProviderForm.id}
+                    onChange={(event) => updateAddProviderField("id", event.target.value)}
+                    placeholder="provider-id"
                   />
                 </label>
                 <label>
                   Base URL
                   <input
-                    value={newProvider.base_url}
-                    onChange={(event) => setNewProvider((prev) => ({ ...prev, base_url: event.target.value }))}
+                    value={addProviderForm.base_url}
+                    onChange={(event) => updateAddProviderField("base_url", event.target.value)}
                     placeholder="https://api.example.com"
                   />
                 </label>
                 <label>
-                  Initial model name
+                  Chat path
                   <input
-                    value={newProvider.model}
-                    onChange={(event) => setNewProvider((prev) => ({ ...prev, model: event.target.value }))}
-                    placeholder="model-name"
+                    value={addProviderForm.chat_path}
+                    onChange={(event) => updateAddProviderField("chat_path", event.target.value)}
+                    placeholder="/v1/chat/completions"
+                  />
+                </label>
+                <label>
+                  API Key (optional, stored securely)
+                  <input
+                    type="password"
+                    value={addProviderForm.api_key}
+                    onChange={(event) => updateAddProviderField("api_key", event.target.value)}
+                    placeholder="sk-..."
+                  />
+                </label>
+                <label>
+                  Optional initial model
+                  <input
+                    value={addProviderForm.initial_model}
+                    onChange={(event) => updateAddProviderField("initial_model", event.target.value)}
+                    placeholder="gpt-4o-mini"
                   />
                 </label>
                 <label className="checkbox-row">
                   <input
                     type="checkbox"
-                    checked={newProvider.local}
-                    onChange={(event) => setNewProvider((prev) => ({ ...prev, local: event.target.checked }))}
+                    checked={addProviderForm.local}
+                    onChange={(event) => updateAddProviderField("local", event.target.checked)}
                   />
                   Local provider
                 </label>
+                <label className="checkbox-row">
+                  <input
+                    type="checkbox"
+                    checked={addProviderForm.enabled}
+                    onChange={(event) => updateAddProviderField("enabled", event.target.checked)}
+                  />
+                  Enabled
+                </label>
               </div>
-              <button onClick={addProvider}>Add Provider</button>
+              <label>
+                Default headers JSON (optional)
+                <textarea
+                  value={addProviderForm.default_headers_text}
+                  onChange={(event) => updateAddProviderField("default_headers_text", event.target.value)}
+                  placeholder='{"HTTP-Referer":"https://example.com"}'
+                />
+              </label>
+              <label>
+                Default query params JSON (optional)
+                <textarea
+                  value={addProviderForm.default_query_params_text}
+                  onChange={(event) => updateAddProviderField("default_query_params_text", event.target.value)}
+                  placeholder='{"api-version":"2024-06-01"}'
+                />
+              </label>
+              <div className="row-actions">
+                <button disabled={addProviderBusy} onClick={() => saveOrTestProvider({ runTest: false })}>
+                  {addProviderBusy ? "Saving..." : "Save Provider"}
+                </button>
+                <button disabled={addProviderBusy} onClick={() => saveOrTestProvider({ runTest: true })}>
+                  {addProviderBusy ? "Testing..." : "Save + Test"}
+                </button>
+              </div>
+              <p className="status-line">{addProviderStatus || "Add any OpenAI-compatible endpoint."}</p>
+            </div>
+
+            <div className="card">
+              <h2>Models</h2>
+              <label>
+                Provider
+                <select value={activeProviderForModels} onChange={(event) => setActiveProviderForModels(event.target.value)}>
+                  <option value="">(select provider)</option>
+                  {providerOptions.map((providerId) => (
+                    <option key={providerId} value={providerId}>
+                      {providerId}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="row-actions">
+                <button disabled={!activeProviderForModels} onClick={() => refreshProviderModels(activeProviderForModels)}>
+                  Fetch Models
+                </button>
+                <button onClick={refreshModels}>Refresh All</button>
+              </div>
+              <div className="model-list">
+                {activeProviderModels.length === 0 ? <p className="empty">No models for selected provider.</p> : null}
+                {activeProviderModels.map((model) => (
+                  <div key={model.id} className="model-row">
+                    <div className="model-head">
+                      <span>{model.id}</span>
+                      <span className={`badge health-${healthLabel(model)}`}>{healthLabel(model)}</span>
+                    </div>
+                    <div className="meta-line">
+                      {model.available ? "available" : "unavailable"} · {model.routable ? "routable" : "not routable"}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="grid two">
+                <label>
+                  Manual model name
+                  <input
+                    value={manualModelDraft.model}
+                    onChange={(event) => setManualModelDraft((prev) => ({ ...prev, model: event.target.value }))}
+                    placeholder="model-name"
+                  />
+                </label>
+                <label>
+                  Capabilities (comma-separated)
+                  <input
+                    value={manualModelDraft.capabilities}
+                    onChange={(event) => setManualModelDraft((prev) => ({ ...prev, capabilities: event.target.value }))}
+                    placeholder="chat,json,tools"
+                  />
+                </label>
+              </div>
+              <button disabled={!activeProviderForModels} onClick={() => addManualModel(activeProviderForModels)}>
+                Add Model Manually
+              </button>
             </div>
 
             {providers.map((provider) => {
