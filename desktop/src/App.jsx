@@ -665,7 +665,7 @@ export default function App() {
 
               <div className="row-actions">
                 <button onClick={saveDefaults}>Save Defaults</button>
-                <button onClick={refreshModels}>Refresh Local Models</button>
+                <button onClick={refreshModels}>Refresh Models</button>
               </div>
               <p className="status-line">{setupStatus || "No pending changes."}</p>
             </div>
