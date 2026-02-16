@@ -48,6 +48,9 @@ export default function App() {
   const [providerDrafts, setProviderDrafts] = useState({});
   const [providerSecrets, setProviderSecrets] = useState({});
   const [providerStatuses, setProviderStatuses] = useState({});
+  const [telegramToken, setTelegramToken] = useState("");
+  const [telegramConfigured, setTelegramConfigured] = useState(false);
+  const [telegramStatus, setTelegramStatus] = useState("");
 
   const [newProvider, setNewProvider] = useState({
     id: "",
@@ -91,10 +94,11 @@ export default function App() {
 
   const refreshRuntimeState = async () => {
     try {
-      const [providersPayload, modelsPayload, defaultsPayload] = await Promise.all([
+      const [providersPayload, modelsPayload, defaultsPayload, telegramPayload] = await Promise.all([
         request("GET", "/providers"),
         request("GET", "/models"),
-        request("GET", "/defaults")
+        request("GET", "/defaults"),
+        request("GET", "/telegram/status").catch(() => null)
       ]);
 
       const providerRows = providersPayload.providers || [];
@@ -106,6 +110,9 @@ export default function App() {
       setDefaultProvider(defaultsPayload.default_provider || "");
       setDefaultModel(defaultsPayload.default_model || "");
       setAllowRemoteFallback(defaultsPayload.allow_remote_fallback !== false);
+      if (telegramPayload && telegramPayload.ok) {
+        setTelegramConfigured(telegramPayload.configured === true);
+      }
 
       setProviderDrafts((prev) => {
         const next = { ...prev };
@@ -351,6 +358,39 @@ export default function App() {
     appendLog({ endpoint: "chat/export", ok: true, detail: "Exported conversation" });
   };
 
+  const saveTelegramToken = async () => {
+    const token = telegramToken.trim();
+    if (!token) {
+      setTelegramStatus("Bot token is required.");
+      return;
+    }
+    try {
+      await request("POST", "/telegram/secret", { bot_token: token });
+      setTelegramToken("");
+      setTelegramConfigured(true);
+      setTelegramStatus("Telegram token saved.");
+      appendLog({ endpoint: "/telegram/secret", ok: true, detail: "Saved Telegram token" });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setTelegramStatus(`Save failed: ${detail}`);
+      appendLog({ endpoint: "/telegram/secret", ok: false, detail });
+    }
+  };
+
+  const testTelegramToken = async () => {
+    try {
+      const result = await request("POST", "/telegram/test", {});
+      const username = result.telegram_user?.username || "unknown";
+      setTelegramStatus(`Connected: @${username}`);
+      setTelegramConfigured(true);
+      appendLog({ endpoint: "/telegram/test", ok: true, detail: `Connected @${username}` });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setTelegramStatus(`Test failed: ${detail}`);
+      appendLog({ endpoint: "/telegram/test", ok: false, detail });
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -364,6 +404,7 @@ export default function App() {
         {[
           ["setup", "Defaults"],
           ["providers", "Providers"],
+          ["telegram", "Telegram"],
           ["chat", "Chat"],
           ["debug", "Logs/Debug"]
         ].map(([id, label]) => (
@@ -560,6 +601,31 @@ export default function App() {
                 </div>
               );
             })}
+          </section>
+        ) : null}
+
+        {activeTab === "telegram" ? (
+          <section className="grid">
+            <div className="card">
+              <h2>Telegram Bot</h2>
+              <p className="help-text">
+                Status: {telegramConfigured ? "configured" : "not configured"}
+              </p>
+              <label>
+                Bot token (stored securely)
+                <input
+                  type="password"
+                  value={telegramToken}
+                  onChange={(event) => setTelegramToken(event.target.value)}
+                  placeholder="123456789:AA..."
+                />
+              </label>
+              <div className="row-actions">
+                <button onClick={saveTelegramToken}>Save Token</button>
+                <button onClick={testTelegramToken}>Test Telegram</button>
+              </div>
+              <p className="status-line">{telegramStatus || "No Telegram checks run yet."}</p>
+            </div>
           </section>
         ) : null}
 
