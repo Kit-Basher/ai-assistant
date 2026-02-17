@@ -19,9 +19,12 @@ import urllib.request
 
 from agent.config import Config, load_config
 from agent.model_scout import build_model_scout
+from agent.audit_log import AuditLog
 from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Message, Request
+from agent.modelops import ModelOpsExecutor, ModelOpsPlanner, SafeRunner
+from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
 from agent.secret_store import SecretStore
 
 
@@ -48,6 +51,9 @@ class AgentRuntime:
         if not registry_path:
             registry_path = str(self._repo_root / "llm_registry.json")
         self.registry_store = RegistryStore(registry_path)
+        self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
+        self.permission_policy = PermissionPolicy()
+        self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
         self.webui_dist_path = Path(
             os.getenv("AGENT_WEBUI_DIST_PATH", "").strip() or str(self._repo_root / "agent" / "webui" / "dist")
         ).resolve()
@@ -58,6 +64,13 @@ class AgentRuntime:
         self.router: LLMRouter | None = None
         self.registry_document: dict[str, Any] = {}
         self.model_scout = build_model_scout(config)
+        installer_script = self._repo_root / "agent" / "modelops" / "install_ollama.sh"
+        self.modelops_planner = ModelOpsPlanner(installer_script_path=str(installer_script))
+        self.modelops_executor = ModelOpsExecutor(
+            safe_runner=SafeRunner(str(installer_script)),
+            apply_defaults=self._modelops_apply_defaults,
+            toggle_enabled=self._modelops_toggle_enabled,
+        )
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
         self._reload_router()
@@ -1163,6 +1176,263 @@ class AgentRuntime:
             return False, {"ok": False, "error": "suggestion not found"}
         return True, {"ok": True, "id": target, "status": "installed"}
 
+    def get_permissions(self) -> dict[str, Any]:
+        return {"ok": True, "permissions": self.permission_store.load()}
+
+    def update_permissions(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return False, {"ok": False, "error": "payload must be an object"}
+        saved = self.permission_store.update(payload)
+        return True, {"ok": True, "permissions": saved}
+
+    def get_audit(self, limit: int = 20) -> dict[str, Any]:
+        return {"ok": True, "entries": self.audit_log.recent(limit=max(1, int(limit)))}
+
+    def _modelops_apply_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        return self.update_defaults(
+            {
+                "default_provider": payload.get("default_provider"),
+                "default_model": payload.get("default_model"),
+            }
+        )
+
+    def _modelops_toggle_enabled(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        target_type = str(payload.get("target_type") or "").strip().lower()
+        target_id = str(payload.get("id") or "").strip()
+        enabled = bool(payload.get("enabled"))
+
+        if target_type not in {"provider", "model"}:
+            return False, {"ok": False, "error": "target_type must be provider or model"}
+        if not target_id:
+            return False, {"ok": False, "error": "id is required"}
+
+        document = self.registry_document
+        if target_type == "provider":
+            providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+            provider_id = target_id.lower()
+            if provider_id not in providers or not isinstance(providers.get(provider_id), dict):
+                return False, {"ok": False, "error": "provider not found"}
+            providers[provider_id] = {
+                **providers[provider_id],
+                "enabled": enabled,
+            }
+            document["providers"] = providers
+            saved, error = self._persist_registry_document(document)
+            if not saved:
+                assert error is not None
+                return False, error
+            return True, {"ok": True, "target_type": target_type, "id": provider_id, "enabled": enabled}
+
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        if target_id not in models or not isinstance(models.get(target_id), dict):
+            return False, {"ok": False, "error": "model not found"}
+        models[target_id] = {
+            **models[target_id],
+            "enabled": enabled,
+        }
+        document["models"] = models
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
+        return True, {"ok": True, "target_type": target_type, "id": target_id, "enabled": enabled}
+
+    def _modelops_permission_decision(
+        self,
+        action: str,
+        params: dict[str, Any],
+        *,
+        estimated_download_bytes: int,
+        estimated_cost: float | None,
+        risk_level: str | None,
+        dry_run: bool,
+    ) -> dict[str, Any]:
+        permissions = self.permission_store.load()
+        request = PermissionRequest(
+            action=action,
+            params=params,
+            estimated_cost=estimated_cost,
+            estimated_bytes=estimated_download_bytes,
+            risk_level=risk_level,
+            dry_run=dry_run,
+        )
+        decision = self.permission_policy.evaluate(request, permissions)
+        return {
+            "allow": bool(decision.allow),
+            "reason": decision.reason,
+            "requires_confirmation": bool(decision.requires_confirmation),
+            "mode": permissions.get("mode"),
+            "permissions": permissions,
+        }
+
+    def _audit_modelops(
+        self,
+        *,
+        actor: str,
+        action: str,
+        params: dict[str, Any],
+        decision: str,
+        reason: str,
+        dry_run: bool,
+        outcome: str,
+        error_kind: str | None,
+        duration_ms: int,
+    ) -> None:
+        self.audit_log.append(
+            actor=actor,
+            action=action,
+            params=params,
+            decision=decision,
+            reason=reason,
+            dry_run=dry_run,
+            outcome=outcome,
+            error_kind=error_kind,
+            duration_ms=duration_ms,
+        )
+
+    def modelops_plan(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        action = str(payload.get("action") or "").strip()
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        dry_run = bool(payload.get("dry_run", True))
+        actor = str(payload.get("actor") or "user")
+        try:
+            plan = self.modelops_planner.plan(action, params)
+        except ValueError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self._audit_modelops(
+                actor=actor,
+                action=action,
+                params=params,
+                decision="deny",
+                reason=str(exc),
+                dry_run=dry_run,
+                outcome="failed",
+                error_kind="invalid_request",
+                duration_ms=duration_ms,
+            )
+            return False, {"ok": False, "error": str(exc)}
+
+        estimated_download_bytes = int(plan.get("estimated_download_bytes") or 0)
+        decision = self._modelops_permission_decision(
+            action,
+            params=plan.get("params") if isinstance(plan.get("params"), dict) else {},
+            estimated_download_bytes=estimated_download_bytes,
+            estimated_cost=payload.get("estimated_cost"),
+            risk_level=str(plan.get("risk_level") or payload.get("risk_level") or ""),
+            dry_run=dry_run,
+        )
+        allow = bool(decision["allow"])
+        reason = str(decision["reason"] or "")
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self._audit_modelops(
+            actor=actor,
+            action=action,
+            params=plan.get("params") if isinstance(plan.get("params"), dict) else {},
+            decision="allow" if allow else "deny",
+            reason=reason,
+            dry_run=dry_run,
+            outcome="planned" if allow else "blocked",
+            error_kind=None if allow else "policy_deny",
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            "action": action,
+            "plan": plan,
+            "decision": {
+                "allow": allow,
+                "reason": reason,
+                "requires_confirmation": bool(decision["requires_confirmation"]),
+                "mode": decision.get("mode"),
+            },
+        }
+
+    def modelops_execute(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        action = str(payload.get("action") or "").strip()
+        params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+        dry_run = bool(payload.get("dry_run", False))
+        confirm = bool(payload.get("confirm", False))
+        actor = str(payload.get("actor") or "user")
+        try:
+            plan = self.modelops_planner.plan(action, params)
+        except ValueError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self._audit_modelops(
+                actor=actor,
+                action=action,
+                params=params,
+                decision="deny",
+                reason=str(exc),
+                dry_run=dry_run,
+                outcome="failed",
+                error_kind="invalid_request",
+                duration_ms=duration_ms,
+            )
+            return False, {"ok": False, "error": str(exc)}
+
+        estimated_download_bytes = int(plan.get("estimated_download_bytes") or 0)
+        decision = self._modelops_permission_decision(
+            action,
+            params=plan.get("params") if isinstance(plan.get("params"), dict) else {},
+            estimated_download_bytes=estimated_download_bytes,
+            estimated_cost=payload.get("estimated_cost"),
+            risk_level=str(plan.get("risk_level") or payload.get("risk_level") or ""),
+            dry_run=dry_run,
+        )
+        if not bool(decision["allow"]):
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self._audit_modelops(
+                actor=actor,
+                action=action,
+                params=plan.get("params") if isinstance(plan.get("params"), dict) else {},
+                decision="deny",
+                reason=str(decision["reason"] or "policy_deny"),
+                dry_run=dry_run,
+                outcome="blocked",
+                error_kind="policy_deny",
+                duration_ms=duration_ms,
+            )
+            return False, {"ok": False, "error": str(decision["reason"] or "policy_deny"), "plan": plan}
+
+        if bool(decision["requires_confirmation"]) and not dry_run and not confirm:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self._audit_modelops(
+                actor=actor,
+                action=action,
+                params=plan.get("params") if isinstance(plan.get("params"), dict) else {},
+                decision="deny",
+                reason="confirmation_required",
+                dry_run=dry_run,
+                outcome="blocked",
+                error_kind="confirmation_required",
+                duration_ms=duration_ms,
+            )
+            return False, {"ok": False, "error": "confirmation_required", "plan": plan}
+
+        result = self.modelops_executor.execute_plan(plan, dry_run=dry_run)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self._audit_modelops(
+            actor=actor,
+            action=action,
+            params=plan.get("params") if isinstance(plan.get("params"), dict) else {},
+            decision="allow",
+            reason="allowed",
+            dry_run=dry_run,
+            outcome="success" if bool(result.get("ok")) else "failure",
+            error_kind=None if bool(result.get("ok")) else str(result.get("error") or "execution_failed"),
+            duration_ms=duration_ms,
+        )
+
+        status_ok = bool(result.get("ok"))
+        return status_ok, {
+            "ok": status_ok,
+            "action": action,
+            "plan": plan,
+            "result": result,
+        }
+
     def webui_dev_landing_html(self) -> str:
         return (
             "<!doctype html>"
@@ -1313,6 +1583,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/providers":
                 self._send_json(200, self.runtime.list_providers())
                 return
+            if path == "/permissions":
+                self._send_json(200, self.runtime.get_permissions())
+                return
+            if path == "/audit":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                limit_raw = query.get("limit", [20])[0]
+                try:
+                    limit = int(limit_raw)
+                except Exception:
+                    limit = 20
+                self._send_json(200, self.runtime.get_audit(limit=limit))
+                return
             if path == "/model_scout/status":
                 self._send_json(200, self.runtime.model_scout_status())
                 return
@@ -1417,6 +1699,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.run_model_scout()
                 self._send_json(200 if ok else 400, body)
                 return
+            if path == "/modelops/plan":
+                ok, body = self.runtime.modelops_plan(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/modelops/execute":
+                ok, body = self.runtime.modelops_execute(payload)
+                self._send_json(200 if ok else 400, body)
+                return
 
             if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
                 provider_id = parts[1]
@@ -1478,6 +1768,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
             if path == "/defaults":
                 ok, body = self.runtime.update_defaults(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/permissions":
+                ok, body = self.runtime.update_permissions(payload)
                 self._send_json(200 if ok else 400, body)
                 return
 

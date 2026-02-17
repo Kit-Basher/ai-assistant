@@ -59,6 +59,8 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.db_path = os.path.join(self.tmpdir.name, "agent.db")
         self._env_backup = dict(os.environ)
         os.environ["AGENT_SECRET_STORE_PATH"] = os.path.join(self.tmpdir.name, "secrets.enc.json")
+        os.environ["AGENT_PERMISSIONS_PATH"] = os.path.join(self.tmpdir.name, "permissions.json")
+        os.environ["AGENT_AUDIT_LOG_PATH"] = os.path.join(self.tmpdir.name, "audit.jsonl")
 
     def tearDown(self) -> None:
         os.environ.clear()
@@ -634,6 +636,96 @@ class TestAPIServerRuntime(unittest.TestCase):
             install_payload = json.loads(install_handler.body.decode("utf-8"))
             self.assertTrue(install_payload["ok"])
             self.assertEqual("installed", install_payload["status"])
+
+    def test_permissions_and_modelops_endpoints(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        get_permissions = _HandlerForTest(runtime, "/permissions")
+        get_permissions.do_GET()
+        self.assertEqual(200, get_permissions.status_code)
+        permissions_payload = json.loads(get_permissions.body.decode("utf-8"))
+        self.assertTrue(permissions_payload["ok"])
+        self.assertFalse(permissions_payload["permissions"]["actions"]["modelops.pull_ollama_model"])
+
+        put_permissions = _HandlerForTest(
+            runtime,
+            "/permissions",
+            {
+                "actions": {
+                    "modelops.pull_ollama_model": True,
+                },
+                "constraints": {
+                    "allowed_providers": ["ollama"],
+                    "max_download_bytes": 1024,
+                },
+            },
+        )
+        put_permissions.do_PUT()
+        self.assertEqual(200, put_permissions.status_code)
+        put_payload = json.loads(put_permissions.body.decode("utf-8"))
+        self.assertTrue(put_payload["ok"])
+        self.assertTrue(put_payload["permissions"]["actions"]["modelops.pull_ollama_model"])
+
+        # Deny by default for actions not explicitly enabled.
+        plan_handler = _HandlerForTest(
+            runtime,
+            "/modelops/plan",
+            {
+                "action": "modelops.install_ollama",
+                "params": {},
+            },
+        )
+        plan_handler.do_POST()
+        self.assertEqual(200, plan_handler.status_code)
+        plan_payload = json.loads(plan_handler.body.decode("utf-8"))
+        self.assertTrue(plan_payload["ok"])
+        self.assertFalse(plan_payload["decision"]["allow"])
+
+        exec_handler = _HandlerForTest(
+            runtime,
+            "/modelops/execute",
+            {
+                "action": "modelops.install_ollama",
+                "params": {},
+                "confirm": True,
+            },
+        )
+        exec_handler.do_POST()
+        self.assertEqual(400, exec_handler.status_code)
+        exec_payload = json.loads(exec_handler.body.decode("utf-8"))
+        self.assertFalse(exec_payload["ok"])
+        self.assertEqual("action_not_permitted", exec_payload["error"])
 
     def test_root_route_serves_webui_index_html(self) -> None:
         webui_dist = os.path.join(self.tmpdir.name, "webui", "dist")
