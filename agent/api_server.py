@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, load_config
+from agent.model_scout import build_model_scout
 from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Message, Request
@@ -56,6 +57,7 @@ class AgentRuntime:
 
         self.router: LLMRouter | None = None
         self.registry_document: dict[str, Any] = {}
+        self.model_scout = build_model_scout(config)
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
         self._reload_router()
@@ -1111,6 +1113,56 @@ class AgentRuntime:
             return False, updated
         return True, {"ok": True, "routing_mode": updated.get("routing_mode")}
 
+    def model_scout_status(self) -> dict[str, Any]:
+        status = self.model_scout.status()
+        return {
+            "ok": True,
+            "enabled": bool(self.config.model_scout_enabled),
+            "status": status,
+        }
+
+    def model_scout_suggestions(self) -> dict[str, Any]:
+        suggestions = self.model_scout.list_suggestions(limit=200)
+        return {
+            "ok": True,
+            "suggestions": suggestions,
+        }
+
+    def run_model_scout(self) -> tuple[bool, dict[str, Any]]:
+        result = self.model_scout.run(
+            registry_document=self.registry_document,
+            router_snapshot=self._router.doctor_snapshot(),
+            usage_stats_snapshot=self._router.usage_stats_snapshot(),
+            notify_sender=None,
+        )
+        self._log_request(
+            "/model_scout/run",
+            bool(result.get("ok")),
+            {
+                "ok": bool(result.get("ok")),
+                "error": result.get("error"),
+                "suggestions": len(result.get("suggestions") or []),
+                "new": len(result.get("new_suggestions") or []),
+            },
+        )
+        return bool(result.get("ok")), {"ok": bool(result.get("ok")), **result}
+
+    def dismiss_model_scout_suggestion(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
+        target = urllib.parse.unquote(str(suggestion_id or "")).strip()
+        if not target:
+            return False, {"ok": False, "error": "suggestion id is required"}
+        if not self.model_scout.dismiss(target):
+            return False, {"ok": False, "error": "suggestion not found"}
+        return True, {"ok": True, "id": target, "status": "dismissed"}
+
+    def mark_model_scout_installed(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
+        target = urllib.parse.unquote(str(suggestion_id or "")).strip()
+        if not target:
+            return False, {"ok": False, "error": "suggestion id is required"}
+        if not self.model_scout.mark_installed(target):
+            return False, {"ok": False, "error": "suggestion not found"}
+        return True, {"ok": True, "id": target, "status": "installed"}
+
     def webui_dev_landing_html(self) -> str:
         return (
             "<!doctype html>"
@@ -1261,6 +1313,12 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/providers":
                 self._send_json(200, self.runtime.list_providers())
                 return
+            if path == "/model_scout/status":
+                self._send_json(200, self.runtime.model_scout_status())
+                return
+            if path == "/model_scout/suggestions":
+                self._send_json(200, self.runtime.model_scout_suggestions())
+                return
 
             if self._try_serve_webui(path):
                 return
@@ -1355,6 +1413,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.test_telegram()
                 self._send_json(200 if ok else 400, body)
                 return
+            if path == "/model_scout/run":
+                ok, body = self.runtime.run_model_scout()
+                self._send_json(200 if ok else 400, body)
+                return
 
             if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
                 provider_id = parts[1]
@@ -1377,6 +1439,26 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[0] == "providers" and parts[2] == "models" and parts[3] == "refresh":
                 provider_id = parts[1]
                 ok, body = self.runtime.refresh_models({"provider": provider_id, **payload})
+                self._send_json(200 if ok else 400, body)
+                return
+            if (
+                len(parts) == 4
+                and parts[0] == "model_scout"
+                and parts[1] == "suggestions"
+                and parts[3] == "dismiss"
+            ):
+                suggestion_id = parts[2]
+                ok, body = self.runtime.dismiss_model_scout_suggestion(suggestion_id)
+                self._send_json(200 if ok else 400, body)
+                return
+            if (
+                len(parts) == 4
+                and parts[0] == "model_scout"
+                and parts[1] == "suggestions"
+                and parts[3] == "mark_installed"
+            ):
+                suggestion_id = parts[2]
+                ok, body = self.runtime.mark_model_scout_installed(suggestion_id)
                 self._send_json(200 if ok else 400, body)
                 return
 

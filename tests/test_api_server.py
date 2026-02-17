@@ -556,6 +556,85 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIsInstance(payload["pid"], int)
         self.assertTrue(str(payload.get("version") or ""))
 
+    def test_model_scout_endpoints(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        status_handler = _HandlerForTest(runtime, "/model_scout/status")
+        status_handler.do_GET()
+        self.assertEqual(200, status_handler.status_code)
+        status_payload = json.loads(status_handler.body.decode("utf-8"))
+        self.assertTrue(status_payload["ok"])
+        self.assertIn("status", status_payload)
+
+        suggestions_handler = _HandlerForTest(runtime, "/model_scout/suggestions")
+        suggestions_handler.do_GET()
+        self.assertEqual(200, suggestions_handler.status_code)
+        suggestions_payload = json.loads(suggestions_handler.body.decode("utf-8"))
+        self.assertTrue(suggestions_payload["ok"])
+        self.assertIn("suggestions", suggestions_payload)
+
+        with patch.object(runtime, "run_model_scout", return_value=(True, {"ok": True, "suggestions": []})):
+            run_handler = _HandlerForTest(runtime, "/model_scout/run", {})
+            run_handler.do_POST()
+            self.assertEqual(200, run_handler.status_code)
+            run_payload = json.loads(run_handler.body.decode("utf-8"))
+            self.assertTrue(run_payload["ok"])
+
+        with patch.object(
+            runtime,
+            "dismiss_model_scout_suggestion",
+            return_value=(True, {"ok": True, "status": "dismissed", "id": "local:abc"}),
+        ):
+            dismiss_handler = _HandlerForTest(runtime, "/model_scout/suggestions/local%3Aabc/dismiss", {})
+            dismiss_handler.do_POST()
+            self.assertEqual(200, dismiss_handler.status_code)
+            dismiss_payload = json.loads(dismiss_handler.body.decode("utf-8"))
+            self.assertTrue(dismiss_payload["ok"])
+            self.assertEqual("dismissed", dismiss_payload["status"])
+
+        with patch.object(
+            runtime,
+            "mark_model_scout_installed",
+            return_value=(True, {"ok": True, "status": "installed", "id": "local:abc"}),
+        ):
+            install_handler = _HandlerForTest(runtime, "/model_scout/suggestions/local%3Aabc/mark_installed", {})
+            install_handler.do_POST()
+            self.assertEqual(200, install_handler.status_code)
+            install_payload = json.loads(install_handler.body.decode("utf-8"))
+            self.assertTrue(install_payload["ok"])
+            self.assertEqual("installed", install_payload["status"])
+
     def test_root_route_serves_webui_index_html(self) -> None:
         webui_dist = os.path.join(self.tmpdir.name, "webui", "dist")
         os.makedirs(webui_dist, exist_ok=True)

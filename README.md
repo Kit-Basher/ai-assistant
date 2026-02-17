@@ -51,11 +51,17 @@ Endpoints:
 - `POST /models/refresh`
 - `POST /telegram/secret`
 - `POST /telegram/test`
+- `GET /model_scout/status`
+- `GET /model_scout/suggestions`
+- `POST /model_scout/run`
+- `POST /model_scout/suggestions/{id}/dismiss`
+- `POST /model_scout/suggestions/{id}/mark_installed`
 
 UI behavior:
 - `GET /` serves the local web UI from `agent/webui/dist`.
 - Static assets (`/assets/*`) are served by the same API process.
 - Runtime installs do not require Node or Rust.
+- `Model Scout` tab shows recommendation-only model suggestions and lets you dismiss/mark installed.
 
 Web UI build (dev-time only):
 1. `./scripts/build_webui.sh`
@@ -128,6 +134,13 @@ Routing (high-level):
   - Expected cost uses rolling usage averages per `(task_type, provider, model)` from `llm_usage_stats.json` (next to DB by default).
   - Local models with unknown pricing are treated as zero-cost for ranking.
 
+Model Scout v1 (recommend-only):
+- Scans Hugging Face trending models (`/api/trending?type=model`) and proposes local GGUF/Ollama candidates first.
+- Adds remote suggestions only for enabled/tested remote providers, based on expected cost + health.
+- Never auto-installs models and never auto-changes defaults.
+- Uses deterministic scoring, dedupe, and cooldown to avoid spam.
+- Storage: SQLite tables in `agent.db` when available; JSON fallback at `~/.local/share/personal-agent/model_scout_state.json`.
+
 Side-by-side staging run:
 1. Use a different API port:
    - `.venv/bin/python -m agent.api_server --port 8876`
@@ -162,6 +175,13 @@ LLM/provider optional:
 - `LLM_CIRCUIT_BREAKER_WINDOW_SECONDS`
 - `LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS`
 - `LLM_USAGE_STATS_PATH` (default: `llm_usage_stats.json` next to DB)
+- `MODEL_SCOUT_ENABLED` (default `1`)
+- `MODEL_SCOUT_NOTIFY_DELTA` (default `15`)
+- `MODEL_SCOUT_ABSOLUTE_THRESHOLD` (default `80`)
+- `MODEL_SCOUT_MAX_SUGGESTIONS_PER_NOTIFY` (default `2`)
+- `MODEL_SCOUT_LICENSE_ALLOWLIST` (default `apache-2.0,mit,bsd-3-clause`)
+- `MODEL_SCOUT_SIZE_MAX_B` (default `12`)
+- `AGENT_MODEL_SCOUT_STATE_PATH` (JSON fallback path when SQLite is unavailable)
 
 Desktop/API optional:
 - `AGENT_API_HOST` (default `127.0.0.1`)
@@ -204,6 +224,9 @@ Uninstall:
 - `/daily_brief_status`
 - `/ask <question>`
 - `/ask_opinion <question>`
+- `/scout`
+- `/scout_dismiss <suggestion_id>`
+- `/scout_installed <suggestion_id>`
 
 Notes:
 - `/task_add` also accepts advanced pipe syntax:

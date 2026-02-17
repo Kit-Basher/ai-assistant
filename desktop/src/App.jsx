@@ -118,6 +118,10 @@ export default function App() {
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [telegramStatus, setTelegramStatus] = useState("");
+  const [modelScoutStatus, setModelScoutStatus] = useState(null);
+  const [modelScoutSuggestions, setModelScoutSuggestions] = useState([]);
+  const [modelScoutMessage, setModelScoutMessage] = useState("");
+  const [modelScoutRunning, setModelScoutRunning] = useState(false);
 
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -153,11 +157,13 @@ export default function App() {
 
   const refreshRuntimeState = async () => {
     try {
-      const [providersPayload, modelsPayload, defaultsPayload, telegramPayload] = await Promise.all([
+      const [providersPayload, modelsPayload, defaultsPayload, telegramPayload, scoutStatusPayload, scoutSuggestionsPayload] = await Promise.all([
         request("GET", "/providers"),
         request("GET", "/models"),
         request("GET", "/defaults"),
-        request("GET", "/telegram/status").catch(() => null)
+        request("GET", "/telegram/status").catch(() => null),
+        request("GET", "/model_scout/status").catch(() => null),
+        request("GET", "/model_scout/suggestions").catch(() => null)
       ]);
 
       const providerRows = providersPayload.providers || [];
@@ -171,6 +177,12 @@ export default function App() {
       setAllowRemoteFallback(defaultsPayload.allow_remote_fallback !== false);
       if (telegramPayload && telegramPayload.ok) {
         setTelegramConfigured(telegramPayload.configured === true);
+      }
+      if (scoutStatusPayload && scoutStatusPayload.ok) {
+        setModelScoutStatus(scoutStatusPayload.status || null);
+      }
+      if (scoutSuggestionsPayload && scoutSuggestionsPayload.ok) {
+        setModelScoutSuggestions(scoutSuggestionsPayload.suggestions || []);
       }
 
       setProviderDrafts((prev) => {
@@ -585,6 +597,51 @@ export default function App() {
     }
   };
 
+  const runModelScout = async () => {
+    setModelScoutRunning(true);
+    setModelScoutMessage("Running scout...");
+    try {
+      const result = await request("POST", "/model_scout/run", {});
+      const total = Array.isArray(result.suggestions) ? result.suggestions.length : 0;
+      const fresh = Array.isArray(result.new_suggestions) ? result.new_suggestions.length : 0;
+      setModelScoutMessage(`Scout complete: ${total} candidates (${fresh} new).`);
+      appendLog({ endpoint: "/model_scout/run", ok: true, detail: `suggestions=${total} new=${fresh}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setModelScoutMessage(`Scout failed: ${detail}`);
+      appendLog({ endpoint: "/model_scout/run", ok: false, detail });
+    } finally {
+      setModelScoutRunning(false);
+    }
+  };
+
+  const dismissScoutSuggestion = async (suggestionId) => {
+    try {
+      await request("POST", `/model_scout/suggestions/${encodeURIComponent(suggestionId)}/dismiss`, {});
+      setModelScoutMessage(`Dismissed ${suggestionId}.`);
+      appendLog({ endpoint: "/model_scout/suggestions/*/dismiss", ok: true, detail: suggestionId });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setModelScoutMessage(`Dismiss failed: ${detail}`);
+      appendLog({ endpoint: "/model_scout/suggestions/*/dismiss", ok: false, detail });
+    }
+  };
+
+  const markScoutSuggestionInstalled = async (suggestionId) => {
+    try {
+      await request("POST", `/model_scout/suggestions/${encodeURIComponent(suggestionId)}/mark_installed`, {});
+      setModelScoutMessage(`Marked installed: ${suggestionId}.`);
+      appendLog({ endpoint: "/model_scout/suggestions/*/mark_installed", ok: true, detail: suggestionId });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setModelScoutMessage(`Mark installed failed: ${detail}`);
+      appendLog({ endpoint: "/model_scout/suggestions/*/mark_installed", ok: false, detail });
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -599,6 +656,7 @@ export default function App() {
           ["setup", "Defaults"],
           ["providers", "Providers"],
           ["telegram", "Telegram"],
+          ["model_scout", "Model Scout"],
           ["chat", "Chat"],
           ["debug", "Logs/Debug"]
         ].map(([id, label]) => (
@@ -968,6 +1026,48 @@ export default function App() {
                 <button onClick={testTelegramToken}>Test Telegram</button>
               </div>
               <p className="status-line">{telegramStatus || "No Telegram checks run yet."}</p>
+            </div>
+          </section>
+        ) : null}
+
+        {activeTab === "model_scout" ? (
+          <section className="grid">
+            <div className="card">
+              <h2>Model Scout</h2>
+              <p className="help-text">
+                Status: {modelScoutStatus?.last_run?.ok === false ? "degraded" : "ready"} · Backend: {modelScoutStatus?.backend || "unknown"}
+              </p>
+              <p className="help-text">
+                Suggestions: {modelScoutStatus?.total || 0} total · {(modelScoutStatus?.counts || {}).new || 0} new
+              </p>
+              <div className="row-actions">
+                <button disabled={modelScoutRunning} onClick={runModelScout}>
+                  {modelScoutRunning ? "Running..." : "Run Scout"}
+                </button>
+              </div>
+              <p className="status-line">{modelScoutMessage || "Scout recommends only. It never changes defaults automatically."}</p>
+            </div>
+
+            <div className="card">
+              <h2>Suggestions</h2>
+              <div className="model-list">
+                {modelScoutSuggestions.length === 0 ? <p className="empty">No suggestions yet.</p> : null}
+                {modelScoutSuggestions.map((item) => (
+                  <div key={item.id} className="model-row">
+                    <div className="model-head">
+                      <span>{item.kind === "local" ? item.repo_id : item.model_id}</span>
+                      <span className="badge">{item.kind}</span>
+                    </div>
+                    <div className="meta-line">score {Number(item.score || 0).toFixed(1)} · status {item.status}</div>
+                    <div className="meta-line">{item.rationale}</div>
+                    {item.install_cmd ? <div className="meta-line">Try: {item.install_cmd}</div> : null}
+                    <div className="row-actions">
+                      <button onClick={() => dismissScoutSuggestion(item.id)}>Dismiss</button>
+                      <button onClick={() => markScoutSuggestionInstalled(item.id)}>Mark Installed</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </section>
         ) : null}

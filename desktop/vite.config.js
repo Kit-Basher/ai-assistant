@@ -19,7 +19,9 @@ export default defineConfig({
       "/chat": apiTarget,
       "/config": apiTarget,
       "/defaults": apiTarget,
-      "/providers": apiTarget
+      "/providers": apiTarget,
+      "/telegram": apiTarget,
+      "/model_scout": apiTarget
     }
   }
 });
