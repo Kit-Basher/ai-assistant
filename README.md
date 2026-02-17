@@ -56,12 +56,18 @@ Endpoints:
 - `POST /model_scout/run`
 - `POST /model_scout/suggestions/{id}/dismiss`
 - `POST /model_scout/suggestions/{id}/mark_installed`
+- `GET /permissions`
+- `PUT /permissions`
+- `GET /audit`
+- `POST /modelops/plan`
+- `POST /modelops/execute`
 
 UI behavior:
 - `GET /` serves the local web UI from `agent/webui/dist`.
 - Static assets (`/assets/*`) are served by the same API process.
 - Runtime installs do not require Node or Rust.
 - `Model Scout` tab shows recommendation-only model suggestions and lets you dismiss/mark installed.
+- `Permissions` tab controls constrained ModelOps autonomy and shows recent audit entries.
 
 Web UI build (dev-time only):
 1. `./scripts/build_webui.sh`
@@ -141,6 +147,20 @@ Model Scout v1 (recommend-only):
 - Uses deterministic scoring, dedupe, and cooldown to avoid spam.
 - Storage: SQLite tables in `agent.db` when available; JSON fallback at `~/.local/share/personal-agent/model_scout_state.json`.
 
+Constrained autonomy (ModelOps only):
+- Autonomy scope is limited to model-management actions:
+  - `modelops.install_ollama`
+  - `modelops.pull_ollama_model`
+  - `modelops.import_gguf_to_ollama`
+  - `modelops.set_default_model`
+  - `modelops.enable_disable_provider_or_model`
+- Default policy is deny for all actions.
+- API flow is plan-first:
+  - `POST /modelops/plan` returns deterministic steps + allow/deny decision.
+  - `POST /modelops/execute` executes only if policy allows (and confirmation is provided in `manual_confirm` mode).
+- No arbitrary shell execution: only whitelisted command paths are used by ModelOps executor.
+- Audit is append-only and redacted.
+
 Side-by-side staging run:
 1. Use a different API port:
    - `.venv/bin/python -m agent.api_server --port 8876`
@@ -190,6 +210,8 @@ Desktop/API optional:
 - `AGENT_WEBUI_DIST_PATH` (default `agent/webui/dist`)
 - `WEBUI_DEV_PROXY` (`1` to show dev server landing page on `/`)
 - `WEBUI_DEV_URL` (default `http://127.0.0.1:1420`)
+- `AGENT_PERMISSIONS_PATH` (default `~/.config/personal-agent/permissions.json`)
+- `AGENT_AUDIT_LOG_PATH` (default `~/.local/share/personal-agent/audit.jsonl`)
 
 ## Legacy/Optional
 - Legacy Tauri scaffold files remain under `desktop/src-tauri/`, but they are not used in the default install or runtime path.
@@ -227,6 +249,8 @@ Uninstall:
 - `/scout`
 - `/scout_dismiss <suggestion_id>`
 - `/scout_installed <suggestion_id>`
+- `/permissions` (ModelOps permissions summary)
+- `/audit` (last 5 redacted ModelOps audit events)
 
 Notes:
 - `/task_add` also accepts advanced pipe syntax:

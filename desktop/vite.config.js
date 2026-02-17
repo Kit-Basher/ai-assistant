@@ -21,7 +21,10 @@ export default defineConfig({
       "/defaults": apiTarget,
       "/providers": apiTarget,
       "/telegram": apiTarget,
-      "/model_scout": apiTarget
+      "/model_scout": apiTarget,
+      "/permissions": apiTarget,
+      "/audit": apiTarget,
+      "/modelops": apiTarget
     }
   }
 });

@@ -16,6 +16,7 @@ class TestTelegramCommandRegistration(unittest.TestCase):
         self.assertIn('CommandHandler("scout", _handle_scout)', source)
         self.assertIn('CommandHandler("scout_dismiss", _handle_scout_dismiss)', source)
         self.assertIn('CommandHandler("scout_installed", _handle_scout_installed)', source)
+        self.assertIn('CommandHandler("permissions", _handle_permissions)', source)
 
 
 if __name__ == "__main__":

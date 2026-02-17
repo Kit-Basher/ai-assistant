@@ -33,7 +33,9 @@ from agent.orchestrator import Orchestrator
 from agent.cards import render_cards_markdown, validate_cards_payload
 from agent.daily_brief import should_send_daily_brief
 from agent.model_scout import build_model_scout
+from agent.audit_log import AuditLog
 from agent.secret_store import SecretStore
+from agent.permissions import PermissionStore
 from memory.db import MemoryDB
 
 
@@ -149,11 +151,39 @@ async def _handle_audit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if update.effective_chat is None or update.effective_message is None:
         return
 
-    chat_id = str(update.effective_chat.id)
-    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    audit_log: AuditLog = context.application.bot_data["audit_log"]
+    rows = audit_log.recent(limit=5)
+    if not rows:
+        await update.effective_message.reply_text("No ModelOps audit events yet.")
+        return
+    lines = ["Recent ModelOps audit events:"]
+    for row in rows:
+        lines.append(
+            f"- {row.get('ts')} {row.get('action')} "
+            f"[{row.get('decision')}/{row.get('outcome')}] reason={row.get('reason')}"
+        )
+    await update.effective_message.reply_text("\n".join(lines))
 
-    response = orchestrator.handle_message("/audit", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+
+async def _handle_permissions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+
+    permission_store: PermissionStore = context.application.bot_data["permission_store"]
+    permissions = permission_store.load()
+    mode = permissions.get("mode") or "manual_confirm"
+    actions = permissions.get("actions") if isinstance(permissions.get("actions"), dict) else {}
+    constraints = permissions.get("constraints") if isinstance(permissions.get("constraints"), dict) else {}
+
+    lines = [f"ModelOps permissions mode: {mode}", "Actions:"]
+    for action_name in sorted(actions.keys()):
+        lines.append(f"- {action_name}: {'allow' if bool(actions[action_name]) else 'deny'}")
+    lines.append("Constraints:")
+    lines.append(f"- max_download_gb: {constraints.get('max_download_gb')}")
+    lines.append(f"- allow_install_ollama: {constraints.get('allow_install_ollama')}")
+    lines.append(f"- allow_remote_models: {constraints.get('allow_remote_models')}")
+    lines.append(f"- allowed_providers: {', '.join(constraints.get('allowed_providers') or [])}")
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def _handle_storage_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -620,6 +650,8 @@ def build_app() -> Application:
 
     llm_broker, llm_broker_error = build_llm_broker(config)
     model_scout = build_model_scout(config)
+    permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
+    audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
 
     orchestrator = Orchestrator(
         db=db,
@@ -644,6 +676,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("runtime_status", _handle_runtime_status))
     app.add_handler(CommandHandler("disk_grow", _handle_disk_grow))
     app.add_handler(CommandHandler("audit", _handle_audit))
+    app.add_handler(CommandHandler("permissions", _handle_permissions))
     app.add_handler(CommandHandler("storage_snapshot", _handle_storage_snapshot))
     app.add_handler(CommandHandler("storage_report", _handle_storage_report))
     app.add_handler(CommandHandler("resource_report", _handle_resource_report))
@@ -672,6 +705,8 @@ def build_app() -> Application:
     app.bot_data["home_path"] = os.path.expanduser("~")
     app.bot_data["timezone"] = config.agent_timezone
     app.bot_data["model_scout"] = model_scout
+    app.bot_data["permission_store"] = permission_store
+    app.bot_data["audit_log"] = audit_log
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
     if config.enable_scheduled_snapshots:

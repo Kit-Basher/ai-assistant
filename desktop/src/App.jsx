@@ -24,6 +24,13 @@ const PROVIDER_PRESETS = {
     local: true
   }
 };
+const MODELOPS_ACTIONS = [
+  "modelops.install_ollama",
+  "modelops.pull_ollama_model",
+  "modelops.import_gguf_to_ollama",
+  "modelops.set_default_model",
+  "modelops.enable_disable_provider_or_model"
+];
 
 function healthStatus(entity) {
   return entity?.health?.status || "ok";
@@ -122,6 +129,12 @@ export default function App() {
   const [modelScoutSuggestions, setModelScoutSuggestions] = useState([]);
   const [modelScoutMessage, setModelScoutMessage] = useState("");
   const [modelScoutRunning, setModelScoutRunning] = useState(false);
+  const [permissionsConfig, setPermissionsConfig] = useState(null);
+  const [permissionsStatus, setPermissionsStatus] = useState("");
+  const [auditEntries, setAuditEntries] = useState([]);
+  const [modelOpsPlans, setModelOpsPlans] = useState({});
+  const [modelOpsStatus, setModelOpsStatus] = useState("");
+  const [modelOpsBusy, setModelOpsBusy] = useState({});
 
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
@@ -157,13 +170,24 @@ export default function App() {
 
   const refreshRuntimeState = async () => {
     try {
-      const [providersPayload, modelsPayload, defaultsPayload, telegramPayload, scoutStatusPayload, scoutSuggestionsPayload] = await Promise.all([
+      const [
+        providersPayload,
+        modelsPayload,
+        defaultsPayload,
+        telegramPayload,
+        scoutStatusPayload,
+        scoutSuggestionsPayload,
+        permissionsPayload,
+        auditPayload
+      ] = await Promise.all([
         request("GET", "/providers"),
         request("GET", "/models"),
         request("GET", "/defaults"),
         request("GET", "/telegram/status").catch(() => null),
         request("GET", "/model_scout/status").catch(() => null),
-        request("GET", "/model_scout/suggestions").catch(() => null)
+        request("GET", "/model_scout/suggestions").catch(() => null),
+        request("GET", "/permissions").catch(() => null),
+        request("GET", "/audit?limit=20").catch(() => null)
       ]);
 
       const providerRows = providersPayload.providers || [];
@@ -183,6 +207,12 @@ export default function App() {
       }
       if (scoutSuggestionsPayload && scoutSuggestionsPayload.ok) {
         setModelScoutSuggestions(scoutSuggestionsPayload.suggestions || []);
+      }
+      if (permissionsPayload && permissionsPayload.ok) {
+        setPermissionsConfig(permissionsPayload.permissions || null);
+      }
+      if (auditPayload && auditPayload.ok) {
+        setAuditEntries(auditPayload.entries || []);
       }
 
       setProviderDrafts((prev) => {
@@ -642,6 +672,155 @@ export default function App() {
     }
   };
 
+  const updatePermissionAction = (actionName, value) => {
+    setPermissionsConfig((prev) => {
+      const base = prev || {};
+      const actions = base.actions || {};
+      return {
+        ...base,
+        actions: {
+          ...actions,
+          [actionName]: !!value
+        }
+      };
+    });
+  };
+
+  const updatePermissionConstraint = (field, value) => {
+    setPermissionsConfig((prev) => {
+      const base = prev || {};
+      const constraints = base.constraints || {};
+      return {
+        ...base,
+        constraints: {
+          ...constraints,
+          [field]: value
+        }
+      };
+    });
+  };
+
+  const savePermissions = async () => {
+    if (!permissionsConfig) {
+      setPermissionsStatus("Permissions are not loaded yet.");
+      return;
+    }
+    const maxGb = Number((permissionsConfig.constraints || {}).max_download_gb || 0);
+    const payload = {
+      mode: permissionsConfig.mode || "manual_confirm",
+      actions: permissionsConfig.actions || {},
+      constraints: {
+        ...(permissionsConfig.constraints || {}),
+        max_download_bytes: Math.max(0, Math.floor(maxGb * 1024 * 1024 * 1024))
+      }
+    };
+    try {
+      const result = await request("PUT", "/permissions", payload);
+      setPermissionsConfig(result.permissions || permissionsConfig);
+      setPermissionsStatus("Permissions saved.");
+      appendLog({ endpoint: "/permissions", ok: true, detail: "Updated ModelOps permissions" });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setPermissionsStatus(`Save failed: ${detail}`);
+      appendLog({ endpoint: "/permissions", ok: false, detail });
+    }
+  };
+
+  const toModelOpsRequest = (suggestion) => {
+    if (!suggestion) return null;
+    if (suggestion.kind === "local") {
+      const repoId = suggestion.repo_id || "";
+      if (!repoId) return null;
+      return {
+        action: "modelops.pull_ollama_model",
+        params: {
+          model: `hf.co/${repoId}`,
+          estimated_download_gb: 4
+        }
+      };
+    }
+
+    const modelId = suggestion.model_id || "";
+    if (!modelId) return null;
+    const provider = suggestion.provider_id || modelId.split(":")[0] || "";
+    return {
+      action: "modelops.set_default_model",
+      params: {
+        default_provider: provider,
+        default_model: modelId
+      }
+    };
+  };
+
+  const planModelOpForSuggestion = async (suggestion) => {
+    const modelOpsRequest = toModelOpsRequest(suggestion);
+    if (!modelOpsRequest) {
+      setModelOpsStatus("Unable to build ModelOps request for this suggestion.");
+      return;
+    }
+    setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: true }));
+    try {
+      const result = await request("POST", "/modelops/plan", {
+        action: modelOpsRequest.action,
+        params: modelOpsRequest.params,
+        dry_run: true
+      });
+      setModelOpsPlans((prev) => ({
+        ...prev,
+        [suggestion.id]: result
+      }));
+      setModelOpsStatus(
+        result.decision?.allow
+          ? `Plan ready for ${suggestion.id}. Confirm to execute.`
+          : `Plan denied for ${suggestion.id}: ${result.decision?.reason || "policy_denied"}`
+      );
+      appendLog({
+        endpoint: "/modelops/plan",
+        ok: true,
+        detail: `${modelOpsRequest.action} allow=${result.decision?.allow === true}`
+      });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setModelOpsStatus(`Plan failed: ${detail}`);
+      appendLog({ endpoint: "/modelops/plan", ok: false, detail });
+    } finally {
+      setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: false }));
+    }
+  };
+
+  const executeModelOpForSuggestion = async (suggestion) => {
+    const planned = modelOpsPlans[suggestion.id];
+    const modelOpsRequest = toModelOpsRequest(suggestion);
+    if (!planned || !modelOpsRequest) {
+      setModelOpsStatus("Run plan first.");
+      return;
+    }
+    setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: true }));
+    try {
+      const result = await request("POST", "/modelops/execute", {
+        action: modelOpsRequest.action,
+        params: modelOpsRequest.params,
+        dry_run: false,
+        confirm: true
+      });
+      const success = result.result?.ok === true;
+      setModelOpsStatus(success ? `Executed ${suggestion.id}.` : `Execution failed for ${suggestion.id}.`);
+      appendLog({
+        endpoint: "/modelops/execute",
+        ok: success,
+        detail: `${modelOpsRequest.action} ${success ? "success" : "failed"}`
+      });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setModelOpsStatus(`Execution failed: ${detail}`);
+      appendLog({ endpoint: "/modelops/execute", ok: false, detail });
+    } finally {
+      setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: false }));
+    }
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -656,6 +835,7 @@ export default function App() {
           ["setup", "Defaults"],
           ["providers", "Providers"],
           ["telegram", "Telegram"],
+          ["permissions", "Permissions"],
           ["model_scout", "Model Scout"],
           ["chat", "Chat"],
           ["debug", "Logs/Debug"]
@@ -1030,6 +1210,122 @@ export default function App() {
           </section>
         ) : null}
 
+        {activeTab === "permissions" ? (
+          <section className="grid two">
+            <div className="card">
+              <h2>ModelOps Permissions</h2>
+              <label>
+                Mode
+                <select
+                  value={permissionsConfig?.mode || "manual_confirm"}
+                  onChange={(event) => setPermissionsConfig((prev) => ({ ...(prev || {}), mode: event.target.value }))}
+                >
+                  <option value="manual_confirm">manual_confirm</option>
+                  <option value="auto">auto</option>
+                </select>
+              </label>
+
+              <div className="grid">
+                {MODELOPS_ACTIONS.map((actionName) => (
+                  <label key={actionName} className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={permissionsConfig?.actions?.[actionName] === true}
+                      onChange={(event) => updatePermissionAction(actionName, event.target.checked)}
+                    />
+                    {actionName}
+                  </label>
+                ))}
+              </div>
+
+              <label>
+                Max download GB
+                <input
+                  type="number"
+                  min="0"
+                  step="0.1"
+                  value={permissionsConfig?.constraints?.max_download_gb ?? 5}
+                  onChange={(event) => updatePermissionConstraint("max_download_gb", Number(event.target.value || 0))}
+                />
+              </label>
+
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={permissionsConfig?.constraints?.allow_install_ollama === true}
+                  onChange={(event) => updatePermissionConstraint("allow_install_ollama", event.target.checked)}
+                />
+                allow_install_ollama
+              </label>
+
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={permissionsConfig?.constraints?.allow_remote_models !== false}
+                  onChange={(event) => updatePermissionConstraint("allow_remote_models", event.target.checked)}
+                />
+                allow_remote_models
+              </label>
+
+              <label>
+                Allowed providers (comma separated)
+                <input
+                  value={(permissionsConfig?.constraints?.allowed_providers || []).join(",")}
+                  onChange={(event) =>
+                    updatePermissionConstraint(
+                      "allowed_providers",
+                      event.target.value
+                        .split(",")
+                        .map((item) => item.trim().toLowerCase())
+                        .filter(Boolean)
+                    )
+                  }
+                />
+              </label>
+
+              <label>
+                Allowed model patterns (comma separated)
+                <input
+                  value={(permissionsConfig?.constraints?.allowed_model_patterns || []).join(",")}
+                  onChange={(event) =>
+                    updatePermissionConstraint(
+                      "allowed_model_patterns",
+                      event.target.value
+                        .split(",")
+                        .map((item) => item.trim())
+                        .filter(Boolean)
+                    )
+                  }
+                />
+              </label>
+
+              <div className="row-actions">
+                <button onClick={savePermissions}>Save Permissions</button>
+              </div>
+              <p className="status-line">{permissionsStatus || "Default is deny for all ModelOps actions."}</p>
+            </div>
+
+            <div className="card">
+              <h2>Recent Audit Events</h2>
+              <div className="model-list">
+                {auditEntries.length === 0 ? <p className="empty">No audit events yet.</p> : null}
+                {auditEntries.map((entry, index) => (
+                  <div className="model-row" key={`${entry.ts || "entry"}-${index}`}>
+                    <div className="model-head">
+                      <span>{entry.action}</span>
+                      <span className={`badge ${entry.decision === "allow" ? "health-ok" : "health-down"}`}>{entry.decision}</span>
+                    </div>
+                    <div className="meta-line">
+                      {entry.ts} · outcome {entry.outcome} · reason {entry.reason}
+                    </div>
+                    <div className="meta-line">dry_run {entry.dry_run ? "yes" : "no"} · duration {entry.duration_ms}ms</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        ) : null}
+
         {activeTab === "model_scout" ? (
           <section className="grid">
             <div className="card">
@@ -1062,12 +1358,29 @@ export default function App() {
                     <div className="meta-line">{item.rationale}</div>
                     {item.install_cmd ? <div className="meta-line">Try: {item.install_cmd}</div> : null}
                     <div className="row-actions">
+                      <button disabled={modelOpsBusy[item.id] === true} onClick={() => planModelOpForSuggestion(item)}>
+                        {modelOpsBusy[item.id] === true ? "Planning..." : "Try This Model"}
+                      </button>
+                      <button
+                        disabled={!modelOpsPlans[item.id]?.decision?.allow || modelOpsBusy[item.id] === true}
+                        onClick={() => executeModelOpForSuggestion(item)}
+                      >
+                        Confirm Execute
+                      </button>
                       <button onClick={() => dismissScoutSuggestion(item.id)}>Dismiss</button>
                       <button onClick={() => markScoutSuggestionInstalled(item.id)}>Mark Installed</button>
                     </div>
+                    {modelOpsPlans[item.id] ? (
+                      <div className="meta-line">
+                        plan: {modelOpsPlans[item.id].decision?.allow ? "allow" : "deny"} · reason{" "}
+                        {modelOpsPlans[item.id].decision?.reason || "n/a"} · steps{" "}
+                        {(modelOpsPlans[item.id].plan?.steps || []).length}
+                      </div>
+                    ) : null}
                   </div>
                 ))}
               </div>
+              <p className="status-line">{modelOpsStatus || "Run plan first, then confirm execution."}</p>
             </div>
           </section>
         ) : null}
