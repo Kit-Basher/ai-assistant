@@ -1,22 +1,27 @@
-# Stability Guarantees (v0.6.x)
+# Stability Guarantees (Current Branch)
 
-> Stability baseline from earlier phase.  
-> Confirm live branch behavior against `PROJECT_STATUS.md` + tests.
+This file captures practical guarantees that should remain stable unless intentionally changed and documented.
 
-This document lists the current, shipped invariants for v0.6.x. It is factual and intentionally conservative.
+## Core Guarantees
 
-## Invariants / Guarantees
-- Read-only by default.
-- Writes require `ENABLE_WRITES=true` and a double confirmation flow.
-- Audit hard-fail: if audit logging fails, the operation aborts.
-- Execution modes are limited to: `off`, `sandbox`, `live`.
-- No sudo usage.
-- Telegram is treated as untrusted input.
-- Storage governor is observe-only.
+- Local-first operation: core runtime works with local DB and local config paths.
+- Telegram and API input are treated as untrusted.
+- ModelOps execution is constrained to explicit, whitelisted model-management actions.
+- Permission defaults are restrictive (`manual_confirm` mode with allow/deny action map).
+- Sensitive operational paths are audited with append-only style records.
+- Systemd-specific doctor checks are environment-aware:
+  - local/dev default: missing units are skipped
+  - enforce mode: `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1`
+- Schema/version compatibility is validated by doctor checks (`VERSION` vs `schema_meta`).
 
-## Non-Goals / Out of Scope (v0.6.x)
-- No autonomous actions.
-- No cleanup or deletion actions.
-- No advice or recommendation language.
-- No scope expansion of permissions or capabilities.
-- No autonomy unlocks or background decision-making.
+## Compatibility Expectations
+
+- Existing API endpoints should remain backward-compatible unless versioned or explicitly documented.
+- Existing Telegram command names should remain stable unless migration notes are added.
+- DB schema changes should be additive/migrated and covered by tests.
+
+## Explicit Non-Goals
+
+- No unrestricted arbitrary shell execution from chat input.
+- No hidden autonomous permission expansion.
+- No silent remote dependency requirement for local baseline operation.

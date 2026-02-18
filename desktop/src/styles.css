@@ -170,6 +170,16 @@ button:disabled {
   color: var(--muted);
 }
 
+.toast-banner {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #9ed7b0;
+  background: #eaf8ee;
+  color: #1e5a27;
+  font-size: 0.85rem;
+}
+
 .model-list {
   max-height: 420px;
   overflow: auto;
@@ -277,6 +287,12 @@ button:disabled {
   border-color: #edc5c2;
   background: #fff1f0;
   color: #ad2e24;
+}
+
+.badge.policy-explicit-true {
+  border-color: #b9d0f6;
+  background: #edf4ff;
+  color: #1f4ea3;
 }
 
 .model-head {

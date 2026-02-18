@@ -93,6 +93,11 @@ class LLMRouter:
         self._providers = providers or self._build_default_providers()
         self._circuits: dict[str, CircuitBreakerState] = {}
         self._outcomes: dict[str, OutcomeState] = {}
+        self._external_health: dict[str, Any] = {
+            "providers": {},
+            "models": {},
+            "last_run_at": None,
+        }
         self._rng = rng or random.Random(0)
         self._time_fn = time_fn or time.monotonic
         self._sleep_fn = sleep_fn or time.sleep
@@ -153,6 +158,92 @@ class LLMRouter:
         active_model_ids = set(self.registry.models.keys())
         self._circuits = {model_id: state for model_id, state in self._circuits.items() if model_id in active_model_ids}
         self._outcomes = {model_id: state for model_id, state in self._outcomes.items() if model_id in active_model_ids}
+        external_models = self._external_health.get("models") if isinstance(self._external_health.get("models"), dict) else {}
+        self._external_health["models"] = {
+            model_id: payload
+            for model_id, payload in external_models.items()
+            if model_id in active_model_ids and isinstance(payload, dict)
+        }
+
+    def set_external_health_state(self, payload: dict[str, Any] | None) -> None:
+        def _safe_int(value: Any) -> int | None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        parsed = payload if isinstance(payload, dict) else {}
+        providers_raw = parsed.get("providers") if isinstance(parsed.get("providers"), dict) else {}
+        models_raw = parsed.get("models") if isinstance(parsed.get("models"), dict) else {}
+        providers: dict[str, dict[str, Any]] = {}
+        models: dict[str, dict[str, Any]] = {}
+
+        for provider_id, row in sorted(providers_raw.items()):
+            if not isinstance(row, dict):
+                continue
+            pid = str(provider_id).strip().lower()
+            if not pid:
+                continue
+            providers[pid] = {
+                "status": str(row.get("status") or "unknown").strip().lower(),
+                "last_error_kind": str(row.get("last_error_kind") or "").strip().lower() or None,
+                "status_code": _safe_int(row.get("status_code")),
+                "last_checked_at": _safe_int(row.get("last_checked_at")),
+                "cooldown_until": _safe_int(row.get("cooldown_until")),
+                "down_since": _safe_int(row.get("down_since")),
+            }
+
+        for model_id, row in sorted(models_raw.items()):
+            if not isinstance(row, dict):
+                continue
+            mid = str(model_id).strip()
+            if not mid:
+                continue
+            models[mid] = {
+                "provider_id": str(row.get("provider_id") or "").strip().lower() or (mid.split(":", 1)[0].strip().lower() if ":" in mid else ""),
+                "status": str(row.get("status") or "unknown").strip().lower(),
+                "last_error_kind": str(row.get("last_error_kind") or "").strip().lower() or None,
+                "status_code": _safe_int(row.get("status_code")),
+                "last_checked_at": _safe_int(row.get("last_checked_at")),
+                "cooldown_until": _safe_int(row.get("cooldown_until")),
+                "down_since": _safe_int(row.get("down_since")),
+            }
+
+        self._external_health = {
+            "providers": providers,
+            "models": models,
+            "last_run_at": _safe_int(parsed.get("last_run_at")),
+        }
+
+    def external_health_snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self._external_health, ensure_ascii=True))
+
+    def _external_provider_health(self, provider_id: str) -> dict[str, Any] | None:
+        providers = self._external_health.get("providers")
+        if not isinstance(providers, dict):
+            return None
+        row = providers.get(provider_id)
+        return row if isinstance(row, dict) else None
+
+    def _external_model_health(self, model_id: str) -> dict[str, Any] | None:
+        models = self._external_health.get("models")
+        if not isinstance(models, dict):
+            return None
+        row = models.get(model_id)
+        return row if isinstance(row, dict) else None
+
+    @staticmethod
+    def _external_blocked(row: dict[str, Any] | None) -> bool:
+        if not isinstance(row, dict):
+            return False
+        status = str(row.get("status") or "unknown").strip().lower()
+        cooldown_until = int(row.get("cooldown_until") or 0)
+        now = int(time.time())
+        if status == "down" and cooldown_until and now < cooldown_until:
+            return True
+        if status == "degraded" and cooldown_until and now < cooldown_until:
+            return True
+        return False
 
     def set_provider_api_key(self, provider: str, api_key: str) -> bool:
         provider_name = (provider or "").strip().lower()
@@ -347,6 +438,10 @@ class LLMRouter:
             if not model.enabled or not model.available:
                 continue
             if self._is_auth_down(model.id):
+                continue
+            if self._external_blocked(self._external_provider_health(model.provider)):
+                continue
+            if self._external_blocked(self._external_model_health(model.id)):
                 continue
             if not self.policy.allows_model(request, model) or not self._context_capable(model, request):
                 continue
@@ -648,6 +743,7 @@ class LLMRouter:
 
     def _model_health(self, model: ModelConfig, *, provider_available: bool) -> dict[str, Any]:
         state = self._outcomes.get(model.id)
+        external_state = self._external_model_health(model.id)
         now = float(self._time_fn())
 
         status = "ok"
@@ -662,18 +758,41 @@ class LLMRouter:
         elif state and state.failures > state.successes:
             status = "degraded"
 
+        if isinstance(external_state, dict):
+            external_status = str(external_state.get("status") or "unknown").strip().lower()
+            if external_status == "down":
+                status = "down"
+            elif external_status == "degraded" and status != "down":
+                status = "degraded"
+
         return {
             "status": status,
-            "last_error_kind": state.last_error_kind if state else None,
-            "status_code": state.last_status_code if state else None,
-            "last_status_code": state.last_status_code if state else None,
-            "last_ts": state.last_ts if state else None,
+            "last_error_kind": (
+                (external_state.get("last_error_kind") if isinstance(external_state, dict) else None)
+                or (state.last_error_kind if state else None)
+            ),
+            "status_code": (
+                (external_state.get("status_code") if isinstance(external_state, dict) else None)
+                or (state.last_status_code if state else None)
+            ),
+            "last_status_code": (
+                (external_state.get("status_code") if isinstance(external_state, dict) else None)
+                or (state.last_status_code if state else None)
+            ),
+            "last_ts": (
+                (float(external_state.get("last_checked_at")) if isinstance(external_state, dict) and external_state.get("last_checked_at") is not None else None)
+                or (state.last_ts if state else None)
+            ),
+            "last_checked_at": external_state.get("last_checked_at") if isinstance(external_state, dict) else None,
+            "cooldown_until": external_state.get("cooldown_until") if isinstance(external_state, dict) else None,
+            "down_since": external_state.get("down_since") if isinstance(external_state, dict) else None,
             "successes": int(state.successes) if state else 0,
             "failures": int(state.failures) if state else 0,
         }
 
     def _provider_health(self, provider_id: str, *, provider_available: bool) -> dict[str, Any]:
         provider_cfg = self.registry.providers.get(provider_id)
+        external_state = self._external_provider_health(provider_id)
         provider_models = [model for model in self.registry.sorted_models() if model.provider == provider_id]
         model_ids = sorted(model.id for model in provider_models)
         model_states = [self._outcomes.get(model_id) for model_id in model_ids]
@@ -708,12 +827,34 @@ class LLMRouter:
             elif down_models > 0 or degraded_models > 0:
                 status = "degraded"
 
+        if isinstance(external_state, dict):
+            external_status = str(external_state.get("status") or "unknown").strip().lower()
+            if external_status == "down":
+                status = "down"
+            elif external_status == "degraded" and status != "down":
+                status = "degraded"
+
         return {
             "status": status,
-            "last_error_kind": latest_state.last_error_kind if latest_state else None,
-            "status_code": latest_state.last_status_code if latest_state else None,
-            "last_status_code": latest_state.last_status_code if latest_state else None,
-            "last_ts": latest_state.last_ts if latest_state else None,
+            "last_error_kind": (
+                (external_state.get("last_error_kind") if isinstance(external_state, dict) else None)
+                or (latest_state.last_error_kind if latest_state else None)
+            ),
+            "status_code": (
+                (external_state.get("status_code") if isinstance(external_state, dict) else None)
+                or (latest_state.last_status_code if latest_state else None)
+            ),
+            "last_status_code": (
+                (external_state.get("status_code") if isinstance(external_state, dict) else None)
+                or (latest_state.last_status_code if latest_state else None)
+            ),
+            "last_ts": (
+                (float(external_state.get("last_checked_at")) if isinstance(external_state, dict) and external_state.get("last_checked_at") is not None else None)
+                or (latest_state.last_ts if latest_state else None)
+            ),
+            "last_checked_at": external_state.get("last_checked_at") if isinstance(external_state, dict) else None,
+            "cooldown_until": external_state.get("cooldown_until") if isinstance(external_state, dict) else None,
+            "down_since": external_state.get("down_since") if isinstance(external_state, dict) else None,
             "successes": sum(int(state.successes) for state in model_states if state),
             "failures": sum(int(state.failures) for state in model_states if state),
         }

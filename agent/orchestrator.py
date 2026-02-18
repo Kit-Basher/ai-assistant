@@ -9,6 +9,7 @@ import json
 import shlex
 import uuid
 import subprocess
+import sqlite3
 from datetime import datetime, timezone, timedelta
 
 from agent.intent_router import route_message
@@ -57,6 +58,7 @@ from agent.epistemics import (
     build_epistemics_report,
     parse_candidate_json,
 )
+from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from memory.db import MemoryDB
 
 
@@ -97,6 +99,107 @@ _COMMAND_STARTERS = {
     "mypy",
 }
 
+_AUTHORITATIVE_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "system.performance": (
+        "slow",
+        "lag",
+        "lagging",
+        "stutter",
+        "stuttering",
+        "fps",
+        "bottleneck",
+        "throttle",
+        "throttling",
+        "temps",
+        "temperature",
+        "hot",
+        "overheating",
+        "cpu",
+        "gpu",
+        "vram",
+        "ram",
+    ),
+    "system.health": (
+        "crash",
+        "crashing",
+        "black screen",
+        "boot loop",
+        "boot",
+        "service",
+        "systemd",
+        "failed unit",
+        "failed units",
+        "journal",
+        "error loop",
+    ),
+    "system.storage": (
+        "disk full",
+        "out of space",
+        "space left",
+        "storage",
+        "ssd full",
+        "drive full",
+        "what s eating space",
+        "what is eating space",
+        "largest folders",
+        "disk space",
+    ),
+}
+_LOCAL_OBS_SNAPSHOT_MARKERS = (
+    '"ts":',
+    '"cpu":',
+    '"memory":',
+    '"disk":',
+)
+_LOCAL_OBS_METRICS_MARKERS = (
+    '"cpu_usage":',
+    '"mem_available":',
+    '"root_disk_used_pct":',
+)
+_AUTHORITATIVE_DOMAIN_TO_TOOL = {
+    "system.performance": "sys_metrics_snapshot",
+    "system.health": "sys_health_report",
+    "system.storage": "sys_inventory_summary",
+}
+
+
+def _normalize_authoritative_text(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9]+", " ", (text or "").lower())
+    return f" {cleaned.strip()} "
+
+
+def _contains_keyword(normalized_text: str, keyword: str) -> bool:
+    token = keyword.strip().lower()
+    if not token:
+        return False
+    token = re.sub(r"[^a-z0-9]+", " ", token).strip()
+    if not token:
+        return False
+    return f" {token} " in normalized_text
+
+
+def classify_authoritative_domain(text: str) -> set[str]:
+    normalized = _normalize_authoritative_text(text)
+    if normalized.strip() == "":
+        return set()
+    domains: set[str] = set()
+    for domain, keywords in _AUTHORITATIVE_DOMAIN_KEYWORDS.items():
+        if any(_contains_keyword(normalized, keyword) for keyword in keywords):
+            domains.add(domain)
+    return domains
+
+
+def has_local_observations_block(text: str) -> bool:
+    lowered = (text or "").lower()
+    if "local_observations" in lowered:
+        return True
+    compact = "".join(ch for ch in lowered if not ch.isspace())
+    if all(marker in compact for marker in _LOCAL_OBS_SNAPSHOT_MARKERS):
+        return True
+    if all(marker in compact for marker in _LOCAL_OBS_METRICS_MARKERS):
+        return True
+    return False
+
 
 @dataclass
 
@@ -117,6 +220,9 @@ class Orchestrator:
         enable_writes: bool = False,
         llm_broker: Any | None = None,
         llm_broker_error: str | None = None,
+        perception_enabled: bool = True,
+        perception_roots: tuple[str, ...] | None = None,
+        perception_interval_seconds: int = 5,
     ) -> None:
         self.db = db
         self.skills = SkillLoader(skills_path).load_all()
@@ -128,6 +234,13 @@ class Orchestrator:
         self._runner: Runner | None = None
         self._llm_broker = llm_broker
         self._llm_broker_error = llm_broker_error
+        self.perception_enabled = bool(perception_enabled)
+        self.perception_roots = tuple(
+            part.strip()
+            for part in (perception_roots or ("/home", "/data/projects"))
+            if part and part.strip()
+        ) or ("/home", "/data/projects")
+        self.perception_interval_seconds = max(1, int(perception_interval_seconds))
         self._knowledge_cache = KnowledgeQueryCache()
         self._pending_compare: dict[str, dict[str, str]] = {}
         self._last_offer_topic: dict[str, str] = {}
@@ -299,7 +412,7 @@ class Orchestrator:
 
         try:
             tokens = shlex.split(header_line)
-        except Exception:
+        except ValueError:
             tokens = header_line.split()
 
         label_tokens: list[str] = []
@@ -413,6 +526,319 @@ class Orchestrator:
         context["knowledge_cache"] = self._knowledge_cache
         return context
 
+    @staticmethod
+    def _perception_event_payloads(events: list[Any]) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for event in events:
+            rows.append(
+                {
+                    "kind": str(getattr(event, "kind", "") or ""),
+                    "severity": str(getattr(event, "severity", "") or ""),
+                    "summary": str(getattr(event, "summary", "") or ""),
+                    "evidence_json": dict(getattr(event, "evidence_json", {}) or {}),
+                }
+            )
+        return rows
+
+    def _collect_perception_snapshot(self) -> dict[str, Any]:
+        return collect_snapshot(list(self.perception_roots))
+
+    def _store_perception_snapshot_and_events(self, snapshot: dict[str, Any]) -> tuple[int, list[int], list[dict[str, Any]]]:
+        events = analyze_snapshot(snapshot)
+        snapshot_id = self.db.insert_metrics_snapshot(snapshot)
+        event_ids: list[int] = []
+        for event in events:
+            event_id = self.db.insert_event(
+                int(snapshot.get("ts") or datetime.now(timezone.utc).timestamp()),
+                event.kind,
+                event.severity,
+                event.summary,
+                event.evidence_json,
+            )
+            event_ids.append(event_id)
+        return snapshot_id, event_ids, self._perception_event_payloads(events)
+
+    @staticmethod
+    def _metrics_row_payload(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        return {
+            "id": int(row.get("id") or 0),
+            "ts": int(row.get("ts") or 0),
+            "cpu_usage": float(row.get("cpu_usage") or 0.0),
+            "cpu_freq": float(row.get("cpu_freq") or 0.0),
+            "mem_used": int(row.get("mem_used") or 0),
+            "mem_available": int(row.get("mem_available") or 0),
+            "root_disk_used_pct": float(row.get("root_disk_used_pct") or 0.0),
+            "gpu_usage": float(row.get("gpu_usage")) if row.get("gpu_usage") is not None else None,
+            "gpu_mem_used": int(row.get("gpu_mem_used")) if row.get("gpu_mem_used") is not None else None,
+            "gpu_temp": float(row.get("gpu_temp")) if row.get("gpu_temp") is not None else None,
+        }
+
+    @staticmethod
+    def _json_payload_from_response(response: OrchestratorResponse, tool_name: str) -> dict[str, Any]:
+        raw = (response.text or "").strip()
+        if not raw.startswith("{"):
+            raise RuntimeError(f"{tool_name} returned non-JSON output")
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"{tool_name} returned invalid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError(f"{tool_name} returned non-object JSON")
+        return parsed
+
+    @staticmethod
+    def _coerce_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _collect_authoritative_observations(self, domains: set[str]) -> dict[str, Any]:
+        observations: dict[str, Any] = {}
+        refs: dict[str, dict[str, Any]] = {}
+
+        for domain in sorted(domains):
+            tool_name = _AUTHORITATIVE_DOMAIN_TO_TOOL.get(domain, "")
+            if domain == "system.performance":
+                payload = self._json_payload_from_response(self._sys_metrics_snapshot(), tool_name)
+                observations[domain] = payload
+                stored = payload.get("stored") if isinstance(payload.get("stored"), dict) else {}
+                snapshot = payload.get("snapshot") if isinstance(payload.get("snapshot"), dict) else {}
+                refs[domain] = {
+                    "tool": tool_name,
+                    "snapshot_id": self._coerce_int(stored.get("snapshot_id")),
+                    "ts": self._coerce_int(snapshot.get("ts")),
+                }
+                continue
+
+            if domain == "system.health":
+                payload = self._json_payload_from_response(self._sys_health_report(), tool_name)
+                observations[domain] = payload
+                latest = payload.get("latest_metrics") if isinstance(payload.get("latest_metrics"), dict) else {}
+                refs[domain] = {
+                    "tool": tool_name,
+                    "snapshot_id": self._coerce_int(latest.get("id")),
+                    "ts": self._coerce_int(latest.get("ts")),
+                }
+                continue
+
+            if domain == "system.storage":
+                payload = self._json_payload_from_response(self._sys_inventory_summary(), tool_name)
+                observations[domain] = payload
+                latest = self.db.get_latest_metrics_snapshot() or {}
+                refs[domain] = {
+                    "tool": tool_name,
+                    "snapshot_id": self._coerce_int(latest.get("id")),
+                    "ts": self._coerce_int(latest.get("ts")),
+                }
+                continue
+
+        return {
+            "domains": sorted(domains),
+            "grounding": {
+                "collected_at_ts": int(datetime.now(timezone.utc).timestamp()),
+                "observation_refs": refs,
+            },
+            "observations": observations,
+        }
+
+    @staticmethod
+    def _authoritative_summary_lines(local_observations: dict[str, Any]) -> list[str]:
+        lines: list[str] = []
+        observations = (
+            local_observations.get("observations")
+            if isinstance(local_observations.get("observations"), dict)
+            else {}
+        )
+
+        perf = observations.get("system.performance") if isinstance(observations.get("system.performance"), dict) else {}
+        perf_snapshot = perf.get("snapshot") if isinstance(perf.get("snapshot"), dict) else {}
+        perf_cpu = perf_snapshot.get("cpu") if isinstance(perf_snapshot.get("cpu"), dict) else {}
+        perf_gpu = perf_snapshot.get("gpu") if isinstance(perf_snapshot.get("gpu"), dict) else {}
+        if perf_snapshot:
+            try:
+                cpu_usage = float(perf_cpu.get("usage_pct") or 0.0)
+            except (TypeError, ValueError):
+                cpu_usage = 0.0
+            try:
+                gpu_usage = float(perf_gpu.get("usage_pct") or 0.0)
+            except (TypeError, ValueError):
+                gpu_usage = 0.0
+            try:
+                gpu_temp = float(perf_gpu.get("temperature_c") or 0.0)
+            except (TypeError, ValueError):
+                gpu_temp = 0.0
+            lines.append(
+                "Performance: cpu={cpu}% gpu={gpu}% gpu_temp={temp}C".format(
+                    cpu=cpu_usage,
+                    gpu=gpu_usage,
+                    temp=gpu_temp,
+                )
+            )
+
+        health = observations.get("system.health") if isinstance(observations.get("system.health"), dict) else {}
+        if health:
+            latest = health.get("latest_metrics") if isinstance(health.get("latest_metrics"), dict) else {}
+            events = health.get("recent_events") if isinstance(health.get("recent_events"), list) else []
+            lines.append(
+                "Health: latest_snapshot_id={sid} recent_events={events}".format(
+                    sid=int(latest.get("id") or 0),
+                    events=len(events),
+                )
+            )
+
+        storage = observations.get("system.storage") if isinstance(observations.get("system.storage"), dict) else {}
+        inventory = storage.get("inventory") if isinstance(storage.get("inventory"), dict) else {}
+        if inventory:
+            try:
+                root_used_pct = float(inventory.get("root_disk_used_pct") or 0.0)
+            except (TypeError, ValueError):
+                root_used_pct = 0.0
+            lines.append(
+                "Storage: root_used_pct={used}% top_dirs={count}".format(
+                    used=root_used_pct,
+                    count=len(inventory.get("top_dirs") or []),
+                )
+            )
+
+        if not lines:
+            lines.append("Collected local observations for authoritative domain query.")
+        return lines
+
+    def _answer_with_authoritative_observations(self, user_text: str, local_observations: dict[str, Any]) -> OrchestratorResponse:
+        observations_json = json.dumps(local_observations, ensure_ascii=True, sort_keys=True)
+        llm_text: str | None = None
+
+        if self.llm_client and hasattr(self.llm_client, "chat"):
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Answer using only LOCAL_OBSERVATIONS. "
+                        "If evidence is missing, say \"I’m not sure.\" and ask one focused question."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Question:\n{user_text}\n\nLOCAL_OBSERVATIONS\n{observations_json}",
+                },
+            ]
+            try:
+                result = self.llm_client.chat(
+                    messages,
+                    purpose="authoritative_domain",
+                    compute_tier="low",
+                    require_tools=True,
+                )
+            except TypeError:
+                result = self.llm_client.chat(messages, purpose="authoritative_domain")
+            if isinstance(result, dict) and result.get("ok") and str(result.get("text") or "").strip():
+                llm_text = str(result.get("text") or "").strip()
+
+        answer_body = llm_text or "\n".join(self._authoritative_summary_lines(local_observations))
+        final_text = f"{answer_body}\n\nLOCAL_OBSERVATIONS\n{observations_json}"
+        return OrchestratorResponse(
+            final_text,
+            {
+                "skip_friction_formatting": True,
+                "local_observations": local_observations,
+            },
+        )
+
+    def _authoritative_tool_failure_response(self, domains: set[str], error: Exception) -> OrchestratorResponse:
+        primary = sorted(domains)[0] if domains else "system.performance"
+        tool_name = _AUTHORITATIVE_DOMAIN_TO_TOOL.get(primary, "sys_metrics_snapshot")
+        reason = " ".join(str(error).replace("?", "").split()) or "unknown error"
+        text = (
+            "I’m not sure.\n\n"
+            f"I couldn’t read local system data via {tool_name} ({reason}). "
+            f"Do you want me to retry {tool_name} now?"
+        )
+        return OrchestratorResponse(text, {"skip_friction_formatting": True})
+
+    def _enforce_authoritative_domain_gate(self, user_text: str) -> OrchestratorResponse | None:
+        domains = classify_authoritative_domain(user_text)
+        if not domains:
+            return None
+        if has_local_observations_block(user_text):
+            return None
+        try:
+            local_observations = self._collect_authoritative_observations(domains)
+        except Exception as exc:  # pragma: no cover - defensive safety
+            return self._authoritative_tool_failure_response(domains, exc)
+        return self._answer_with_authoritative_observations(user_text, local_observations)
+
+    def _sys_metrics_snapshot(self) -> OrchestratorResponse:
+        if not self.perception_enabled:
+            return OrchestratorResponse("Perception is disabled.")
+        snapshot = self._collect_perception_snapshot()
+        snapshot_id, event_ids, events = self._store_perception_snapshot_and_events(snapshot)
+        payload = {
+            "ok": True,
+            "source": "fresh",
+            "snapshot": snapshot,
+            "events": events,
+            "stored": {
+                "snapshot_id": snapshot_id,
+                "event_ids": event_ids,
+            },
+        }
+        return OrchestratorResponse(self._render_pretty_json(payload))
+
+    def _sys_health_report(self) -> OrchestratorResponse:
+        if not self.perception_enabled:
+            return OrchestratorResponse("Perception is disabled.")
+        latest = self.db.get_latest_metrics_snapshot()
+        source = "sqlite" if latest else "fresh"
+        snapshot: dict[str, Any] | None = None
+        if not latest:
+            snapshot = self._collect_perception_snapshot()
+            self._store_perception_snapshot_and_events(snapshot)
+            latest = self.db.get_latest_metrics_snapshot()
+        payload = {
+            "ok": True,
+            "source": source,
+            "latest_metrics": self._metrics_row_payload(latest),
+            "recent_events": self.db.list_recent_events(limit=10),
+            "system_health": ((snapshot or {}).get("system_health") if snapshot else None),
+        }
+        return OrchestratorResponse(self._render_pretty_json(payload))
+
+    def _sys_inventory_summary(self) -> OrchestratorResponse:
+        if not self.perception_enabled:
+            return OrchestratorResponse("Perception is disabled.")
+        latest = self.db.get_latest_metrics_snapshot()
+        source = "sqlite" if latest else "fresh"
+        if latest:
+            snapshot = {
+                "cpu": {"freq_mhz": latest.get("cpu_freq") or 0.0, "load_avg": {"1m": 0.0}},
+                "memory": {
+                    "total": 0,
+                    "used": int(latest.get("mem_used") or 0),
+                    "available": int(latest.get("mem_available") or 0),
+                    "swap_total": 0,
+                },
+                "disk": {
+                    "root": {
+                        "total": 0,
+                        "used_pct": float(latest.get("root_disk_used_pct") or 0.0),
+                    },
+                    "top_dirs": [],
+                },
+                "gpu": {
+                    "available": latest.get("gpu_usage") is not None,
+                },
+            }
+        else:
+            snapshot = self._collect_perception_snapshot()
+            self._store_perception_snapshot_and_events(snapshot)
+
+        summary = summarize_inventory(snapshot, list(self.perception_roots))
+        payload = {"ok": True, "source": source, "inventory": summary}
+        return OrchestratorResponse(self._render_pretty_json(payload))
+
     def _maybe_add_narration(self, kind: str, payload: dict[str, Any], text: str) -> str:
         if not self._narration_enabled():
             return text
@@ -495,10 +921,7 @@ class Orchestrator:
     ) -> None:
         if not topic:
             return
-        try:
-            record_event(self.db, user_id, topic, intent_type)
-        except Exception:
-            return
+        record_event(self.db, user_id, topic, intent_type)
 
     def _topic_tags_for_decision(self, decision: dict[str, Any] | None) -> list[str]:
         if not decision:
@@ -540,7 +963,7 @@ class Orchestrator:
             if row.get("expires_at") and datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
                 self._pending_compare.pop(user_id, None)
                 return None
-        except Exception:
+        except (TypeError, ValueError):
             return None
         return row
 
@@ -625,7 +1048,7 @@ class Orchestrator:
                     "text": cleaned,
                 },
             )
-        except Exception:
+        except (sqlite3.Error, OSError, TypeError, ValueError):
             pass
 
     def _epistemic_extract_referents(self, user_id: str, thread_id: str) -> tuple[str, ...]:
@@ -1016,7 +1439,7 @@ class Orchestrator:
             user_visible_text = "\n\n".join(part for part in parts if part and part.strip())
         try:
             self._epistemic_monitor.record(user_id, decision, active_thread_id=ctx.active_thread_id)
-        except Exception:
+        except (sqlite3.Error, OSError, TypeError, ValueError):
             pass
         thread_id = ctx.active_thread_id or self._default_thread_id(user_id)
         user_turn_id = ctx.recent_turn_ids[-1] if ctx.recent_turn_ids else self._next_turn_id(user_id, thread_id, "user")
@@ -1121,7 +1544,7 @@ class Orchestrator:
                         "mode": "read_only",
                     },
                 )
-            except Exception:
+            except (sqlite3.Error, OSError, TypeError, ValueError):
                 return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
         log_event(self.log_path, "skill_call", {"skill": skill_name, "function": function_name})
         if self._runner and self._runner.mode in {"sandbox", "live"}:
@@ -1163,7 +1586,7 @@ class Orchestrator:
                     [function_name or skill_name],
                     override=None,
                 )
-            except Exception:
+            except (TypeError, ValueError, sqlite3.Error, OSError):
                 pass
         return OrchestratorResponse(response_text, result)
 
@@ -1251,7 +1674,7 @@ class Orchestrator:
                         [cmd.name],
                         override=override,
                     )
-                except Exception:
+                except (TypeError, ValueError, sqlite3.Error, OSError):
                     pass
                 if cmd.name == "confirm":
                     pending = self.confirmations.pop(user_id)
@@ -1610,7 +2033,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) < 2:
                         return OrchestratorResponse(
@@ -1636,7 +2059,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) != 3:
                         return OrchestratorResponse(
@@ -1758,7 +2181,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) != 2:
                         return OrchestratorResponse(
@@ -1789,7 +2212,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) != 2:
                         return OrchestratorResponse(
@@ -1956,7 +2379,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) < 2:
                         return OrchestratorResponse(
@@ -1970,7 +2393,7 @@ class Orchestrator:
                         if len(parts) == 4 and parts[2] == "--max":
                             try:
                                 max_depth = int(parts[3])
-                            except Exception:
+                            except (TypeError, ValueError):
                                 return OrchestratorResponse(
                                     "Usage: /graph_path <from_ref> <to_ref> [--max <N>]",
                                     {"skip_friction_formatting": True, "thread_id": thread_id},
@@ -2097,7 +2520,7 @@ class Orchestrator:
                     else:
                         try:
                             tokens = shlex.split(raw_args)
-                        except Exception:
+                        except ValueError:
                             tokens = raw_args.split()
                         if len(tokens) != 2 or tokens[0] != "--threads":
                             return OrchestratorResponse(
@@ -2154,7 +2577,7 @@ class Orchestrator:
                         )
                     try:
                         payload = json.loads(payload_text)
-                    except Exception:
+                    except json.JSONDecodeError:
                         payload = None
                     if not isinstance(payload, dict):
                         return OrchestratorResponse(
@@ -2197,7 +2620,7 @@ class Orchestrator:
                         )
                     try:
                         payload = json.loads(payload_text)
-                    except Exception:
+                    except json.JSONDecodeError:
                         payload = None
                     if not isinstance(payload, dict):
                         return OrchestratorResponse(
@@ -2223,7 +2646,7 @@ class Orchestrator:
                     active_thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if not parts:
                         return OrchestratorResponse(
@@ -2260,7 +2683,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) < 2:
                         return OrchestratorResponse(
@@ -2290,7 +2713,7 @@ class Orchestrator:
                     thread_id = self._active_thread_id_for_user(user_id)
                     try:
                         parts = shlex.split((cmd.args or "").strip())
-                    except Exception:
+                    except ValueError:
                         parts = (cmd.args or "").strip().split()
                     if len(parts) != 2:
                         return OrchestratorResponse(
@@ -2500,7 +2923,7 @@ class Orchestrator:
                     def _parse_notes(raw_bullets: str) -> list[str]:
                         try:
                             decoded = json.loads(raw_bullets or "[]")
-                        except Exception:
+                        except json.JSONDecodeError:
                             decoded = []
                         out: list[str] = []
                         if isinstance(decoded, list):
@@ -2854,9 +3277,12 @@ class Orchestrator:
                                     "reason": "advice_request",
                                 },
                             )
-                        except Exception:
+                        except (sqlite3.Error, OSError, TypeError, ValueError):
                             return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
                         return OrchestratorResponse(refusal)
+                    gated = self._enforce_authoritative_domain_gate(question)
+                    if gated is not None:
+                        return gated
 
                     parsed = parse_timeframe(question, self.db, self.timezone)
                     if parsed.clarify:
@@ -2876,7 +3302,7 @@ class Orchestrator:
                                     "clarification_required": True,
                                 },
                             )
-                        except Exception:
+                        except (sqlite3.Error, OSError, TypeError, ValueError):
                             return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
                         self._store_pending_clarification(
                             user_id,
@@ -2928,7 +3354,7 @@ class Orchestrator:
                                     "reason": "advice_request",
                                 },
                             )
-                        except Exception:
+                        except (sqlite3.Error, OSError, TypeError, ValueError):
                             return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
                         return OrchestratorResponse(refusal)
 
@@ -2956,7 +3382,7 @@ class Orchestrator:
                                     "clarification_required": True,
                                 },
                             )
-                        except Exception:
+                        except (sqlite3.Error, OSError, TypeError, ValueError):
                             return OrchestratorResponse(AUDIT_HARD_FAIL_MSG)
                         self._store_pending_clarification(
                             user_id,
@@ -3032,6 +3458,15 @@ class Orchestrator:
                     )
                     response.text = self._maybe_add_narration_from_text("network_report", response.text)
                     return response
+
+                if cmd.name == "sys_metrics_snapshot":
+                    return self._sys_metrics_snapshot()
+
+                if cmd.name == "sys_health_report":
+                    return self._sys_health_report()
+
+                if cmd.name == "sys_inventory_summary":
+                    return self._sys_inventory_summary()
 
                 if cmd.name == "weekly_reflection":
                     return self._call_skill(
@@ -3263,7 +3698,7 @@ class Orchestrator:
                     topic_tags,
                     override=override,
                 )
-            except Exception:
+            except (TypeError, ValueError, sqlite3.Error, OSError):
                 pass
 
             if decision.get("type") == "disk_changes":
@@ -3537,7 +3972,7 @@ class Orchestrator:
                 details=payload,
                 error=result.error,
             )
-        except Exception:
+        except (sqlite3.Error, OSError, TypeError, ValueError):
             return False
         return True
 
@@ -3699,7 +4134,7 @@ class Orchestrator:
                                 mins = int(match.group(1))
                                 body = re.sub(r"\s*\[\d+m\]\s*", " ", body, flags=re.IGNORECASE).strip()
                             tasks.append((body, mins))
-            except Exception:
+            except (OSError, UnicodeError, ValueError):
                 tasks = []
         if not tasks:
             rows = self.db.list_tasks(limit=8)
@@ -3849,7 +4284,7 @@ class Orchestrator:
                 due = (row.get("due_date") or "").strip()
                 try:
                     due_date = datetime.fromisoformat(due).date()
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if (due_date - now).days <= due_within_days:
                     filtered.append(row)
@@ -3957,7 +4392,7 @@ class Orchestrator:
             )
             text = (proc.stdout or proc.stderr or "").strip()
             return text or "unknown"
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             return "unknown"
 
     def _health_payload(self, user_id: str) -> dict[str, Any]:
@@ -4062,7 +4497,7 @@ class Orchestrator:
                     continue
                 try:
                     delta_bytes += int(value)
-                except Exception:
+                except (TypeError, ValueError, OverflowError):
                     continue
             disk_delta_mb = round(delta_bytes / (1024.0 * 1024.0), 2)
         # Service verdict.

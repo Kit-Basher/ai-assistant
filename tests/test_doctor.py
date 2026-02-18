@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent.doctor import (
     _check_db,
@@ -95,6 +96,21 @@ class TestDoctor(unittest.TestCase):
         result = _check_systemd_units(fake_run, "/nonexistent/doctor.db")
         self.assertFalse(result.ok)
 
+    def test_systemd_missing_unit_fails_in_strict_mode(self) -> None:
+        def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+            cmd = args[0]
+            if cmd[:2] == ["systemctl", "--version"]:
+                return _Proc(0, "systemd 253")
+            if cmd[:2] == ["systemctl", "cat"]:
+                if cmd[2] == "personal-agent-observe.service":
+                    return _Proc(1)
+                return _Proc(0, "unit")
+            return _Proc(1)
+
+        with patch.dict(os.environ, {"AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS": "1"}, clear=False):
+            result = _check_systemd_units(fake_run, "/nonexistent/doctor.db")
+        self.assertFalse(result.ok)
+
     def test_daily_brief_timer_passes_when_active(self) -> None:
         def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
             cmd = args[0]
@@ -117,7 +133,7 @@ class TestDoctor(unittest.TestCase):
         result = _check_daily_brief_timer(fake_run)
         self.assertTrue(result.ok)
 
-    def test_daily_brief_timer_fails_when_missing(self) -> None:
+    def test_daily_brief_timer_skips_when_missing_by_default(self) -> None:
         def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
             cmd = args[0]
             if cmd[:2] == ["systemctl", "--version"]:
@@ -129,6 +145,22 @@ class TestDoctor(unittest.TestCase):
             return _Proc(1)
 
         result = _check_daily_brief_timer(fake_run)
+        self.assertTrue(result.ok)
+        self.assertIn("skipped", result.message)
+
+    def test_daily_brief_timer_fails_when_missing_in_strict_mode(self) -> None:
+        def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+            cmd = args[0]
+            if cmd[:2] == ["systemctl", "--version"]:
+                return _Proc(0, "systemd 253")
+            if cmd[:2] == ["systemctl", "cat"]:
+                if cmd[2] == "personal-agent-daily-brief.service":
+                    return _Proc(0, "unit")
+                return _Proc(1)
+            return _Proc(1)
+
+        with patch.dict(os.environ, {"AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS": "1"}, clear=False):
+            result = _check_daily_brief_timer(fake_run)
         self.assertFalse(result.ok)
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import unittest
 
 from agent.config import Config
@@ -620,6 +621,45 @@ class TestLLMRouter(unittest.TestCase):
         second = router.chat([{"role": "user", "content": "second"}], purpose="chat", task_type="chat")
         self.assertTrue(second["ok"])
         self.assertEqual("remote_b", second["provider"])
+        self.assertEqual(1, remote_a.calls)
+
+    def test_external_health_skip_list_avoids_recently_down_candidate(self) -> None:
+        remote_a = FakeProvider("remote_a", [Response("remote-ok", "remote_a", "cheap")])
+        local = FakeProvider("local", [Response("local-should-not-run", "local", "chat")])
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": local,
+                "remote_a": remote_a,
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=_registry(),
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+        )
+        router.set_external_health_state(
+            {
+                "providers": {
+                    "local": {
+                        "status": "down",
+                        "cooldown_until": int(time.time()) + 120,
+                    }
+                },
+                "models": {
+                    "local:chat": {
+                        "provider_id": "local",
+                        "status": "down",
+                        "cooldown_until": int(time.time()) + 120,
+                    }
+                },
+                "last_run_at": int(time.time()),
+            }
+        )
+
+        result = router.chat([{"role": "user", "content": "hello"}], purpose="chat", task_type="chat")
+        self.assertTrue(result["ok"])
+        self.assertEqual("remote_a", result["provider"])
+        self.assertEqual(0, local.calls)
         self.assertEqual(1, remote_a.calls)
 
 

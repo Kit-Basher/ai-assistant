@@ -1,63 +1,53 @@
-# Architecture (v0.8)
+# Architecture (Current Branch)
 
-> Architecture reference baseline.  
-> For what is currently wired in this branch, verify against `PROJECT_STATUS.md`.
+This file describes the structural shape of the project as implemented on `brief-v0.2-clean`.
 
-This document explains the stable architecture spine and how new features must fit into it.
+## Runtime Entry Points
 
-## Core Spine (Plain Terms)
-Telegram input (untrusted) flows through a strict sequence:
+- Telegram bot: `telegram_adapter/bot.py`
+- Local API server: `agent/api_server.py`
 
-Telegram input (untrusted)
-  -> intent / commands
+Both runtimes depend on shared core modules (`agent/orchestrator.py`, skills, memory DB, llm router).
+
+## Core Request Flow
+
+Telegram/API input (untrusted)
+  -> command/intent handling
   -> orchestrator
-  -> skill
-  -> DB + audit
-  -> report text (facts)
-  -> optional narration (rephrase only)
+  -> skill or domain module
+  -> persistence/audit/memory
+  -> response formatting
+  -> transport response (Telegram/API)
 
-The orchestrator is the single entry point for behavior. Skills are the only execution surface. Reports are deterministic and factual. Narration is optional and may never alter or add facts.
+## Main Components
 
-## Three-Layer Model
-1) Governors produce facts
-- Collect snapshots, diffs, and raw measurements.
-- Observe-only by default.
+- Orchestration and routing: `agent/orchestrator.py`, `agent/intent_router.py`, `agent/nl_router.py`
+- Skill system: `skills/*`, loaded by `agent/skills_loader.py`
+- Persistence: `memory/db.py` + schema in `memory/schema.sql`
+- LLM abstraction: `agent/llm/*`, registry in `llm_registry.json`
+- ModelOps controls: `agent/modelops/*`, `agent/permissions.py`, `agent/audit_log.py`
+- Scheduling entrypoints:
+  - observe: `agent/scheduled_observe.py`
+  - daily brief: `agent/scheduled_daily_brief.py`
+  - optional in-process snapshots in Telegram runtime when enabled
 
-2) Reports format facts deterministically
-- Convert facts into a stable, neutral report text.
-- No advice or recommendations.
+## Data/State Boundaries
 
-3) Narration optionally rephrases
-- Takes report text as input.
-- Produces a short, neutral summary.
-- If narration is disabled or fails, raw report is returned unchanged.
+- Primary structured state: SQLite (`memory/agent.db` by default)
+- Operational logs: JSONL (`logs/agent.jsonl` by default)
+- Secrets: OS keyring where available, encrypted file fallback
+- Provider/model registry: JSON (`llm_registry.json`)
 
-## ASCII Diagram
+## Design Constraints
 
-[Telegram (untrusted)]
-        |
-        v
-[Intent / Commands]
-        |
-        v
-[Orchestrator]
-        |
-        v
-[Skill / Governor]
-        |
-        v
-[DB + Audit] ---> [Report Text (facts)] ---> [Optional Narration]
+- Input is untrusted until routed and validated.
+- Side effects are explicit and auditable.
+- Model-management autonomy is constrained to whitelisted actions.
+- Local operation is first-class; remote providers are optional.
 
-## Invariants
-See `STABILITY.md` for the authoritative list of guarantees. This document does not redefine them.
+## Change Rules
 
-## Extension Rules
-Any new jurisdiction or governor must:
-- Remain observe-only unless explicitly approved.
-- Persist snapshots and compute diffs against previous snapshots.
-- Enforce audit hard-fail (abort if audit logging fails).
-- Be covered by tests comparable to storage/resource governors.
-
-Narration rules:
-- Must be optional and failure-safe.
-- Must not introduce new facts or recommendations.
+- New behavior should go through orchestrator/skill boundaries (not ad hoc handler logic).
+- New persistence should be schema-backed and migration-safe.
+- New operational actions should include explicit permission and audit paths.
+- New modules should ship with tests in `tests/`.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import io
 import json
 import os
 import tempfile
@@ -11,8 +13,8 @@ from agent.config import Config
 from agent.llm.types import LLMError, Response, Usage
 
 
-def _config(registry_path: str, db_path: str) -> Config:
-    return Config(
+def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
+    base = Config(
         telegram_bot_token="token",
         openai_api_key=None,
         openai_model="gpt-4o-mini",
@@ -49,7 +51,12 @@ def _config(registry_path: str, db_path: str) -> Config:
         llm_circuit_breaker_window_seconds=60,
         llm_circuit_breaker_cooldown_seconds=30,
         llm_usage_stats_path=os.path.join(os.path.dirname(db_path), "usage_stats.json"),
+        llm_health_state_path=os.path.join(os.path.dirname(db_path), "llm_health_state.json"),
+        llm_automation_enabled=False,
+        model_scout_state_path=os.path.join(os.path.dirname(db_path), "model_scout_state.json"),
+        autopilot_notify_store_path=os.path.join(os.path.dirname(db_path), "llm_notifications.json"),
     )
+    return base.__class__(**{**base.__dict__, **overrides})
 
 
 class TestAPIServerRuntime(unittest.TestCase):
@@ -305,6 +312,11 @@ class TestAPIServerRuntime(unittest.TestCase):
                     "bad_request",
                     400,
                 ),
+                (
+                    RuntimeError("boom"),
+                    "server_error",
+                    None,
+                ),
             ]
             for raised, expected_kind, expected_status in cases:
                 provider_impl.chat = lambda request, *, model, timeout_seconds, err=raised: (_ for _ in ()).throw(err)  # type: ignore[assignment]
@@ -405,18 +417,36 @@ class TestAPIServerRuntime(unittest.TestCase):
     def test_refresh_models_marks_embedding_models_as_embedding_only(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 
-        runtime._http_get_json = lambda *_args, **_kwargs: {  # type: ignore[assignment]
-            "data": [
-                {"id": "llama3.2"},
-                {"id": "nomic-embed-text"},
-            ]
-        }
+        def _fake_get(url: str, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            if url.endswith("/api/tags"):
+                return {"models": [{"name": "llama3.2"}, {"name": "nomic-embed-text"}]}
+            return {"data": []}
+
+        runtime._http_get_json = _fake_get  # type: ignore[assignment]
 
         ok, _response = runtime.refresh_models()
         self.assertTrue(ok)
 
         embed_model = runtime.registry_document["models"]["ollama:nomic-embed-text"]
         self.assertEqual(["embedding"], embed_model["capabilities"])
+
+    def test_refresh_models_ollama_uses_tags_and_adds_qwen_as_chat(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        def _fake_get(url: str, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+            if url.endswith("/v1/models"):
+                raise AssertionError("ollama refresh must not use /v1/models")
+            if url.endswith("/api/tags"):
+                return {"models": [{"name": "qwen2.5:3b-instruct"}]}
+            return {}
+
+        runtime._http_get_json = _fake_get  # type: ignore[assignment]
+        ok, response = runtime.refresh_models({"provider": "ollama"})
+        self.assertTrue(ok)
+        self.assertTrue(response["ok"])
+        model_payload = runtime.registry_document["models"]["ollama:qwen2.5:3b-instruct"]
+        self.assertEqual(["chat"], model_payload["capabilities"])
+        self.assertTrue(model_payload["available"])
 
     def test_refresh_models_quarantines_stale_ollama_entries(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -637,6 +667,456 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertTrue(install_payload["ok"])
             self.assertEqual("installed", install_payload["status"])
 
+    def test_llm_health_autoconfig_and_hygiene_endpoints(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._health_monitor._probe_fn = lambda *_args: {"ok": True}  # type: ignore[attr-defined]
+        runtime.update_permissions(
+            {
+                "mode": "auto",
+                "actions": {
+                    "llm.autoconfig.apply": True,
+                    "llm.hygiene.apply": True,
+                    "llm.capabilities.reconcile.apply": True,
+                },
+            }
+        )
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        health_get = _HandlerForTest(runtime, "/llm/health")
+        health_get.do_GET()
+        self.assertEqual(200, health_get.status_code)
+        health_payload = json.loads(health_get.body.decode("utf-8"))
+        self.assertTrue(health_payload["ok"])
+        self.assertIn("health", health_payload)
+
+        health_run = _HandlerForTest(runtime, "/llm/health/run", {})
+        health_run.do_POST()
+        self.assertEqual(200, health_run.status_code)
+        health_run_payload = json.loads(health_run.body.decode("utf-8"))
+        self.assertTrue(health_run_payload["ok"])
+        self.assertIn("health", health_run_payload)
+
+        sources_get = _HandlerForTest(runtime, "/model_scout/sources")
+        sources_get.do_GET()
+        self.assertEqual(200, sources_get.status_code)
+        sources_payload = json.loads(sources_get.body.decode("utf-8"))
+        self.assertTrue(sources_payload["ok"])
+        self.assertIn("sources", sources_payload)
+
+        autoconfig_plan = _HandlerForTest(runtime, "/llm/autoconfig/plan", {"actor": "test"})
+        autoconfig_plan.do_POST()
+        self.assertEqual(200, autoconfig_plan.status_code)
+        autoconfig_plan_payload = json.loads(autoconfig_plan.body.decode("utf-8"))
+        self.assertTrue(autoconfig_plan_payload["ok"])
+        self.assertIn("plan", autoconfig_plan_payload)
+
+        capabilities_reconcile_plan = _HandlerForTest(runtime, "/llm/capabilities/reconcile/plan", {"actor": "test"})
+        capabilities_reconcile_plan.do_POST()
+        self.assertEqual(200, capabilities_reconcile_plan.status_code)
+        capabilities_reconcile_plan_payload = json.loads(capabilities_reconcile_plan.body.decode("utf-8"))
+        self.assertTrue(capabilities_reconcile_plan_payload["ok"])
+        self.assertIn("plan", capabilities_reconcile_plan_payload)
+
+        capabilities_reconcile_apply = _HandlerForTest(
+            runtime,
+            "/llm/capabilities/reconcile/apply",
+            {"actor": "test", "confirm": True},
+        )
+        capabilities_reconcile_apply.do_POST()
+        self.assertEqual(200, capabilities_reconcile_apply.status_code)
+        capabilities_reconcile_apply_payload = json.loads(capabilities_reconcile_apply.body.decode("utf-8"))
+        self.assertTrue(capabilities_reconcile_apply_payload["ok"])
+        self.assertIn("applied", capabilities_reconcile_apply_payload)
+
+        autoconfig_apply = _HandlerForTest(
+            runtime,
+            "/llm/autoconfig/apply",
+            {"actor": "test", "confirm": True},
+        )
+        autoconfig_apply.do_POST()
+        self.assertEqual(200, autoconfig_apply.status_code)
+        autoconfig_apply_payload = json.loads(autoconfig_apply.body.decode("utf-8"))
+        self.assertTrue(autoconfig_apply_payload["ok"])
+        self.assertTrue(autoconfig_apply_payload["applied"])
+
+        hygiene_plan = _HandlerForTest(runtime, "/llm/hygiene/plan", {"actor": "test"})
+        hygiene_plan.do_POST()
+        self.assertEqual(200, hygiene_plan.status_code)
+        hygiene_plan_payload = json.loads(hygiene_plan.body.decode("utf-8"))
+        self.assertTrue(hygiene_plan_payload["ok"])
+        self.assertIn("plan", hygiene_plan_payload)
+
+        hygiene_apply = _HandlerForTest(
+            runtime,
+            "/llm/hygiene/apply",
+            {"actor": "test", "confirm": True},
+        )
+        hygiene_apply.do_POST()
+        self.assertEqual(200, hygiene_apply.status_code)
+        hygiene_apply_payload = json.loads(hygiene_apply.body.decode("utf-8"))
+        self.assertTrue(hygiene_apply_payload["ok"])
+        self.assertIn("applied", hygiene_apply_payload)
+
+        restarted = AgentRuntime(_config(self.registry_path, self.db_path))
+        self.assertEqual(
+            runtime.get_defaults()["default_model"],
+            restarted.get_defaults()["default_model"],
+        )
+
+    def test_llm_apply_endpoints_deny_when_permission_not_allowed(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._health_monitor._probe_fn = lambda *_args: {"ok": True}  # type: ignore[attr-defined]
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        autoconfig_apply = _HandlerForTest(
+            runtime,
+            "/llm/autoconfig/apply",
+            {"actor": "test", "confirm": True},
+        )
+        autoconfig_apply.do_POST()
+        self.assertEqual(400, autoconfig_apply.status_code)
+        autoconfig_payload = json.loads(autoconfig_apply.body.decode("utf-8"))
+        self.assertFalse(autoconfig_payload["ok"])
+        self.assertEqual("action_not_permitted", autoconfig_payload["error"])
+
+        hygiene_apply = _HandlerForTest(
+            runtime,
+            "/llm/hygiene/apply",
+            {"actor": "test", "confirm": True},
+        )
+        hygiene_apply.do_POST()
+        self.assertEqual(400, hygiene_apply.status_code)
+        hygiene_payload = json.loads(hygiene_apply.body.decode("utf-8"))
+        self.assertFalse(hygiene_payload["ok"])
+        self.assertEqual("action_not_permitted", hygiene_payload["error"])
+
+        capabilities_reconcile_apply = _HandlerForTest(
+            runtime,
+            "/llm/capabilities/reconcile/apply",
+            {"actor": "test", "confirm": True},
+        )
+        capabilities_reconcile_apply.do_POST()
+        self.assertEqual(400, capabilities_reconcile_apply.status_code)
+        capabilities_reconcile_payload = json.loads(capabilities_reconcile_apply.body.decode("utf-8"))
+        self.assertFalse(capabilities_reconcile_payload["ok"])
+        self.assertEqual("action_not_permitted", capabilities_reconcile_payload["error"])
+
+    def test_unknown_llm_endpoint_returns_not_found(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+        handler = _HandlerForTest(runtime, "/llm/unknown")
+        handler.do_GET()
+        self.assertEqual(404, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertFalse(payload["ok"])
+        self.assertEqual("not_found", payload["error"])
+
+    def test_llm_notifications_endpoints_and_permission_gate(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=False))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        with patch.object(runtime, "_send_telegram_message", return_value=None), patch.object(
+            runtime, "_resolve_telegram_target", return_value=("token", "chat-1")
+        ):
+            denied_test = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test", "confirm": True})
+            denied_test.do_POST()
+            self.assertEqual(400, denied_test.status_code)
+            denied_payload = json.loads(denied_test.body.decode("utf-8"))
+            self.assertFalse(denied_payload["ok"])
+            self.assertEqual("action_not_permitted", denied_payload["error"])
+
+            runtime.update_permissions(
+                {
+                    "mode": "auto",
+                    "actions": {
+                        "llm.notifications.test": True,
+                    },
+                }
+            )
+            allowed_test = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test", "confirm": True})
+            allowed_test.do_POST()
+            self.assertEqual(200, allowed_test.status_code)
+            allowed_payload = json.loads(allowed_test.body.decode("utf-8"))
+            self.assertTrue(allowed_payload["ok"])
+            self.assertEqual("sent", allowed_payload["result"]["outcome"])
+
+        list_handler = _HandlerForTest(runtime, "/llm/notifications?limit=5")
+        list_handler.do_GET()
+        self.assertEqual(200, list_handler.status_code)
+        list_payload = json.loads(list_handler.body.decode("utf-8"))
+        self.assertTrue(list_payload["ok"])
+        self.assertTrue(isinstance(list_payload["notifications"], list))
+        self.assertTrue(len(list_payload["notifications"]) >= 1)
+        status_handler = _HandlerForTest(runtime, "/llm/notifications/status")
+        status_handler.do_GET()
+        self.assertEqual(200, status_handler.status_code)
+        status_payload = json.loads(status_handler.body.decode("utf-8"))
+        self.assertTrue(status_payload["ok"])
+        self.assertTrue(isinstance(status_payload["status"], dict))
+        self.assertIn("stored_count", status_payload["status"])
+        audit_entries = runtime.get_audit(limit=20)["entries"]
+        notification_test_audit = [
+            entry for entry in audit_entries if str(entry.get("action") or "") == "llm.notifications.test"
+        ]
+        self.assertTrue(len(notification_test_audit) >= 2)
+        self.assertEqual("deny", notification_test_audit[1]["decision"])
+        self.assertEqual("action_not_permitted", notification_test_audit[1]["reason"])
+        self.assertEqual("allow", notification_test_audit[0]["decision"])
+
+    def test_llm_notifications_test_allows_loopback_default_without_permission(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=None))
+        runtime.set_listening("127.0.0.1", 8765)
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        with patch.object(runtime, "_send_telegram_message", return_value=None), patch.object(
+            runtime, "_resolve_telegram_target", return_value=("token", "chat-1")
+        ):
+            allowed_test = _HandlerForTest(runtime, "/llm/notifications/test", {"actor": "test", "confirm": True})
+            allowed_test.do_POST()
+            self.assertEqual(200, allowed_test.status_code)
+            payload = json.loads(allowed_test.body.decode("utf-8"))
+            self.assertTrue(payload["ok"])
+            self.assertEqual("sent", payload["result"]["outcome"])
+
+        notifications = runtime.llm_notifications(limit=5)["notifications"]
+        self.assertTrue(len(notifications) >= 1)
+        audit_entries = runtime.get_audit(limit=20)["entries"]
+        notification_test_audit = [
+            entry for entry in audit_entries if str(entry.get("action") or "") == "llm.notifications.test"
+        ]
+        self.assertTrue(notification_test_audit)
+        self.assertEqual("allow", notification_test_audit[0]["decision"])
+        self.assertEqual("local_loopback_default", notification_test_audit[0]["reason"])
+
+    def test_llm_notifications_prune_endpoint_requires_permission(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=False))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        runtime._notification_store.append(  # type: ignore[attr-defined]
+            ts=1_000,
+            message="m",
+            dedupe_hash="h",
+            delivered_to="local",
+            deferred=False,
+            outcome="sent",
+            reason="sent_local",
+            modified_ids=["defaults:default_model"],
+            mark_sent=True,
+        )
+        denied = _HandlerForTest(runtime, "/llm/notifications/prune", {"actor": "test", "confirm": True})
+        denied.do_POST()
+        self.assertEqual(400, denied.status_code)
+        denied_payload = json.loads(denied.body.decode("utf-8"))
+        self.assertFalse(denied_payload["ok"])
+        self.assertEqual("action_not_permitted", denied_payload["error"])
+
+        runtime.update_permissions(
+            {
+                "mode": "auto",
+                "actions": {
+                    "llm.notifications.prune": True,
+                },
+            }
+        )
+        allowed = _HandlerForTest(runtime, "/llm/notifications/prune", {"actor": "test", "confirm": True})
+        allowed.do_POST()
+        self.assertEqual(200, allowed.status_code)
+        allowed_payload = json.loads(allowed.body.decode("utf-8"))
+        self.assertTrue(allowed_payload["ok"])
+        self.assertTrue(isinstance(allowed_payload["result"], dict))
+        self.assertIn("stored_count", allowed_payload["result"])
+
+    def test_notify_autopilot_changes_noop_when_no_diff(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        before = copy.deepcopy(runtime.registry_document)
+        after = copy.deepcopy(runtime.registry_document)
+        result = runtime._notify_autopilot_changes(  # type: ignore[attr-defined]
+            before_document=before,
+            after_document=after,
+            reasons=["noop"],
+            modified_ids=[],
+            trigger="scheduler",
+        )
+        self.assertIsNone(result)
+        self.assertEqual([], runtime.llm_notifications(limit=5)["notifications"])
+
     def test_permissions_and_modelops_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 
@@ -771,6 +1251,19 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("text/html", handler.content_type)
         self.assertIn("<html", body_text)
         self.assertIn("personal-agent-webui", body_text)
+
+    def test_read_json_returns_empty_dict_on_invalid_utf8(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, raw_body: bytes) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": str(len(raw_body))}
+                self.rfile = io.BytesIO(raw_body)
+
+        handler = _HandlerForTest(runtime, b"\xff")
+        self.assertEqual({}, handler._read_json())
 
 
 if __name__ == "__main__":

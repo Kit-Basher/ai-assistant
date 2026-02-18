@@ -1,0 +1,1 @@
+Environment=LLM_REGISTRY_PATH=/home/c/personal-agent/llm_registry.json AGENT_SECRET_STORE_PATH=/home/c/.local/share/personal-agent/secrets.enc.json LLM_USAGE_STATS_PATH=/home/c/.local/share/personal-agent/llm_usage_stats.json

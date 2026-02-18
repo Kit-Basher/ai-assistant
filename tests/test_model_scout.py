@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.model_scout import ModelScout, ModelScoutSettings, ModelScoutStore
 
@@ -267,6 +268,64 @@ class TestModelScout(unittest.TestCase):
         self.assertEqual(0, second["notified"])
         self.assertEqual(1, third["notified"])
         self.assertEqual(2, len(notifications))
+
+    def test_openrouter_model_discovery_source_is_used_when_configured(self) -> None:
+        payload = {"data": []}
+        now_holder = [datetime(2026, 2, 16, 12, 0, tzinfo=timezone.utc)]
+        settings = ModelScoutSettings(
+            enabled=True,
+            notify_delta=0.0,
+            absolute_threshold=0.0,
+            max_suggestions_per_notify=2,
+            license_allowlist=frozenset({"apache-2.0", "mit", "bsd-3-clause"}),
+            size_max_b=12.0,
+        )
+        scout = self._scout(payload=payload, now_holder=now_holder, settings=settings)
+        registry_document = _registry_document()
+        registry_document["providers"]["openrouter"] = {
+            "provider_type": "openai_compat",
+            "base_url": "https://openrouter.ai/api/v1",
+            "chat_path": "/chat/completions",
+            "enabled": True,
+            "local": False,
+            "api_key_source": {"type": "env", "name": "OPENROUTER_API_KEY"},
+        }
+
+        def _fake_http(
+            url: str,
+            *,
+            headers: dict[str, str],
+            timeout_seconds: float,
+            allowed_hosts: set[str],
+        ) -> dict[str, object]:
+            _ = timeout_seconds
+            _ = allowed_hosts
+            if url.endswith("/api/tags"):
+                return {"models": [{"name": "llama3"}]}
+            if url.endswith("/models"):
+                self.assertEqual("Bearer sk-test-openrouter", headers.get("Authorization"))
+                return {"data": [{"id": "openai/gpt-4o-mini"}, {"id": "meta-llama/llama-3.1-8b-instruct"}]}
+            return {}
+
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test-openrouter"}, clear=False), patch(
+            "agent.model_scout._http_get_json_with_policy",
+            side_effect=_fake_http,
+        ):
+            try:
+                result = scout.run(
+                    registry_document=registry_document,
+                    router_snapshot=_router_snapshot(),
+                    usage_stats_snapshot={},
+                    notify_sender=None,
+                )
+            finally:
+                scout.close()
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["sources"]["openrouter"]["available"])
+        self.assertEqual(2, result["sources"]["openrouter"]["count"])
+        suggestion_ids = [row["id"] for row in result["suggestions"]]
+        self.assertIn("remote:openrouter:openrouter:openai/gpt-4o-mini", suggestion_ids)
 
 
 if __name__ == "__main__":

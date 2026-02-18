@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 const ROUTING_MODES = ["auto", "prefer_cheap", "prefer_best", "prefer_local_lowest_cost_capable"];
 const PROVIDER_PRESETS = {
@@ -29,7 +29,16 @@ const MODELOPS_ACTIONS = [
   "modelops.pull_ollama_model",
   "modelops.import_gguf_to_ollama",
   "modelops.set_default_model",
-  "modelops.enable_disable_provider_or_model"
+  "modelops.enable_disable_provider_or_model",
+  "llm.autoconfig.apply",
+  "llm.hygiene.apply",
+  "llm.registry.prune",
+  "llm.registry.rollback",
+  "llm.self_heal.apply",
+  "llm.autopilot.bootstrap.apply",
+  "llm.notifications.test",
+  "llm.notifications.send",
+  "llm.notifications.prune"
 ];
 
 function healthStatus(entity) {
@@ -68,6 +77,27 @@ function formatNow() {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function formatEpoch(epochSeconds) {
+  if (!epochSeconds) return "n/a";
+  const asNumber = Number(epochSeconds);
+  if (!Number.isFinite(asNumber) || asNumber <= 0) return "n/a";
+  return new Date(asNumber * 1000).toLocaleString();
+}
+
+function newestNotificationHash(rows) {
+  if (!Array.isArray(rows) || rows.length === 0) return "";
+  const first = rows[0] || {};
+  return String(first.dedupe_hash || "").trim();
+}
+
+function normalizeSupportTarget(target) {
+  const value = String(target || "").trim();
+  if (!value) return "";
+  if (value.startsWith("provider:")) return value.slice("provider:".length);
+  if (value.startsWith("model:")) return value.slice("model:".length);
+  return value;
+}
+
 function MessageBubble({ message }) {
   const isAssistant = message.role === "assistant";
   return (
@@ -79,6 +109,14 @@ function MessageBubble({ message }) {
           <div className="message-meta">
             <span className="badge">{`${message.meta.provider || "none"}/${message.meta.model || "none"}`}</span>
             {message.meta.fallback_used ? <span className="badge fallback">Fallback</span> : null}
+            {message.meta.autopilot?.last_notification?.hash ? (
+              <span className="badge">
+                {`autopilot ${message.meta.autopilot.last_notification.outcome || "unknown"} · ${message.meta.autopilot.last_notification.delivered_to || "none"}`}
+              </span>
+            ) : null}
+            {Number(message.meta.autopilot?.since_last_user_message || 0) > 0 ? (
+              <span className="badge">{`new ops ${Number(message.meta.autopilot.since_last_user_message)}`}</span>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -129,6 +167,46 @@ export default function App() {
   const [modelScoutSuggestions, setModelScoutSuggestions] = useState([]);
   const [modelScoutMessage, setModelScoutMessage] = useState("");
   const [modelScoutRunning, setModelScoutRunning] = useState(false);
+  const [llmHealth, setLlmHealth] = useState(null);
+  const [llmHealthMessage, setLlmHealthMessage] = useState("");
+  const [llmHealthRunning, setLlmHealthRunning] = useState(false);
+  const [autoconfigPlan, setAutoconfigPlan] = useState(null);
+  const [autoconfigStatus, setAutoconfigStatus] = useState("");
+  const [autoconfigBusy, setAutoconfigBusy] = useState(false);
+  const [hygienePlan, setHygienePlan] = useState(null);
+  const [hygieneStatus, setHygieneStatus] = useState("");
+  const [hygieneBusy, setHygieneBusy] = useState(false);
+  const [cleanupPlan, setCleanupPlan] = useState(null);
+  const [cleanupStatus, setCleanupStatus] = useState("");
+  const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [capabilitiesReconcilePlan, setCapabilitiesReconcilePlan] = useState(null);
+  const [capabilitiesReconcileStatus, setCapabilitiesReconcileStatus] = useState("");
+  const [capabilitiesReconcileBusy, setCapabilitiesReconcileBusy] = useState(false);
+  const [llmCatalogRows, setLlmCatalogRows] = useState([]);
+  const [llmCatalogStatus, setLlmCatalogStatus] = useState(null);
+  const [autopilotNotifications, setAutopilotNotifications] = useState([]);
+  const [autopilotNotificationsStatus, setAutopilotNotificationsStatus] = useState(null);
+  const [autopilotNotificationsPolicy, setAutopilotNotificationsPolicy] = useState(null);
+  const [autopilotLastReadHash, setAutopilotLastReadHash] = useState("");
+  const [autopilotLastChange, setAutopilotLastChange] = useState(null);
+  const [autopilotLastChangeStatus, setAutopilotLastChangeStatus] = useState("");
+  const [autopilotLastChangeBusy, setAutopilotLastChangeBusy] = useState(false);
+  const [autopilotToast, setAutopilotToast] = useState("");
+  const [autopilotNotifyStatus, setAutopilotNotifyStatus] = useState("");
+  const [autopilotNotifyBusy, setAutopilotNotifyBusy] = useState(false);
+  const [autopilotLedgerEntries, setAutopilotLedgerEntries] = useState([]);
+  const [registrySnapshots, setRegistrySnapshots] = useState([]);
+  const [safetyStatus, setSafetyStatus] = useState("");
+  const [rollbackBusySnapshotId, setRollbackBusySnapshotId] = useState("");
+  const [autopilotUndoBusy, setAutopilotUndoBusy] = useState(false);
+  const [autopilotBootstrapBusy, setAutopilotBootstrapBusy] = useState(false);
+  const [supportBundlePreview, setSupportBundlePreview] = useState(null);
+  const [supportDiagnoseTarget, setSupportDiagnoseTarget] = useState("");
+  const [supportDiagnoseIntent, setSupportDiagnoseIntent] = useState("fix_routing");
+  const [supportDiagnosis, setSupportDiagnosis] = useState(null);
+  const [supportRemediationPlan, setSupportRemediationPlan] = useState(null);
+  const [supportStatus, setSupportStatus] = useState("");
+  const [supportBusy, setSupportBusy] = useState(false);
   const [permissionsConfig, setPermissionsConfig] = useState(null);
   const [permissionsStatus, setPermissionsStatus] = useState("");
   const [auditEntries, setAuditEntries] = useState([]);
@@ -141,6 +219,7 @@ export default function App() {
   const [chatBusy, setChatBusy] = useState(false);
 
   const [logs, setLogs] = useState([]);
+  const autopilotLastHashRef = useRef("");
 
   const appendLog = (entry) => {
     setLogs((prev) => [
@@ -177,6 +256,14 @@ export default function App() {
         telegramPayload,
         scoutStatusPayload,
         scoutSuggestionsPayload,
+        llmHealthPayload,
+        llmCatalogPayload,
+        llmCatalogStatusPayload,
+        llmNotificationsPayload,
+        llmNotificationsStatusPayload,
+        llmNotificationsPolicyPayload,
+        autopilotLedgerPayload,
+        registrySnapshotsPayload,
         permissionsPayload,
         auditPayload
       ] = await Promise.all([
@@ -186,6 +273,14 @@ export default function App() {
         request("GET", "/telegram/status").catch(() => null),
         request("GET", "/model_scout/status").catch(() => null),
         request("GET", "/model_scout/suggestions").catch(() => null),
+        request("GET", "/llm/health").catch(() => null),
+        request("GET", "/llm/catalog?limit=50").catch(() => null),
+        request("GET", "/llm/catalog/status").catch(() => null),
+        request("GET", "/llm/notifications?limit=20").catch(() => null),
+        request("GET", "/llm/notifications/status").catch(() => null),
+        request("GET", "/llm/notifications/policy").catch(() => null),
+        request("GET", "/llm/autopilot/ledger?limit=10").catch(() => null),
+        request("GET", "/llm/registry/snapshots?limit=20").catch(() => null),
         request("GET", "/permissions").catch(() => null),
         request("GET", "/audit?limit=20").catch(() => null)
       ]);
@@ -207,6 +302,36 @@ export default function App() {
       }
       if (scoutSuggestionsPayload && scoutSuggestionsPayload.ok) {
         setModelScoutSuggestions(scoutSuggestionsPayload.suggestions || []);
+      }
+      if (llmHealthPayload && llmHealthPayload.ok) {
+        setLlmHealth(llmHealthPayload.health || null);
+      }
+      if (llmCatalogPayload && llmCatalogPayload.ok) {
+        setLlmCatalogRows(Array.isArray(llmCatalogPayload.models) ? llmCatalogPayload.models : []);
+      }
+      if (llmCatalogStatusPayload && llmCatalogStatusPayload.ok) {
+        setLlmCatalogStatus(llmCatalogStatusPayload.status || null);
+      }
+      if (llmNotificationsPayload && llmNotificationsPayload.ok) {
+        const nextRows = Array.isArray(llmNotificationsPayload.notifications) ? llmNotificationsPayload.notifications : [];
+        autopilotLastHashRef.current = newestNotificationHash(nextRows);
+        setAutopilotNotifications(nextRows);
+      }
+      if (llmNotificationsStatusPayload && llmNotificationsStatusPayload.ok) {
+        const statusRow = llmNotificationsStatusPayload.status || null;
+        setAutopilotNotificationsStatus(statusRow);
+        if (statusRow && typeof statusRow.last_read_hash === "string") {
+          setAutopilotLastReadHash(statusRow.last_read_hash);
+        }
+      }
+      if (llmNotificationsPolicyPayload && llmNotificationsPolicyPayload.ok) {
+        setAutopilotNotificationsPolicy(llmNotificationsPolicyPayload.policy || null);
+      }
+      if (autopilotLedgerPayload && autopilotLedgerPayload.ok) {
+        setAutopilotLedgerEntries(Array.isArray(autopilotLedgerPayload.entries) ? autopilotLedgerPayload.entries : []);
+      }
+      if (registrySnapshotsPayload && registrySnapshotsPayload.ok) {
+        setRegistrySnapshots(Array.isArray(registrySnapshotsPayload.snapshots) ? registrySnapshotsPayload.snapshots : []);
       }
       if (permissionsPayload && permissionsPayload.ok) {
         setPermissionsConfig(permissionsPayload.permissions || null);
@@ -240,6 +365,21 @@ export default function App() {
         setActiveProviderForModels(providerRows[0]?.id || "");
       }
 
+      const supportTargetId = normalizeSupportTarget(supportDiagnoseTarget);
+      const supportTargetExists = !!(
+        (supportTargetId && modelRows.some((item) => item.id === supportTargetId))
+        || (supportTargetId && providerRows.some((item) => item.id === supportTargetId))
+      );
+      if (!supportTargetId || !supportTargetExists) {
+        if (modelRows[0]?.id) {
+          setSupportDiagnoseTarget(`model:${modelRows[0].id}`);
+        } else if (providerRows[0]?.id) {
+          setSupportDiagnoseTarget(`provider:${providerRows[0].id}`);
+        } else {
+          setSupportDiagnoseTarget("");
+        }
+      }
+
       appendLog({ endpoint: "bootstrap", ok: true, detail: "Loaded /providers, /models, /defaults" });
     } catch (error) {
       appendLog({ endpoint: "bootstrap", ok: false, detail: asErrorText(error) });
@@ -249,6 +389,66 @@ export default function App() {
   useEffect(() => {
     refreshRuntimeState();
   }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const [notificationsPayload, statusPayload] = await Promise.all([
+          request("GET", "/llm/notifications?limit=20").catch(() => null),
+          request("GET", "/llm/notifications/status").catch(() => null)
+        ]);
+        if (stopped) return;
+
+        if (notificationsPayload && notificationsPayload.ok) {
+          const incoming = Array.isArray(notificationsPayload.notifications) ? notificationsPayload.notifications : [];
+          const incomingHash = newestNotificationHash(incoming);
+          const previousHash = autopilotLastHashRef.current;
+
+          if (incomingHash && incomingHash !== previousHash) {
+            const newest = incoming[0] || {};
+            if (String(newest.outcome || "").trim() === "sent") {
+              const title = String(newest.message || "").split("\n")[0] || "LLM Autopilot updated configuration";
+              setAutopilotToast(title);
+            }
+          }
+          autopilotLastHashRef.current = incomingHash;
+
+          setAutopilotNotifications((current) => {
+            const currentHash = newestNotificationHash(current);
+            if (currentHash && incomingHash && currentHash === incomingHash) {
+              return current;
+            }
+            return incoming;
+          });
+        }
+
+        if (statusPayload && statusPayload.ok) {
+          const statusRow = statusPayload.status || null;
+          setAutopilotNotificationsStatus(statusRow);
+          if (statusRow && typeof statusRow.last_read_hash === "string") {
+            setAutopilotLastReadHash(statusRow.last_read_hash);
+          }
+        }
+      } catch (_error) {
+        // Ignore background poll failures and keep current UI state.
+      }
+    };
+
+    const timerId = window.setInterval(poll, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timerId);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!autopilotToast) return undefined;
+    const timerId = window.setTimeout(() => {
+      setAutopilotToast("");
+    }, 3500);
+    return () => window.clearTimeout(timerId);
+  }, [autopilotToast]);
 
   const providerOptions = useMemo(() => providers.map((item) => item.id), [providers]);
   const modelOptions = useMemo(
@@ -277,6 +477,76 @@ export default function App() {
     () => models.filter((model) => model.provider === activeProviderForModels),
     [models, activeProviderForModels]
   );
+  const canSendAutopilotTest =
+    permissionsConfig?.actions?.["llm.notifications.test"] === true
+    || autopilotNotificationsPolicy?.allow_test_effective === true;
+  const canRollbackRegistry =
+    permissionsConfig?.actions?.["llm.registry.rollback"] === true
+    || llmHealth?.autopilot?.rollback_policy?.allow_rollback_effective === true;
+  const canBootstrapAutopilot =
+    permissionsConfig?.actions?.["llm.autopilot.bootstrap.apply"] === true
+    || llmHealth?.autopilot?.bootstrap_policy?.allow_apply_effective === true;
+  const supportTargetOptions = useMemo(() => {
+    const modelOptions = models
+      .filter((row) => row && row.id)
+      .map((row) => ({
+        value: `model:${row.id}`,
+        label: `Model · ${row.id}`
+      }));
+    const providerOptions = providers
+      .filter((row) => row && row.id)
+      .map((row) => ({
+        value: `provider:${row.id}`,
+        label: `Provider · ${row.id}`
+      }));
+    return [...modelOptions, ...providerOptions];
+  }, [models, providers]);
+  const notifyStatusSummary = useMemo(() => {
+    const outcome = String(llmHealth?.notifications?.last_outcome || "").trim();
+    const reason = String(llmHealth?.notifications?.last_reason || "").trim();
+    const hash = String(llmHealth?.notifications?.last_hash || "").trim();
+    if (!outcome && !reason) {
+      return "Autopilot notify status is not available yet.";
+    }
+    return `Autopilot notify status: ${outcome || "unknown"}${reason ? ` (${reason})` : ""}${hash ? ` · hash ${hash.slice(0, 12)}` : ""}`;
+  }, [llmHealth]);
+  const notificationStoreSummary = useMemo(() => {
+    if (!autopilotNotificationsStatus) return "Notification store status unavailable.";
+    const stored = Number(autopilotNotificationsStatus.stored_count || 0);
+    const pruned = Number(autopilotNotificationsStatus.pruned_count_last_run || 0);
+    const pruneAt = autopilotNotificationsStatus.last_prune_at_iso || "never";
+    const unread = Number(autopilotNotificationsStatus.unread_count || 0);
+    return `Store: ${stored} item(s) · unread ${unread} · last prune removed ${pruned} · at ${pruneAt}`;
+  }, [autopilotNotificationsStatus]);
+
+  const autopilotPolicyBadge = useMemo(() => {
+    const reason = String(autopilotNotificationsPolicy?.allow_reason || "");
+    if (reason === "loopback_auto") {
+      return {
+        label: "Dev Mode (Loopback Auto-Allow)",
+        className: "health-ok"
+      };
+    }
+    if (reason === "permission_required") {
+      return {
+        label: "Permission Required",
+        className: "health-degraded"
+      };
+    }
+    if (reason === "explicit_true") {
+      return {
+        label: "Explicitly Enabled",
+        className: "policy-explicit-true"
+      };
+    }
+    if (reason === "explicit_false") {
+      return {
+        label: "Explicitly Disabled",
+        className: "health-down"
+      };
+    }
+    return null;
+  }, [autopilotNotificationsPolicy]);
 
   const saveDefaults = async () => {
     setSetupStatus("Saving defaults...");
@@ -553,7 +823,8 @@ export default function App() {
         meta: {
           provider: result.meta?.provider,
           model: result.meta?.model,
-          fallback_used: !!result.meta?.fallback_used
+          fallback_used: !!result.meta?.fallback_used,
+          autopilot: result.meta?.autopilot || null
         }
       };
       setMessages((prev) => [...prev, assistantMessage]);
@@ -643,6 +914,438 @@ export default function App() {
       appendLog({ endpoint: "/model_scout/run", ok: false, detail });
     } finally {
       setModelScoutRunning(false);
+    }
+  };
+
+  const runLlmHealthCheck = async () => {
+    setLlmHealthRunning(true);
+    setLlmHealthMessage("Running health checks...");
+    try {
+      const result = await request("POST", "/llm/health/run", {});
+      setLlmHealth(result.health || null);
+      const total = Number(result.health?.probed?.length || 0);
+      setLlmHealthMessage(`Health check complete: probed ${total} candidate(s).`);
+      appendLog({ endpoint: "/llm/health/run", ok: true, detail: `probed=${total}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setLlmHealthMessage(`Health check failed: ${detail}`);
+      appendLog({ endpoint: "/llm/health/run", ok: false, detail });
+    } finally {
+      setLlmHealthRunning(false);
+    }
+  };
+
+  const runLlmCatalogRefresh = async () => {
+    setLlmHealthRunning(true);
+    setLlmHealthMessage("Refreshing model catalog...");
+    try {
+      const result = await request("POST", "/llm/catalog/run", { actor: "webui" });
+      const added = Number(result.counts?.added || 0);
+      const removed = Number(result.counts?.removed || 0);
+      const changed = Number(result.counts?.changed || 0);
+      setLlmHealthMessage(`Catalog refresh complete: +${added} / -${removed} / ~${changed}.`);
+      appendLog({ endpoint: "/llm/catalog/run", ok: true, detail: `added=${added} removed=${removed} changed=${changed}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setLlmHealthMessage(`Catalog refresh failed: ${detail}`);
+      appendLog({ endpoint: "/llm/catalog/run", ok: false, detail });
+    } finally {
+      setLlmHealthRunning(false);
+    }
+  };
+
+  const planLlmAutoconfig = async () => {
+    setAutoconfigBusy(true);
+    setAutoconfigStatus("Planning autoconfig...");
+    try {
+      const result = await request("POST", "/llm/autoconfig/plan", {
+        actor: "webui",
+        disable_auth_failed_providers: true
+      });
+      setAutoconfigPlan(result.plan || null);
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      setAutoconfigStatus(`Autoconfig plan ready: ${changes} change(s).`);
+      appendLog({ endpoint: "/llm/autoconfig/plan", ok: true, detail: `changes=${changes}` });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setAutoconfigStatus(`Plan failed: ${detail}`);
+      appendLog({ endpoint: "/llm/autoconfig/plan", ok: false, detail });
+    } finally {
+      setAutoconfigBusy(false);
+    }
+  };
+
+  const applyLlmAutoconfig = async () => {
+    setAutoconfigBusy(true);
+    setAutoconfigStatus("Applying autoconfig...");
+    try {
+      const result = await request("POST", "/llm/autoconfig/apply", {
+        actor: "webui",
+        confirm: true,
+        disable_auth_failed_providers: true
+      });
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      setAutoconfigStatus(`Autoconfig applied: ${changes} change(s).`);
+      setAutoconfigPlan(result.plan || autoconfigPlan);
+      appendLog({ endpoint: "/llm/autoconfig/apply", ok: true, detail: `changes=${changes}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setAutoconfigStatus(`Apply failed: ${detail}`);
+      appendLog({ endpoint: "/llm/autoconfig/apply", ok: false, detail });
+    } finally {
+      setAutoconfigBusy(false);
+    }
+  };
+
+  const planLlmHygiene = async () => {
+    setHygieneBusy(true);
+    setHygieneStatus("Planning hygiene...");
+    try {
+      const result = await request("POST", "/llm/hygiene/plan", {
+        actor: "webui"
+      });
+      setHygienePlan(result.plan || null);
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      setHygieneStatus(`Hygiene plan ready: ${changes} change(s).`);
+      appendLog({ endpoint: "/llm/hygiene/plan", ok: true, detail: `changes=${changes}` });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setHygieneStatus(`Plan failed: ${detail}`);
+      appendLog({ endpoint: "/llm/hygiene/plan", ok: false, detail });
+    } finally {
+      setHygieneBusy(false);
+    }
+  };
+
+  const applyLlmHygiene = async () => {
+    setHygieneBusy(true);
+    setHygieneStatus("Applying hygiene...");
+    try {
+      const result = await request("POST", "/llm/hygiene/apply", {
+        actor: "webui",
+        confirm: true
+      });
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      setHygieneStatus(`Hygiene applied: ${changes} change(s).`);
+      setHygienePlan(result.plan || hygienePlan);
+      appendLog({ endpoint: "/llm/hygiene/apply", ok: true, detail: `changes=${changes}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setHygieneStatus(`Apply failed: ${detail}`);
+      appendLog({ endpoint: "/llm/hygiene/apply", ok: false, detail });
+    } finally {
+      setHygieneBusy(false);
+    }
+  };
+
+  const planLlmCleanup = async () => {
+    setCleanupBusy(true);
+    setCleanupStatus("Planning cleanup...");
+    try {
+      const result = await request("POST", "/llm/cleanup/plan", {
+        actor: "webui"
+      });
+      setCleanupPlan(result.plan || null);
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      const candidates = Number(result.plan?.impact?.prune_candidates_count || 0);
+      setCleanupStatus(`Cleanup plan ready: ${changes} change(s), ${candidates} prune candidate(s).`);
+      appendLog({ endpoint: "/llm/cleanup/plan", ok: true, detail: `changes=${changes} prune=${candidates}` });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setCleanupStatus(`Plan failed: ${detail}`);
+      appendLog({ endpoint: "/llm/cleanup/plan", ok: false, detail });
+    } finally {
+      setCleanupBusy(false);
+    }
+  };
+
+  const applyLlmCleanup = async () => {
+    setCleanupBusy(true);
+    setCleanupStatus("Applying cleanup...");
+    try {
+      const result = await request("POST", "/llm/cleanup/apply", {
+        actor: "webui",
+        confirm: true
+      });
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      setCleanupStatus(`Cleanup applied: ${changes} change(s).`);
+      setCleanupPlan(result.plan || cleanupPlan);
+      appendLog({ endpoint: "/llm/cleanup/apply", ok: true, detail: `changes=${changes}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setCleanupStatus(`Apply failed: ${detail}`);
+      appendLog({ endpoint: "/llm/cleanup/apply", ok: false, detail });
+    } finally {
+      setCleanupBusy(false);
+    }
+  };
+
+  const planLlmCapabilitiesReconcile = async () => {
+    setCapabilitiesReconcileBusy(true);
+    setCapabilitiesReconcileStatus("Planning capability reconcile...");
+    try {
+      const result = await request("POST", "/llm/capabilities/reconcile/plan", {
+        actor: "webui"
+      });
+      setCapabilitiesReconcilePlan(result.plan || null);
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      const mismatches = Number(result.plan?.impact?.models_with_mismatch || 0);
+      setCapabilitiesReconcileStatus(`Capability reconcile plan ready: ${changes} change(s), ${mismatches} mismatched model(s).`);
+      appendLog({ endpoint: "/llm/capabilities/reconcile/plan", ok: true, detail: `changes=${changes}` });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setCapabilitiesReconcileStatus(`Plan failed: ${detail}`);
+      appendLog({ endpoint: "/llm/capabilities/reconcile/plan", ok: false, detail });
+    } finally {
+      setCapabilitiesReconcileBusy(false);
+    }
+  };
+
+  const applyLlmCapabilitiesReconcile = async () => {
+    setCapabilitiesReconcileBusy(true);
+    setCapabilitiesReconcileStatus("Applying capability reconcile...");
+    try {
+      const result = await request("POST", "/llm/capabilities/reconcile/apply", {
+        actor: "webui",
+        confirm: true
+      });
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      setCapabilitiesReconcileStatus(`Capability reconcile applied: ${changes} change(s).`);
+      setCapabilitiesReconcilePlan(result.plan || capabilitiesReconcilePlan);
+      appendLog({ endpoint: "/llm/capabilities/reconcile/apply", ok: true, detail: `changes=${changes}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setCapabilitiesReconcileStatus(`Apply failed: ${detail}`);
+      appendLog({ endpoint: "/llm/capabilities/reconcile/apply", ok: false, detail });
+    } finally {
+      setCapabilitiesReconcileBusy(false);
+    }
+  };
+
+  const rollbackRegistryToSnapshot = async (snapshotId) => {
+    const target = String(snapshotId || "").trim();
+    if (!target) return;
+    setRollbackBusySnapshotId(target);
+    setSafetyStatus(`Rolling back to ${target}...`);
+    try {
+      const result = await request("POST", "/llm/registry/rollback", {
+        actor: "webui",
+        snapshot_id: target,
+        confirm: true
+      });
+      const hash = String(result.resulting_registry_hash || "").trim();
+      setSafetyStatus(`Rollback complete: ${target}${hash ? ` · ${hash.slice(0, 12)}` : ""}`);
+      appendLog({ endpoint: "/llm/registry/rollback", ok: true, detail: `snapshot=${target}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSafetyStatus(`Rollback failed: ${detail}`);
+      appendLog({ endpoint: "/llm/registry/rollback", ok: false, detail });
+    } finally {
+      setRollbackBusySnapshotId("");
+    }
+  };
+
+  const sendAutopilotTestNotification = async () => {
+    setAutopilotNotifyBusy(true);
+    setAutopilotNotifyStatus("Sending test notification...");
+    try {
+      const result = await request("POST", "/llm/notifications/test", {
+        actor: "webui",
+        confirm: true
+      });
+      const outcome = result.result?.outcome || "unknown";
+      const delivered = result.result?.delivered_to || "none";
+      setAutopilotNotifyStatus(`Test notification outcome: ${outcome} (delivered_to=${delivered}).`);
+      appendLog({ endpoint: "/llm/notifications/test", ok: true, detail: `outcome=${outcome}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setAutopilotNotifyStatus(`Test notification failed: ${detail}`);
+      appendLog({ endpoint: "/llm/notifications/test", ok: false, detail });
+    } finally {
+      setAutopilotNotifyBusy(false);
+    }
+  };
+
+  const markAutopilotRead = async (hash, { silent = false } = {}) => {
+    const normalizedHash = String(hash || "").trim();
+    if (!normalizedHash) return;
+    try {
+      const result = await request("POST", "/llm/notifications/mark_read", { hash: normalizedHash });
+      if (result.ok && result.status) {
+        setAutopilotNotificationsStatus(result.status);
+        setAutopilotLastReadHash(String(result.status.last_read_hash || ""));
+      }
+      if (!silent) {
+        setAutopilotLastChangeStatus(`Marked read: ${normalizedHash.slice(0, 12)}`);
+      }
+    } catch (error) {
+      if (!silent) {
+        setAutopilotLastChangeStatus(`Mark read failed: ${asErrorText(error)}`);
+      }
+    }
+  };
+
+  const explainLastAutopilotChange = async () => {
+    setAutopilotLastChangeBusy(true);
+    setAutopilotLastChangeStatus("Loading last autopilot change...");
+    try {
+      const result = await request("GET", "/llm/autopilot/explain_last");
+      if (!result.ok || !result.found || !result.last_apply) {
+        setAutopilotLastChange(null);
+        setAutopilotLastChangeStatus("No autopilot apply action found.");
+        return;
+      }
+      setAutopilotLastChange(result.last_apply);
+      setAutopilotLastChangeStatus("Loaded latest autopilot apply rationale.");
+    } catch (error) {
+      setAutopilotLastChange(null);
+      setAutopilotLastChangeStatus(`Explain failed: ${asErrorText(error)}`);
+    } finally {
+      setAutopilotLastChangeBusy(false);
+    }
+  };
+
+  const undoLastAutopilotChange = async () => {
+    setAutopilotUndoBusy(true);
+    setSafetyStatus("Rolling back most recent autopilot apply...");
+    try {
+      const result = await request("POST", "/llm/autopilot/undo", {
+        actor: "webui",
+        confirm: true
+      });
+      const snapshot = String(result.rolled_back_to_snapshot_id || "").trim();
+      const hash = String(result.resulting_registry_hash || "").trim();
+      setSafetyStatus(`Undo complete${snapshot ? `: ${snapshot}` : ""}${hash ? ` · ${hash.slice(0, 12)}` : ""}`);
+      appendLog({ endpoint: "/llm/autopilot/undo", ok: true, detail: snapshot || "ok" });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSafetyStatus(`Undo failed: ${detail}`);
+      appendLog({ endpoint: "/llm/autopilot/undo", ok: false, detail });
+    } finally {
+      setAutopilotUndoBusy(false);
+    }
+  };
+
+  const bootstrapAutopilotDefaults = async () => {
+    setAutopilotBootstrapBusy(true);
+    setSafetyStatus("Running bootstrap defaults...");
+    try {
+      const result = await request("POST", "/llm/autopilot/bootstrap", {
+        actor: "webui",
+        confirm: true
+      });
+      const changes = Number(result.plan?.impact?.changes_count || 0);
+      if (result.applied) {
+        setSafetyStatus(`Bootstrap applied: ${changes} change(s).`);
+      } else {
+        const reason = String((result.plan?.reasons || [])[0] || "already_configured");
+        setSafetyStatus(`Bootstrap no-op: ${reason}.`);
+      }
+      appendLog({ endpoint: "/llm/autopilot/bootstrap", ok: true, detail: `changes=${changes}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSafetyStatus(`Bootstrap failed: ${detail}`);
+      appendLog({ endpoint: "/llm/autopilot/bootstrap", ok: false, detail });
+    } finally {
+      setAutopilotBootstrapBusy(false);
+    }
+  };
+
+  const exportSupportBundle = async () => {
+    setSupportBusy(true);
+    setSupportStatus("Exporting support bundle...");
+    try {
+      const result = await request("GET", "/llm/support/bundle");
+      const bundle = result.bundle || {};
+      setSupportBundlePreview(bundle);
+      const rendered = JSON.stringify(bundle, null, 2);
+      let copied = false;
+      try {
+        if (navigator?.clipboard?.writeText) {
+          await navigator.clipboard.writeText(rendered);
+          copied = true;
+        }
+      } catch (_error) {
+        copied = false;
+      }
+      if (!copied) {
+        const blob = new Blob([rendered], { type: "application/json;charset=utf-8" });
+        const url = window.URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = url;
+        anchor.download = "personal-agent-support-bundle.json";
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        window.URL.revokeObjectURL(url);
+      }
+      setSupportStatus(copied ? "Support bundle copied to clipboard." : "Support bundle downloaded.");
+      appendLog({ endpoint: "/llm/support/bundle", ok: true, detail: copied ? "copied" : "downloaded" });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSupportStatus(`Support bundle export failed: ${detail}`);
+      appendLog({ endpoint: "/llm/support/bundle", ok: false, detail });
+    } finally {
+      setSupportBusy(false);
+    }
+  };
+
+  const runSupportDiagnosis = async () => {
+    const targetId = normalizeSupportTarget(supportDiagnoseTarget);
+    if (!targetId) {
+      setSupportStatus("Select a provider or model to diagnose.");
+      return;
+    }
+    setSupportBusy(true);
+    setSupportStatus(`Diagnosing ${targetId}...`);
+    try {
+      const result = await request("GET", `/llm/support/diagnose?id=${encodeURIComponent(targetId)}`);
+      setSupportDiagnosis(result.diagnosis || null);
+      setSupportStatus(`Diagnosis ready for ${result.kind || "target"} ${result.id || targetId}.`);
+      appendLog({ endpoint: "/llm/support/diagnose", ok: true, detail: targetId });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSupportDiagnosis(null);
+      setSupportStatus(`Diagnosis failed: ${detail}`);
+      appendLog({ endpoint: "/llm/support/diagnose", ok: false, detail });
+    } finally {
+      setSupportBusy(false);
+    }
+  };
+
+  const planSupportRemediation = async () => {
+    const targetId = normalizeSupportTarget(supportDiagnoseTarget);
+    setSupportBusy(true);
+    setSupportStatus("Building remediation plan...");
+    try {
+      const payload = {
+        intent: supportDiagnoseIntent
+      };
+      if (targetId) {
+        payload.target = targetId;
+      }
+      const result = await request("POST", "/llm/support/remediate/plan", payload);
+      setSupportRemediationPlan(result.plan || null);
+      const stepCount = Number((result.plan?.steps || []).length || 0);
+      setSupportStatus(`Remediation plan ready (${stepCount} step(s), plan-only).`);
+      appendLog({ endpoint: "/llm/support/remediate/plan", ok: true, detail: `steps=${stepCount}` });
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSupportRemediationPlan(null);
+      setSupportStatus(`Remediation plan failed: ${detail}`);
+      appendLog({ endpoint: "/llm/support/remediate/plan", ok: false, detail });
+    } finally {
+      setSupportBusy(false);
     }
   };
 
@@ -938,6 +1641,408 @@ export default function App() {
                     ) : null}
                   </div>
                 ))}
+              </div>
+            </div>
+
+            <div className="card">
+              <h2>LLM Health + Automation</h2>
+              <p className="help-text">
+                Last health run: {llmHealth?.last_run_at_iso || "never"}
+              </p>
+              <p className="help-text">
+                Status counts: ok {Number(llmHealth?.counts?.ok || 0)} · degraded {Number(llmHealth?.counts?.degraded || 0)} · down{" "}
+                {Number(llmHealth?.counts?.down || 0)}
+              </p>
+              <p className="help-text">
+                Scheduler: {llmHealth?.scheduler?.enabled ? "enabled" : "disabled"} · next health {formatEpoch(llmHealth?.scheduler?.next_health_run_at)}
+              </p>
+              <p className="help-text">
+                Next catalog {formatEpoch(llmHealth?.scheduler?.next_catalog_run_at)} · next refresh {formatEpoch(llmHealth?.scheduler?.next_refresh_run_at)}
+              </p>
+              <p className="help-text">
+                Next bootstrap {formatEpoch(llmHealth?.scheduler?.next_bootstrap_run_at)}
+              </p>
+              <p className="help-text">
+                Next reconcile {formatEpoch(llmHealth?.scheduler?.next_capabilities_reconcile_run_at)}
+              </p>
+              <p className="help-text">
+                Next hygiene {formatEpoch(llmHealth?.scheduler?.next_hygiene_run_at)}
+              </p>
+              <p className="help-text">
+                Next cleanup {formatEpoch(llmHealth?.scheduler?.next_cleanup_run_at)}
+              </p>
+              <p className="help-text">
+                Next self-heal {formatEpoch(llmHealth?.scheduler?.next_self_heal_run_at)} · next autoconfig{" "}
+                {formatEpoch(llmHealth?.scheduler?.next_autoconfig_run_at)}
+              </p>
+              <p className="help-text">
+                Next scout {formatEpoch(llmHealth?.scheduler?.next_model_scout_run_at)}
+              </p>
+              <div className="row-actions">
+                <button disabled={llmHealthRunning} onClick={runLlmHealthCheck}>
+                  {llmHealthRunning ? "Running..." : "Run Health Check"}
+                </button>
+                <button disabled={llmHealthRunning} onClick={runLlmCatalogRefresh}>
+                  {llmHealthRunning ? "Working..." : "Run Catalog Refresh"}
+                </button>
+              </div>
+              <p className="status-line">{llmHealthMessage || "No health checks run from UI in this session."}</p>
+              <div className="model-list">
+                {Array.isArray(llmHealth?.last_actions) && llmHealth.last_actions.length > 0 ? null : (
+                  <p className="empty">No recent autopilot actions.</p>
+                )}
+                {(llmHealth?.last_actions || []).slice(0, 5).map((entry, index) => (
+                  <div key={`${entry.ts || "llm-action"}-${index}`} className="model-row">
+                    <div className="model-head">
+                      <span>{entry.action}</span>
+                      <span className={`badge ${entry.outcome === "success" ? "health-ok" : "health-degraded"}`}>
+                        {entry.outcome || "unknown"}
+                      </span>
+                    </div>
+                    <div className="meta-line">
+                      {entry.ts || "n/a"} · {entry.reason || "n/a"} · {entry.duration_ms || 0}ms
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <h3>Recent Notifications</h3>
+              {autopilotToast ? <div className="toast-banner">{autopilotToast}</div> : null}
+              {autopilotPolicyBadge ? (
+                <p className="status-line">
+                  <span className={`badge ${autopilotPolicyBadge.className}`}>{autopilotPolicyBadge.label}</span>
+                </p>
+              ) : null}
+              <p className="status-line">{notifyStatusSummary}</p>
+              <p className="help-text">{notificationStoreSummary}</p>
+              <div className="model-list">
+                {autopilotNotifications.length === 0 ? <p className="empty">No notifications recorded.</p> : null}
+                {autopilotNotifications.map((entry, index) => (
+                  <div key={`${entry.ts || "autopilot-note"}-${index}`} className="model-row">
+                    <div className="model-head">
+                      <span>{String(entry.message || "").split("\n")[0] || "LLM Autopilot updated configuration"}</span>
+                      <span className={`badge ${entry.outcome === "sent" ? "health-ok" : "health-degraded"}`}>
+                        {entry.outcome || "unknown"}
+                      </span>
+                    </div>
+                    <div className="meta-line">
+                      {entry.ts_iso || "n/a"} · {entry.reason || "n/a"} · delivered_to {entry.delivered_to || "none"} ·{" "}
+                      {entry.deferred ? "deferred" : "immediate"}
+                    </div>
+                    <div className="meta-line">
+                      {String(entry.message || "")
+                        .split("\n")
+                        .slice(1, 3)
+                        .join(" ")
+                        .trim() || "(no body preview)"}
+                    </div>
+                    <div className="meta-line">hash: {entry.dedupe_hash || "n/a"}</div>
+                  </div>
+                ))}
+              </div>
+              <div className="row-actions">
+                <button disabled={!canSendAutopilotTest || autopilotNotifyBusy} onClick={sendAutopilotTestNotification}>
+                  {autopilotNotifyBusy ? "Sending..." : "Send Test Notification"}
+                </button>
+                <button disabled={autopilotLastChangeBusy} onClick={explainLastAutopilotChange}>
+                  {autopilotLastChangeBusy ? "Loading..." : "Explain last autopilot change"}
+                </button>
+                <button
+                  disabled={!autopilotNotifications[0]?.dedupe_hash}
+                  onClick={() => markAutopilotRead(autopilotNotifications[0]?.dedupe_hash)}
+                >
+                  Mark Latest Read
+                </button>
+              </div>
+              <p className="status-line">
+                {autopilotNotifyStatus || (canSendAutopilotTest ? "Notification test is allowed by current policy." : "Enable llm.notifications.test in Permissions to send tests.")}
+              </p>
+              <p className="status-line">
+                {autopilotLastChangeStatus || (autopilotLastReadHash ? `Last read hash: ${autopilotLastReadHash.slice(0, 12)}` : "No read acknowledgment stored yet.")}
+              </p>
+              {autopilotLastChange ? (
+                <div className="model-row">
+                  <div className="model-head">
+                    <span>{autopilotLastChange.action || "llm.autopilot.apply"}</span>
+                    <span className="badge">
+                      {autopilotLastChange.snapshot_id_before || "no-snapshot"}
+                    </span>
+                  </div>
+                  <div className="meta-line">
+                    {formatEpoch(autopilotLastChange.ts)} · {autopilotLastChange.reason || "n/a"} · hash{" "}
+                    {String(autopilotLastChange.registry_hash_after || "").slice(0, 12) || "n/a"}
+                  </div>
+                  {(autopilotLastChange.rationale_lines || []).map((line, index) => (
+                    <div key={`${line}-${index}`} className="meta-line">
+                      {line}
+                    </div>
+                  ))}
+                  <div className="meta-line">changed: {(autopilotLastChange.changed_ids || []).join(", ") || "none"}</div>
+                </div>
+              ) : null}
+
+              <div className="row-actions">
+                <button disabled={autoconfigBusy} onClick={planLlmAutoconfig}>
+                  {autoconfigBusy ? "Working..." : "Plan Autoconfig"}
+                </button>
+                <button disabled={autoconfigBusy || !autoconfigPlan} onClick={applyLlmAutoconfig}>
+                  Apply Autoconfig
+                </button>
+              </div>
+              <p className="help-text">
+                Autoconfig plan: {Number(autoconfigPlan?.impact?.changes_count || 0)} change(s)
+              </p>
+              <p className="status-line">{autoconfigStatus || "Autoconfig never runs without permissions."}</p>
+
+              <div className="row-actions">
+                <button disabled={hygieneBusy} onClick={planLlmHygiene}>
+                  {hygieneBusy ? "Working..." : "Plan Hygiene"}
+                </button>
+                <button disabled={hygieneBusy || !hygienePlan} onClick={applyLlmHygiene}>
+                  Apply Hygiene
+                </button>
+              </div>
+              <p className="help-text">Hygiene plan: {Number(hygienePlan?.impact?.changes_count || 0)} change(s)</p>
+              <p className="status-line">{hygieneStatus || "Hygiene only touches registry entries."}</p>
+
+              <h3>Catalog</h3>
+              <p className="help-text">
+                Last refresh: {llmCatalogStatus?.last_run_at_iso || "never"} · providers {Array.isArray(llmCatalogStatus?.providers) ? llmCatalogStatus.providers.length : 0}
+              </p>
+              <p className="help-text">
+                Last errors:{" "}
+                {(Array.isArray(llmCatalogStatus?.providers) ? llmCatalogStatus.providers : [])
+                  .filter((row) => row?.last_error_kind)
+                  .map((row) => `${row.provider_id}:${row.last_error_kind}`)
+                  .join(", ") || "none"}
+              </p>
+              <div className="model-list">
+                {llmCatalogRows.length === 0 ? <p className="empty">No catalog rows available.</p> : null}
+                {llmCatalogRows.slice(0, 8).map((row) => (
+                  <div key={row.id} className="model-row">
+                    <div className="model-head">
+                      <span>{row.id}</span>
+                      <span className="badge">{(row.capabilities || []).join(",") || "chat"}</span>
+                    </div>
+                    <div className="meta-line">
+                      ctx {row.max_context_tokens || "?"} · in {row.input_cost_per_million_tokens ?? "n/a"} · out {row.output_cost_per_million_tokens ?? "n/a"} · {row.source}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <h3>Cleanup</h3>
+              <div className="row-actions">
+                <button disabled={cleanupBusy} onClick={planLlmCleanup}>
+                  {cleanupBusy ? "Working..." : "Plan Cleanup"}
+                </button>
+                <button disabled={cleanupBusy || !cleanupPlan} onClick={applyLlmCleanup}>
+                  Apply Cleanup
+                </button>
+              </div>
+              <p className="help-text">
+                Cleanup plan: {Number(cleanupPlan?.impact?.changes_count || 0)} change(s) · prune candidates {Number(cleanupPlan?.impact?.prune_candidates_count || 0)}
+              </p>
+              <p className="status-line">{cleanupStatus || "Cleanup marks stale entries and prunes only when policy allows."}</p>
+
+              <h3>Capabilities</h3>
+              <p className="help-text">
+                Mismatch models: {Number(llmHealth?.capabilities_reconcile?.mismatch_count || 0)} · planned changes{" "}
+                {Number(llmHealth?.capabilities_reconcile?.changes_count || 0)}
+              </p>
+              <div className="row-actions">
+                <button disabled={capabilitiesReconcileBusy} onClick={planLlmCapabilitiesReconcile}>
+                  {capabilitiesReconcileBusy ? "Working..." : "Plan Reconcile"}
+                </button>
+                <button
+                  disabled={capabilitiesReconcileBusy || !capabilitiesReconcilePlan}
+                  onClick={applyLlmCapabilitiesReconcile}
+                >
+                  Apply Reconcile
+                </button>
+              </div>
+              <p className="help-text">
+                Reconcile plan: {Number(capabilitiesReconcilePlan?.impact?.changes_count || 0)} change(s)
+              </p>
+              <p className="status-line">
+                {capabilitiesReconcileStatus || "Capability reconcile fixes chat/embedding drift from catalog inference."}
+              </p>
+
+              <h3>Safety</h3>
+              <p className="help-text">
+                Safe mode: {llmHealth?.autopilot?.safe_mode ? "enabled" : "disabled"} · last blocked reason{" "}
+                {llmHealth?.autopilot?.last_blocked_reason || "none"}
+              </p>
+              <p className="help-text">
+                Safe mode reason: {llmHealth?.autopilot?.safe_mode_reason || "none"} · last churn{" "}
+                {llmHealth?.autopilot?.last_churn_event_ts_iso || "never"} ({llmHealth?.autopilot?.last_churn_reason || "none"})
+              </p>
+              <p className="help-text">
+                Rollback policy: {llmHealth?.autopilot?.rollback_policy?.allow_reason || "unknown"} ·{" "}
+                {llmHealth?.autopilot?.rollback_policy?.allow_rollback_effective ? "rollback allowed" : "permission required"}
+              </p>
+              <p className="help-text">
+                Bootstrap policy: {llmHealth?.autopilot?.bootstrap_policy?.allow_reason || "unknown"} ·{" "}
+                {llmHealth?.autopilot?.bootstrap_policy?.allow_apply_effective ? "apply allowed" : "permission required"}
+              </p>
+              <div className="row-actions">
+                <button disabled={autopilotLastChangeBusy} onClick={explainLastAutopilotChange}>
+                  {autopilotLastChangeBusy ? "Loading..." : "Explain Last Change"}
+                </button>
+                <button disabled={!canRollbackRegistry || autopilotUndoBusy} onClick={undoLastAutopilotChange}>
+                  {autopilotUndoBusy ? "Undoing..." : "Undo Last Autopilot Change"}
+                </button>
+                <button disabled={!canBootstrapAutopilot || autopilotBootstrapBusy} onClick={bootstrapAutopilotDefaults}>
+                  {autopilotBootstrapBusy ? "Bootstrapping..." : "Bootstrap Defaults"}
+                </button>
+              </div>
+              <p className="status-line">
+                {safetyStatus || (canRollbackRegistry ? "Rollback is allowed by current policy." : "Enable llm.registry.rollback or use loopback auto policy.")}
+              </p>
+              <div className="model-list">
+                {autopilotLedgerEntries.length === 0 ? <p className="empty">No autopilot ledger entries yet.</p> : null}
+                {autopilotLedgerEntries.slice(0, 10).map((entry) => {
+                  const snapshotId = String(entry.snapshot_id || "").trim();
+                  return (
+                    <div key={entry.id} className="model-row">
+                      <div className="model-head">
+                        <span>{entry.action || "llm.apply"}</span>
+                        <span className={`badge ${entry.outcome === "success" ? "health-ok" : "health-degraded"}`}>
+                          {entry.outcome || "unknown"}
+                        </span>
+                      </div>
+                      <div className="meta-line">
+                        {entry.ts_iso || "n/a"} · {entry.reason || "n/a"} · changed {(entry.changed_ids || []).join(", ") || "none"}
+                      </div>
+                      <div className="meta-line">
+                        snapshot {snapshotId || "n/a"} · hash {entry.resulting_registry_hash || "n/a"}
+                      </div>
+                      <div className="row-actions">
+                        <button
+                          disabled={!snapshotId || !canRollbackRegistry || rollbackBusySnapshotId === snapshotId}
+                          onClick={() => rollbackRegistryToSnapshot(snapshotId)}
+                        >
+                          {rollbackBusySnapshotId === snapshotId ? "Rolling Back..." : "Rollback"}
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="model-list">
+                {registrySnapshots.length === 0 ? <p className="empty">No snapshots available.</p> : null}
+                {registrySnapshots.slice(0, 10).map((row) => (
+                  <div key={row.snapshot_id} className="model-row">
+                    <div className="model-head">
+                      <span>{row.snapshot_id}</span>
+                      <span className="badge">{row.size_bytes || 0} bytes</span>
+                    </div>
+                    <div className="meta-line">hash {row.registry_hash || "n/a"}</div>
+                    <div className="row-actions">
+                      <button
+                        disabled={!canRollbackRegistry || rollbackBusySnapshotId === row.snapshot_id}
+                        onClick={() => rollbackRegistryToSnapshot(row.snapshot_id)}
+                      >
+                        {rollbackBusySnapshotId === row.snapshot_id ? "Rolling Back..." : "Rollback"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="card">
+              <h2>Support</h2>
+              <p className="help-text">
+                Export a deterministic local support bundle, diagnose a provider/model, and generate a plan-only remediation sequence.
+              </p>
+              <div className="grid two">
+                <label>
+                  Diagnose Target
+                  <select
+                    value={supportDiagnoseTarget}
+                    onChange={(event) => setSupportDiagnoseTarget(event.target.value)}
+                  >
+                    {supportTargetOptions.length === 0 ? <option value="">No targets available</option> : null}
+                    {supportTargetOptions.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Remediation Intent
+                  <select
+                    value={supportDiagnoseIntent}
+                    onChange={(event) => setSupportDiagnoseIntent(event.target.value)}
+                  >
+                    <option value="fix_routing">Fix Routing</option>
+                    <option value="reduce_churn">Reduce Churn</option>
+                    <option value="bootstrap">Bootstrap</option>
+                  </select>
+                </label>
+              </div>
+              <div className="row-actions">
+                <button disabled={supportBusy} onClick={exportSupportBundle}>
+                  {supportBusy ? "Working..." : "Export Support Bundle"}
+                </button>
+                <button
+                  disabled={supportBusy || !normalizeSupportTarget(supportDiagnoseTarget)}
+                  onClick={runSupportDiagnosis}
+                >
+                  {supportBusy ? "Working..." : "Run Diagnosis"}
+                </button>
+                <button disabled={supportBusy} onClick={planSupportRemediation}>
+                  {supportBusy ? "Working..." : "Plan Remediation"}
+                </button>
+              </div>
+              <p className="status-line">{supportStatus || "No support actions run in this session."}</p>
+              <p className="help-text">
+                {supportBundlePreview
+                  ? `Bundle ready · registry ${String(supportBundlePreview.registry_hash || "").slice(0, 12)} · safe mode ${supportBundlePreview.safe_mode?.enabled ? "on" : "off"}`
+                  : "Support bundle not exported yet."}
+              </p>
+              <div className="model-list">
+                {!supportDiagnosis ? <p className="empty">Run diagnosis to view root causes and suggested actions.</p> : null}
+                {supportDiagnosis ? (
+                  <div className="model-row">
+                    <div className="model-head">
+                      <span>Status</span>
+                      <span className={`badge ${String(supportDiagnosis.status || "") === "ok" ? "health-ok" : "health-degraded"}`}>
+                        {supportDiagnosis.status || "unknown"}
+                      </span>
+                    </div>
+                    <div className="meta-line">
+                      error {supportDiagnosis.last_error_kind || "none"} · code {supportDiagnosis.status_code || "n/a"} · streak{" "}
+                      {Number(supportDiagnosis.failure_streak || 0)}
+                    </div>
+                    <div className="meta-line">
+                      root causes: {(supportDiagnosis.root_causes || []).join(", ") || "none"}
+                    </div>
+                    {(supportDiagnosis.recommended_actions || []).map((line, index) => (
+                      <div key={`${line}-${index}`} className="meta-line">
+                        {line}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+              <div className="model-list">
+                {!supportRemediationPlan ? <p className="empty">Run remediation plan to view next steps.</p> : null}
+                {supportRemediationPlan ? (
+                  <div className="model-row">
+                    <div className="model-head">
+                      <span>Remediation Plan ({supportRemediationPlan.intent || "fix_routing"})</span>
+                      <span className="badge">{supportRemediationPlan.plan_only ? "plan-only" : "apply"}</span>
+                    </div>
+                    <div className="meta-line">reasons: {(supportRemediationPlan.reasons || []).join(" | ") || "n/a"}</div>
+                    {(supportRemediationPlan.steps || []).map((step) => (
+                      <div key={step.id || step.action} className="meta-line">
+                        {(step.id || "step").replaceAll("_", " ")}: {step.action} ({step.reason})
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
               </div>
             </div>
           </section>
@@ -1335,6 +2440,11 @@ export default function App() {
               </p>
               <p className="help-text">
                 Suggestions: {modelScoutStatus?.total || 0} total · {(modelScoutStatus?.counts || {}).new || 0} new
+              </p>
+              <p className="help-text">
+                Sources: HF {modelScoutStatus?.sources?.huggingface?.available ? "ok" : "down"} · Ollama{" "}
+                {modelScoutStatus?.sources?.ollama?.available ? "ok" : "down"} · OpenRouter{" "}
+                {modelScoutStatus?.sources?.openrouter?.available ? "ok" : "down"}
               </p>
               <div className="row-actions">
                 <button disabled={modelScoutRunning} onClick={runModelScout}>

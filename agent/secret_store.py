@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import hmac
 import json
@@ -28,7 +29,7 @@ class SecretStore:
             import keyring  # type: ignore
 
             return keyring
-        except Exception:
+        except ImportError:
             return None
 
     @staticmethod
@@ -39,7 +40,7 @@ class SecretStore:
                 machine_id = machine_id_path.read_text(encoding="utf-8").strip()
                 if machine_id:
                     return machine_id.encode("utf-8")
-            except Exception:
+            except (OSError, UnicodeError):
                 pass
         fallback = f"{platform.node()}:{os.getuid()}"
         return fallback.encode("utf-8")
@@ -100,7 +101,7 @@ class SecretStore:
             if not isinstance(raw, dict):
                 return {}
             return self._decrypt_payload(raw)
-        except Exception:
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, binascii.Error, RuntimeError):
             return {}
 
     def _write_file_secrets(self, data: dict[str, str]) -> None:
@@ -109,7 +110,7 @@ class SecretStore:
         self._path.write_text(json.dumps(encrypted, ensure_ascii=True), encoding="utf-8")
         try:
             os.chmod(self._path, 0o600)
-        except Exception:
+        except OSError:
             pass
 
     def get_secret(self, key: str) -> str | None:

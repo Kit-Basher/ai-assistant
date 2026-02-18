@@ -53,9 +53,42 @@ Endpoints:
 - `POST /telegram/test`
 - `GET /model_scout/status`
 - `GET /model_scout/suggestions`
+- `GET /model_scout/sources`
 - `POST /model_scout/run`
 - `POST /model_scout/suggestions/{id}/dismiss`
 - `POST /model_scout/suggestions/{id}/mark_installed`
+- `GET /llm/health`
+- `POST /llm/health/run`
+- `GET /llm/catalog`
+- `GET /llm/catalog/status`
+- `POST /llm/catalog/run`
+- `POST /llm/capabilities/reconcile/plan`
+- `POST /llm/capabilities/reconcile/apply`
+- `POST /llm/autoconfig/plan`
+- `POST /llm/autoconfig/apply`
+- `POST /llm/hygiene/plan`
+- `POST /llm/hygiene/apply`
+- `POST /llm/cleanup/plan`
+- `POST /llm/cleanup/apply`
+- `POST /llm/self_heal/plan`
+- `POST /llm/self_heal/apply`
+- `GET /llm/autopilot/ledger?limit=N`
+- `GET /llm/autopilot/ledger/{id}`
+- `GET /llm/autopilot/explain_last`
+- `POST /llm/autopilot/undo`
+- `POST /llm/autopilot/bootstrap`
+- `GET /llm/registry/snapshots?limit=N`
+- `POST /llm/registry/rollback`
+- `GET /llm/notifications?limit=N`
+- `GET /llm/notifications/status`
+- `GET /llm/notifications/last_change`
+- `GET /llm/notifications/policy`
+- `POST /llm/notifications/test`
+- `POST /llm/notifications/mark_read`
+- `POST /llm/notifications/prune`
+- `GET /llm/support/bundle`
+- `GET /llm/support/diagnose?id=<provider_or_model_id>`
+- `POST /llm/support/remediate/plan`
 - `GET /permissions`
 - `PUT /permissions`
 - `GET /audit`
@@ -142,10 +175,169 @@ Routing (high-level):
 
 Model Scout v1 (recommend-only):
 - Scans Hugging Face trending models (`/api/trending?type=model`) and proposes local GGUF/Ollama candidates first.
+- Uses local backends for discovery:
+  - Ollama: reads local `/api/tags` for installed models.
+  - OpenRouter: reads `/models` when key source is configured.
 - Adds remote suggestions only for enabled/tested remote providers, based on expected cost + health.
 - Never auto-installs models and never auto-changes defaults.
 - Uses deterministic scoring, dedupe, and cooldown to avoid spam.
 - Storage: SQLite tables in `agent.db` when available; JSON fallback at `~/.local/share/personal-agent/model_scout_state.json`.
+
+LLM catalog/health/autoconfig/hygiene/cleanup:
+- Catalog store persists provider model metadata (capabilities, context window, pricing when available) at `LLM_CATALOG_PATH` (default `~/.local/share/personal-agent/llm_catalog.json`).
+- Catalog endpoints:
+  - `GET /llm/catalog` returns normalized catalog rows (optional provider filter + limit).
+  - `GET /llm/catalog/status` returns last refresh/error per provider.
+  - `POST /llm/catalog/run` triggers a refresh and syncs catalog metadata into registry model rows.
+- Health monitor persists provider/model status at `LLM_HEALTH_STATE_PATH` (default `~/.local/share/personal-agent/llm_health_state.json`).
+- Router skip-list avoids candidates marked down/degraded during active cooldown windows.
+- Capabilities reconcile endpoints:
+  - `POST /llm/capabilities/reconcile/plan` computes deterministic capability mismatch fixes from catalog inference.
+  - `POST /llm/capabilities/reconcile/apply` applies capability/default_for fixes via transactional write + ledger + audit.
+- Autoconfig endpoints:
+  - `POST /llm/autoconfig/plan` returns deterministic proposed defaults/provider toggles.
+  - `POST /llm/autoconfig/apply` applies plan via permission gate + audit.
+- Hygiene endpoints:
+  - `POST /llm/hygiene/plan` returns deterministic registry cleanup diff.
+  - `POST /llm/hygiene/apply` applies cleanup via permission gate + audit.
+- Cleanup endpoints:
+  - `POST /llm/cleanup/plan` returns deterministic prune/disable plan from usage + health + catalog.
+  - `POST /llm/cleanup/apply` applies cleanup via `llm.registry.prune` permission gate and scheduler policy.
+
+LLM Autopilot loop (API process, deterministic):
+- Sequence per scheduler cycle:
+  1. `POST /models/refresh` logic (provider inventory refresh; Ollama uses `/api/tags` as source of truth)
+  2. `POST /llm/catalog/run` logic (authoritative provider catalogs + deterministic metadata sync)
+  3. `POST /llm/capabilities/reconcile/plan` + `POST /llm/capabilities/reconcile/apply` (if permissions/policy allow)
+  4. `POST /llm/health/run` (provider-specific probes + persisted cooldown/backoff)
+  5. `POST /llm/hygiene/plan` + `POST /llm/hygiene/apply` (if permissions allow)
+  6. `POST /llm/cleanup/plan` + `POST /llm/cleanup/apply` (if permissions allow/policy allows)
+  7. `POST /llm/self_heal/plan` + `POST /llm/self_heal/apply` (if drift exists; if allowed)
+  8. `POST /llm/autoconfig/plan` + `POST /llm/autoconfig/apply` (if permissions allow)
+- Conservative default behavior:
+  - keep current healthy/routable defaults unchanged
+  - detect and report defaults drift in `GET /llm/health` under `health.drift`
+  - self-heal defaults when current default provider/model drifts (missing, unavailable, unroutable, non-chat, unhealthy)
+  - repair missing/invalid defaults deterministically (prefer local chat-capable model, then remote if allowed/available)
+  - normalize `default_model` to fully-qualified `provider:model`
+- Safety model:
+  - apply actions are permission-gated (`llm.autoconfig.apply`, `llm.hygiene.apply`, `llm.self_heal.apply`, `llm.registry.prune`, `llm.capabilities.reconcile.apply`)
+  - scheduler capability-reconcile auto-apply is only allowed by default on loopback bindings when `LLM_CAPABILITIES_RECONCILE_ALLOW_APPLY` is unset
+  - scheduler self-heal auto-apply is only allowed by default on loopback bindings when `LLM_SELF_HEAL_ALLOW_APPLY` is unset
+  - scheduler cleanup auto-apply is only allowed by default on loopback bindings when `LLM_REGISTRY_PRUNE_ALLOW_APPLY` is unset
+  - every catalog/health/autoconfig/hygiene/cleanup/self-heal run emits an audit record with decision, outcome, reason, duration, and modified ids
+  - cleanup/hygiene never remove secrets; they only update registry entries
+
+Autopilot safety + rollback:
+- Apply actions (`llm.autoconfig.apply`, `llm.hygiene.apply`, `llm.cleanup.apply`, `llm.self_heal.apply`, `llm.capabilities.reconcile.apply`) use transactional registry writes:
+  - snapshot before apply
+  - atomic write/replace
+  - post-write invariant verification
+  - automatic restore if verification fails
+- Every successful transactional apply now records:
+  - `snapshot_id_before`
+  - `snapshot_id_after` (post-apply snapshot, best-effort)
+  - `resulting_registry_hash`
+  - stable-sorted `changed_ids`
+- Snapshot API:
+  - `GET /llm/registry/snapshots?limit=N`
+  - `POST /llm/registry/rollback` with `{ "snapshot_id": "..." }`
+- Rollback policy:
+  - loopback binding + `LLM_REGISTRY_ROLLBACK_ALLOW` unset: auto-allow
+  - non-loopback: requires `llm.registry.rollback` permission
+- One-click undo API:
+  - `POST /llm/autopilot/undo`
+  - resolves latest successful autopilot apply action and rolls back to its `snapshot_id_before`
+  - uses existing rollback policy/permission checks and audits `llm.autopilot.undo`
+- Safe mode (`LLM_AUTOPILOT_SAFE_MODE=1` default):
+  - allows local repairs (mark unroutable, fix local defaults)
+  - blocks remote activation changes:
+    - enabling remote providers/models
+    - switching defaults to remote provider/model
+    - enabling remote fallback from false->true
+  - blocked actions are reported in health under `health.autopilot.last_blocked_reason`
+- Churn escalation:
+  - runtime tracks recent autopilot applies and detects churn (`LLM_AUTOPILOT_CHURN_MIN_APPLIES` within `LLM_AUTOPILOT_CHURN_WINDOW_SECONDS`)
+  - on churn, runtime enters a persisted safe-mode override (`LLM_AUTOPILOT_STATE_PATH`) and pauses apply phases until operator intervention
+  - emits audit action `llm.autopilot.safe_mode.enter` and notification context
+- Bootstrap defaults:
+  - `POST /llm/autopilot/bootstrap` deterministically selects a local chat-capable healthy model when defaults are unset/unroutable
+  - loopback + `LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY` unset: auto-allow
+  - non-loopback: requires `llm.autopilot.bootstrap.apply` permission
+- Explain endpoint:
+  - `GET /llm/autopilot/explain_last`
+  - returns latest successful autopilot apply with rationale lines, stable `changed_ids`, snapshot/hash metadata, and redacted evidence subset
+- Action ledger API (UI-friendly):
+  - `GET /llm/autopilot/ledger?limit=N`
+  - `GET /llm/autopilot/ledger/{id}`
+  - entries include action, decision/outcome/reason, `snapshot_id_before`, `snapshot_id_after`, `resulting_registry_hash`, and stable-sorted `changed_ids`
+
+Autopilot notifications:
+- When scheduler cycles mutate defaults/provider/model state, it builds one combined natural-language notification for that cycle.
+- Diff source is deterministic and limited to:
+  - defaults: `routing_mode`, `default_provider`, `default_model`, `allow_remote_fallback`
+  - providers: `enabled`, `available`, `health.status`, `health.cooldown_until`, `health.down_since`, `health.failure_streak`
+  - models: `enabled`, `available`, `routable`, `health.status`, `health.cooldown_until`, `health.down_since`, `health.failure_streak`
+- Delivery targets (deterministic order):
+  - `telegram` target first when configured and remote send policy permits.
+  - `local` target fallback (always configured) so UI still shows delivered notifications when Telegram is absent/unavailable.
+- Send policy:
+  - loopback binding + `LLM_NOTIFICATIONS_ALLOW_SEND` unset: auto-allow (developer default)
+  - non-loopback: remote send requires `llm.notifications.send` permission (local target still records delivery)
+- Anti-spam:
+  - rate limit (`AUTOPILOT_NOTIFY_RATE_LIMIT_SECONDS`, default `1800`)
+  - dedupe by stable change hash (`AUTOPILOT_NOTIFY_DEDUPE_WINDOW_SECONDS`, default `86400`)
+  - quiet hours defer Telegram send but still record (`AUTOPILOT_NOTIFY_QUIET_START_HOUR` / `AUTOPILOT_NOTIFY_QUIET_END_HOUR`)
+  - retention/compaction in store:
+    - `LLM_NOTIFICATIONS_MAX_ITEMS` (default `200`)
+    - `LLM_NOTIFICATIONS_MAX_AGE_DAYS` (default `30`)
+    - `LLM_NOTIFICATIONS_COMPACT` (default `1`; keeps only recent repeated `no_changes`/same-diff groups)
+- API:
+  - `GET /llm/notifications?limit=N`
+  - `GET /llm/notifications/status`
+    - includes `last_read_hash` and `unread_count`
+  - `GET /llm/notifications/last_change`
+    - returns the latest actionable change summary (skips no-op/rate-limit/dedupe/quiet-hour rows)
+  - `GET /llm/notifications/policy` (shows effective test policy from loopback/knob logic)
+  - `POST /llm/notifications/test`
+  - `POST /llm/notifications/mark_read` with `{ "hash": "<dedupe_hash>" }`
+  - `POST /llm/notifications/prune` (permission-gated by `llm.notifications.prune`)
+    - Requires explicit policy allow for `llm.notifications.prune` (no loopback auto-allow path).
+  - Web UI shows this policy as a badge in the Autopilot Notifications card.
+- `GET /llm/health` includes last scheduler notify outcome/hash in `health.notifications`.
+- `GET /llm/health` includes deterministic defaults drift report in `health.drift`.
+
+Chat response meta now includes an ops summary:
+- `meta.autopilot.last_notification`:
+  - `hash`, `ts_iso`, `title`, `outcome`, `reason`, `delivered_to`
+- `meta.autopilot.since_last_user_message`:
+  - count of notifications with `ts > chat_request_start_ts`
+
+Support diagnostics (local-only, deterministic):
+- `GET /llm/support/bundle`
+  - exports a redacted local support bundle (defaults/providers/models/health/audit/ledger/notifications/policies)
+  - no network calls; no secret values
+- `GET /llm/support/diagnose?id=<provider_id_or_model_id>`
+  - explains provider/model failure state from stored validation + health + catalog evidence
+  - includes stable `root_causes` and safe `recommended_actions`
+- `POST /llm/support/remediate/plan`
+  - returns a plan-only remediation sequence for `fix_routing`, `reduce_churn`, or `bootstrap`
+  - never applies changes and never writes registry state
+
+Background automation (API process):
+- Enabled by default when `LLM_AUTOMATION_ENABLED=1`.
+- Jobs:
+  - provider/model refresh every `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
+  - bootstrap check every `LLM_SELF_HEAL_INTERVAL_S` (default `86400`; first run shortly after startup)
+  - catalog refresh every `LLM_CATALOG_REFRESH_INTERVAL_S` (default `21600`)
+  - capability reconcile every `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
+  - health probe every `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
+  - hygiene every `LLM_HYGIENE_INTERVAL_SECONDS` (default `86400`)
+  - cleanup every `LLM_HYGIENE_INTERVAL_SECONDS` (default `86400`)
+  - model scout every `LLM_MODEL_SCOUT_INTERVAL_SECONDS` (default `86400`)
+  - autoconfig every `LLM_AUTOCONFIG_INTERVAL_SECONDS` (default `604800`)
+- Optional startup autoconfig: `LLM_AUTOCONFIG_RUN_ON_STARTUP=1`.
+- Disable all background jobs with `LLM_AUTOMATION_ENABLED=0`.
 
 Constrained autonomy (ModelOps only):
 - Autonomy scope is limited to model-management actions:
@@ -154,7 +346,19 @@ Constrained autonomy (ModelOps only):
   - `modelops.import_gguf_to_ollama`
   - `modelops.set_default_model`
   - `modelops.enable_disable_provider_or_model`
+  - `llm.autoconfig.apply`
+  - `llm.hygiene.apply`
+  - `llm.registry.prune`
+  - `llm.registry.rollback`
+  - `llm.self_heal.apply`
+  - `llm.capabilities.reconcile.apply`
+  - `llm.autopilot.bootstrap.apply`
+  - `llm.notifications.test`
+  - `llm.notifications.send`
+  - `llm.notifications.prune`
 - Default policy is deny for all actions.
+- Exception: `llm.notifications.test` is auto-allowed on loopback-only API bindings when `LLM_NOTIFICATIONS_ALLOW_TEST` is unset (developer ergonomics).
+- Exception: `llm.notifications.send` is auto-allowed for loopback-only API bindings when `LLM_NOTIFICATIONS_ALLOW_SEND` is unset.
 - API flow is plan-first:
   - `POST /modelops/plan` returns deterministic steps + allow/deny decision.
   - `POST /modelops/execute` executes only if policy allows (and confirmation is provided in `manual_confirm` mode).
@@ -180,6 +384,10 @@ Common optional:
 - `AGENT_DB_PATH` (default `memory/agent.db`)
 - `AGENT_LOG_PATH` (default `logs/agent.jsonl`)
 - `AGENT_SKILLS_PATH` (default `skills/`)
+- `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS` (`1` makes `scripts/doctor.py` fail when required systemd units are missing; default skips these checks when units are not installed)
+- `PERCEPTION_ENABLED` (default `1`)
+- `PERCEPTION_ROOTS` (comma-separated allowlist roots for perception top-dir sizing; default `/home,/data/projects`)
+- `PERCEPTION_INTERVAL_SECONDS` (default `5`; reserved for future background scheduling)
 - `ENABLE_SCHEDULED_SNAPSHOTS` (`1` to enable periodic snapshots)
 - `ENABLE_WRITES` (default off)
 
@@ -195,6 +403,7 @@ LLM/provider optional:
 - `LLM_CIRCUIT_BREAKER_WINDOW_SECONDS`
 - `LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS`
 - `LLM_USAGE_STATS_PATH` (default: `llm_usage_stats.json` next to DB)
+- `LLM_CATALOG_PATH` (default `~/.local/share/personal-agent/llm_catalog.json`)
 - `MODEL_SCOUT_ENABLED` (default `1`)
 - `MODEL_SCOUT_NOTIFY_DELTA` (default `15`)
 - `MODEL_SCOUT_ABSOLUTE_THRESHOLD` (default `80`)
@@ -202,6 +411,69 @@ LLM/provider optional:
 - `MODEL_SCOUT_LICENSE_ALLOWLIST` (default `apache-2.0,mit,bsd-3-clause`)
 - `MODEL_SCOUT_SIZE_MAX_B` (default `12`)
 - `AGENT_MODEL_SCOUT_STATE_PATH` (JSON fallback path when SQLite is unavailable)
+- `LLM_AUTOMATION_ENABLED` (default `1`)
+- `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
+- `LLM_HEALTH_MAX_PROBES_PER_RUN` (default `6`)
+- `LLM_HEALTH_PROBE_TIMEOUT_SECONDS` (default `6`)
+- `LLM_HEALTH_STATE_PATH` (default `~/.local/share/personal-agent/llm_health_state.json`)
+- `LLM_CATALOG_REFRESH_INTERVAL_S` (default `21600`)
+- `LLM_MODEL_SCOUT_INTERVAL_SECONDS` (default `86400`)
+- `LLM_AUTOCONFIG_INTERVAL_SECONDS` (default `604800`)
+- `LLM_AUTOCONFIG_RUN_ON_STARTUP` (default `0`)
+- `LLM_HYGIENE_INTERVAL_SECONDS` (default `86400`)
+- `LLM_HYGIENE_UNAVAILABLE_DAYS` (default `7`)
+- `LLM_HYGIENE_REMOVE_EMPTY_DISABLED_PROVIDERS` (default `1`)
+- `LLM_HYGIENE_DISABLE_REPEATEDLY_FAILING_PROVIDERS` (default `0`)
+- `LLM_HYGIENE_PROVIDER_FAILURE_STREAK` (default `8`)
+- `LLM_REGISTRY_PRUNE_ALLOW_APPLY` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: always allow scheduler cleanup applies without `llm.registry.prune`
+  - `false`: always require `llm.registry.prune`
+- `LLM_REGISTRY_PRUNE_UNUSED_DAYS` (default `30`)
+- `LLM_REGISTRY_PRUNE_DISABLE_FAILING_PROVIDER` (default `0`)
+- `LLM_REGISTRY_SNAPSHOTS_DIR` (default `~/.local/share/personal-agent/registry_snapshots`)
+- `LLM_REGISTRY_SNAPSHOT_MAX_ITEMS` (default `40`)
+- `LLM_REGISTRY_ROLLBACK_ALLOW` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: allow rollback without `llm.registry.rollback`
+  - `false`: always require `llm.registry.rollback`
+- `LLM_AUTOPILOT_SAFE_MODE` (default `1`)
+- `LLM_AUTOPILOT_STATE_PATH` (default `~/.local/share/personal-agent/autopilot_state.json`)
+- `LLM_AUTOPILOT_CHURN_WINDOW_SECONDS` (default `1800`)
+- `LLM_AUTOPILOT_CHURN_MIN_APPLIES` (default `4`)
+- `LLM_AUTOPILOT_CHURN_RECENT_LIMIT` (default `80`)
+- `LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: allow `/llm/autopilot/bootstrap` without `llm.autopilot.bootstrap.apply`
+  - `false`: always require `llm.autopilot.bootstrap.apply`
+- `LLM_AUTOPILOT_LEDGER_PATH` (default `~/.local/share/personal-agent/autopilot_action_ledger.json`)
+- `LLM_AUTOPILOT_LEDGER_MAX_ITEMS` (default `400`)
+- `LLM_SELF_HEAL_INTERVAL_S` (default `86400`)
+- `LLM_SELF_HEAL_ALLOW_APPLY` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: always allow scheduler self-heal applies without `llm.self_heal.apply` permission action
+  - `false`: always require `llm.self_heal.apply` permission action
+- `LLM_CAPABILITIES_RECONCILE_ALLOW_APPLY` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: always allow scheduler capability-reconcile applies without `llm.capabilities.reconcile.apply`
+  - `false`: always require `llm.capabilities.reconcile.apply`
+- `AUTOPILOT_NOTIFY_ENABLED` (default `1`)
+- `AUTOPILOT_NOTIFY_RATE_LIMIT_SECONDS` (default `1800`)
+- `AUTOPILOT_NOTIFY_DEDUPE_WINDOW_SECONDS` (default `86400`)
+- `AUTOPILOT_NOTIFY_STORE_PATH` (default `~/.local/share/personal-agent/llm_notifications.json`)
+- `AUTOPILOT_NOTIFY_QUIET_START_HOUR` (optional, 0-23)
+- `AUTOPILOT_NOTIFY_QUIET_END_HOUR` (optional, 0-23)
+- `LLM_NOTIFICATIONS_MAX_ITEMS` (default `200`)
+- `LLM_NOTIFICATIONS_MAX_AGE_DAYS` (default `30`; `0` disables age-based pruning)
+- `LLM_NOTIFICATIONS_COMPACT` (default `1`; `0` disables repeated-diff compaction)
+- `LLM_NOTIFICATIONS_ALLOW_TEST` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: always allow `/llm/notifications/test` without permission action toggle
+  - `false`: always require `llm.notifications.test` permission action
+- `LLM_NOTIFICATIONS_ALLOW_SEND` (optional: `true`/`false`)
+  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
+  - `true`: always allow scheduler autopilot sends without `llm.notifications.send`
+  - `false`: always require `llm.notifications.send` permission action
 
 Desktop/API optional:
 - `AGENT_API_HOST` (default `127.0.0.1`)
@@ -270,7 +542,7 @@ User timer status:
 
 ## Testing
 - Full suite: `pytest -q`
-- Current local result (2026-02-16): `350 passed`
+- Current local result (2026-02-18): `486 passed`
 
 ## Architecture References
 - `ARCHITECTURE.md`

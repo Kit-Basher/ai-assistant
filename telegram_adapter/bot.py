@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone, time
 from zoneinfo import ZoneInfo
 import os
+from pathlib import Path
 import sys
 
 try:
@@ -110,6 +111,7 @@ async def _handle_remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     response = orchestrator.handle_message(prompt, user_id=chat_id)
     await update.effective_message.reply_text(response.text)
     log_event(log_path, "telegram_command", {"chat_id": chat_id, "text": text, "forwarded": prompt})
+
 
 async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
@@ -238,6 +240,33 @@ async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_T
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/network_report", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_sys_metrics_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message("/sys_metrics_snapshot", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_sys_health_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message("/sys_health_report", user_id=chat_id)
+    await update.effective_message.reply_text(response.text)
+
+
+async def _handle_sys_inventory_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    response = orchestrator.handle_message("/sys_inventory_summary", user_id=chat_id)
     await update.effective_message.reply_text(response.text)
 
 
@@ -639,12 +668,8 @@ def build_app() -> Application:
     config = replace(config, telegram_bot_token=token)
     db = MemoryDB(config.db_path)
 
-    schema_path = "{}/memory/schema.sql".format(
-        __import__("os").path.abspath(
-            __import__("os").path.join(__import__("os").path.dirname(__file__), "..")
-        )
-    )
-    db.init_schema(schema_path)
+    schema_path = Path(__file__).resolve().parents[1] / "memory" / "schema.sql"
+    db.init_schema(str(schema_path))
 
     llm_client = LLMRouter(config, log_path=config.log_path)
 
@@ -662,6 +687,9 @@ def build_app() -> Application:
         enable_writes=config.enable_writes,
         llm_broker=llm_broker,
         llm_broker_error=llm_broker_error,
+        perception_enabled=config.perception_enabled,
+        perception_roots=config.perception_roots,
+        perception_interval_seconds=config.perception_interval_seconds,
     )
     debug_protocol = DebugProtocol()
 
@@ -682,6 +710,9 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("resource_report", _handle_resource_report))
     app.add_handler(CommandHandler("brief", _handle_brief))
     app.add_handler(CommandHandler("network_report", _handle_network_report))
+    app.add_handler(CommandHandler("sys_metrics_snapshot", _handle_sys_metrics_snapshot))
+    app.add_handler(CommandHandler("sys_health_report", _handle_sys_health_report))
+    app.add_handler(CommandHandler("sys_inventory_summary", _handle_sys_inventory_summary))
     app.add_handler(CommandHandler("weekly_reflection", _handle_weekly_reflection))
     app.add_handler(CommandHandler("today", _handle_today))
     app.add_handler(CommandHandler("task_add", _handle_task_add))

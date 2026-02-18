@@ -1,39 +1,49 @@
-# Personal Agent (Telegram) — How To Use
+# Personal Agent - Operator Runbook
 
-## What This Is
-This is a local‑first Telegram assistant designed to be trustable and auditable.  
-It runs on your machine, uses explicit confirmations for sensitive actions, and keeps a clear log of what happened.
+## Source Priority
 
-## Current Status (Authoritative)
-- Use `PROJECT_STATUS.md` for current branch status, active work, and latest test health.
-- If another status/tracking doc conflicts, prefer `PROJECT_STATUS.md`.
-- Use `CANONICAL_HANDOFF_V3.md` for mission, behavioral guardrails, and long-horizon direction.
+- Current branch reality: `PROJECT_STATUS.md`
+- Mission/behavior contract: `CANONICAL_HANDOFF_V3.md`
+- Setup/API/UI details: `README.md`
 
-## Safety Model (Plain English)
-- No surprise actions: sensitive operations require explicit confirmation.
-- Facts → opinions: the assistant will not give advice without facts first.
-- Audit trail: actions and results are logged to a local JSONL file.
+## Runtime Modes
 
-## Quick Start (Systemd)
-If installed via `ops/install.sh`, the service is already set up.
+- Telegram bot runtime: `.venv/bin/python -m telegram_adapter`
+- Local API/UI runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
 
-Common service commands:
-- Start: `sudo systemctl start personal-agent.service`
-- Stop: `sudo systemctl stop personal-agent.service`
-- Restart: `sudo systemctl restart personal-agent.service`
-- Status: `sudo systemctl status personal-agent.service`
+## Service Control
 
-## Usage Examples (Natural Language)
-Try these in Telegram:
-- “show me my last disk report”
-- “what changed this week?”
-- “any anomalies lately?”
-- “largest directory growth in /home”
+System service install:
+- `sudo systemctl status personal-agent.service`
+- `sudo systemctl restart personal-agent.service`
 
-## Slash Commands (Telegram)
-Source of truth: `README.md` command list (kept in sync with `telegram_adapter/bot.py`).
+User service install:
+- `systemctl --user status personal-agent-api.service`
+- `systemctl --user restart personal-agent-api.service`
 
-Most used:
+If unsure which mode is installed, check both and use the one that exists.
+
+## Quick Diagnostics
+
+- Core health:
+  - `curl -s http://127.0.0.1:8765/health`
+  - `curl -s http://127.0.0.1:8765/version`
+- Doctor checks:
+  - `. .venv/bin/activate && python scripts/doctor.py`
+  - strict mode (fail when units missing): `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1 .venv/bin/python scripts/doctor.py`
+- Test sweep:
+  - `. .venv/bin/activate && pytest -q`
+
+## Timers
+
+- Observe: `personal-agent-observe.service` + `personal-agent-observe.timer`
+- Daily brief: `personal-agent-daily-brief.service` + `personal-agent-daily-brief.timer`
+- Check timer state:
+  - system scope: `sudo systemctl status <timer>`
+  - user scope: `systemctl --user status <timer>`
+
+## Telegram Commands (High-Use)
+
 - `/brief`
 - `/today`
 - `/task_add <title>`
@@ -41,79 +51,29 @@ Most used:
 - `/open_loops [all|due|important]`
 - `/daily_brief_status`
 - `/health`
-- `/remind <YYYY-MM-DD HH:MM> | <text>`
 - `/status`
+- `/ask <prompt>`
+- `/ask_opinion <prompt>`
+- `/scout`
 
-## Logs (Where To Look)
-Application event log (JSONL):
-- `/home/c/personal-agent/logs/agent.jsonl`
+## Logs
 
-Journal logs:
-- `journalctl -u personal-agent.service -n 200 --no-pager`
+- Default app log: `logs/agent.jsonl`
+- System journal:
+  - system scope: `journalctl -u personal-agent.service -n 200 --no-pager`
+  - user scope: `journalctl --user -u personal-agent-api.service -n 200 --no-pager`
 
-## Troubleshooting
-**Bot not responding**
-- Check status: `sudo systemctl status personal-agent.service`
-- Check logs: `journalctl -u personal-agent.service -n 200 --no-pager`
+## Common Failures
 
-**Telegram Conflict: another poller**
-- Error looks like: `Conflict: terminated by other getUpdates request`
-- Ensure only one instance is running (no other machines polling this bot token).
-- Restart service: `sudo systemctl restart personal-agent.service`
+Bot/API not responding:
+- verify active service and restart it
+- check journal logs
+- confirm token exists (`telegram:bot_token` secret or `TELEGRAM_BOT_TOKEN`)
 
-**No snapshots found**
-- Run `/storage_snapshot` once to seed data.
-- Or enable scheduled snapshots (set `ENABLE_SCHEDULED_SNAPSHOTS=1` in `/etc/personal-agent/agent.env` and restart).
+Telegram conflict (`terminated by other getUpdates request`):
+- ensure only one process uses the same bot token
+- stop duplicate pollers and restart the intended service
 
-## Scheduled Observe Timer
-- Installed unit: `personal-agent-observe.service`
-- Installed timer: `personal-agent-observe.timer`
-- Default cadence: hourly (`OnCalendar=hourly`)
-- Override cadence with a systemd drop-in (example 3x/day: `OnCalendar=*-*-* 09,15,21:00:00`)
-- Commands:
-  - `sudo systemctl status personal-agent-observe.timer`
-  - `sudo systemctl list-timers | grep personal-agent-observe`
-
-## Daily Brief (Opt-In)
-- Enable via explicit chat phrase:
-  - `daily brief on at 09:00`
-  - `daily brief off`
-- Optional brief controls:
-  - `daily brief quiet on|off`
-  - `set disk delta threshold to 300 mb`
-  - `only send if service unhealthy on|off`
-  - `set open loops due window to 3 days`
-- Stored preferences:
-  - `daily_brief_enabled` (`on|off`)
-  - `daily_brief_time` (`HH:MM`, local agent timezone)
-- Daily brief sends Telegram cards only; it does not run actions.
-
-### Migration Note (Scheduler)
-- Daily brief scheduling now runs from systemd timer (`personal-agent-daily-brief.timer`), not Telegram in-process repeat jobs.
-- Reinstall/refresh units:
-  - `bash ops/install.sh --user`
-- Enable timer:
-  - `systemctl --user daemon-reload`
-  - `systemctl --user enable --now personal-agent-daily-brief.timer`
-
-## Open Loops (Explicit Only)
-- Add: `remember that I need to <title> by <YYYY-MM-DD>`
-- Priority add: `remember that ! <title> by <YYYY-MM-DD>` (priority 1)
-- List:
-  - `/open_loops` (recent open)
-  - `/open_loops due` (due-first open)
-  - `/open_loops important` (priority-first, then due)
-  - `/open_loops all` (open + done)
-- Complete: `mark <title> done`
-
-## Operational Trust
-- `/health` shows cards for bot status, observe scheduler state, DB path/schema, daily brief config, and redacted last error.
-- `/daily_brief_status` (or NL: `daily brief status`) explains why brief did/didn't send today.
-
-## Versions
-- App version file: `VERSION`
-- DB schema version: stored in `schema_meta.schema_version`
-
-## Security Notes
-- Secrets live in `/etc/personal-agent/agent.env` (keep it `600` and root‑owned).
-- Do not paste tokens or secrets into chat, logs, or GitHub issues.
+No reports/snapshots yet:
+- run `/storage_snapshot` once to seed baseline
+- verify timers are enabled and active

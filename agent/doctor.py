@@ -21,6 +21,24 @@ class CheckResult:
     message: str
 
 
+def _env_truthy(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _require_systemd_units() -> bool:
+    return _env_truthy("AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS", default=False)
+
+
+def _missing_unit_result(check_name: str, unit_name: str, *, strict: bool) -> CheckResult:
+    if strict:
+        return CheckResult(check_name, False, f"{unit_name} missing")
+    hint = "set AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1 to enforce"
+    return CheckResult(check_name, True, f"{unit_name} missing (skipped; {hint})")
+
+
 def _check_llm_router() -> CheckResult:
     try:
         from agent.config import load_config
@@ -165,12 +183,13 @@ def _has_recent_observe_audit_success(db_path: str, window_hours: int = 24) -> b
 def _check_systemd_units(run: Callable[..., subprocess.CompletedProcess[str]], db_path: str) -> CheckResult:
     svc = "personal-agent-observe.service"
     timer = "personal-agent-observe.timer"
+    strict = _require_systemd_units()
     if not _systemd_available(run):
         return CheckResult("systemd", True, "systemd unavailable (skipped)")
     if not _unit_exists(svc, run):
-        return CheckResult("systemd", False, f"{svc} missing")
+        return _missing_unit_result("systemd", svc, strict=strict)
     if not _unit_exists(timer, run):
-        return CheckResult("systemd", False, f"{timer} missing")
+        return _missing_unit_result("systemd", timer, strict=strict)
     svc_enabled, svc_active = _unit_state(svc, run)
     timer_enabled, timer_active = _unit_state(timer, run)
     if timer_enabled != "enabled" or timer_active != "active":
@@ -199,12 +218,13 @@ def _check_systemd_units(run: Callable[..., subprocess.CompletedProcess[str]], d
 def _check_daily_brief_timer(run: Callable[..., subprocess.CompletedProcess[str]]) -> CheckResult:
     svc = "personal-agent-daily-brief.service"
     timer = "personal-agent-daily-brief.timer"
+    strict = _require_systemd_units()
     if not _systemd_available(run):
         return CheckResult("daily_brief_timer", True, "systemd unavailable (skipped)")
     if not _unit_exists(svc, run):
-        return CheckResult("daily_brief_timer", False, f"{svc} missing")
+        return _missing_unit_result("daily_brief_timer", svc, strict=strict)
     if not _unit_exists(timer, run):
-        return CheckResult("daily_brief_timer", False, f"{timer} missing")
+        return _missing_unit_result("daily_brief_timer", timer, strict=strict)
     _svc_enabled, svc_active = _unit_state(svc, run)
     timer_enabled, timer_active = _unit_state(timer, run)
     if timer_enabled != "enabled" or timer_active != "active":

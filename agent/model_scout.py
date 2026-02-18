@@ -11,6 +11,7 @@ import sqlite3
 import tempfile
 from typing import Any, Callable
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -482,17 +483,29 @@ class ModelScout:
         store: ModelScoutStore,
         fetch_json: Callable[[str], dict[str, Any]] | None = None,
         now_fn: Callable[[], datetime] | None = None,
+        secret_lookup: Callable[[str], str | None] | None = None,
     ) -> None:
         self.settings = settings
         self.store = store
         self._fetch_json = fetch_json or _http_get_json
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self._secret_lookup = secret_lookup or (lambda _name: None)
+        self._last_sources: dict[str, Any] = {
+            "huggingface": {"available": True, "reason": "always_enabled"},
+            "ollama": {"available": False, "reason": "not_checked"},
+            "openrouter": {"available": False, "reason": "not_checked"},
+        }
 
     def close(self) -> None:
         self.store.close()
 
     def status(self) -> dict[str, Any]:
-        return self.store.status()
+        payload = self.store.status()
+        payload["sources"] = self.sources()
+        return payload
+
+    def sources(self) -> dict[str, Any]:
+        return dict(self._last_sources)
 
     def list_suggestions(self, *, status: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
         return self.store.list_suggestions(status=status, limit=limit)
@@ -534,6 +547,26 @@ class ModelScout:
             trending_error = str(exc) or "trending_fetch_failed"
             trending_models = []
 
+        ollama_models, ollama_error = self._discover_ollama_models(registry_document)
+        openrouter_models, openrouter_error = self._discover_openrouter_models(registry_document)
+        self._last_sources = {
+            "huggingface": {
+                "available": trending_error is None,
+                "reason": None if trending_error is None else trending_error,
+                "count": len(trending_models),
+            },
+            "ollama": {
+                "available": ollama_error is None,
+                "reason": None if ollama_error is None else ollama_error,
+                "count": len(ollama_models),
+            },
+            "openrouter": {
+                "available": openrouter_error is None,
+                "reason": None if openrouter_error is None else openrouter_error,
+                "count": len(openrouter_models),
+            },
+        }
+
         baselines = self._build_baselines(registry_document)
         baseline_local_score = float(baselines.get("local", {}).get("score") or 0.0)
         baseline_remote = {
@@ -554,9 +587,19 @@ class ModelScout:
             trending_models,
             baseline_remote=baseline_remote,
         )
+        discovery_suggestions = self._build_discovery_suggestions(
+            registry_document,
+            ollama_models=ollama_models,
+            openrouter_models=openrouter_models,
+        )
 
+        merged_by_id: dict[str, Suggestion] = {}
+        for item in local_suggestions + remote_suggestions + discovery_suggestions:
+            existing = merged_by_id.get(item.id)
+            if existing is None or float(item.score) > float(existing.score):
+                merged_by_id[item.id] = item
         suggestions = sorted(
-            local_suggestions + remote_suggestions,
+            merged_by_id.values(),
             key=lambda item: (-float(item.score), item.kind, str(item.provider_id or ""), str(item.id)),
         )
 
@@ -597,6 +640,7 @@ class ModelScout:
             "new_suggestions": newly_actionable,
             "notified": notified,
             "fetched_trending": len(trending_models),
+            "sources": self.sources(),
         }
 
     def _build_baselines(self, registry_document: dict[str, Any]) -> dict[str, Any]:
@@ -692,6 +736,163 @@ class ModelScout:
                 "default_model": defaults.get("default_model"),
             },
         }
+
+    def _discover_ollama_models(self, registry_document: dict[str, Any]) -> tuple[list[str], str | None]:
+        providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
+        ollama = providers.get("ollama") if isinstance(providers.get("ollama"), dict) else None
+        if not isinstance(ollama, dict):
+            return [], "provider_missing"
+        if not bool(ollama.get("enabled", True)):
+            return [], "provider_disabled"
+
+        base_url = str(ollama.get("base_url") or "http://127.0.0.1:11434").strip().rstrip("/")
+        if not base_url:
+            return [], "base_url_missing"
+        tags_url = base_url + "/api/tags"
+        try:
+            parsed = _http_get_json_with_policy(
+                tags_url,
+                headers={"Accept": "application/json"},
+                timeout_seconds=4.0,
+                allowed_hosts={"127.0.0.1", "localhost"},
+            )
+        except RuntimeError as exc:
+            return [], str(exc)
+
+        rows = parsed.get("models") if isinstance(parsed.get("models"), list) else []
+        names: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "").strip()
+            if name:
+                names.append(name)
+        return sorted(set(names)), None
+
+    def _discover_openrouter_models(self, registry_document: dict[str, Any]) -> tuple[list[str], str | None]:
+        providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
+        openrouter = providers.get("openrouter") if isinstance(providers.get("openrouter"), dict) else None
+        if not isinstance(openrouter, dict):
+            return [], "provider_missing"
+        if not bool(openrouter.get("enabled", True)):
+            return [], "provider_disabled"
+
+        source = openrouter.get("api_key_source") if isinstance(openrouter.get("api_key_source"), dict) else None
+        key = ""
+        if isinstance(source, dict):
+            source_type = str(source.get("type") or "").strip().lower()
+            source_name = str(source.get("name") or "").strip()
+            if source_type == "env":
+                key = os.getenv(source_name, "").strip()
+            elif source_type == "secret":
+                key = str(self._secret_lookup(source_name) or "").strip()
+        if not key:
+            return [], "missing_api_key"
+
+        base_url = str(openrouter.get("base_url") or "https://openrouter.ai/api/v1").strip().rstrip("/")
+        if not base_url:
+            return [], "base_url_missing"
+        models_url = base_url + "/models"
+        try:
+            parsed = _http_get_json_with_policy(
+                models_url,
+                headers={
+                    "Accept": "application/json",
+                    "Authorization": f"Bearer {key}",
+                },
+                timeout_seconds=6.0,
+                allowed_hosts={"openrouter.ai"},
+            )
+        except RuntimeError as exc:
+            return [], str(exc)
+
+        rows = parsed.get("data") if isinstance(parsed.get("data"), list) else []
+        names: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            if model_id:
+                names.append(model_id)
+        return sorted(set(names)), None
+
+    def _build_discovery_suggestions(
+        self,
+        registry_document: dict[str, Any],
+        *,
+        ollama_models: list[str],
+        openrouter_models: list[str],
+    ) -> list[Suggestion]:
+        providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
+        models = registry_document.get("models") if isinstance(registry_document.get("models"), dict) else {}
+        suggestions: list[Suggestion] = []
+
+        ollama_provider = providers.get("ollama") if isinstance(providers.get("ollama"), dict) else None
+        local_chat_models = [
+            model_id
+            for model_id, payload in sorted(models.items())
+            if isinstance(payload, dict)
+            and str(payload.get("provider") or "").strip().lower() == "ollama"
+            and bool(payload.get("enabled", True))
+            and bool(payload.get("available", True))
+            and self._is_chat_model(payload)
+        ]
+
+        if isinstance(ollama_provider, dict) and bool(ollama_provider.get("enabled", True)) and not local_chat_models and not ollama_models:
+            bootstrap = [
+                ("qwen2.5:3b-instruct", 88.0),
+                ("llama3.2:3b", 82.0),
+                ("mistral:7b-instruct", 78.0),
+            ]
+            for model_name, score in bootstrap:
+                suggestion_id = f"local:ollama:{model_name}"
+                suggestions.append(
+                    Suggestion(
+                        id=suggestion_id,
+                        kind="local",
+                        repo_id=f"ollama/{model_name}",
+                        provider_id="ollama",
+                        model_id=None,
+                        score=score,
+                        rationale="No local Ollama models detected; this is a small general-purpose starter model.",
+                        install_cmd=f"ollama pull {model_name}",
+                    )
+                )
+
+        preferred_openrouter = [
+            "openai/gpt-4o-mini",
+            "anthropic/claude-3.5-haiku",
+            "meta-llama/llama-3.1-8b-instruct",
+        ]
+        chosen = ""
+        for candidate in preferred_openrouter:
+            if candidate in set(openrouter_models):
+                chosen = candidate
+                break
+        if not chosen and openrouter_models:
+            chosen = sorted(openrouter_models)[0]
+        if chosen:
+            model_id = f"openrouter:{chosen}"
+            model_exists = isinstance(models.get(model_id), dict)
+            score = 90.0 if chosen == "openai/gpt-4o-mini" else 80.0
+            suggestions.append(
+                Suggestion(
+                    id=f"remote:openrouter:{model_id}",
+                    kind="remote",
+                    repo_id=None,
+                    provider_id="openrouter",
+                    model_id=model_id,
+                    score=score,
+                    rationale=(
+                        "Discovered from OpenRouter catalog; recommended as default."
+                        if not model_exists
+                        else "Discovered from OpenRouter catalog and available in registry."
+                    ),
+                    install_cmd=None,
+                )
+            )
+
+        return sorted(suggestions, key=lambda item: (-item.score, item.id))
 
     @staticmethod
     def _is_chat_model(model_payload: dict[str, Any]) -> bool:
@@ -1073,23 +1274,46 @@ def load_model_scout_settings(config) -> ModelScoutSettings:
 def build_model_scout(config) -> ModelScout:
     settings = load_model_scout_settings(config)
     store = ModelScoutStore(config.db_path, json_path=config.model_scout_state_path)
-    return ModelScout(settings, store=store)
+    from agent.secret_store import SecretStore
+
+    secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
+    return ModelScout(settings, store=store, secret_lookup=secret_store.get_secret)
 
 
 def _http_get_json(url: str) -> dict[str, Any]:
-    req = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    return _http_get_json_with_policy(
+        url,
+        headers={"Accept": "application/json"},
+        timeout_seconds=12.0,
+        allowed_hosts={"huggingface.co"},
+    )
+
+
+def _http_get_json_with_policy(
+    url: str,
+    *,
+    headers: dict[str, str],
+    timeout_seconds: float,
+    allowed_hosts: set[str],
+) -> dict[str, Any]:
+    parsed_url = urllib.parse.urlparse(url)
+    host = (parsed_url.hostname or "").strip().lower()
+    if host and host not in {item.strip().lower() for item in allowed_hosts if item.strip()}:
+        raise RuntimeError("domain_not_allowed")
+
+    req = urllib.request.Request(url, method="GET", headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=12.0) as response:
+        with urllib.request.urlopen(req, timeout=float(timeout_seconds)) as response:
             payload = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
-        raise RuntimeError(f"hf_http_{int(exc.code)}") from exc
+        raise RuntimeError(f"http_{int(exc.code)}") from exc
     except urllib.error.URLError as exc:
-        raise RuntimeError("hf_unreachable") from exc
+        raise RuntimeError("unreachable") from exc
 
     try:
         parsed = json.loads(payload or "{}")
     except json.JSONDecodeError as exc:
-        raise RuntimeError("hf_invalid_json") from exc
+        raise RuntimeError("invalid_json") from exc
     if isinstance(parsed, dict):
         return parsed
     if isinstance(parsed, list):

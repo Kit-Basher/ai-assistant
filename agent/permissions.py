@@ -15,6 +15,16 @@ MODEL_OPS_ACTIONS = (
     "modelops.import_gguf_to_ollama",
     "modelops.set_default_model",
     "modelops.enable_disable_provider_or_model",
+    "llm.autoconfig.apply",
+    "llm.hygiene.apply",
+    "llm.registry.prune",
+    "llm.registry.rollback",
+    "llm.self_heal.apply",
+    "llm.capabilities.reconcile.apply",
+    "llm.autopilot.bootstrap.apply",
+    "llm.notifications.test",
+    "llm.notifications.send",
+    "llm.notifications.prune",
 )
 
 _PERMISSION_MODES = {"manual_confirm", "auto"}
@@ -56,11 +66,11 @@ def _normalize_document(document: dict[str, Any]) -> dict[str, Any]:
     if max_download_bytes is None and max_download_gb is not None:
         try:
             max_download_bytes = int(float(max_download_gb) * 1024 * 1024 * 1024)
-        except Exception:
+        except (TypeError, ValueError, OverflowError):
             max_download_bytes = constraints["max_download_bytes"]
     try:
         constraints["max_download_bytes"] = max(0, int(max_download_bytes))
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         pass
 
     if "allow_install_ollama" in raw_constraints:
@@ -116,7 +126,7 @@ class PermissionStore:
             return default_permissions_document()
         try:
             parsed = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return default_permissions_document()
         if not isinstance(parsed, dict):
             return default_permissions_document()
@@ -235,6 +245,44 @@ class PermissionPolicy:
             if target_type == "model" and ":" in target_id:
                 return target_id.split(":", 1)[0].strip().lower() or None
             return None
+        if action == "llm.autoconfig.apply":
+            provider = str(params.get("default_provider") or "").strip().lower()
+            if provider:
+                return provider
+            default_model = str(params.get("default_model") or "").strip()
+            if ":" in default_model:
+                return default_model.split(":", 1)[0].strip().lower() or None
+            return None
+        if action == "llm.hygiene.apply":
+            return None
+        if action == "llm.registry.prune":
+            return None
+        if action == "llm.registry.rollback":
+            return None
+        if action == "llm.self_heal.apply":
+            provider = str(params.get("default_provider") or "").strip().lower()
+            if provider:
+                return provider
+            default_model = str(params.get("default_model") or "").strip()
+            if ":" in default_model:
+                return default_model.split(":", 1)[0].strip().lower() or None
+            return None
+        if action == "llm.capabilities.reconcile.apply":
+            return None
+        if action == "llm.autopilot.bootstrap.apply":
+            provider = str(params.get("default_provider") or "").strip().lower()
+            if provider:
+                return provider
+            default_model = str(params.get("default_model") or "").strip()
+            if ":" in default_model:
+                return default_model.split(":", 1)[0].strip().lower() or None
+            return None
+        if action == "llm.notifications.test":
+            return None
+        if action == "llm.notifications.send":
+            return None
+        if action == "llm.notifications.prune":
+            return None
 
         return None
 
@@ -256,5 +304,25 @@ class PermissionPolicy:
             target_type = str(params.get("target_type") or "").strip().lower()
             if target_type == "model":
                 return str(params.get("id") or "").strip() or None
+        if action == "llm.autoconfig.apply":
+            return str(params.get("default_model") or "").strip() or None
+        if action == "llm.hygiene.apply":
+            return None
+        if action == "llm.registry.prune":
+            return None
+        if action == "llm.registry.rollback":
+            return None
+        if action == "llm.self_heal.apply":
+            return str(params.get("default_model") or "").strip() or None
+        if action == "llm.capabilities.reconcile.apply":
+            return None
+        if action == "llm.autopilot.bootstrap.apply":
+            return str(params.get("default_model") or "").strip() or None
+        if action == "llm.notifications.test":
+            return None
+        if action == "llm.notifications.send":
+            return None
+        if action == "llm.notifications.prune":
+            return None
 
         return None

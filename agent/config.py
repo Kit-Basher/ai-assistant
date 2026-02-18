@@ -52,6 +52,52 @@ class Config:
     model_scout_license_allowlist: tuple[str, ...] = ("apache-2.0", "mit", "bsd-3-clause")
     model_scout_size_max_b: float = 12.0
     model_scout_state_path: str | None = None
+    perception_enabled: bool = True
+    perception_roots: tuple[str, ...] = ("/home", "/data/projects")
+    perception_interval_seconds: int = 5
+    llm_health_interval_seconds: int = 900
+    llm_health_max_probes_per_run: int = 6
+    llm_health_probe_timeout_seconds: float = 6.0
+    llm_health_state_path: str | None = None
+    llm_catalog_path: str | None = None
+    llm_catalog_refresh_interval_seconds: int = 21600
+    llm_automation_enabled: bool = True
+    llm_model_scout_interval_seconds: int = 86400
+    llm_autoconfig_interval_seconds: int = 604800
+    llm_autoconfig_run_on_startup: bool = False
+    llm_hygiene_interval_seconds: int = 86400
+    llm_hygiene_unavailable_days: int = 7
+    llm_hygiene_remove_empty_disabled_providers: bool = True
+    llm_hygiene_disable_repeatedly_failing_providers: bool = False
+    llm_hygiene_provider_failure_streak: int = 8
+    llm_registry_prune_allow_apply: bool | None = None
+    llm_registry_prune_unused_days: int = 30
+    llm_registry_prune_disable_failing_provider: bool = False
+    llm_self_heal_interval_seconds: int = 86400
+    llm_self_heal_allow_apply: bool | None = None
+    llm_capabilities_reconcile_allow_apply: bool | None = None
+    autopilot_notify_enabled: bool = True
+    autopilot_notify_rate_limit_seconds: int = 1800
+    autopilot_notify_dedupe_window_seconds: int = 86400
+    autopilot_notify_store_path: str | None = None
+    autopilot_notify_quiet_start_hour: int | None = None
+    autopilot_notify_quiet_end_hour: int | None = None
+    llm_notifications_allow_test: bool | None = None
+    llm_notifications_allow_send: bool | None = None
+    llm_notifications_max_items: int = 200
+    llm_notifications_max_age_days: int = 30
+    llm_notifications_compact: bool = True
+    llm_registry_snapshots_dir: str | None = None
+    llm_registry_snapshot_max_items: int = 40
+    llm_registry_rollback_allow: bool | None = None
+    llm_autopilot_safe_mode: bool = True
+    llm_autopilot_state_path: str | None = None
+    llm_autopilot_churn_window_seconds: int = 1800
+    llm_autopilot_churn_min_applies: int = 4
+    llm_autopilot_churn_recent_limit: int = 80
+    llm_autopilot_bootstrap_allow_apply: bool | None = None
+    llm_autopilot_ledger_path: str | None = None
+    llm_autopilot_ledger_max_items: int = 400
 
 
 @dataclass(frozen=True)
@@ -193,6 +239,166 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     ) or ("apache-2.0", "mit", "bsd-3-clause")
     model_scout_size_max_b = float(os.getenv("MODEL_SCOUT_SIZE_MAX_B", "12") or 12)
     model_scout_state_path = os.getenv("AGENT_MODEL_SCOUT_STATE_PATH", "").strip() or None
+    perception_enabled = os.getenv("PERCEPTION_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    perception_roots_raw = os.getenv("PERCEPTION_ROOTS", "/home,/data/projects").strip()
+    perception_roots = tuple(
+        item.strip()
+        for item in perception_roots_raw.split(",")
+        if item.strip()
+    ) or ("/home", "/data/projects")
+    perception_interval_seconds = int(os.getenv("PERCEPTION_INTERVAL_SECONDS", "5") or 5)
+    llm_health_interval_seconds = int(os.getenv("LLM_HEALTH_INTERVAL_SECONDS", "900") or 900)
+    llm_health_max_probes_per_run = int(os.getenv("LLM_HEALTH_MAX_PROBES_PER_RUN", "6") or 6)
+    llm_health_probe_timeout_seconds = float(os.getenv("LLM_HEALTH_PROBE_TIMEOUT_SECONDS", "6") or 6)
+    llm_health_state_path = os.getenv("LLM_HEALTH_STATE_PATH", "").strip() or None
+    llm_catalog_path = os.getenv("LLM_CATALOG_PATH", "").strip() or None
+    llm_catalog_refresh_interval_seconds = int(os.getenv("LLM_CATALOG_REFRESH_INTERVAL_S", "21600") or 21600)
+    llm_automation_enabled = os.getenv("LLM_AUTOMATION_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    llm_model_scout_interval_seconds = int(os.getenv("LLM_MODEL_SCOUT_INTERVAL_SECONDS", "86400") or 86400)
+    llm_autoconfig_interval_seconds = int(os.getenv("LLM_AUTOCONFIG_INTERVAL_SECONDS", "604800") or 604800)
+    llm_autoconfig_run_on_startup = os.getenv("LLM_AUTOCONFIG_RUN_ON_STARTUP", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    llm_hygiene_interval_seconds = int(os.getenv("LLM_HYGIENE_INTERVAL_SECONDS", "86400") or 86400)
+    llm_hygiene_unavailable_days = int(os.getenv("LLM_HYGIENE_UNAVAILABLE_DAYS", "7") or 7)
+    llm_hygiene_remove_empty_disabled_providers = (
+        os.getenv("LLM_HYGIENE_REMOVE_EMPTY_DISABLED_PROVIDERS", "1").strip().lower()
+        in {"1", "true", "yes", "y", "on"}
+    )
+    llm_hygiene_disable_repeatedly_failing_providers = (
+        os.getenv("LLM_HYGIENE_DISABLE_REPEATEDLY_FAILING_PROVIDERS", "0").strip().lower()
+        in {"1", "true", "yes", "y", "on"}
+    )
+    llm_hygiene_provider_failure_streak = int(os.getenv("LLM_HYGIENE_PROVIDER_FAILURE_STREAK", "8") or 8)
+    llm_registry_prune_allow_apply_raw = os.getenv("LLM_REGISTRY_PRUNE_ALLOW_APPLY", "").strip().lower()
+    if not llm_registry_prune_allow_apply_raw:
+        llm_registry_prune_allow_apply: bool | None = None
+    elif llm_registry_prune_allow_apply_raw in {"1", "true", "yes", "y", "on"}:
+        llm_registry_prune_allow_apply = True
+    elif llm_registry_prune_allow_apply_raw in {"0", "false", "no", "n", "off"}:
+        llm_registry_prune_allow_apply = False
+    else:
+        raise RuntimeError("LLM_REGISTRY_PRUNE_ALLOW_APPLY must be true/false when set.")
+    llm_registry_prune_unused_days = int(os.getenv("LLM_REGISTRY_PRUNE_UNUSED_DAYS", "30") or 30)
+    llm_registry_prune_disable_failing_provider = (
+        os.getenv("LLM_REGISTRY_PRUNE_DISABLE_FAILING_PROVIDER", "0").strip().lower()
+        in {"1", "true", "yes", "y", "on"}
+    )
+    llm_self_heal_interval_seconds = int(os.getenv("LLM_SELF_HEAL_INTERVAL_S", "86400") or 86400)
+    llm_self_heal_allow_apply_raw = os.getenv("LLM_SELF_HEAL_ALLOW_APPLY", "").strip().lower()
+    if not llm_self_heal_allow_apply_raw:
+        llm_self_heal_allow_apply: bool | None = None
+    elif llm_self_heal_allow_apply_raw in {"1", "true", "yes", "y", "on"}:
+        llm_self_heal_allow_apply = True
+    elif llm_self_heal_allow_apply_raw in {"0", "false", "no", "n", "off"}:
+        llm_self_heal_allow_apply = False
+    else:
+        raise RuntimeError("LLM_SELF_HEAL_ALLOW_APPLY must be true/false when set.")
+    llm_capabilities_reconcile_allow_apply_raw = (
+        os.getenv("LLM_CAPABILITIES_RECONCILE_ALLOW_APPLY", "").strip().lower()
+    )
+    if not llm_capabilities_reconcile_allow_apply_raw:
+        llm_capabilities_reconcile_allow_apply: bool | None = None
+    elif llm_capabilities_reconcile_allow_apply_raw in {"1", "true", "yes", "y", "on"}:
+        llm_capabilities_reconcile_allow_apply = True
+    elif llm_capabilities_reconcile_allow_apply_raw in {"0", "false", "no", "n", "off"}:
+        llm_capabilities_reconcile_allow_apply = False
+    else:
+        raise RuntimeError("LLM_CAPABILITIES_RECONCILE_ALLOW_APPLY must be true/false when set.")
+    autopilot_notify_enabled = os.getenv("AUTOPILOT_NOTIFY_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    autopilot_notify_rate_limit_seconds = int(os.getenv("AUTOPILOT_NOTIFY_RATE_LIMIT_SECONDS", "1800") or 1800)
+    autopilot_notify_dedupe_window_seconds = int(
+        os.getenv("AUTOPILOT_NOTIFY_DEDUPE_WINDOW_SECONDS", "86400") or 86400
+    )
+    autopilot_notify_store_path = os.getenv("AUTOPILOT_NOTIFY_STORE_PATH", "").strip() or None
+    quiet_start_raw = os.getenv("AUTOPILOT_NOTIFY_QUIET_START_HOUR", "").strip()
+    quiet_end_raw = os.getenv("AUTOPILOT_NOTIFY_QUIET_END_HOUR", "").strip()
+    autopilot_notify_quiet_start_hour = int(quiet_start_raw) if quiet_start_raw else None
+    autopilot_notify_quiet_end_hour = int(quiet_end_raw) if quiet_end_raw else None
+    llm_notifications_allow_test_raw = os.getenv("LLM_NOTIFICATIONS_ALLOW_TEST", "").strip().lower()
+    if not llm_notifications_allow_test_raw:
+        llm_notifications_allow_test: bool | None = None
+    elif llm_notifications_allow_test_raw in {"1", "true", "yes", "y", "on"}:
+        llm_notifications_allow_test = True
+    elif llm_notifications_allow_test_raw in {"0", "false", "no", "n", "off"}:
+        llm_notifications_allow_test = False
+    else:
+        raise RuntimeError("LLM_NOTIFICATIONS_ALLOW_TEST must be true/false when set.")
+    llm_notifications_allow_send_raw = os.getenv("LLM_NOTIFICATIONS_ALLOW_SEND", "").strip().lower()
+    if not llm_notifications_allow_send_raw:
+        llm_notifications_allow_send: bool | None = None
+    elif llm_notifications_allow_send_raw in {"1", "true", "yes", "y", "on"}:
+        llm_notifications_allow_send = True
+    elif llm_notifications_allow_send_raw in {"0", "false", "no", "n", "off"}:
+        llm_notifications_allow_send = False
+    else:
+        raise RuntimeError("LLM_NOTIFICATIONS_ALLOW_SEND must be true/false when set.")
+    llm_notifications_max_items = int(os.getenv("LLM_NOTIFICATIONS_MAX_ITEMS", "200") or 200)
+    llm_notifications_max_age_days = int(os.getenv("LLM_NOTIFICATIONS_MAX_AGE_DAYS", "30") or 30)
+    llm_notifications_compact = os.getenv("LLM_NOTIFICATIONS_COMPACT", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    llm_registry_snapshots_dir = os.getenv("LLM_REGISTRY_SNAPSHOTS_DIR", "").strip() or None
+    llm_registry_snapshot_max_items = int(os.getenv("LLM_REGISTRY_SNAPSHOT_MAX_ITEMS", "40") or 40)
+    llm_registry_rollback_allow_raw = os.getenv("LLM_REGISTRY_ROLLBACK_ALLOW", "").strip().lower()
+    if not llm_registry_rollback_allow_raw:
+        llm_registry_rollback_allow: bool | None = None
+    elif llm_registry_rollback_allow_raw in {"1", "true", "yes", "y", "on"}:
+        llm_registry_rollback_allow = True
+    elif llm_registry_rollback_allow_raw in {"0", "false", "no", "n", "off"}:
+        llm_registry_rollback_allow = False
+    else:
+        raise RuntimeError("LLM_REGISTRY_ROLLBACK_ALLOW must be true/false when set.")
+    llm_autopilot_safe_mode = os.getenv("LLM_AUTOPILOT_SAFE_MODE", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    llm_autopilot_state_path = os.getenv("LLM_AUTOPILOT_STATE_PATH", "").strip() or None
+    llm_autopilot_churn_window_seconds = int(
+        os.getenv("LLM_AUTOPILOT_CHURN_WINDOW_SECONDS", "1800") or 1800
+    )
+    llm_autopilot_churn_min_applies = int(os.getenv("LLM_AUTOPILOT_CHURN_MIN_APPLIES", "4") or 4)
+    llm_autopilot_churn_recent_limit = int(os.getenv("LLM_AUTOPILOT_CHURN_RECENT_LIMIT", "80") or 80)
+    llm_autopilot_bootstrap_allow_apply_raw = os.getenv("LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY", "").strip().lower()
+    if not llm_autopilot_bootstrap_allow_apply_raw:
+        llm_autopilot_bootstrap_allow_apply: bool | None = None
+    elif llm_autopilot_bootstrap_allow_apply_raw in {"1", "true", "yes", "y", "on"}:
+        llm_autopilot_bootstrap_allow_apply = True
+    elif llm_autopilot_bootstrap_allow_apply_raw in {"0", "false", "no", "n", "off"}:
+        llm_autopilot_bootstrap_allow_apply = False
+    else:
+        raise RuntimeError("LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY must be true/false when set.")
+    llm_autopilot_ledger_path = os.getenv("LLM_AUTOPILOT_LEDGER_PATH", "").strip() or None
+    llm_autopilot_ledger_max_items = int(os.getenv("LLM_AUTOPILOT_LEDGER_MAX_ITEMS", "400") or 400)
 
     if llm_routing_mode not in {
         "auto",
@@ -221,6 +427,52 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("MODEL_SCOUT_MAX_SUGGESTIONS_PER_NOTIFY must be >= 1.")
     if model_scout_size_max_b <= 0:
         raise RuntimeError("MODEL_SCOUT_SIZE_MAX_B must be > 0.")
+    if perception_interval_seconds < 1:
+        raise RuntimeError("PERCEPTION_INTERVAL_SECONDS must be >= 1.")
+    if llm_health_interval_seconds < 1:
+        raise RuntimeError("LLM_HEALTH_INTERVAL_SECONDS must be >= 1.")
+    if llm_health_max_probes_per_run < 1:
+        raise RuntimeError("LLM_HEALTH_MAX_PROBES_PER_RUN must be >= 1.")
+    if llm_health_probe_timeout_seconds <= 0:
+        raise RuntimeError("LLM_HEALTH_PROBE_TIMEOUT_SECONDS must be > 0.")
+    if llm_catalog_refresh_interval_seconds < 1:
+        raise RuntimeError("LLM_CATALOG_REFRESH_INTERVAL_S must be >= 1.")
+    if llm_model_scout_interval_seconds < 1:
+        raise RuntimeError("LLM_MODEL_SCOUT_INTERVAL_SECONDS must be >= 1.")
+    if llm_autoconfig_interval_seconds < 1:
+        raise RuntimeError("LLM_AUTOCONFIG_INTERVAL_SECONDS must be >= 1.")
+    if llm_hygiene_interval_seconds < 1:
+        raise RuntimeError("LLM_HYGIENE_INTERVAL_SECONDS must be >= 1.")
+    if llm_hygiene_unavailable_days < 1:
+        raise RuntimeError("LLM_HYGIENE_UNAVAILABLE_DAYS must be >= 1.")
+    if llm_hygiene_provider_failure_streak < 1:
+        raise RuntimeError("LLM_HYGIENE_PROVIDER_FAILURE_STREAK must be >= 1.")
+    if llm_registry_prune_unused_days < 1:
+        raise RuntimeError("LLM_REGISTRY_PRUNE_UNUSED_DAYS must be >= 1.")
+    if llm_self_heal_interval_seconds < 1:
+        raise RuntimeError("LLM_SELF_HEAL_INTERVAL_S must be >= 1.")
+    if autopilot_notify_rate_limit_seconds < 0:
+        raise RuntimeError("AUTOPILOT_NOTIFY_RATE_LIMIT_SECONDS must be >= 0.")
+    if autopilot_notify_dedupe_window_seconds < 0:
+        raise RuntimeError("AUTOPILOT_NOTIFY_DEDUPE_WINDOW_SECONDS must be >= 0.")
+    if autopilot_notify_quiet_start_hour is not None and not 0 <= autopilot_notify_quiet_start_hour <= 23:
+        raise RuntimeError("AUTOPILOT_NOTIFY_QUIET_START_HOUR must be between 0 and 23.")
+    if autopilot_notify_quiet_end_hour is not None and not 0 <= autopilot_notify_quiet_end_hour <= 23:
+        raise RuntimeError("AUTOPILOT_NOTIFY_QUIET_END_HOUR must be between 0 and 23.")
+    if llm_notifications_max_items < 1:
+        raise RuntimeError("LLM_NOTIFICATIONS_MAX_ITEMS must be >= 1.")
+    if llm_notifications_max_age_days < 0:
+        raise RuntimeError("LLM_NOTIFICATIONS_MAX_AGE_DAYS must be >= 0.")
+    if llm_registry_snapshot_max_items < 1:
+        raise RuntimeError("LLM_REGISTRY_SNAPSHOT_MAX_ITEMS must be >= 1.")
+    if llm_autopilot_churn_window_seconds < 60:
+        raise RuntimeError("LLM_AUTOPILOT_CHURN_WINDOW_SECONDS must be >= 60.")
+    if llm_autopilot_churn_min_applies < 2:
+        raise RuntimeError("LLM_AUTOPILOT_CHURN_MIN_APPLIES must be >= 2.")
+    if llm_autopilot_churn_recent_limit < 1:
+        raise RuntimeError("LLM_AUTOPILOT_CHURN_RECENT_LIMIT must be >= 1.")
+    if llm_autopilot_ledger_max_items < 1:
+        raise RuntimeError("LLM_AUTOPILOT_LEDGER_MAX_ITEMS must be >= 1.")
 
     return Config(
         telegram_bot_token=telegram_bot_token,
@@ -268,4 +520,50 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         model_scout_license_allowlist=model_scout_license_allowlist,
         model_scout_size_max_b=model_scout_size_max_b,
         model_scout_state_path=model_scout_state_path,
+        perception_enabled=perception_enabled,
+        perception_roots=perception_roots,
+        perception_interval_seconds=perception_interval_seconds,
+        llm_health_interval_seconds=llm_health_interval_seconds,
+        llm_health_max_probes_per_run=llm_health_max_probes_per_run,
+        llm_health_probe_timeout_seconds=llm_health_probe_timeout_seconds,
+        llm_health_state_path=llm_health_state_path,
+        llm_catalog_path=llm_catalog_path,
+        llm_catalog_refresh_interval_seconds=llm_catalog_refresh_interval_seconds,
+        llm_automation_enabled=llm_automation_enabled,
+        llm_model_scout_interval_seconds=llm_model_scout_interval_seconds,
+        llm_autoconfig_interval_seconds=llm_autoconfig_interval_seconds,
+        llm_autoconfig_run_on_startup=llm_autoconfig_run_on_startup,
+        llm_hygiene_interval_seconds=llm_hygiene_interval_seconds,
+        llm_hygiene_unavailable_days=llm_hygiene_unavailable_days,
+        llm_hygiene_remove_empty_disabled_providers=llm_hygiene_remove_empty_disabled_providers,
+        llm_hygiene_disable_repeatedly_failing_providers=llm_hygiene_disable_repeatedly_failing_providers,
+        llm_hygiene_provider_failure_streak=llm_hygiene_provider_failure_streak,
+        llm_registry_prune_allow_apply=llm_registry_prune_allow_apply,
+        llm_registry_prune_unused_days=llm_registry_prune_unused_days,
+        llm_registry_prune_disable_failing_provider=llm_registry_prune_disable_failing_provider,
+        llm_self_heal_interval_seconds=llm_self_heal_interval_seconds,
+        llm_self_heal_allow_apply=llm_self_heal_allow_apply,
+        llm_capabilities_reconcile_allow_apply=llm_capabilities_reconcile_allow_apply,
+        autopilot_notify_enabled=autopilot_notify_enabled,
+        autopilot_notify_rate_limit_seconds=autopilot_notify_rate_limit_seconds,
+        autopilot_notify_dedupe_window_seconds=autopilot_notify_dedupe_window_seconds,
+        autopilot_notify_store_path=autopilot_notify_store_path,
+        autopilot_notify_quiet_start_hour=autopilot_notify_quiet_start_hour,
+        autopilot_notify_quiet_end_hour=autopilot_notify_quiet_end_hour,
+        llm_notifications_allow_test=llm_notifications_allow_test,
+        llm_notifications_allow_send=llm_notifications_allow_send,
+        llm_notifications_max_items=llm_notifications_max_items,
+        llm_notifications_max_age_days=llm_notifications_max_age_days,
+        llm_notifications_compact=llm_notifications_compact,
+        llm_registry_snapshots_dir=llm_registry_snapshots_dir,
+        llm_registry_snapshot_max_items=llm_registry_snapshot_max_items,
+        llm_registry_rollback_allow=llm_registry_rollback_allow,
+        llm_autopilot_safe_mode=llm_autopilot_safe_mode,
+        llm_autopilot_state_path=llm_autopilot_state_path,
+        llm_autopilot_churn_window_seconds=llm_autopilot_churn_window_seconds,
+        llm_autopilot_churn_min_applies=llm_autopilot_churn_min_applies,
+        llm_autopilot_churn_recent_limit=llm_autopilot_churn_recent_limit,
+        llm_autopilot_bootstrap_allow_apply=llm_autopilot_bootstrap_allow_apply,
+        llm_autopilot_ledger_path=llm_autopilot_ledger_path,
+        llm_autopilot_ledger_max_items=llm_autopilot_ledger_max_items,
     )

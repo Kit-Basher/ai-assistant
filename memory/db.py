@@ -1861,6 +1861,132 @@ class MemoryDB:
         )
         self._commit_if_needed()
 
+    def insert_metrics_snapshot(self, snapshot: dict[str, Any]) -> int:
+        cpu = snapshot.get("cpu") if isinstance(snapshot.get("cpu"), dict) else {}
+        memory = snapshot.get("memory") if isinstance(snapshot.get("memory"), dict) else {}
+        disk = snapshot.get("disk") if isinstance(snapshot.get("disk"), dict) else {}
+        root_disk = disk.get("root") if isinstance(disk.get("root"), dict) else {}
+        gpu = snapshot.get("gpu") if isinstance(snapshot.get("gpu"), dict) else {}
+        ts = int(snapshot.get("ts") or datetime.now(timezone.utc).timestamp())
+
+        cur = self._conn.execute(
+            """
+            INSERT INTO metrics_snapshot (
+                ts,
+                cpu_usage,
+                cpu_freq,
+                mem_used,
+                mem_available,
+                root_disk_used_pct,
+                gpu_usage,
+                gpu_mem_used,
+                gpu_temp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                ts,
+                float(cpu.get("usage_pct") or 0.0),
+                float(cpu.get("freq_mhz") or 0.0),
+                int(memory.get("used") or 0),
+                int(memory.get("available") or 0),
+                float(root_disk.get("used_pct") or 0.0),
+                float(gpu.get("usage_pct")) if gpu.get("usage_pct") is not None else None,
+                int(gpu.get("memory_used_mb")) if gpu.get("memory_used_mb") is not None else None,
+                float(gpu.get("temperature_c")) if gpu.get("temperature_c") is not None else None,
+            ),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def get_latest_metrics_snapshot(self) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            """
+            SELECT
+                id,
+                ts,
+                cpu_usage,
+                cpu_freq,
+                mem_used,
+                mem_available,
+                root_disk_used_pct,
+                gpu_usage,
+                gpu_mem_used,
+                gpu_temp
+            FROM metrics_snapshot
+            ORDER BY ts DESC, id DESC
+            LIMIT 1
+            """
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
+    def list_recent_metrics_snapshots(self, limit: int = 20) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT
+                id,
+                ts,
+                cpu_usage,
+                cpu_freq,
+                mem_used,
+                mem_available,
+                root_disk_used_pct,
+                gpu_usage,
+                gpu_mem_used,
+                gpu_temp
+            FROM metrics_snapshot
+            ORDER BY ts DESC, id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def insert_event(
+        self,
+        ts: int,
+        kind: str,
+        severity: str,
+        summary: str,
+        evidence_json: dict[str, Any],
+    ) -> int:
+        cur = self._conn.execute(
+            """
+            INSERT INTO events (ts, kind, severity, summary, evidence_json)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                int(ts),
+                str(kind or "").strip(),
+                str(severity or "").strip(),
+                str(summary or "").strip(),
+                json.dumps(evidence_json or {}, ensure_ascii=True),
+            ),
+        )
+        self._commit_if_needed()
+        return int(cur.lastrowid)
+
+    def list_recent_events(self, limit: int = 20) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            """
+            SELECT id, ts, kind, severity, summary, evidence_json
+            FROM events
+            ORDER BY ts DESC, id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        )
+        rows: list[dict[str, Any]] = []
+        for row in cur.fetchall():
+            parsed = dict(row)
+            raw_evidence = parsed.get("evidence_json")
+            try:
+                parsed["evidence_json"] = json.loads(raw_evidence or "{}")
+            except (TypeError, ValueError):
+                parsed["evidence_json"] = {}
+            rows.append(parsed)
+        return rows
+
     def audit_log_create(
         self,
         user_id: str,
