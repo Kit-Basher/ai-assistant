@@ -282,8 +282,10 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
         with patch("agent.api_server.build_autoconfig_plan", return_value=plan_a):
             blocked_ok, blocked_body = runtime.llm_autoconfig_apply({"actor": "webui", "confirm": True})
         self.assertTrue(blocked_ok)
-        self.assertFalse(blocked_body["applied"])
-        self.assertTrue(blocked_body["safe_mode_blocked"])
+        # Config-level safe mode is disabled here, so churn pause override must not
+        # filter apply plans.
+        self.assertTrue(blocked_body["applied"])
+        self.assertFalse(blocked_body["safe_mode_blocked"])
 
     def test_bootstrap_selects_local_chat_and_then_noops(self) -> None:
         runtime = AgentRuntime(

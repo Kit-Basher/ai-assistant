@@ -329,6 +329,26 @@ def compute_autopilot_bootstrap_apply_policy(runtime: "AgentRuntime") -> dict[st
 
 
 class AgentRuntime:
+    @staticmethod
+    def _runtime_state_path(
+        config: Config,
+        configured_path: str | None,
+        filename: str,
+    ) -> str | None:
+        explicit = str(configured_path or "").strip()
+        if explicit:
+            return explicit
+        # Tests and ephemeral runs often use a temp DB path. Co-locate state there
+        # so stale global state cannot bleed across isolated runtimes.
+        try:
+            db_parent = Path(config.db_path).expanduser().resolve().parent
+        except (OSError, RuntimeError, ValueError):
+            return None
+        db_parent_value = str(db_parent)
+        if db_parent_value == "/tmp" or db_parent_value.startswith("/tmp/"):
+            return str((db_parent / filename).resolve())
+        return None
+
     def __init__(self, config: Config) -> None:
         self.config = config
         self._registry_lock = threading.RLock()
@@ -378,16 +398,31 @@ class AgentRuntime:
             probe_fn=self._probe_llm_candidate,
         )
         self._catalog_store = CatalogStore(path=self.config.llm_catalog_path)
+        snapshots_dir = self._runtime_state_path(
+            self.config,
+            self.config.llm_registry_snapshots_dir,
+            "registry_snapshots",
+        )
         self._registry_snapshot_store = RegistrySnapshotStore(
-            path=self.config.llm_registry_snapshots_dir,
+            path=snapshots_dir,
             max_items=max(1, int(self.config.llm_registry_snapshot_max_items)),
         )
+        ledger_path = self._runtime_state_path(
+            self.config,
+            self.config.llm_autopilot_ledger_path,
+            "autopilot_action_ledger.json",
+        )
         self._action_ledger = ActionLedgerStore(
-            path=self.config.llm_autopilot_ledger_path,
+            path=ledger_path,
             max_items=max(1, int(self.config.llm_autopilot_ledger_max_items)),
         )
+        autopilot_state_path = self._runtime_state_path(
+            self.config,
+            self.config.llm_autopilot_state_path,
+            "autopilot_state.json",
+        )
         self._autopilot_safety_state = AutopilotSafetyStateStore(
-            path=self.config.llm_autopilot_state_path,
+            path=autopilot_state_path,
             max_recent_apply_ids=max(1, int(self.config.llm_autopilot_churn_recent_limit)),
         )
         self._notification_store = NotificationStore(
@@ -453,9 +488,13 @@ class AgentRuntime:
         return self._autopilot_safety_state.status()
 
     def _effective_safe_mode(self) -> bool:
+        if not bool(self.config.llm_autopilot_safe_mode):
+            return False
         return self._autopilot_safety_state.effective_safe_mode(bool(self.config.llm_autopilot_safe_mode))
 
     def _autopilot_apply_pause_enabled(self) -> bool:
+        if not bool(self.config.llm_autopilot_safe_mode):
+            return False
         return self._autopilot_safety_state.apply_pause_enabled()
 
     def _read_version(self) -> str:
@@ -1016,23 +1055,9 @@ class AgentRuntime:
         action: str,
         plan: dict[str, Any],
     ) -> tuple[dict[str, Any], list[str]]:
-        if self._autopilot_apply_pause_enabled():
-            filtered = copy.deepcopy(plan if isinstance(plan, dict) else {})
-            filtered["changes"] = []
-            impact = filtered.get("impact") if isinstance(filtered.get("impact"), dict) else {}
-            impact["changes_count"] = 0
-            filtered["impact"] = impact
-            reasons = filtered.get("reasons") if isinstance(filtered.get("reasons"), list) else []
-            reasons_set = {str(item).strip() for item in reasons if str(item).strip()}
-            reasons_set.add("safe_mode_paused")
-            reasons_set.add("safe_mode_blocked")
-            filtered["reasons"] = sorted(reasons_set)
-            blocked_reason = f"{action}: blocked because safe mode is paused (churn_detected)"
-            self._safe_mode_last_blocked_reason = blocked_reason
-            return filtered, [blocked_reason]
-
         if not bool(self.config.llm_autopilot_safe_mode):
             return plan, []
+        paused = self._autopilot_apply_pause_enabled()
         changes = plan.get("changes") if isinstance(plan.get("changes"), list) else []
         blocked_lines: list[str] = []
         kept_changes: list[dict[str, Any]] = []
@@ -1065,8 +1090,28 @@ class AgentRuntime:
 
             if blocked_reason:
                 blocked_lines.append(blocked_reason)
-            else:
+            elif not paused:
                 kept_changes.append(row)
+
+        if paused:
+            filtered = copy.deepcopy(plan if isinstance(plan, dict) else {})
+            filtered["changes"] = []
+            impact = filtered.get("impact") if isinstance(filtered.get("impact"), dict) else {}
+            impact["changes_count"] = 0
+            filtered["impact"] = impact
+            reasons = filtered.get("reasons") if isinstance(filtered.get("reasons"), list) else []
+            reasons_set = {str(item).strip() for item in reasons if str(item).strip()}
+            reasons_set.add("safe_mode_paused")
+            reasons_set.add("safe_mode_blocked")
+            filtered["reasons"] = sorted(reasons_set)
+            if blocked_lines:
+                dedup_blocked = sorted({str(item).strip() for item in blocked_lines if str(item).strip()})
+                paused_detail = [f"{line} (paused: churn_detected)" for line in dedup_blocked]
+                self._safe_mode_last_blocked_reason = paused_detail[0]
+                return filtered, paused_detail
+            blocked_reason = f"{action}: blocked because safe mode is paused (churn_detected)"
+            self._safe_mode_last_blocked_reason = blocked_reason
+            return filtered, [blocked_reason]
 
         if not blocked_lines:
             return plan, []
