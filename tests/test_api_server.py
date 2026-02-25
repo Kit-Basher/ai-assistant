@@ -735,6 +735,17 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertTrue(refresh_payload["ok"])
             self.assertEqual(5, refresh_payload["model_count"])
 
+    def test_run_model_watch_once_does_not_raise_nameerror(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 3}), patch(
+            "agent.api_server.log_event"
+        ) as log_event_mock:
+            ok, payload = runtime.run_model_watch_once(trigger="manual")
+        self.assertTrue(ok)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(3, payload["fetched_candidates"])
+        self.assertTrue(log_event_mock.called)
+
     def test_llm_health_autoconfig_and_hygiene_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._health_monitor._probe_fn = lambda *_args: {"ok": True}  # type: ignore[attr-defined]

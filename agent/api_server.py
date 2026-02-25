@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, load_config
+from agent.logging_utils import log_event
 from agent.model_watch import (
     ModelWatchStore,
     latest_model_watch_batch,
@@ -832,11 +833,13 @@ class AgentRuntime:
                         self._scheduler_next_run["model_watch"] = now + max(60.0, float(next_after))
                         if not ok_watch:
                             log_event(
+                                self.config.log_path,
                                 "model_watch_scheduler_error",
                                 {"error": str(watch_body.get("error") or "run_failed")},
                             )
                 except Exception as exc:
                     log_event(
+                        self.config.log_path,
                         "model_watch_scheduler_error",
                         {"error": str(exc)},
                     )
@@ -5587,6 +5590,7 @@ class AgentRuntime:
                         "next_check_after_seconds": max(1, interval_seconds - elapsed),
                     }
                     log_event(
+                        self.config.log_path,
                         "model_watch_tick",
                         {
                             "trigger": trigger,
@@ -5601,6 +5605,7 @@ class AgentRuntime:
             result = run_watch_once_for_config(self.config, trigger=trigger, now_epoch=now)
         except Exception as exc:
             log_event(
+                self.config.log_path,
                 "model_watch_tick",
                 {
                     "trigger": trigger,
@@ -5639,6 +5644,7 @@ class AgentRuntime:
             },
         )
         log_event(
+            self.config.log_path,
             "model_watch_tick",
             {
                 "trigger": trigger,
