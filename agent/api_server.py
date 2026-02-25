@@ -22,6 +22,7 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, load_config
+from agent.fallback_ladder import run_with_fallback
 from agent.logging_utils import log_event
 from agent.model_watch import (
     ModelWatchStore,
@@ -37,6 +38,7 @@ from agent.model_watch_catalog import (
     write_snapshot_atomic as write_model_watch_catalog_snapshot,
 )
 from agent.model_watch_skill import run_watch_once_for_config
+from agent.response_envelope import failure, ok_result
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog, redact as redact_audit_value
 from agent.llm.action_ledger import ActionLedgerStore
@@ -6940,6 +6942,38 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return {}
         return {}
 
+    def _request_trace_id(self, payload: dict[str, Any] | None = None) -> str:
+        body = payload if isinstance(payload, dict) else {}
+        for key in ("request_id", "trace_id"):
+            value = str(body.get(key) or "").strip()
+            if value:
+                return value
+        seed = f"{time.time_ns()}|{os.getpid()}|{getattr(self, 'path', '')}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+    def _error_envelope_payload(
+        self,
+        *,
+        intent: str,
+        message: str,
+        trace_id: str,
+        error_code: str,
+        status: int = 500,
+    ) -> tuple[int, dict[str, Any]]:
+        envelope = failure(
+            message,
+            intent=intent,
+            trace_id=trace_id,
+            errors=[error_code],
+        )
+        return status, {
+            "ok": False,
+            "error": error_code,
+            "message": envelope["message"],
+            "trace_id": envelope["trace_id"],
+            "envelope": envelope,
+        }
+
     def _handle_internal_error(self, method: str, exc: Exception) -> None:
         print(
             f"api_server internal_error method={method} path={getattr(self, 'path', '')} "
@@ -6948,7 +6982,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
             flush=True,
         )
         try:
-            self._send_json(500, {"ok": False, "error": "internal_error"})
+            trace_id = self._request_trace_id()
+            status, payload = self._error_envelope_payload(
+                intent=f"http.{str(method).strip().lower()}",
+                message="I hit an internal error, but I’m still running. Try one of these:",
+                trace_id=trace_id,
+                error_code="internal_error",
+                status=500,
+            )
+            self._send_json(status, payload)
         except OSError:
             pass
 
@@ -7144,7 +7186,73 @@ class APIServerHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
 
             if path == "/chat":
-                ok, body = self.runtime.chat(payload)
+                trace_id = self._request_trace_id(payload)
+                chat_result: tuple[bool, dict[str, Any]] | None = None
+
+                def _run_chat() -> dict[str, Any]:
+                    nonlocal chat_result
+                    chat_result = self.runtime.chat(payload)
+                    ok_local, body_local = chat_result
+                    assistant = (
+                        body_local.get("assistant")
+                        if isinstance(body_local.get("assistant"), dict)
+                        else {}
+                    )
+                    assistant_text = str((assistant or {}).get("content") or "").strip()
+                    if not assistant_text:
+                        assistant_text = str(body_local.get("message") or body_local.get("error") or "").strip()
+                    if ok_local:
+                        return ok_result(
+                            intent="chat",
+                            message=assistant_text or "Done.",
+                            confidence=1.0,
+                            did_work=True,
+                            trace_id=trace_id,
+                        )
+                    return failure(
+                        assistant_text or "I couldn't complete that request.",
+                        intent="chat",
+                        confidence=0.0,
+                        trace_id=trace_id,
+                        errors=[str(body_local.get("error") or "chat_failed")],
+                    )
+
+                envelope = run_with_fallback(
+                    fn=_run_chat,
+                    context={
+                        "intent": "chat",
+                        "trace_id": trace_id,
+                        "log_path": self.runtime.config.log_path,
+                        "actions": [
+                            {"label": "Retry request", "command": "Retry the same /chat request once"},
+                            {"label": "Check health", "command": "GET /health"},
+                        ],
+                    },
+                )
+
+                if chat_result is None:
+                    status, error_payload = self._error_envelope_payload(
+                        intent="chat",
+                        message=envelope["message"],
+                        trace_id=envelope["trace_id"],
+                        error_code="internal_error",
+                        status=500,
+                    )
+                    self._send_json(status, error_payload)
+                    return
+
+                ok, body = chat_result
+                if not isinstance(body, dict):
+                    body = {}
+                assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
+                assistant_text = str((assistant or {}).get("content") or "").strip()
+                if not assistant_text:
+                    assistant_text = str(envelope.get("message") or "").strip() or "I couldn't complete that request."
+                    body["assistant"] = {"role": "assistant", "content": assistant_text}
+                if not ok:
+                    body["message"] = str(body.get("message") or "").strip() or assistant_text
+                    body.setdefault("trace_id", envelope.get("trace_id"))
+                    body.setdefault("envelope", envelope)
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -7183,10 +7291,54 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/model_watch/run":
                 ok, body = self.runtime.run_model_watch_once(trigger="manual")
+                if not ok:
+                    trace_id = self._request_trace_id(payload)
+                    body = body if isinstance(body, dict) else {}
+                    message = (
+                        str(body.get("message") or "").strip()
+                        or str(body.get("detail") or "").strip()
+                        or str(body.get("error") or "").strip()
+                        or "Model watch run failed."
+                    )
+                    envelope = failure(
+                        message,
+                        intent="model_watch.run",
+                        trace_id=trace_id,
+                        errors=[str(body.get("error") or "model_watch_run_failed")],
+                    )
+                    body = {
+                        **body,
+                        "ok": False,
+                        "message": envelope["message"],
+                        "trace_id": envelope["trace_id"],
+                        "envelope": envelope,
+                    }
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/model_watch/refresh":
                 ok, body = self.runtime.model_watch_refresh(payload)
+                if not ok:
+                    trace_id = self._request_trace_id(payload)
+                    body = body if isinstance(body, dict) else {}
+                    message = (
+                        str(body.get("message") or "").strip()
+                        or str(body.get("detail") or "").strip()
+                        or str(body.get("error") or "").strip()
+                        or "Model watch refresh failed."
+                    )
+                    envelope = failure(
+                        message,
+                        intent="model_watch.refresh",
+                        trace_id=trace_id,
+                        errors=[str(body.get("error") or "model_watch_refresh_failed")],
+                    )
+                    body = {
+                        **body,
+                        "ok": False,
+                        "message": envelope["message"],
+                        "trace_id": envelope["trace_id"],
+                        "envelope": envelope,
+                    }
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/health/run":

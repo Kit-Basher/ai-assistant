@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - testing without telegram insta
     filters = object()  # type: ignore
 
 from agent.config import load_config
+from agent.fallback_ladder import run_with_fallback
 from agent.llm_router import LLMRouter
 from agent.llm_client import build_llm_broker
 from agent.logging_utils import log_event
@@ -41,6 +42,7 @@ from memory.db import MemoryDB
 
 
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
+_TELEGRAM_FALLBACK_TEXT = "I hit an internal error, but I’m still running. Try one of these:"
 
 
 def _resolve_telegram_bot_token() -> str | None:
@@ -50,6 +52,50 @@ def _resolve_telegram_bot_token() -> str | None:
         return secret_token
     env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     return env_token or None
+
+
+def _safe_reply_text(text: str | None) -> str:
+    value = str(text or "").strip()
+    return value if value else "I’m still here. What should I do next?"
+
+
+def _trace_id_from_update(update: Update, *, fallback_prefix: str = "tg") -> str:
+    chat_id = (
+        str(getattr(getattr(update, "effective_chat", None), "id", "") or "").strip()
+        if update is not None
+        else ""
+    )
+    message_id = (
+        str(getattr(getattr(update, "effective_message", None), "message_id", "") or "").strip()
+        if update is not None
+        else ""
+    )
+    if chat_id and message_id:
+        return f"{fallback_prefix}-{chat_id}-{message_id}"
+    if chat_id:
+        return f"{fallback_prefix}-{chat_id}"
+    return f"{fallback_prefix}-unknown"
+
+
+def _envelope_from_exception(
+    *,
+    exc: Exception,
+    intent: str,
+    trace_id: str,
+    log_path: str | None,
+) -> dict[str, object]:
+    def _raiser() -> dict[str, object]:
+        raise exc
+
+    return run_with_fallback(
+        fn=_raiser,
+        context={
+            "intent": intent,
+            "trace_id": trace_id,
+            "log_path": log_path,
+            "actions": [],
+        },
+    )
 
 
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -64,24 +110,35 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     db: MemoryDB = context.application.bot_data["db"]
     log_path: str = context.application.bot_data["log_path"]
+    trace_id = _trace_id_from_update(update)
 
-    # Remember which chat we're talking to (useful for reminders/jobs).
-    db.set_preference("telegram_chat_id", chat_id)
+    try:
+        # Remember which chat we're talking to (useful for reminders/jobs).
+        db.set_preference("telegram_chat_id", chat_id)
 
-    # Route ALL non-command text through the orchestrator (single brain).
-    response = orchestrator.handle_message(text, user_id=chat_id)
-    reply_text = response.text.strip() if response and response.text else ""
-    parse_mode = None
-    if response and isinstance(response.data, dict):
-        ok, _ = validate_cards_payload(response.data)
-        if ok:
-            reply_text = render_cards_markdown(response.data)
-            parse_mode = "Markdown"
-    if not reply_text:
-        reply_text = "Ask about disk, CPU, memory, or process changes."
-    await update.effective_message.reply_text(reply_text, parse_mode=parse_mode)
+        # Route ALL non-command text through the orchestrator (single brain).
+        response = orchestrator.handle_message(text, user_id=chat_id)
+        reply_text = response.text.strip() if response and response.text else ""
+        parse_mode = None
+        if response and isinstance(response.data, dict):
+            ok, _ = validate_cards_payload(response.data)
+            if ok:
+                reply_text = render_cards_markdown(response.data)
+                parse_mode = "Markdown"
+        if not reply_text:
+            reply_text = "Ask about disk, CPU, memory, or process changes."
+        await update.effective_message.reply_text(_safe_reply_text(reply_text), parse_mode=parse_mode)
 
-    log_event(log_path, "telegram_message", {"chat_id": chat_id, "text": text})
+        log_event(log_path, "telegram_message", {"chat_id": chat_id, "text": text, "trace_id": trace_id})
+    except Exception as exc:
+        envelope = _envelope_from_exception(
+            exc=exc,
+            intent="telegram.message",
+            trace_id=trace_id,
+            log_path=log_path,
+        )
+        message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
+        await update.effective_message.reply_text(message)
 
 
 def _command_payload(text: str, command: str) -> str:
@@ -109,7 +166,7 @@ async def _handle_remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     log_path: str = context.application.bot_data["log_path"]
 
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
     log_event(log_path, "telegram_command", {"chat_id": chat_id, "text": text, "forwarded": prompt})
 
 
@@ -121,7 +178,7 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/status", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_runtime_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -132,7 +189,7 @@ async def _handle_runtime_status(update: Update, context: ContextTypes.DEFAULT_T
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/runtime_status", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_disk_grow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -146,7 +203,7 @@ async def _handle_disk_grow(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_audit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -196,7 +253,7 @@ async def _handle_storage_snapshot(update: Update, context: ContextTypes.DEFAULT
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/storage_snapshot", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_storage_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -207,7 +264,7 @@ async def _handle_storage_report(update: Update, context: ContextTypes.DEFAULT_T
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/storage_report", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_resource_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,7 +275,7 @@ async def _handle_resource_report(update: Update, context: ContextTypes.DEFAULT_
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/resource_report", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -229,7 +286,7 @@ async def _handle_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/brief", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -240,7 +297,7 @@ async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_T
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/network_report", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_sys_metrics_snapshot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -249,7 +306,7 @@ async def _handle_sys_metrics_snapshot(update: Update, context: ContextTypes.DEF
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message("/sys_metrics_snapshot", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_sys_health_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -258,7 +315,7 @@ async def _handle_sys_health_report(update: Update, context: ContextTypes.DEFAUL
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message("/sys_health_report", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_sys_inventory_summary(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,7 +324,7 @@ async def _handle_sys_inventory_summary(update: Update, context: ContextTypes.DE
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message("/sys_inventory_summary", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_weekly_reflection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -278,7 +335,7 @@ async def _handle_weekly_reflection(update: Update, context: ContextTypes.DEFAUL
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
 
     response = orchestrator.handle_message("/weekly_reflection", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -288,7 +345,7 @@ async def _handle_today(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message("/today", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_task_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -300,7 +357,7 @@ async def _handle_task_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     prompt = f"/task_add {content}".strip()
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -312,7 +369,7 @@ async def _handle_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     prompt = f"/done {content}".strip()
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_open_loops(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -324,7 +381,7 @@ async def _handle_open_loops(update: Update, context: ContextTypes.DEFAULT_TYPE)
     prompt = f"/open_loops {content}".strip()
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -333,7 +390,7 @@ async def _handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message("/health", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_daily_brief_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -342,7 +399,7 @@ async def _handle_daily_brief_status(update: Update, context: ContextTypes.DEFAU
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message("/daily_brief_status", user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -356,7 +413,7 @@ async def _handle_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_ask_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -370,7 +427,7 @@ async def _handle_ask_opinion(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     response = orchestrator.handle_message(prompt, user_id=chat_id)
-    await update.effective_message.reply_text(response.text)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_scout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -445,6 +502,22 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
     logger.exception("Telegram handler error", exc_info=error)
+    message = getattr(update, "effective_message", None)
+    if message is None:
+        return
+    trace_id = _trace_id_from_update(update) if isinstance(update, Update) else "tg-error"
+    bot_data = getattr(getattr(context, "application", None), "bot_data", {}) or {}
+    log_path = str(bot_data.get("log_path") or "").strip() or None
+    envelope = _envelope_from_exception(
+        exc=error if isinstance(error, Exception) else RuntimeError("TelegramHandlerError"),
+        intent="telegram.error_handler",
+        trace_id=trace_id,
+        log_path=log_path,
+    )
+    try:
+        await message.reply_text(_safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT)))
+    except Exception:
+        return
 
 
 async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
