@@ -52,6 +52,12 @@ class Config:
     model_scout_license_allowlist: tuple[str, ...] = ("apache-2.0", "mit", "bsd-3-clause")
     model_scout_size_max_b: float = 12.0
     model_scout_state_path: str | None = None
+    model_watch_enabled: bool = True
+    model_watch_interval_seconds: int = 86400
+    model_watch_startup_grace_seconds: int = 300
+    model_watch_state_path: str | None = None
+    model_watch_config_path: str | None = None
+    model_watch_catalog_path: str | None = None
     perception_enabled: bool = True
     perception_roots: tuple[str, ...] = ("/home", "/data/projects")
     perception_interval_seconds: int = 5
@@ -239,6 +245,24 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     ) or ("apache-2.0", "mit", "bsd-3-clause")
     model_scout_size_max_b = float(os.getenv("MODEL_SCOUT_SIZE_MAX_B", "12") or 12)
     model_scout_state_path = os.getenv("AGENT_MODEL_SCOUT_STATE_PATH", "").strip() or None
+    model_watch_enabled = os.getenv("AGENT_MODEL_WATCH_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    model_watch_interval_raw = os.getenv("AGENT_MODEL_WATCH_INTERVAL_SECONDS", "").strip()
+    if model_watch_interval_raw:
+        model_watch_interval_seconds = int(model_watch_interval_raw or 86400)
+    else:
+        model_watch_interval_seconds = int(
+            os.getenv("AGENT_MODEL_WATCH_MIN_INTERVAL_SECONDS", str(24 * 60 * 60)) or (24 * 60 * 60)
+        )
+    model_watch_startup_grace_seconds = int(os.getenv("AGENT_MODEL_WATCH_STARTUP_GRACE_SECONDS", "300") or 300)
+    model_watch_state_path = os.getenv("AGENT_MODEL_WATCH_STATE_PATH", "").strip() or None
+    model_watch_config_path = os.getenv("AGENT_MODEL_WATCH_CONFIG_PATH", "").strip() or None
+    model_watch_catalog_path = os.getenv("AGENT_MODEL_WATCH_CATALOG_PATH", "").strip() or None
     perception_enabled = os.getenv("PERCEPTION_ENABLED", "1").strip().lower() in {
         "1",
         "true",
@@ -427,6 +451,10 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("MODEL_SCOUT_MAX_SUGGESTIONS_PER_NOTIFY must be >= 1.")
     if model_scout_size_max_b <= 0:
         raise RuntimeError("MODEL_SCOUT_SIZE_MAX_B must be > 0.")
+    if model_watch_interval_seconds < 1:
+        raise RuntimeError("AGENT_MODEL_WATCH_INTERVAL_SECONDS must be >= 1.")
+    if model_watch_startup_grace_seconds < 0:
+        raise RuntimeError("AGENT_MODEL_WATCH_STARTUP_GRACE_SECONDS must be >= 0.")
     if perception_interval_seconds < 1:
         raise RuntimeError("PERCEPTION_INTERVAL_SECONDS must be >= 1.")
     if llm_health_interval_seconds < 1:
@@ -520,6 +548,12 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         model_scout_license_allowlist=model_scout_license_allowlist,
         model_scout_size_max_b=model_scout_size_max_b,
         model_scout_state_path=model_scout_state_path,
+        model_watch_enabled=model_watch_enabled,
+        model_watch_interval_seconds=model_watch_interval_seconds,
+        model_watch_startup_grace_seconds=model_watch_startup_grace_seconds,
+        model_watch_state_path=model_watch_state_path,
+        model_watch_config_path=model_watch_config_path,
+        model_watch_catalog_path=model_watch_catalog_path,
         perception_enabled=perception_enabled,
         perception_roots=perception_roots,
         perception_interval_seconds=perception_interval_seconds,

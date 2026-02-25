@@ -22,6 +22,20 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, load_config
+from agent.model_watch import (
+    ModelWatchStore,
+    latest_model_watch_batch,
+    model_watch_last_run_at,
+    normalize_model_watch_state,
+    summarize_model_watch_batch,
+)
+from agent.model_watch_catalog import (
+    build_openrouter_snapshot,
+    load_latest_snapshot as load_model_watch_catalog_snapshot,
+    snapshot_path_for_config as model_watch_catalog_path_for_config,
+    write_snapshot_atomic as write_model_watch_catalog_snapshot,
+)
+from agent.model_watch_skill import run_watch_once_for_config
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog, redact as redact_audit_value
 from agent.llm.action_ledger import ActionLedgerStore
@@ -377,6 +391,13 @@ class AgentRuntime:
         self.router: LLMRouter | None = None
         self.registry_document: dict[str, Any] = {}
         self.model_scout = build_model_scout(config)
+        model_watch_state_path = self._runtime_state_path(
+            config,
+            self.config.model_watch_state_path,
+            "model_watch_state.json",
+        )
+        self._model_watch_store = ModelWatchStore(path=model_watch_state_path)
+        self._model_watch_catalog_path = model_watch_catalog_path_for_config(self.config)
         installer_script = self._repo_root / "agent" / "modelops" / "install_ollama.sh"
         self.modelops_planner = ModelOpsPlanner(installer_script_path=str(installer_script))
         self.modelops_executor = ModelOpsExecutor(
@@ -570,6 +591,11 @@ class AgentRuntime:
                 else max(60.0, float(self.config.llm_autoconfig_interval_seconds))
             ),
         }
+        if bool(self.config.model_watch_enabled):
+            self._scheduler_next_run["model_watch"] = now + max(
+                60.0,
+                float(self.config.model_watch_startup_grace_seconds),
+            )
         self._scheduler_thread = threading.Thread(
             target=self._scheduler_loop,
             name="llm-automation-scheduler",
@@ -795,6 +821,29 @@ class AgentRuntime:
                 self._scheduler_next_run["model_scout"] = now + max(
                     300.0, float(self.config.llm_model_scout_interval_seconds)
                 )
+
+            if "model_watch" in self._scheduler_next_run:
+                try:
+                    if now >= float(self._scheduler_next_run.get("model_watch", 0.0)):
+                        ok_watch, watch_body = self.run_model_watch_once(trigger="scheduler")
+                        next_after = int(watch_body.get("next_check_after_seconds") or 0)
+                        if next_after <= 0:
+                            next_after = int(self.config.model_watch_interval_seconds)
+                        self._scheduler_next_run["model_watch"] = now + max(60.0, float(next_after))
+                        if not ok_watch:
+                            log_event(
+                                "model_watch_scheduler_error",
+                                {"error": str(watch_body.get("error") or "run_failed")},
+                            )
+                except Exception as exc:
+                    log_event(
+                        "model_watch_scheduler_error",
+                        {"error": str(exc)},
+                    )
+                    self._scheduler_next_run["model_watch"] = now + max(
+                        300.0,
+                        float(self.config.model_watch_interval_seconds),
+                    )
 
             if cycle_started and cycle_before_state is not None:
                 churn = self._evaluate_autopilot_churn(now_epoch=int(now), trigger="scheduler")
@@ -4245,6 +4294,7 @@ class AgentRuntime:
             "next_cleanup_run_at": int(self._scheduler_next_run.get("cleanup") or 0) or None,
             "next_self_heal_run_at": int(self._scheduler_next_run.get("self_heal") or 0) or None,
             "next_model_scout_run_at": int(self._scheduler_next_run.get("model_scout") or 0) or None,
+            "next_model_watch_run_at": int(self._scheduler_next_run.get("model_watch") or 0) or None,
             "next_autoconfig_run_at": int(self._scheduler_next_run.get("autoconfig") or 0) or None,
         }
         summary["last_actions"] = recent_actions
@@ -5508,6 +5558,221 @@ class AgentRuntime:
             return False, {"ok": False, "error": "suggestion not found"}
         return True, {"ok": True, "id": target, "status": "installed"}
 
+    def run_model_watch_once(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
+        now = int(time.time())
+        interval_seconds = max(1, int(self.config.model_watch_interval_seconds))
+        if not bool(self.config.model_watch_enabled):
+            body = {
+                "ok": True,
+                "skipped": True,
+                "reason": "disabled",
+                "trigger": trigger,
+                "next_check_after_seconds": interval_seconds,
+            }
+            self._log_request("/model_watch/run", True, body)
+            return True, body
+
+        if trigger == "scheduler":
+            state = normalize_model_watch_state(self._model_watch_store.load())
+            last_run_at = model_watch_last_run_at(state)
+            if isinstance(last_run_at, int):
+                elapsed = int(now - last_run_at)
+                if elapsed < interval_seconds:
+                    body = {
+                        "ok": True,
+                        "skipped": True,
+                        "reason": "interval_not_elapsed",
+                        "trigger": trigger,
+                        "last_run_at": last_run_at,
+                        "next_check_after_seconds": max(1, interval_seconds - elapsed),
+                    }
+                    log_event(
+                        "model_watch_tick",
+                        {
+                            "trigger": trigger,
+                            "ran": False,
+                            "reason": "interval_not_elapsed",
+                            "batch_created": False,
+                        },
+                    )
+                    return True, body
+
+        try:
+            result = run_watch_once_for_config(self.config, trigger=trigger, now_epoch=now)
+        except Exception as exc:
+            log_event(
+                "model_watch_tick",
+                {
+                    "trigger": trigger,
+                    "ran": True,
+                    "reason": "error",
+                    "error": str(exc),
+                    "batch_created": False,
+                },
+            )
+            body = {
+                "ok": False,
+                "error": "model_watch_run_failed",
+                "detail": str(exc),
+                "trigger": trigger,
+                "next_check_after_seconds": interval_seconds,
+            }
+            self._log_request("/model_watch/run", False, body)
+            return False, body
+
+        body = {
+            "ok": bool(result.get("ok")),
+            **result,
+            "trigger": trigger,
+            "next_check_after_seconds": interval_seconds,
+        }
+        self._log_request(
+            "/model_watch/run",
+            bool(body.get("ok")),
+            {
+                "ok": bool(body.get("ok")),
+                "batch_id": body.get("batch_id"),
+                "new_batch_created": bool(body.get("new_batch_created")),
+                "fetched_candidates": int(body.get("fetched_candidates") or 0),
+                "catalog_models_considered": int(body.get("catalog_models_considered") or 0),
+                "catalog_snapshot_model_count": int(body.get("catalog_snapshot_model_count") or 0),
+            },
+        )
+        log_event(
+            "model_watch_tick",
+            {
+                "trigger": trigger,
+                "ran": True,
+                "reason": "ok" if bool(body.get("ok")) else "error",
+                "batch_created": bool(body.get("new_batch_created")),
+                "batch_id": body.get("batch_id"),
+            },
+        )
+        return bool(body.get("ok")), body
+
+    def model_watch_refresh(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        request = payload if isinstance(payload, dict) else {}
+        provider = str(request.get("provider") or "openrouter").strip().lower()
+        if provider != "openrouter":
+            return False, {"ok": False, "error": "provider_not_supported", "provider": provider}
+
+        providers = (
+            self.registry_document.get("providers")
+            if isinstance(self.registry_document.get("providers"), dict)
+            else {}
+        )
+        provider_payload = providers.get("openrouter") if isinstance(providers.get("openrouter"), dict) else {}
+        if not isinstance(provider_payload, dict) or not provider_payload:
+            return False, {"ok": False, "error": "provider_not_configured", "provider": "openrouter"}
+
+        base_url = str(provider_payload.get("base_url") or self.config.openrouter_base_url or "").strip().rstrip("/")
+        if not base_url:
+            base_url = "https://openrouter.ai/api/v1"
+        headers = self._provider_request_headers(provider_payload)
+        headers["Accept"] = "application/json"
+        try:
+            parsed = self._http_get_json(base_url + "/models", headers=headers, timeout_seconds=20.0)
+            fetched_at = int(time.time())
+            snapshot = build_openrouter_snapshot(raw_payload=parsed, fetched_at=fetched_at)
+            saved = write_model_watch_catalog_snapshot(self._model_watch_catalog_path, snapshot)
+        except Exception as exc:
+            body = {
+                "ok": False,
+                "error": "catalog_refresh_failed",
+                "detail": str(exc),
+                "provider": "openrouter",
+            }
+            self._log_request("/model_watch/refresh", False, body)
+            return False, body
+
+        body = {
+            "ok": True,
+            "provider": "openrouter",
+            "model_count": int(saved.get("model_count") or 0),
+            "fetched_at": int(saved.get("fetched_at") or fetched_at),
+            "raw_sha256": saved.get("raw_sha256"),
+            "path": str(self._model_watch_catalog_path),
+        }
+        self._log_request("/model_watch/refresh", True, body)
+        return True, body
+
+    @staticmethod
+    def _model_watch_candidate_label(candidate: dict[str, Any]) -> str:
+        model = str(candidate.get("model") or "").strip()
+        candidate_id = str(candidate.get("id") or "").strip()
+        return model or candidate_id or "unknown-model"
+
+    def _model_watch_explanation(self, batch: dict[str, Any]) -> dict[str, Any]:
+        top = batch.get("top_pick") if isinstance(batch.get("top_pick"), dict) else None
+        if not isinstance(top, dict):
+            return {"top_pick": None, "reasons": [], "why_not_others": []}
+
+        top_name = self._model_watch_candidate_label(top)
+        top_score = float(top.get("score") or 0.0)
+        top_subscores = top.get("subscores") if isinstance(top.get("subscores"), dict) else {}
+        reasons: list[str] = [f"Top pick score: {top_score:.2f}."]
+        for key in ("local_feasibility", "cost_efficiency", "quality_proxy"):
+            if key in top_subscores:
+                reasons.append(f"{key.replace('_', ' ').title()}: {float(top_subscores.get(key) or 0.0):.2f}.")
+        top_tradeoffs = [str(item).strip() for item in (top.get("tradeoffs") or []) if str(item).strip()]
+        if top_tradeoffs:
+            reasons.append(f"Tradeoff: {top_tradeoffs[0]}")
+        reasons = reasons[:4]
+
+        why_not_others: list[str] = []
+        other_rows = batch.get("other_candidates") if isinstance(batch.get("other_candidates"), list) else []
+        for row in other_rows[:3]:
+            if not isinstance(row, dict):
+                continue
+            label = self._model_watch_candidate_label(row)
+            alt_tradeoffs = [str(item).strip() for item in (row.get("tradeoffs") or []) if str(item).strip()]
+            if alt_tradeoffs:
+                why_not_others.append(f"{label}: {alt_tradeoffs[0]}")
+                continue
+            alt_subscores = row.get("subscores") if isinstance(row.get("subscores"), dict) else {}
+            best_key = None
+            best_delta = 0.0
+            for key in sorted(set(top_subscores.keys()) | set(alt_subscores.keys())):
+                delta = float(top_subscores.get(key, 0.0) or 0.0) - float(alt_subscores.get(key, 0.0) or 0.0)
+                if delta > best_delta:
+                    best_delta = delta
+                    best_key = key
+            if best_key:
+                why_not_others.append(
+                    f"{label}: lower {best_key.replace('_', ' ')} "
+                    f"({float(alt_subscores.get(best_key, 0.0) or 0.0):.2f} vs "
+                    f"{float(top_subscores.get(best_key, 0.0) or 0.0):.2f})."
+                )
+            else:
+                why_not_others.append(f"{label}: lower deterministic score.")
+
+        return {
+            "top_pick": top_name,
+            "reasons": reasons,
+            "why_not_others": why_not_others,
+        }
+
+    def model_watch_latest(self) -> dict[str, Any]:
+        snapshot, snapshot_error = load_model_watch_catalog_snapshot(self._model_watch_catalog_path)
+        state = normalize_model_watch_state(self._model_watch_store.load())
+        latest = summarize_model_watch_batch(latest_model_watch_batch(state))
+        if latest is None:
+            reason = None
+            if snapshot is None:
+                reason = "No model catalog snapshot available; run refresh"
+            return {
+                "ok": True,
+                "found": False,
+                "reason": reason,
+                "catalog_snapshot_error": snapshot_error,
+            }
+        return {
+            "ok": True,
+            "found": True,
+            "batch": latest,
+            "explanation": self._model_watch_explanation(latest),
+        }
+
     def get_permissions(self) -> dict[str, Any]:
         return {"ok": True, "permissions": self.permission_store.load()}
 
@@ -6763,6 +7028,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/model_scout/sources":
                 self._send_json(200, self.runtime.model_scout_sources())
                 return
+            if path == "/model_watch/latest":
+                self._send_json(200, self.runtime.model_watch_latest())
+                return
             if path == "/llm/health":
                 self._send_json(200, self.runtime.llm_health_summary())
                 return
@@ -6905,6 +7173,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/model_scout/run":
                 ok, body = self.runtime.run_model_scout()
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/model_watch/run":
+                ok, body = self.runtime.run_model_watch_once(trigger="manual")
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/model_watch/refresh":
+                ok, body = self.runtime.model_watch_refresh(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/health/run":

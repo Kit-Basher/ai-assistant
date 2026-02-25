@@ -667,6 +667,74 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertTrue(install_payload["ok"])
             self.assertEqual("installed", install_payload["status"])
 
+    def test_model_watch_routes_exist_and_are_not_not_found(self) -> None:
+        os.environ["AGENT_MODEL_WATCH_CATALOG_PATH"] = os.path.join(self.tmpdir.name, "catalog.json")
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                model_watch_state_path=os.path.join(self.tmpdir.name, "model_watch_state.json"),
+                model_watch_config_path=os.path.join(self.tmpdir.name, "model_watch_config.json"),
+            )
+        )
+        with open(runtime.config.model_watch_config_path, "w", encoding="utf-8") as handle:
+            json.dump({"huggingface_watch_authors": []}, handle, ensure_ascii=True)
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.content_type = ""
+                self.body = b""
+                self._payload = payload or {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.content_type = "application/json"
+                self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = cache_control
+                self.status_code = status
+                self.content_type = content_type
+                self.body = body
+
+            def _read_json(self) -> dict[str, object]:
+                return self._payload
+
+        latest_handler = _HandlerForTest(runtime, "/model_watch/latest")
+        latest_handler.do_GET()
+        self.assertEqual(200, latest_handler.status_code)
+        latest_payload = json.loads(latest_handler.body.decode("utf-8"))
+        self.assertTrue(latest_payload["ok"])
+        self.assertFalse(latest_payload["found"])
+        self.assertNotEqual("not_found", latest_payload.get("error"))
+
+        with patch.object(runtime, "run_model_watch_once", return_value=(True, {"ok": True, "fetched_candidates": 12})):
+            run_handler = _HandlerForTest(runtime, "/model_watch/run", {})
+            run_handler.do_POST()
+            self.assertEqual(200, run_handler.status_code)
+            run_payload = json.loads(run_handler.body.decode("utf-8"))
+            self.assertTrue(run_payload["ok"])
+            self.assertEqual(12, run_payload["fetched_candidates"])
+
+        with patch.object(runtime, "model_watch_refresh", return_value=(True, {"ok": True, "model_count": 5})):
+            refresh_handler = _HandlerForTest(runtime, "/model_watch/refresh", {})
+            refresh_handler.do_POST()
+            self.assertEqual(200, refresh_handler.status_code)
+            refresh_payload = json.loads(refresh_handler.body.decode("utf-8"))
+            self.assertTrue(refresh_payload["ok"])
+            self.assertEqual(5, refresh_payload["model_count"])
+
     def test_llm_health_autoconfig_and_hygiene_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._health_monitor._probe_fn = lambda *_args: {"ok": True}  # type: ignore[attr-defined]
