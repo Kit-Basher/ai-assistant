@@ -7643,16 +7643,16 @@ class APIServerHandler(BaseHTTPRequestHandler):
             }
         )
         return {
-            "ok": envelope["ok"],
-            "intent": envelope["intent"],
-            "confidence": envelope["confidence"],
-            "did_work": envelope["did_work"],
-            "error_kind": envelope["error_kind"],
-            "message": envelope["message"],
-            "next_question": envelope["next_question"],
-            "actions": envelope["actions"],
-            "errors": envelope["errors"],
-            "trace_id": envelope["trace_id"],
+            "ok": bool(envelope.get("ok", False)),
+            "intent": envelope.get("intent", "chat"),
+            "confidence": float(envelope.get("confidence", 0.0)),
+            "did_work": bool(envelope.get("did_work", False)),
+            "error_kind": envelope.get("error_kind", "internal_error"),
+            "message": envelope.get("message") or "Internal error.",
+            "next_question": envelope.get("next_question"),
+            "actions": envelope.get("actions", []),
+            "errors": envelope.get("errors", ["internal_error"]),
+            "trace_id": envelope.get("trace_id") or "trace_unknown",
             "envelope": envelope,
         }
 
