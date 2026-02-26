@@ -22,6 +22,8 @@ import urllib.parse
 import urllib.request
 
 from agent.config import Config, load_config
+from agent.error_kind import classify_error_kind
+from agent.error_response_ux import bad_request_next_question, friendly_error_message
 from agent.fallback_ladder import run_with_fallback
 from agent.logging_utils import log_event
 from agent.model_watch import (
@@ -39,6 +41,7 @@ from agent.model_watch_catalog import (
 )
 from agent.model_watch_skill import run_watch_once_for_config
 from agent.response_envelope import failure, ok_result
+from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog, redact as redact_audit_value
 from agent.llm.action_ledger import ActionLedgerStore
@@ -101,6 +104,8 @@ _AUTOPILOT_APPLY_ACTIONS = {
     "llm.capabilities.reconcile.apply",
     "llm.autopilot.bootstrap.apply",
 }
+_SAFE_MODE_BLOCKED_DEDUPE_SECONDS = 600
+_SAFE_MODE_PAUSED_HEALTH_NOTIFY_SECONDS = 21600
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -520,6 +525,46 @@ class AgentRuntime:
         if not bool(self.config.llm_autopilot_safe_mode):
             return False
         return self._autopilot_safety_state.apply_pause_enabled()
+
+    def _safe_mode_health_payload(self) -> dict[str, Any]:
+        state = self._safe_mode_status()
+        paused = bool(self._autopilot_apply_pause_enabled())
+        reason = (
+            str(state.get("safe_mode_reason") or "").strip()
+            if paused
+            else "not_paused"
+        ) or "not_paused"
+        last_transition_at = None
+        safe_mode_entered_ts_raw = state.get("safe_mode_entered_ts")
+        last_churn_event_ts_raw = state.get("last_churn_event_ts")
+        try:
+            safe_mode_entered_ts = int(safe_mode_entered_ts_raw or 0)
+        except (TypeError, ValueError):
+            safe_mode_entered_ts = 0
+        try:
+            last_churn_event_ts = int(last_churn_event_ts_raw or 0)
+        except (TypeError, ValueError):
+            last_churn_event_ts = 0
+        if safe_mode_entered_ts > 0:
+            last_transition_at = safe_mode_entered_ts
+        elif last_churn_event_ts > 0:
+            last_transition_at = last_churn_event_ts
+        next_retry = None
+        if paused:
+            try:
+                next_retry_raw = self._scheduler_next_run.get("autoconfig")
+                next_retry_value = int(float(next_retry_raw)) if next_retry_raw is not None else 0
+            except (TypeError, ValueError):
+                next_retry_value = 0
+            if next_retry_value > 0:
+                next_retry = next_retry_value
+        return {
+            "paused": paused,
+            "reason": reason,
+            "cooldown_until": None,
+            "next_retry": next_retry,
+            "last_transition_at": last_transition_at,
+        }
 
     def _read_version(self) -> str:
         version_file = self._repo_root / "VERSION"
@@ -1158,12 +1203,16 @@ class AgentRuntime:
             reasons_set.add("safe_mode_paused")
             reasons_set.add("safe_mode_blocked")
             filtered["reasons"] = sorted(reasons_set)
+            paused_reason = str(self._safe_mode_status().get("safe_mode_reason") or "churn_detected").strip() or "churn_detected"
             if blocked_lines:
                 dedup_blocked = sorted({str(item).strip() for item in blocked_lines if str(item).strip()})
-                paused_detail = [f"{line} (paused: churn_detected)" for line in dedup_blocked]
-                self._safe_mode_last_blocked_reason = paused_detail[0]
-                return filtered, paused_detail
-            blocked_reason = f"{action}: blocked because safe mode is paused (churn_detected)"
+                blocked_reason = build_safe_mode_paused_message(
+                    reason=paused_reason,
+                    blocked_detail=dedup_blocked[0],
+                )
+                self._safe_mode_last_blocked_reason = blocked_reason
+                return filtered, [blocked_reason]
+            blocked_reason = build_safe_mode_paused_message(reason=paused_reason, blocked_detail=action)
             self._safe_mode_last_blocked_reason = blocked_reason
             return filtered, [blocked_reason]
 
@@ -1255,6 +1304,7 @@ class AgentRuntime:
             "routing_mode": snapshot.get("routing_mode"),
             "configured_providers": [item.get("id") for item in snapshot.get("providers") or []],
             "registry_path": self.registry_store.path,
+            "safe_mode": self._safe_mode_health_payload(),
         }
 
     def models(self) -> dict[str, Any]:
@@ -1640,6 +1690,14 @@ class AgentRuntime:
     @staticmethod
     def _normalize_provider_test_error(kind: str | None, status_code: int | None) -> str:
         normalized = str(kind or "").strip().lower()
+        if status_code == 402:
+            return "payment_required"
+        if normalized in {
+            "payment_required",
+            "credits_insufficient",
+            "insufficient_credits",
+        }:
+            return "payment_required"
         if normalized in {
             "auth_error",
             "rate_limit",
@@ -1665,6 +1723,7 @@ class AgentRuntime:
             "rate_limit": "Provider rate limit reached.",
             "server_error": "Provider server error.",
             "bad_request": "Provider rejected request.",
+            "payment_required": "Provider test hit a credits/limit issue. Add credits, lower max_tokens, or choose a cheaper model.",
             "misconfigured_path": "Provider chat_path/base_url path is misconfigured.",
             "missing_auth": "Provider requires authorization credentials but no Authorization header was set.",
             "bad_base_url": "Provider base_url is invalid.",
@@ -1868,12 +1927,14 @@ class AgentRuntime:
             "missing_auth",
             "bad_base_url",
         }:
+            probe_error = str(models_probe.get("error") or "bad_request")
             response = {
                 "ok": False,
                 "provider": provider_key,
                 "model": model_override or None,
-                "error": str(models_probe.get("error") or "bad_request"),
-                "message": str(models_probe.get("message") or self._provider_test_message(str(models_probe.get("error") or ""))),
+                "error": probe_error,
+                "error_kind": probe_error,
+                "message": str(models_probe.get("message") or self._provider_test_message(probe_error)),
                 "models_probe": models_probe,
             }
             self._log_request(f"/providers/{provider_key}/test", False, response)
@@ -1889,6 +1950,7 @@ class AgentRuntime:
                 "provider": provider_key,
                 "model": None,
                 "error": "bad_request",
+                "error_kind": "bad_request",
                 "message": "No model available for provider test.",
                 "models_probe": models_probe,
             }
@@ -1902,6 +1964,7 @@ class AgentRuntime:
                 "provider": provider_key,
                 "model": model_override,
                 "error": "server_error",
+                "error_kind": "server_error",
                 "message": "Provider is not available in router.",
                 "models_probe": models_probe,
             }
@@ -1913,24 +1976,35 @@ class AgentRuntime:
 
         start = time.monotonic()
         try:
+            prompt = (
+                "Run a lightweight provider connectivity health check. "
+                "Reply with exactly: OK."
+            )
             response_obj = impl.chat(
                 Request(
-                    messages=(Message(role="user", content="ping"),),
-                    purpose="diagnostics",
-                    task_type="diagnostics",
+                    messages=(Message(role="user", content=prompt),),
+                    purpose="health",
+                    task_type="test",
+                    temperature=0.0,
+                    max_tokens=256,
                 ),
                 model=model_override,
                 timeout_seconds=timeout_seconds,
             )
         except LLMError as exc:
             error_kind = self._normalize_provider_test_error(exc.kind, exc.status_code)
+            if error_kind == "payment_required":
+                message = self._provider_test_message(error_kind)
+            else:
+                message = str(exc.message or self._provider_test_message(error_kind))
             response = {
                 "ok": False,
                 "provider": provider_key,
                 "model": model_override,
                 "error": error_kind,
+                "error_kind": ("upstream_down" if error_kind == "payment_required" else error_kind),
                 "status_code": exc.status_code,
-                "message": str(exc.message or self._provider_test_message(error_kind)),
+                "message": message,
                 "models_probe": models_probe,
             }
             self._log_request(f"/providers/{provider_key}/test", False, response)
@@ -1941,6 +2015,7 @@ class AgentRuntime:
                 "provider": provider_key,
                 "model": model_override,
                 "error": "server_error",
+                "error_kind": "server_error",
                 "status_code": None,
                 "message": self._provider_test_message("server_error"),
                 "models_probe": models_probe,
@@ -3192,9 +3267,9 @@ class AgentRuntime:
             duration_ms=0,
         )
 
-        notification_line = (
-            "Autopilot paused applies after churn detection; use /llm/autopilot/undo or "
-            "adjust safe mode policy before re-enabling."
+        notification_line = build_safe_mode_paused_message(
+            reason=reason,
+            blocked_detail="churn-detected autopilot apply pause",
         )
         return {
             "entered_safe_mode": True,
@@ -3317,6 +3392,8 @@ class AgentRuntime:
             "sent_local_fallback": "sent",
             "rate_limited": "skipped_rate_limit",
             "dedupe_hash_match": "skipped_dedupe",
+            "safe_mode_blocked_deduped": "skipped_dedupe",
+            "safe_mode_paused_health_suppressed": "skipped_dedupe",
             "quiet_hours": "skipped_quiet_hours",
             "quiet_hours_deferred": "skipped_quiet_hours",
             "permission_required": "permission_required",
@@ -3356,6 +3433,146 @@ class AgentRuntime:
             "changed_providers": int(changed_providers),
             "changed_models": int(changed_models),
         }
+
+    @staticmethod
+    def _safe_mode_block_subject(
+        *,
+        modified_ids: list[str],
+        extra_changes: list[str],
+    ) -> str:
+        for token in modified_ids:
+            model_id = str(token or "").strip()
+            if model_id.startswith("model:"):
+                subject = model_id[len("model:") :].strip().lower()
+                if subject:
+                    return f"model:{subject}"
+        for token in modified_ids:
+            provider_id = str(token or "").strip()
+            if provider_id.startswith("provider:"):
+                subject = provider_id[len("provider:") :].strip().lower()
+                if subject:
+                    return f"provider:{subject}"
+        for line in sorted({str(item).strip().lower() for item in extra_changes if str(item).strip()}):
+            model_match = re.search(r"\bmodel[:\s]+([a-z0-9._:/-]+)", line)
+            if model_match:
+                return f"model:{model_match.group(1).strip().lower()}"
+            provider_match = re.search(r"\bprovider[:\s]+([a-z0-9._:/-]+)", line)
+            if provider_match:
+                return f"provider:{provider_match.group(1).strip().lower()}"
+        return "global"
+
+    def _safe_mode_block_key(
+        self,
+        *,
+        reasons: list[str],
+        modified_ids: list[str],
+        extra_changes: list[str],
+    ) -> str | None:
+        normalized_reasons = {str(item or "").strip().lower() for item in reasons if str(item).strip()}
+        if "safe_mode_blocked" not in normalized_reasons:
+            return None
+        subject = self._safe_mode_block_subject(modified_ids=modified_ids, extra_changes=extra_changes)
+        return f"safe_mode_blocked:{subject}"
+
+    @staticmethod
+    def _health_status_value(row: dict[str, Any] | None) -> str:
+        payload = row if isinstance(row, dict) else {}
+        health_payload = payload.get("health") if isinstance(payload.get("health"), dict) else {}
+        return str(health_payload.get("status") or "unknown").strip().lower() or "unknown"
+
+    @staticmethod
+    def _health_numeric_value(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def _ok_down_transition_in_state_diff(
+        cls,
+        before_state: dict[str, Any],
+        after_state: dict[str, Any],
+    ) -> bool:
+        for key in ("providers", "models"):
+            before_rows = before_state.get(key) if isinstance(before_state.get(key), dict) else {}
+            after_rows = after_state.get(key) if isinstance(after_state.get(key), dict) else {}
+            for row_id in sorted(set(before_rows.keys()) | set(after_rows.keys())):
+                before_row = before_rows.get(row_id) if isinstance(before_rows.get(row_id), dict) else {}
+                after_row = after_rows.get(row_id) if isinstance(after_rows.get(row_id), dict) else {}
+                before_status = cls._health_status_value(before_row)
+                after_status = cls._health_status_value(after_row)
+                if before_status == after_status:
+                    continue
+                if (before_status == "ok" and after_status == "down") or (
+                    before_status == "down" and after_status == "ok"
+                ):
+                    return True
+        return False
+
+    @classmethod
+    def _state_diff_health_flags(
+        cls,
+        before_state: dict[str, Any],
+        after_state: dict[str, Any],
+    ) -> tuple[bool, bool]:
+        health_changed = False
+        non_health_changed = False
+
+        before_providers = before_state.get("providers") if isinstance(before_state.get("providers"), dict) else {}
+        after_providers = after_state.get("providers") if isinstance(after_state.get("providers"), dict) else {}
+        for provider_id in sorted(set(before_providers.keys()) | set(after_providers.keys())):
+            before_row = before_providers.get(provider_id) if isinstance(before_providers.get(provider_id), dict) else {}
+            after_row = after_providers.get(provider_id) if isinstance(after_providers.get(provider_id), dict) else {}
+            if bool(before_row.get("enabled", False)) != bool(after_row.get("enabled", False)):
+                non_health_changed = True
+            if bool(before_row.get("available", False)) != bool(after_row.get("available", False)):
+                non_health_changed = True
+            before_health = before_row.get("health") if isinstance(before_row.get("health"), dict) else {}
+            after_health = after_row.get("health") if isinstance(after_row.get("health"), dict) else {}
+            if cls._health_status_value(before_row) != cls._health_status_value(after_row):
+                health_changed = True
+            if cls._health_numeric_value(before_health.get("cooldown_until")) != cls._health_numeric_value(
+                after_health.get("cooldown_until")
+            ):
+                health_changed = True
+            if cls._health_numeric_value(before_health.get("down_since")) != cls._health_numeric_value(
+                after_health.get("down_since")
+            ):
+                health_changed = True
+            if cls._health_numeric_value(before_health.get("failure_streak")) != cls._health_numeric_value(
+                after_health.get("failure_streak")
+            ):
+                health_changed = True
+
+        before_models = before_state.get("models") if isinstance(before_state.get("models"), dict) else {}
+        after_models = after_state.get("models") if isinstance(after_state.get("models"), dict) else {}
+        for model_id in sorted(set(before_models.keys()) | set(after_models.keys())):
+            before_row = before_models.get(model_id) if isinstance(before_models.get(model_id), dict) else {}
+            after_row = after_models.get(model_id) if isinstance(after_models.get(model_id), dict) else {}
+            if bool(before_row.get("enabled", False)) != bool(after_row.get("enabled", False)):
+                non_health_changed = True
+            if bool(before_row.get("available", False)) != bool(after_row.get("available", False)):
+                non_health_changed = True
+            if bool(before_row.get("routable", False)) != bool(after_row.get("routable", False)):
+                non_health_changed = True
+            before_health = before_row.get("health") if isinstance(before_row.get("health"), dict) else {}
+            after_health = after_row.get("health") if isinstance(after_row.get("health"), dict) else {}
+            if cls._health_status_value(before_row) != cls._health_status_value(after_row):
+                health_changed = True
+            if cls._health_numeric_value(before_health.get("cooldown_until")) != cls._health_numeric_value(
+                after_health.get("cooldown_until")
+            ):
+                health_changed = True
+            if cls._health_numeric_value(before_health.get("down_since")) != cls._health_numeric_value(
+                after_health.get("down_since")
+            ):
+                health_changed = True
+            if cls._health_numeric_value(before_health.get("failure_streak")) != cls._health_numeric_value(
+                after_health.get("failure_streak")
+            ):
+                health_changed = True
+
+        return health_changed, non_health_changed
 
     def _deliver_autopilot_notification(
         self,
@@ -3410,7 +3627,13 @@ class AgentRuntime:
     ) -> dict[str, Any]:
         start = time.monotonic()
         now_epoch = int(time.time())
-        diff = build_notification_from_state_diff(before_state, after_state, reasons, extra_changes=extra_changes)
+        extra_changes_list = sorted({str(item).strip() for item in (extra_changes or []) if str(item).strip()})
+        diff = build_notification_from_state_diff(
+            before_state,
+            after_state,
+            reasons,
+            extra_changes=extra_changes_list,
+        )
         message = str(diff.get("message") or "").strip()
         dedupe_hash = str(diff.get("dedupe_hash") or "").strip()
         counts = diff.get("counts") if isinstance(diff.get("counts"), dict) else {}
@@ -3424,6 +3647,21 @@ class AgentRuntime:
         changed_models = int(counts.get("models") or 0)
         changed_any = bool(message and dedupe_hash)
         actor = "system" if trigger == "scheduler" else "user"
+        safe_mode_key = self._safe_mode_block_key(
+            reasons=[str(item or "") for item in (reasons or [])],
+            modified_ids=modified_ids,
+            extra_changes=extra_changes_list,
+        )
+        health_changed, non_health_changed = self._state_diff_health_flags(before_state, after_state)
+        ok_down_transition = self._ok_down_transition_in_state_diff(before_state, after_state)
+        health_pause_key = "safe_mode_paused_health"
+        should_track_paused_health_send = bool(
+            self._autopilot_apply_pause_enabled()
+            and changed_defaults == 0
+            and health_changed
+            and not non_health_changed
+            and not ok_down_transition
+        )
 
         if not changed_any:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -3456,6 +3694,128 @@ class AgentRuntime:
                 duration_ms=duration_ms,
             )
             return {"ok": True, "outcome": "skipped", "reason": "no_changes"}
+
+        if safe_mode_key:
+            last_subject_sent_ts = self._notification_store.reason_subject_last_sent_ts(safe_mode_key)
+            if (
+                isinstance(last_subject_sent_ts, int)
+                and last_subject_sent_ts > 0
+                and (now_epoch - last_subject_sent_ts) < _SAFE_MODE_BLOCKED_DEDUPE_SECONDS
+            ):
+                self._notification_store.append(
+                    ts=now_epoch,
+                    message=message,
+                    dedupe_hash=dedupe_hash,
+                    delivered_to="none",
+                    deferred=False,
+                    outcome="skipped",
+                    reason="safe_mode_blocked_deduped",
+                    modified_ids=modified_ids,
+                    mark_sent=False,
+                )
+                duration_ms = int((time.monotonic() - start) * 1000)
+                audit_reason = self._notification_audit_reason("safe_mode_blocked_deduped")
+                self._set_last_notify_status(
+                    outcome="skipped",
+                    reason=audit_reason,
+                    dedupe_hash=dedupe_hash,
+                    changed_defaults=changed_defaults,
+                    changed_providers=changed_providers,
+                    changed_models=changed_models,
+                    ts=now_epoch,
+                )
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.autopilot.notify",
+                    params={
+                        "trigger": trigger,
+                        "dedupe_hash": dedupe_hash,
+                        "changed_defaults": changed_defaults,
+                        "changed_providers": changed_providers,
+                        "changed_models": changed_models,
+                        "modified_ids": modified_ids,
+                        "safe_mode_key": safe_mode_key,
+                    },
+                    decision="allow",
+                    reason=audit_reason,
+                    dry_run=False,
+                    outcome="skipped",
+                    error_kind=None,
+                    duration_ms=duration_ms,
+                )
+                return {
+                    "ok": True,
+                    "outcome": "skipped",
+                    "reason": audit_reason,
+                    "dedupe_hash": dedupe_hash,
+                    "counts": {
+                        "defaults": changed_defaults,
+                        "providers": changed_providers,
+                        "models": changed_models,
+                    },
+                    "delivered_to": "none",
+                }
+
+        if should_track_paused_health_send:
+            last_paused_health_sent_ts = self._notification_store.reason_subject_last_sent_ts(health_pause_key)
+            if (
+                isinstance(last_paused_health_sent_ts, int)
+                and last_paused_health_sent_ts > 0
+                and (now_epoch - last_paused_health_sent_ts) < _SAFE_MODE_PAUSED_HEALTH_NOTIFY_SECONDS
+            ):
+                self._notification_store.append(
+                    ts=now_epoch,
+                    message=message,
+                    dedupe_hash=dedupe_hash,
+                    delivered_to="none",
+                    deferred=False,
+                    outcome="skipped",
+                    reason="safe_mode_paused_health_suppressed",
+                    modified_ids=modified_ids,
+                    mark_sent=False,
+                )
+                duration_ms = int((time.monotonic() - start) * 1000)
+                audit_reason = self._notification_audit_reason("safe_mode_paused_health_suppressed")
+                self._set_last_notify_status(
+                    outcome="skipped",
+                    reason=audit_reason,
+                    dedupe_hash=dedupe_hash,
+                    changed_defaults=changed_defaults,
+                    changed_providers=changed_providers,
+                    changed_models=changed_models,
+                    ts=now_epoch,
+                )
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.autopilot.notify",
+                    params={
+                        "trigger": trigger,
+                        "dedupe_hash": dedupe_hash,
+                        "changed_defaults": changed_defaults,
+                        "changed_providers": changed_providers,
+                        "changed_models": changed_models,
+                        "modified_ids": modified_ids,
+                        "safe_mode_health_key": health_pause_key,
+                    },
+                    decision="allow",
+                    reason=audit_reason,
+                    dry_run=False,
+                    outcome="skipped",
+                    error_kind=None,
+                    duration_ms=duration_ms,
+                )
+                return {
+                    "ok": True,
+                    "outcome": "skipped",
+                    "reason": audit_reason,
+                    "dedupe_hash": dedupe_hash,
+                    "counts": {
+                        "defaults": changed_defaults,
+                        "providers": changed_providers,
+                        "models": changed_models,
+                    },
+                    "delivered_to": "none",
+                }
 
         send_gate = should_send(
             now_epoch=now_epoch,
@@ -3536,6 +3896,10 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
+        if safe_mode_key and outcome == "sent":
+            self._notification_store.mark_reason_subject_sent(safe_mode_key, now_epoch)
+        if should_track_paused_health_send and outcome == "sent":
+            self._notification_store.mark_reason_subject_sent(health_pause_key, now_epoch)
 
         audit_reason = self._notification_audit_reason(reason)
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -6069,6 +6433,77 @@ class AgentRuntime:
             "resulting_registry_hash": resulting_registry_hash,
         }
 
+    def llm_autopilot_unpause(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(payload.get("actor") or "user")
+        confirm = bool(payload.get("confirm") is True)
+        if not confirm:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="llm.autopilot.safe_mode.unpause",
+                params={"modified_ids": []},
+                decision="deny",
+                reason="confirm_required",
+                dry_run=False,
+                outcome="blocked",
+                error_kind="confirm_required",
+                duration_ms=duration_ms,
+            )
+            return False, {
+                "ok": False,
+                "error": "confirm_required",
+                "message": 'Set {"confirm": true} to clear safe mode pause.',
+            }
+
+        if not self._autopilot_apply_pause_enabled():
+            return True, {
+                "ok": True,
+                "changed": False,
+                "paused": False,
+                "reason": "not_paused",
+            }
+
+        current = dict(
+            self._autopilot_safety_state.state
+            if isinstance(self._autopilot_safety_state.state, dict)
+            else {}
+        )
+        current["safe_mode_override"] = None
+        current["safe_mode_reason"] = None
+        current["safe_mode_entered_ts"] = None
+        self._autopilot_safety_state.save(current)
+        self._safe_mode_last_blocked_reason = None
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="llm.autopilot.safe_mode.unpause",
+            params={"modified_ids": []},
+            decision="allow",
+            reason="allowed",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        self._record_action_ledger(
+            action="llm.autopilot.safe_mode.unpause",
+            actor=actor,
+            decision="allow",
+            outcome="success",
+            reason="allowed",
+            trigger="manual",
+            snapshot_id=None,
+            resulting_registry_hash=None,
+            changed_ids=[],
+        )
+        return True, {
+            "ok": True,
+            "changed": True,
+            "paused": False,
+            "message": "Safe mode pause cleared. Automatic apply actions can run again.",
+        }
+
     def _bootstrap_plan(self) -> dict[str, Any]:
         document = self.registry_document if isinstance(self.registry_document, dict) else {}
         defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
@@ -6928,8 +7363,13 @@ class APIServerHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self) -> dict[str, Any]:
+        self._last_json_error = None
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0:
+            return {}
+        content_type = str(self.headers.get("Content-Type") or "").strip().lower()
+        if "application/json" not in content_type:
+            self._last_json_error = "content_type_not_json"
             return {}
         raw = self.rfile.read(length)
         if not raw:
@@ -6939,7 +7379,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if isinstance(parsed, dict):
                 return parsed
         except (UnicodeDecodeError, json.JSONDecodeError):
+            self._last_json_error = "invalid_json_body"
             return {}
+        self._last_json_error = "invalid_json_body"
         return {}
 
     def _request_trace_id(self, payload: dict[str, Any] | None = None) -> str:
@@ -6958,6 +7400,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
         message: str,
         trace_id: str,
         error_code: str,
+        error_kind: str = "internal_error",
         status: int = 500,
     ) -> tuple[int, dict[str, Any]]:
         envelope = failure(
@@ -6965,10 +7408,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
             intent=intent,
             trace_id=trace_id,
             errors=[error_code],
+            error_kind=classify_error_kind(
+                payload={"ok": False, "error": error_code, "message": message},
+                context={"intent": intent, "error_kind": error_kind},
+            ),
         )
         return status, {
             "ok": False,
             "error": error_code,
+            "error_kind": envelope["error_kind"],
             "message": envelope["message"],
             "trace_id": envelope["trace_id"],
             "envelope": envelope,
@@ -6988,6 +7436,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 message="I hit an internal error, but I’m still running. Try one of these:",
                 trace_id=trace_id,
                 error_code="internal_error",
+                error_kind="internal_error",
                 status=500,
             )
             self._send_json(status, payload)
@@ -7184,6 +7633,88 @@ class APIServerHandler(BaseHTTPRequestHandler):
         try:
             path, parts = self._path_parts()
             payload = self._read_json()
+            json_error = str(getattr(self, "_last_json_error", "") or "").strip().lower() or None
+            if path in {"/chat", "/ask", "/done"} and json_error in {"content_type_not_json", "invalid_json_body"}:
+                trace_id = self._request_trace_id(payload)
+                if json_error == "content_type_not_json":
+                    message = "Request body must use Content-Type: application/json."
+                else:
+                    message = "Request body is not valid JSON."
+                next_question = bad_request_next_question(error_message=message, json_error=json_error)
+                envelope = failure(
+                    message,
+                    intent=path.lstrip("/"),
+                    error_kind="bad_request",
+                    trace_id=trace_id,
+                    errors=["bad_request"],
+                    next_question=next_question,
+                )
+                self._send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": "bad_request",
+                        "error_kind": envelope["error_kind"],
+                        "message": envelope["message"],
+                        "next_question": envelope["next_question"],
+                        "trace_id": envelope["trace_id"],
+                        "envelope": envelope,
+                    },
+                )
+                return
+            if path in {"/ask", "/done"}:
+                command = path
+                prompt_text = (
+                    str(payload.get("text") or "").strip()
+                    or str(payload.get("message") or "").strip()
+                    or str(payload.get("query") or "").strip()
+                )
+                forwarded_payload = dict(payload)
+                raw_messages = payload.get("messages")
+                if isinstance(raw_messages, list) and raw_messages:
+                    normalized_messages: list[dict[str, str]] = []
+                    last_user_idx = -1
+                    for idx, row in enumerate(raw_messages):
+                        if not isinstance(row, dict):
+                            continue
+                        role = str(row.get("role") or "user").strip() or "user"
+                        content = str(row.get("content") or "")
+                        normalized_messages.append({"role": role, "content": content})
+                        if role == "user":
+                            last_user_idx = len(normalized_messages) - 1
+                    if normalized_messages:
+                        if last_user_idx >= 0:
+                            content = str(normalized_messages[last_user_idx].get("content") or "").strip()
+                            if not content.startswith(command):
+                                normalized_messages[last_user_idx]["content"] = f"{command} {content}".strip()
+                        else:
+                            normalized_messages.append({"role": "user", "content": command})
+                        forwarded_payload["messages"] = normalized_messages
+                elif prompt_text:
+                    forwarded_payload["messages"] = [{"role": "user", "content": f"{command} {prompt_text}".strip()}]
+                else:
+                    trace_id = self._request_trace_id(payload)
+                    envelope = failure(
+                        "message is required",
+                        intent=command.lstrip("/"),
+                        error_kind="bad_request",
+                        trace_id=trace_id,
+                        errors=["bad_request"],
+                    )
+                    self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": "bad_request",
+                            "error_kind": envelope["error_kind"],
+                            "message": envelope["message"],
+                            "trace_id": envelope["trace_id"],
+                            "envelope": envelope,
+                        },
+                    )
+                    return
+                payload = forwarded_payload
+                path = "/chat"
 
             if path == "/chat":
                 trace_id = self._request_trace_id(payload)
@@ -7209,20 +7740,58 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             did_work=True,
                             trace_id=trace_id,
                         )
+                    meta_local = body_local.get("meta") if isinstance(body_local.get("meta"), dict) else {}
+                    provider_local = str(meta_local.get("provider") or "").strip().lower()
+                    model_local = str(meta_local.get("model") or "").strip()
+                    attempts_local = meta_local.get("attempts") if isinstance(meta_local.get("attempts"), list) else []
+                    if (not provider_local or not model_local) and attempts_local:
+                        first_attempt = attempts_local[0] if isinstance(attempts_local[0], dict) else {}
+                        provider_local = provider_local or str(first_attempt.get("provider") or "").strip().lower()
+                        model_local = model_local or str(first_attempt.get("model") or "").strip()
+                    error_kind = classify_error_kind(
+                        payload=body_local,
+                        context={
+                            "route": "/chat",
+                            "provider": provider_local,
+                            "model": model_local,
+                            "health_state": self.runtime._health_monitor.state,  # noqa: SLF001
+                        },
+                    )
+                    base_message = assistant_text or "I couldn't complete that request."
+                    friendly_message = friendly_error_message(
+                        error_kind=error_kind,
+                        current_message=base_message,
+                        context={
+                            "route": "/chat",
+                            "provider": provider_local,
+                            "model": model_local,
+                            "health_state": self.runtime._health_monitor.state,  # noqa: SLF001
+                        },
+                        now_epoch=int(time.time()),
+                    ) or base_message
+                    next_question = (
+                        bad_request_next_question(error_message=base_message)
+                        if error_kind == "bad_request"
+                        else None
+                    )
                     return failure(
-                        assistant_text or "I couldn't complete that request.",
+                        friendly_message,
                         intent="chat",
                         confidence=0.0,
+                        error_kind=error_kind,
                         trace_id=trace_id,
                         errors=[str(body_local.get("error") or "chat_failed")],
+                        next_question=next_question,
                     )
 
                 envelope = run_with_fallback(
                     fn=_run_chat,
                     context={
                         "intent": "chat",
+                        "route": "/chat",
                         "trace_id": trace_id,
                         "log_path": self.runtime.config.log_path,
+                        "health_state": self.runtime._health_monitor.state,  # noqa: SLF001
                         "actions": [
                             {"label": "Retry request", "command": "Retry the same /chat request once"},
                             {"label": "Check health", "command": "GET /health"},
@@ -7236,6 +7805,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         message=envelope["message"],
                         trace_id=envelope["trace_id"],
                         error_code="internal_error",
+                        error_kind=str(envelope.get("error_kind") or "internal_error"),
                         status=500,
                     )
                     self._send_json(status, error_payload)
@@ -7250,7 +7820,34 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     assistant_text = str(envelope.get("message") or "").strip() or "I couldn't complete that request."
                     body["assistant"] = {"role": "assistant", "content": assistant_text}
                 if not ok:
-                    body["message"] = str(body.get("message") or "").strip() or assistant_text
+                    body["message"] = str(body.get("message") or "").strip() or str(envelope.get("message") or "").strip() or assistant_text
+                    body["error_kind"] = str(
+                        body.get("error_kind")
+                        or envelope.get("error_kind")
+                        or classify_error_kind(
+                            payload=body,
+                            context={"route": "/chat", "health_state": self.runtime._health_monitor.state},  # noqa: SLF001
+                        )
+                    )
+                    if body["error_kind"] == "upstream_down":
+                        body["message"] = friendly_error_message(
+                            error_kind="upstream_down",
+                            current_message=body["message"],
+                            context={
+                                "route": "/chat",
+                                "provider": str((body.get("meta") or {}).get("provider") or "").strip().lower()
+                                if isinstance(body.get("meta"), dict)
+                                else "",
+                                "model": str((body.get("meta") or {}).get("model") or "").strip()
+                                if isinstance(body.get("meta"), dict)
+                                else "",
+                                "health_state": self.runtime._health_monitor.state,  # noqa: SLF001
+                            },
+                            now_epoch=int(time.time()),
+                        ) or body["message"]
+                        body["assistant"] = {"role": "assistant", "content": body["message"]}
+                    if str(envelope.get("next_question") or "").strip():
+                        body["next_question"] = envelope.get("next_question")
                     body.setdefault("trace_id", envelope.get("trace_id"))
                     body.setdefault("envelope", envelope)
                 self._send_json(200 if ok else 400, body)
@@ -7294,6 +7891,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if not ok:
                     trace_id = self._request_trace_id(payload)
                     body = body if isinstance(body, dict) else {}
+                    error_kind = classify_error_kind(payload=body, context={"route": "/model_watch/run"})
                     message = (
                         str(body.get("message") or "").strip()
                         or str(body.get("detail") or "").strip()
@@ -7303,12 +7901,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     envelope = failure(
                         message,
                         intent="model_watch.run",
+                        error_kind=error_kind,
                         trace_id=trace_id,
                         errors=[str(body.get("error") or "model_watch_run_failed")],
                     )
                     body = {
                         **body,
                         "ok": False,
+                        "error_kind": envelope["error_kind"],
                         "message": envelope["message"],
                         "trace_id": envelope["trace_id"],
                         "envelope": envelope,
@@ -7320,6 +7920,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if not ok:
                     trace_id = self._request_trace_id(payload)
                     body = body if isinstance(body, dict) else {}
+                    error_kind = classify_error_kind(payload=body, context={"route": "/model_watch/refresh"})
                     message = (
                         str(body.get("message") or "").strip()
                         or str(body.get("detail") or "").strip()
@@ -7329,12 +7930,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     envelope = failure(
                         message,
                         intent="model_watch.refresh",
+                        error_kind=error_kind,
                         trace_id=trace_id,
                         errors=[str(body.get("error") or "model_watch_refresh_failed")],
                     )
                     body = {
                         **body,
                         "ok": False,
+                        "error_kind": envelope["error_kind"],
                         "message": envelope["message"],
                         "trace_id": envelope["trace_id"],
                         "envelope": envelope,
@@ -7412,6 +8015,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/llm/autopilot/undo":
                 ok, body = self.runtime.llm_autopilot_undo(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/autopilot/unpause":
+                ok, body = self.runtime.llm_autopilot_unpause(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/autopilot/bootstrap":

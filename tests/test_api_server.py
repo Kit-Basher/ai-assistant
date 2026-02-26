@@ -74,6 +74,18 @@ class TestAPIServerRuntime(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
+    def test_health_includes_safe_mode_fields(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._autopilot_safety_state.enter_safe_mode(reason="churn_detected", now_epoch=1_700_000_000)
+        runtime._scheduler_next_run["autoconfig"] = float(1_700_000_600)
+        payload = runtime.health()
+        safe_mode = payload.get("safe_mode") if isinstance(payload.get("safe_mode"), dict) else {}
+        self.assertTrue(bool(safe_mode.get("paused")))
+        self.assertEqual("churn_detected", safe_mode.get("reason"))
+        self.assertEqual(1_700_000_600, safe_mode.get("next_retry"))
+        self.assertEqual(1_700_000_000, safe_mode.get("last_transition_at"))
+        self.assertIn("cooldown_until", safe_mode)
+
     def test_add_provider_set_secret_and_test_provider(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 
@@ -326,6 +338,62 @@ class TestAPIServerRuntime(unittest.TestCase):
                 self.assertEqual(expected_status, response["status_code"])
         finally:
             provider_impl.chat = original_chat  # type: ignore[assignment]
+
+    def test_openrouter_provider_test_402_is_friendly_and_uses_small_budget(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        provider_impl = runtime._router._providers["openrouter"]  # type: ignore[attr-defined]
+        original_chat = provider_impl.chat
+        captured: dict[str, object] = {}
+
+        openrouter_error_body = json.dumps(
+            {
+                "error": {
+                    "message": "Insufficient credits for this request",
+                    "code": 402,
+                }
+            },
+            ensure_ascii=True,
+        )
+
+        def _raise_402(request, *, model, timeout_seconds):  # type: ignore[no-untyped-def]
+            captured["request"] = request
+            raise LLMError(
+                kind="bad_request",
+                retriable=False,
+                provider="openrouter",
+                status_code=402,
+                message=openrouter_error_body,
+            )
+
+        provider_impl.chat = _raise_402  # type: ignore[assignment]
+        try:
+            with patch.object(
+                runtime,
+                "_probe_provider_models",
+                return_value={"ok": True, "models": ["openrouter:openai/gpt-4o-mini"], "count": 1},
+            ):
+                ok, response = runtime.test_provider(
+                    "openrouter",
+                    {"model": "openrouter:openai/gpt-4o-mini"},
+                )
+        finally:
+            provider_impl.chat = original_chat  # type: ignore[assignment]
+
+        self.assertFalse(ok)
+        self.assertEqual(402, response["status_code"])
+        self.assertEqual("payment_required", response["error"])
+        self.assertEqual("upstream_down", response["error_kind"])
+        self.assertIn("credits/limit issue", response["message"])
+        self.assertIn("lower max_tokens", response["message"])
+        self.assertIn("cheaper model", response["message"])
+        self.assertNotIn('{"error"', response["message"])
+
+        request_obj = captured.get("request")
+        self.assertIsNotNone(request_obj)
+        self.assertEqual(256, getattr(request_obj, "max_tokens", None))
+        self.assertEqual(0.0, getattr(request_obj, "temperature", None))
+        self.assertEqual("health", getattr(request_obj, "purpose", None))
+        self.assertEqual("test", getattr(request_obj, "task_type", None))
 
     def test_defaults_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
