@@ -1412,6 +1412,77 @@ class TestAPIServerRuntime(unittest.TestCase):
         handler = _HandlerForTest(runtime, b"\xff")
         self.assertEqual({}, handler._read_json())
 
+    def test_chat_low_confidence_returns_clarification_contract(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        handler = _HandlerForTest(runtime, {})
+        handler.do_POST()
+
+        payload = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, payload.get("ok"))
+        self.assertEqual("chat", payload.get("intent"))
+        self.assertEqual(0.0, payload.get("confidence"))
+        self.assertEqual(False, payload.get("did_work"))
+        self.assertEqual("needs_clarification", payload.get("error_kind"))
+        self.assertTrue(str(payload.get("message") or "").strip())
+        self.assertEqual(payload.get("message"), payload.get("next_question"))
+        self.assertEqual([], payload.get("actions"))
+        self.assertEqual(["needs_clarification"], payload.get("errors"))
+        self.assertTrue(str(payload.get("trace_id") or "").strip())
+        envelope = payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        clarification = (envelope or {}).get("clarification")
+        self.assertTrue(isinstance(clarification, dict))
+        self.assertTrue(str((clarification or {}).get("reason") or "").strip())
+        self.assertTrue(isinstance((clarification or {}).get("hints"), list))
+
+    def test_ask_low_confidence_returns_clarification_contract(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/ask"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        handler = _HandlerForTest(runtime, {})
+        handler.do_POST()
+
+        payload = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, payload.get("ok"))
+        self.assertEqual("ask", payload.get("intent"))
+        self.assertEqual("needs_clarification", payload.get("error_kind"))
+        self.assertEqual(["needs_clarification"], payload.get("errors"))
+        self.assertEqual(payload.get("message"), payload.get("next_question"))
+
 
 if __name__ == "__main__":
     unittest.main()

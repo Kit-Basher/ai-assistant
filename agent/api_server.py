@@ -25,6 +25,7 @@ from agent.config import Config, load_config
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import bad_request_next_question, friendly_error_message
 from agent.fallback_ladder import run_with_fallback
+from agent.intent.clarification import build_clarification_plan
 from agent.intent.low_confidence import detect_low_confidence
 from agent.logging_utils import log_event
 from agent.model_watch import (
@@ -7627,7 +7628,20 @@ class APIServerHandler(BaseHTTPRequestHandler):
         return False
 
     @staticmethod
-    def _clarification_payload(*, intent: str, trace_id: str, next_question: str) -> dict[str, Any]:
+    def _clarification_payload(
+        *,
+        intent: str,
+        trace_id: str,
+        raw_text: str,
+        norm_text: str,
+        detector_reason: str,
+    ) -> dict[str, Any]:
+        plan = build_clarification_plan(
+            raw_text=raw_text,
+            norm_text=norm_text,
+            detector_reason=detector_reason,
+            intent=intent,
+        )
         envelope = validate_envelope(
             {
                 "ok": True,
@@ -7635,25 +7649,31 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 "confidence": 0.0,
                 "did_work": False,
                 "error_kind": "needs_clarification",
-                "message": str(next_question or "").strip(),
-                "next_question": str(next_question or "").strip(),
+                "message": str(plan.message or "").strip(),
+                "next_question": str(plan.next_question or "").strip(),
                 "actions": [],
                 "errors": ["needs_clarification"],
                 "trace_id": trace_id,
             }
         )
+        envelope_payload = dict(envelope)
+        envelope_payload["clarification"] = {
+            "reason": plan.reason,
+            "hints": list(plan.hints),
+            "suggested_intents": list(plan.suggested_intents),
+        }
         return {
-            "ok": bool(envelope.get("ok", False)),
-            "intent": envelope.get("intent", "chat"),
-            "confidence": float(envelope.get("confidence", 0.0)),
-            "did_work": bool(envelope.get("did_work", False)),
-            "error_kind": envelope.get("error_kind", "internal_error"),
-            "message": envelope.get("message") or "Internal error.",
-            "next_question": envelope.get("next_question"),
-            "actions": envelope.get("actions", []),
-            "errors": envelope.get("errors", ["internal_error"]),
-            "trace_id": envelope.get("trace_id") or "trace_unknown",
-            "envelope": envelope,
+            "ok": bool(envelope_payload.get("ok", False)),
+            "intent": envelope_payload.get("intent", "chat"),
+            "confidence": float(envelope_payload.get("confidence", 0.0)),
+            "did_work": bool(envelope_payload.get("did_work", False)),
+            "error_kind": envelope_payload.get("error_kind", "internal_error"),
+            "message": envelope_payload.get("message") or "Internal error.",
+            "next_question": envelope_payload.get("next_question"),
+            "actions": envelope_payload.get("actions", []),
+            "errors": envelope_payload.get("errors", ["internal_error"]),
+            "trace_id": envelope_payload.get("trace_id") or "trace_unknown",
+            "envelope": envelope_payload,
         }
 
     def _error_envelope_payload(
@@ -7931,12 +7951,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 low_confidence = detect_low_confidence(input_text)
                 if low_confidence.is_low_confidence and not self._has_explicit_user_message(payload):
                     intent_name = "ask" if path == "/ask" else "chat"
+                    norm_text = str(low_confidence.debug.get("norm") or "")
                     self._send_json(
                         200,
                         self._clarification_payload(
                             intent=intent_name,
                             trace_id=trace_id,
-                            next_question=low_confidence.next_question,
+                            raw_text=input_text,
+                            norm_text=norm_text,
+                            detector_reason=low_confidence.reason,
                         ),
                     )
                     return
