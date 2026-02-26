@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from agent.error_kind import classify_error_kind
+from agent.error_response_ux import friendly_error_message
 from agent.logging_utils import log_event
 from agent.response_envelope import ResponseEnvelope, failure, validate_envelope
 
@@ -32,13 +34,27 @@ def _log_safe(log_path: str | None, event_type: str, payload: dict[str, Any]) ->
         return
 
 
-def _minimal_failure(context: dict[str, Any], *, error_code: str) -> ResponseEnvelope:
+def _minimal_failure(
+    context: dict[str, Any],
+    *,
+    error_code: str,
+    error_kind: str = "internal_error",
+) -> ResponseEnvelope:
     trace_id = str(context.get("trace_id") or "").strip() or None
+    message = (
+        friendly_error_message(
+            error_kind=error_kind,
+            current_message=_DEFAULT_FAILURE_MESSAGE,
+            context=context if isinstance(context, dict) else {},
+        )
+        or _DEFAULT_FAILURE_MESSAGE
+    )
     return failure(
-        _DEFAULT_FAILURE_MESSAGE,
+        message,
         intent=str(context.get("intent") or "unknown"),
         actions=_suggested_actions(context),
         errors=[error_code],
+        error_kind=error_kind,
         trace_id=trace_id,
     )
 
@@ -52,6 +68,7 @@ def run_with_fallback(*, fn: Callable[[], ResponseEnvelope], context: dict[str, 
     try:
         env = fn()
     except Exception as exc:
+        error_kind = classify_error_kind(error=exc, context=context)
         _log_safe(
             log_path,
             "fallback_ladder_exception",
@@ -59,9 +76,10 @@ def run_with_fallback(*, fn: Callable[[], ResponseEnvelope], context: dict[str, 
                 "intent": intent,
                 "trace_id": trace_id,
                 "error": exc.__class__.__name__,
+                "error_kind": error_kind,
             },
         )
-        return _minimal_failure(context, error_code=exc.__class__.__name__)
+        return _minimal_failure(context, error_code=exc.__class__.__name__, error_kind=error_kind)
 
     try:
         return validate_envelope(dict(env))
@@ -73,6 +91,7 @@ def run_with_fallback(*, fn: Callable[[], ResponseEnvelope], context: dict[str, 
                 "intent": intent,
                 "trace_id": trace_id,
                 "error": exc.__class__.__name__,
+                "error_kind": "internal_error",
             },
         )
         try:
@@ -81,10 +100,11 @@ def run_with_fallback(*, fn: Callable[[], ResponseEnvelope], context: dict[str, 
                 intent=intent,
                 actions=actions,
                 errors=["InvalidEnvelope"],
+                error_kind="internal_error",
                 trace_id=trace_id,
             )
         except Exception:
-            return _minimal_failure(context, error_code="InvalidEnvelope")
+            return _minimal_failure(context, error_code="InvalidEnvelope", error_kind="internal_error")
 
 
 __all__ = ["run_with_fallback"]

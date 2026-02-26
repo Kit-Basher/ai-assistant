@@ -4,6 +4,7 @@ import hashlib
 import time
 from typing import Any, TypedDict
 
+from agent.error_kind import ensure_user_message, normalize_error_kind
 
 class ResponseAction(TypedDict):
     label: str
@@ -15,6 +16,7 @@ class ResponseEnvelope(TypedDict):
     intent: str
     confidence: float
     did_work: bool
+    error_kind: str | None
     message: str
     next_question: str | None
     actions: list[ResponseAction]
@@ -39,7 +41,18 @@ def _normalize_trace_id(trace_id: str | None) -> str:
 
 
 def validate_envelope(env: dict[str, Any]) -> ResponseEnvelope:
-    message = str(env.get("message") or "").strip()
+    ok = bool(env.get("ok"))
+    raw_error_kind = env.get("error_kind")
+    error_kind: str | None
+    if raw_error_kind is None or not str(raw_error_kind).strip():
+        error_kind = None
+    else:
+        error_kind = normalize_error_kind(raw_error_kind, default="unknown")
+
+    message = ensure_user_message(
+        str(env.get("message") or "").strip(),
+        error_kind=error_kind or ("unknown" if ok else "internal_error"),
+    )
     if not message:
         raise ValueError("message must be non-empty")
 
@@ -68,10 +81,11 @@ def validate_envelope(env: dict[str, Any]) -> ResponseEnvelope:
     errors = [str(item).strip() for item in errors_raw if str(item).strip()]
 
     normalized: ResponseEnvelope = {
-        "ok": bool(env.get("ok")),
+        "ok": ok,
         "intent": str(env.get("intent") or "").strip() or "unknown",
         "confidence": _clamp_confidence(env.get("confidence")),
         "did_work": bool(env.get("did_work")),
+        "error_kind": error_kind,
         "message": message,
         "next_question": next_question if next_question else None,
         "actions": actions,
@@ -98,6 +112,7 @@ def ok_result(
             "intent": intent,
             "confidence": confidence,
             "did_work": did_work,
+            "error_kind": None,
             "message": message,
             "next_question": next_question,
             "actions": actions or [],
@@ -123,6 +138,7 @@ def needs_clarification(
             "intent": intent,
             "confidence": confidence,
             "did_work": False,
+            "error_kind": None,
             "message": message,
             "next_question": question,
             "actions": actions or [],
@@ -137,6 +153,7 @@ def failure(
     *,
     intent: str,
     confidence: float = 0.0,
+    error_kind: str = "internal_error",
     next_question: str | None = None,
     actions: list[dict[str, str]] | None = None,
     errors: list[str] | None = None,
@@ -148,6 +165,7 @@ def failure(
             "intent": intent,
             "confidence": confidence,
             "did_work": False,
+            "error_kind": error_kind,
             "message": message,
             "next_question": next_question,
             "actions": actions or [],
