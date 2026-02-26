@@ -382,7 +382,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(402, response["status_code"])
         self.assertEqual("payment_required", response["error"])
-        self.assertEqual("upstream_down", response["error_kind"])
+        self.assertEqual("payment_required", response["error_kind"])
         self.assertIn("credits/limit issue", response["message"])
         self.assertIn("lower max_tokens", response["message"])
         self.assertIn("cheaper model", response["message"])

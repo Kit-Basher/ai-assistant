@@ -8,6 +8,7 @@ import unittest
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.model_watch import normalize_model_watch_state
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -51,6 +52,7 @@ def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
         llm_health_state_path=os.path.join(os.path.dirname(db_path), "llm_health_state.json"),
         llm_automation_enabled=False,
         model_scout_state_path=os.path.join(os.path.dirname(db_path), "model_scout_state.json"),
+        model_watch_state_path=os.path.join(os.path.dirname(db_path), "model_watch_state.json"),
         autopilot_notify_store_path=os.path.join(os.path.dirname(db_path), "llm_notifications.json"),
     )
     return base.__class__(**{**base.__dict__, **overrides})
@@ -172,6 +174,123 @@ class TestLLMSupport(unittest.TestCase):
         self.assertEqual(before_hash, after_hash)
         self.assertEqual(before_ledger, after_ledger)
 
+    def test_support_remediation_payment_required_disables_openrouter_and_prefers_local(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        updated_document = copy.deepcopy(runtime.registry_document)
+        updated_document["defaults"]["default_provider"] = "openrouter"
+        updated_document["defaults"]["default_model"] = "openrouter:openai/gpt-4o-mini"
+        saved, error = runtime._persist_registry_document(updated_document)
+        self.assertTrue(saved)
+        self.assertIsNone(error)
+        runtime._health_monitor.state = {  # type: ignore[attr-defined]
+            "providers": {
+                "openrouter": {"status": "down", "last_error_kind": "payment_required", "status_code": 402},
+                "ollama": {"status": "ok"},
+            },
+            "models": {
+                "ollama:llama3": {"status": "ok", "last_error_kind": None},
+            },
+        }
+
+        ok, payload = runtime.llm_support_remediate_plan(
+            {"target": "defaults", "intent": "fix_routing", "last_error_kind": "payment_required", "status_code": 402}
+        )
+        self.assertTrue(ok)
+        steps = payload["plan"]["steps"]
+        disable_openrouter = [
+            row
+            for row in steps
+            if row.get("action") == "modelops.enable_disable_provider_or_model"
+            and (row.get("params") or {}).get("id") == "openrouter"
+            and (row.get("params") or {}).get("enabled") is False
+        ]
+        self.assertTrue(disable_openrouter)
+        set_local_default = [
+            row
+            for row in steps
+            if row.get("action") == "modelops.set_default_model"
+            and (row.get("params") or {}).get("default_provider") == "ollama"
+        ]
+        self.assertTrue(set_local_default)
+
+    def test_support_remediation_no_local_installed_uses_model_watch_pull_candidate(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._health_monitor.state = {  # type: ignore[attr-defined]
+            "providers": {
+                "ollama": {"status": "ok"},
+            },
+            "models": {
+                "ollama:llama3": {"status": "down", "last_error_kind": "model_not_installed"},
+            },
+        }
+        runtime._model_watch_store.save(  # type: ignore[attr-defined]
+            normalize_model_watch_state(
+                {
+                    "seen": {},
+                    "recommendations": [],
+                    "active_batch_id": "batch_local",
+                    "batches": [
+                        {
+                            "batch_id": "batch_local",
+                            "created_at": 1_700_000_000,
+                            "status": "new",
+                            "deferred_until": None,
+                            "candidate_ids": ["ollama:qwen2.5:3b-instruct"],
+                            "top_pick_id": "ollama:qwen2.5:3b-instruct",
+                            "confidence": 0.9,
+                            "show_top_only": True,
+                            "candidates": [
+                                {
+                                    "id": "ollama:qwen2.5:3b-instruct",
+                                    "provider": "ollama",
+                                    "model": "qwen2.5:3b-instruct",
+                                    "score": 88.4,
+                                    "reason": "fits local constraints",
+                                    "tradeoffs": [],
+                                    "subscores": {
+                                        "task_fit": 25.0,
+                                        "local_feasibility": 25.0,
+                                        "cost_efficiency": 15.0,
+                                        "quality_proxy": 18.4,
+                                        "switch_gain": 5.0,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        )
+
+        ok, payload = runtime.llm_support_remediate_plan({"target": "defaults", "intent": "fix_routing"})
+        self.assertTrue(ok)
+        pull_steps = [
+            row
+            for row in payload["plan"]["steps"]
+            if row.get("action") == "modelops.pull_ollama_model"
+        ]
+        self.assertTrue(pull_steps)
+        self.assertEqual("qwen2.5:3b-instruct", (pull_steps[0].get("params") or {}).get("model"))
+
+    def test_support_remediation_ollama_down_adds_user_action_guidance(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._health_monitor.state = {  # type: ignore[attr-defined]
+            "providers": {
+                "ollama": {"status": "down", "last_error_kind": "provider_unavailable"},
+            },
+            "models": {},
+        }
+
+        ok, payload = runtime.llm_support_remediate_plan({"target": "defaults", "intent": "fix_routing"})
+        self.assertTrue(ok)
+        user_action_steps = [
+            row
+            for row in payload["plan"]["steps"]
+            if row.get("kind") == "user_action" and row.get("action") == "user.start_verify_ollama"
+        ]
+        self.assertTrue(user_action_steps)
+        self.assertIn("http://127.0.0.1:11434", str(user_action_steps[0].get("instructions") or ""))
+
     def test_support_endpoints_are_wired(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 
@@ -203,6 +322,18 @@ class TestLLMSupport(unittest.TestCase):
         remediate_payload = json.loads(remediate_handler.body.decode("utf-8"))
         self.assertTrue(remediate_payload["ok"])
         self.assertTrue(remediate_payload["plan"]["plan_only"])
+
+        remediate_execute_handler = _HandlerForTest(
+            runtime,
+            "/llm/support/remediate/execute",
+            {"target": "defaults", "intent": "fix_routing", "confirm": True},
+        )
+        remediate_execute_handler.do_POST()
+        self.assertEqual(200, remediate_execute_handler.status_code)
+        remediate_execute_payload = json.loads(remediate_execute_handler.body.decode("utf-8"))
+        self.assertTrue(remediate_execute_payload["ok"])
+        self.assertIn("executed_steps", remediate_execute_payload)
+        self.assertIn("blocked_steps", remediate_execute_payload)
 
 
 if __name__ == "__main__":

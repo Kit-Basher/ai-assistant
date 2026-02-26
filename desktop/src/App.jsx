@@ -205,6 +205,7 @@ export default function App() {
   const [supportDiagnoseIntent, setSupportDiagnoseIntent] = useState("fix_routing");
   const [supportDiagnosis, setSupportDiagnosis] = useState(null);
   const [supportRemediationPlan, setSupportRemediationPlan] = useState(null);
+  const [supportRemediationResult, setSupportRemediationResult] = useState(null);
   const [supportStatus, setSupportStatus] = useState("");
   const [supportBusy, setSupportBusy] = useState(false);
   const [permissionsConfig, setPermissionsConfig] = useState(null);
@@ -1336,6 +1337,7 @@ export default function App() {
       }
       const result = await request("POST", "/llm/support/remediate/plan", payload);
       setSupportRemediationPlan(result.plan || null);
+      setSupportRemediationResult(null);
       const stepCount = Number((result.plan?.steps || []).length || 0);
       setSupportStatus(`Remediation plan ready (${stepCount} step(s), plan-only).`);
       appendLog({ endpoint: "/llm/support/remediate/plan", ok: true, detail: `steps=${stepCount}` });
@@ -1344,6 +1346,41 @@ export default function App() {
       setSupportRemediationPlan(null);
       setSupportStatus(`Remediation plan failed: ${detail}`);
       appendLog({ endpoint: "/llm/support/remediate/plan", ok: false, detail });
+    } finally {
+      setSupportBusy(false);
+    }
+  };
+
+  const executeSupportRemediation = async () => {
+    const targetId = normalizeSupportTarget(supportDiagnoseTarget);
+    setSupportBusy(true);
+    setSupportStatus("Executing safe remediation steps...");
+    try {
+      const payload = {
+        intent: supportDiagnoseIntent,
+        confirm: true
+      };
+      if (targetId) {
+        payload.target = targetId;
+      }
+      const result = await request("POST", "/llm/support/remediate/execute", payload);
+      setSupportRemediationResult(result);
+      setSupportRemediationPlan(result.plan || supportRemediationPlan);
+      const executedCount = Number((result.executed_steps || []).length || 0);
+      const blockedCount = Number((result.blocked_steps || []).length || 0);
+      setSupportStatus(
+        result.message || `Executed ${executedCount} step(s), blocked ${blockedCount}.`
+      );
+      appendLog({
+        endpoint: "/llm/support/remediate/execute",
+        ok: !!result.ok,
+        detail: `executed=${executedCount},blocked=${blockedCount}`
+      });
+      await refreshRuntimeState();
+    } catch (error) {
+      const detail = asErrorText(error);
+      setSupportStatus(`Remediation execute failed: ${detail}`);
+      appendLog({ endpoint: "/llm/support/remediate/execute", ok: false, detail });
     } finally {
       setSupportBusy(false);
     }
@@ -1953,7 +1990,7 @@ export default function App() {
             <div className="card">
               <h2>Support</h2>
               <p className="help-text">
-                Export a deterministic local support bundle, diagnose a provider/model, and generate a plan-only remediation sequence.
+                Export a deterministic local support bundle, diagnose a provider/model, and generate a deterministic LLM remediation plan.
               </p>
               <div className="grid two">
                 <label>
@@ -1993,7 +2030,10 @@ export default function App() {
                   {supportBusy ? "Working..." : "Run Diagnosis"}
                 </button>
                 <button disabled={supportBusy} onClick={planSupportRemediation}>
-                  {supportBusy ? "Working..." : "Plan Remediation"}
+                  {supportBusy ? "Working..." : "Fix LLM setup"}
+                </button>
+                <button disabled={supportBusy || !supportRemediationPlan} onClick={executeSupportRemediation}>
+                  {supportBusy ? "Working..." : "Execute safe steps"}
                 </button>
               </div>
               <p className="status-line">{supportStatus || "No support actions run in this session."}</p>
@@ -2039,8 +2079,28 @@ export default function App() {
                     {(supportRemediationPlan.steps || []).map((step) => (
                       <div key={step.id || step.action} className="meta-line">
                         {(step.id || "step").replaceAll("_", " ")}: {step.action} ({step.reason})
+                        {step.instructions ? ` · ${step.instructions}` : ""}
                       </div>
                     ))}
+                  </div>
+                ) : null}
+              </div>
+              <div className="model-list">
+                {!supportRemediationResult ? <p className="empty">Execute safe steps to apply registry/model changes.</p> : null}
+                {supportRemediationResult ? (
+                  <div className="model-row">
+                    <div className="model-head">
+                      <span>Remediation Execute</span>
+                      <span className={`badge ${supportRemediationResult.ok ? "health-ok" : "health-degraded"}`}>
+                        {supportRemediationResult.ok ? "ok" : "error"}
+                      </span>
+                    </div>
+                    <div className="meta-line">
+                      executed {(supportRemediationResult.executed_steps || []).length} · blocked{" "}
+                      {(supportRemediationResult.blocked_steps || []).length} · failed{" "}
+                      {(supportRemediationResult.failed_steps || []).length}
+                    </div>
+                    <div className="meta-line">{supportRemediationResult.message || "n/a"}</div>
                   </div>
                 ) : null}
               </div>

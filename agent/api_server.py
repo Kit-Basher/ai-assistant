@@ -71,6 +71,7 @@ from agent.llm.notifications import (
 from agent.llm.notify_delivery import DeliveryResult, LocalTarget, TelegramTarget
 from agent.llm.probes import probe_model, probe_provider
 from agent.llm.provider_validation import validate_provider_call_format
+from agent.llm.remediation import build_llm_remediation_plan
 from agent.llm.registry_txn import RegistrySnapshotStore, apply_with_rollback
 from agent.llm.self_heal import (
     apply_self_heal_plan,
@@ -80,7 +81,6 @@ from agent.llm.self_heal import (
 from agent.llm.support import (
     build_model_diagnosis,
     build_provider_diagnosis,
-    build_support_remediation_plan,
     sanitize_support_payload,
 )
 from agent.llm.registry import RegistryStore
@@ -2002,7 +2002,7 @@ class AgentRuntime:
                 "provider": provider_key,
                 "model": model_override,
                 "error": error_kind,
-                "error_kind": ("upstream_down" if error_kind == "payment_required" else error_kind),
+                "error_kind": error_kind,
                 "status_code": exc.status_code,
                 "message": message,
                 "models_probe": models_probe,
@@ -4450,14 +4450,184 @@ class AgentRuntime:
             if not ok:
                 return False, {"ok": False, "error": "target_not_found"}
             diagnosis = body.get("diagnosis") if isinstance(body.get("diagnosis"), dict) else None
-        plan = build_support_remediation_plan(
+        defaults = self._ensure_defaults(self.registry_document)
+        health_summary = self._health_monitor.summary(self.registry_document)
+        model_watch_state = normalize_model_watch_state(self._model_watch_store.load())
+        latest_batch = summarize_model_watch_batch(latest_model_watch_batch(model_watch_state))
+        last_error_kind = (
+            str(payload.get("last_error_kind") or "").strip().lower()
+            or str((diagnosis or {}).get("last_error_kind") or "").strip().lower()
+            or None
+        )
+        last_status_code: int | None
+        try:
+            last_status_code = int(payload.get("status_code")) if payload.get("status_code") is not None else None
+        except (TypeError, ValueError):
+            last_status_code = None
+        if last_status_code is None:
+            try:
+                last_status_code = int((diagnosis or {}).get("status_code")) if (diagnosis or {}).get("status_code") is not None else None
+            except (TypeError, ValueError):
+                last_status_code = None
+        last_error = (
+            str(payload.get("error") or "").strip()
+            or str(payload.get("detail") or "").strip()
+            or None
+        )
+        plan = build_llm_remediation_plan(
+            registry_snapshot=self.registry_document if isinstance(self.registry_document, dict) else {},
+            defaults=defaults,
+            health_summary=health_summary if isinstance(health_summary, dict) else {},
+            last_error_kind=last_error_kind,
+            last_status_code=last_status_code,
+            last_error=last_error,
+            safe_mode=self._safe_mode_health_payload(),
+            routing_mode=str(defaults.get("routing_mode") or ""),
+            latest_model_watch_batch=latest_batch,
+            ollama_model_fallback=self.config.ollama_model,
             target=target,
             intent=intent,
-            diagnosis=diagnosis,
-            drift_report=self._current_drift_report(),
-            safe_mode_enabled=bool(self._effective_safe_mode()),
         )
         return True, {"ok": True, "plan": plan}
+
+    def llm_support_remediate_execute(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        confirm = bool(payload.get("confirm", False))
+        actor = str(payload.get("actor") or "user").strip() or "user"
+        if not confirm:
+            return False, {"ok": False, "error": "confirmation_required", "message": "confirm=true is required"}
+
+        plan_ok, plan_body = self.llm_support_remediate_plan(payload)
+        if not plan_ok:
+            return False, plan_body
+        plan = plan_body.get("plan") if isinstance(plan_body.get("plan"), dict) else {}
+        steps = plan.get("steps") if isinstance(plan.get("steps"), list) else []
+
+        executed_steps: list[dict[str, Any]] = []
+        blocked_steps: list[dict[str, Any]] = []
+        failed_steps: list[dict[str, Any]] = []
+        user_actions: list[dict[str, Any]] = []
+
+        for index, raw_step in enumerate(steps, start=1):
+            step = raw_step if isinstance(raw_step, dict) else {}
+            step_id = str(step.get("id") or f"step_{index}")
+            kind = str(step.get("kind") or "").strip().lower()
+            action = str(step.get("action") or "").strip()
+            reason = str(step.get("reason") or "").strip()
+            params = step.get("params") if isinstance(step.get("params"), dict) else {}
+            instructions = str(step.get("instructions") or "").strip()
+            safe_to_execute = bool(step.get("safe_to_execute", False))
+
+            if kind == "user_action":
+                user_actions.append(
+                    {
+                        "id": step_id,
+                        "action": action,
+                        "reason": reason,
+                        "instructions": instructions,
+                    }
+                )
+                continue
+
+            if not safe_to_execute:
+                blocked_steps.append(
+                    {
+                        "id": step_id,
+                        "action": action,
+                        "reason": reason or "step_not_marked_safe",
+                        "error": "unsafe_step",
+                    }
+                )
+                continue
+
+            if not action.startswith("modelops."):
+                blocked_steps.append(
+                    {
+                        "id": step_id,
+                        "action": action,
+                        "reason": reason or "unsupported_safe_step",
+                        "error": "unsupported_action",
+                    }
+                )
+                continue
+
+            plan_preview_ok, plan_preview = self.modelops_plan(
+                {
+                    "action": action,
+                    "params": params,
+                    "dry_run": False,
+                    "actor": actor,
+                }
+            )
+            if not plan_preview_ok or not bool(plan_preview.get("ok")):
+                blocked_steps.append(
+                    {
+                        "id": step_id,
+                        "action": action,
+                        "reason": reason or "planning_failed",
+                        "error": str(plan_preview.get("error") or "plan_failed"),
+                    }
+                )
+                continue
+
+            decision = plan_preview.get("decision") if isinstance(plan_preview.get("decision"), dict) else {}
+            if not bool(decision.get("allow")):
+                blocked_steps.append(
+                    {
+                        "id": step_id,
+                        "action": action,
+                        "reason": str(decision.get("reason") or reason or "policy_deny"),
+                        "error": "policy_deny",
+                    }
+                )
+                continue
+
+            execute_ok, execute_body = self.modelops_execute(
+                {
+                    "action": action,
+                    "params": params,
+                    "confirm": True,
+                    "dry_run": False,
+                    "actor": actor,
+                }
+            )
+            if not execute_ok:
+                failed_steps.append(
+                    {
+                        "id": step_id,
+                        "action": action,
+                        "reason": reason or "execution_failed",
+                        "error": str(execute_body.get("error") or "execution_failed"),
+                    }
+                )
+                continue
+            executed_steps.append(
+                {
+                    "id": step_id,
+                    "action": action,
+                    "reason": reason,
+                    "result": execute_body.get("result"),
+                }
+            )
+
+        if failed_steps:
+            message = "Some remediation steps failed during execution."
+        elif blocked_steps:
+            message = "Some remediation steps were blocked by policy or require user action."
+        elif executed_steps:
+            message = "Safe remediation steps executed."
+        else:
+            message = "No executable remediation steps were found."
+
+        return (False if failed_steps else True), {
+            "ok": False if failed_steps else True,
+            "applied": bool(executed_steps) and not blocked_steps and not failed_steps,
+            "message": message,
+            "plan": plan,
+            "executed_steps": executed_steps,
+            "blocked_steps": blocked_steps,
+            "failed_steps": failed_steps,
+            "user_actions": user_actions,
+        }
 
     def llm_notifications_mark_read(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         read_hash = str(payload.get("hash") or "").strip()
@@ -7829,9 +7999,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             context={"route": "/chat", "health_state": self.runtime._health_monitor.state},  # noqa: SLF001
                         )
                     )
-                    if body["error_kind"] == "upstream_down":
+                    if body["error_kind"] in {"upstream_down", "payment_required"}:
                         body["message"] = friendly_error_message(
-                            error_kind="upstream_down",
+                            error_kind=str(body["error_kind"]),
                             current_message=body["message"],
                             context={
                                 "route": "/chat",
@@ -8007,6 +8177,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/llm/support/remediate/plan":
                 ok, body = self.runtime.llm_support_remediate_plan(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/support/remediate/execute":
+                ok, body = self.runtime.llm_support_remediate_execute(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/registry/rollback":
