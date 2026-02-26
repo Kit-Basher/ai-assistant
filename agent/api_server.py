@@ -25,6 +25,7 @@ from agent.config import Config, load_config
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import bad_request_next_question, friendly_error_message
 from agent.fallback_ladder import run_with_fallback
+from agent.intent.low_confidence import detect_low_confidence
 from agent.logging_utils import log_event
 from agent.model_watch import (
     ModelWatchStore,
@@ -40,7 +41,7 @@ from agent.model_watch_catalog import (
     write_snapshot_atomic as write_model_watch_catalog_snapshot,
 )
 from agent.model_watch_skill import run_watch_once_for_config
-from agent.response_envelope import failure, ok_result
+from agent.response_envelope import failure, ok_result, validate_envelope
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog, redact as redact_audit_value
@@ -7563,6 +7564,98 @@ class APIServerHandler(BaseHTTPRequestHandler):
         seed = f"{time.time_ns()}|{os.getpid()}|{getattr(self, 'path', '')}"
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
+    @staticmethod
+    def _extract_user_text_for_low_confidence(payload: dict[str, Any]) -> str:
+        body = payload if isinstance(payload, dict) else {}
+        for key in ("text", "message", "content", "input", "query"):
+            raw = body.get(key)
+            if not isinstance(raw, str):
+                continue
+            value = raw.strip()
+            if value:
+                return value
+        raw_messages = body.get("messages")
+        if isinstance(raw_messages, list):
+            for row in reversed(raw_messages):
+                if not isinstance(row, dict):
+                    continue
+                role = str(row.get("role") or "").strip().lower() or "user"
+                if role != "user":
+                    continue
+                content = row.get("content")
+                if isinstance(content, str):
+                    value = content.strip()
+                    if value:
+                        return value
+                    continue
+                if isinstance(content, list):
+                    parts: list[str] = []
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        text_value = part.get("text")
+                        if isinstance(text_value, str):
+                            stripped = text_value.strip()
+                            if stripped:
+                                parts.append(stripped)
+                    if parts:
+                        return " ".join(parts)
+        return ""
+
+    @staticmethod
+    def _has_explicit_user_message(payload: dict[str, Any]) -> bool:
+        body = payload if isinstance(payload, dict) else {}
+        raw_messages = body.get("messages")
+        if not isinstance(raw_messages, list):
+            return False
+        for row in raw_messages:
+            if not isinstance(row, dict):
+                continue
+            role = str(row.get("role") or "").strip().lower()
+            if role != "user":
+                continue
+            content = row.get("content")
+            if isinstance(content, str) and content.strip():
+                return True
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    text_value = part.get("text")
+                    if isinstance(text_value, str) and text_value.strip():
+                        return True
+        return False
+
+    @staticmethod
+    def _clarification_payload(*, intent: str, trace_id: str, next_question: str) -> dict[str, Any]:
+        envelope = validate_envelope(
+            {
+                "ok": True,
+                "intent": intent,
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": str(next_question or "").strip(),
+                "next_question": str(next_question or "").strip(),
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+            }
+        )
+        return {
+            "ok": envelope["ok"],
+            "intent": envelope["intent"],
+            "confidence": envelope["confidence"],
+            "did_work": envelope["did_work"],
+            "error_kind": envelope["error_kind"],
+            "message": envelope["message"],
+            "next_question": envelope["next_question"],
+            "actions": envelope["actions"],
+            "errors": envelope["errors"],
+            "trace_id": envelope["trace_id"],
+            "envelope": envelope,
+        }
+
     def _error_envelope_payload(
         self,
         *,
@@ -7832,6 +7925,21 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if path in {"/chat", "/ask"}:
+                trace_id = self._request_trace_id(payload)
+                input_text = self._extract_user_text_for_low_confidence(payload)
+                low_confidence = detect_low_confidence(input_text)
+                if low_confidence.is_low_confidence and not self._has_explicit_user_message(payload):
+                    intent_name = "ask" if path == "/ask" else "chat"
+                    self._send_json(
+                        200,
+                        self._clarification_payload(
+                            intent=intent_name,
+                            trace_id=trace_id,
+                            next_question=low_confidence.next_question,
+                        ),
+                    )
+                    return
             if path in {"/ask", "/done"}:
                 command = path
                 prompt_text = (
