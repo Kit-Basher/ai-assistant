@@ -73,4 +73,34 @@ def build_clarification_plan(
     )
 
 
-__all__ = ["ClarificationPlan", "build_clarification_plan"]
+def build_thread_integrity_plan(
+    *,
+    user_text_norm: str,
+    drift_reason: str,
+    intent: str,
+) -> ClarificationPlan:
+    normalized_intent = str(intent or "").strip().lower() or "chat"
+    normalized_user_text = str(user_text_norm or "").strip()
+    normalized_reason = str(drift_reason or "").strip().lower() or "topic_shift"
+
+    if normalized_reason in {"explicit_switch", "reset_request"}:
+        message = "Do you want to start a new thread for this?"
+    else:
+        message = "Are we continuing the current thread, or should I treat this as a new request?"
+
+    hints = ["Reply: 'new thread' or 'same thread'.", "If new, restate the goal in one sentence."]
+    return ClarificationPlan(
+        message=message,
+        next_question=message,
+        reason="thread_integrity",
+        hints=hints,
+        suggested_intents=[],
+        debug={
+            "intent": normalized_intent,
+            "drift_reason": normalized_reason,
+            "user_text_norm": normalized_user_text,
+        },
+    )
+
+
+__all__ = ["ClarificationPlan", "build_clarification_plan", "build_thread_integrity_plan"]

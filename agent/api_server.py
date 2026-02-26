@@ -25,8 +25,9 @@ from agent.config import Config, load_config
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import bad_request_next_question, friendly_error_message
 from agent.fallback_ladder import run_with_fallback
-from agent.intent.clarification import build_clarification_plan
+from agent.intent.clarification import build_clarification_plan, build_thread_integrity_plan
 from agent.intent.low_confidence import detect_low_confidence
+from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
 from agent.model_watch import (
     ModelWatchStore,
@@ -7566,6 +7567,24 @@ class APIServerHandler(BaseHTTPRequestHandler):
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
+    def _message_content_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                text_value = part.get("text")
+                if isinstance(text_value, str):
+                    stripped = text_value.strip()
+                    if stripped:
+                        parts.append(stripped)
+            if parts:
+                return " ".join(parts)
+        return ""
+
+    @staticmethod
     def _extract_user_text_for_low_confidence(payload: dict[str, Any]) -> str:
         body = payload if isinstance(payload, dict) else {}
         for key in ("text", "message", "content", "input", "query"):
@@ -7583,24 +7602,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 role = str(row.get("role") or "").strip().lower() or "user"
                 if role != "user":
                     continue
-                content = row.get("content")
-                if isinstance(content, str):
-                    value = content.strip()
-                    if value:
-                        return value
-                    continue
-                if isinstance(content, list):
-                    parts: list[str] = []
-                    for part in content:
-                        if not isinstance(part, dict):
-                            continue
-                        text_value = part.get("text")
-                        if isinstance(text_value, str):
-                            stripped = text_value.strip()
-                            if stripped:
-                                parts.append(stripped)
-                    if parts:
-                        return " ".join(parts)
+                value = APIServerHandler._message_content_text(row.get("content"))
+                if value:
+                    return value
         return ""
 
     @staticmethod
@@ -7615,17 +7619,85 @@ class APIServerHandler(BaseHTTPRequestHandler):
             role = str(row.get("role") or "").strip().lower()
             if role != "user":
                 continue
-            content = row.get("content")
-            if isinstance(content, str) and content.strip():
+            if APIServerHandler._message_content_text(row.get("content")):
                 return True
-            if isinstance(content, list):
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    text_value = part.get("text")
-                    if isinstance(text_value, str) and text_value.strip():
-                        return True
         return False
+
+    @staticmethod
+    def _extract_recent_context_for_thread_integrity(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+        body = payload if isinstance(payload, dict) else {}
+        raw_messages = body.get("messages")
+        if not isinstance(raw_messages, list):
+            return None, None
+        user_messages: list[str] = []
+        last_assistant_message: str | None = None
+        for row in raw_messages:
+            if not isinstance(row, dict):
+                continue
+            role = str(row.get("role") or "").strip().lower()
+            content_text = APIServerHandler._message_content_text(row.get("content"))
+            normalized = normalize_thread_text(content_text)
+            if not normalized:
+                continue
+            if role == "user":
+                user_messages.append(normalized)
+                continue
+            if role == "assistant":
+                last_assistant_message = normalized
+        last_user_message = user_messages[-2] if len(user_messages) >= 2 else None
+        return last_user_message, last_assistant_message
+
+    @staticmethod
+    def _thread_integrity_payload(
+        *,
+        intent: str,
+        trace_id: str,
+        user_text_norm: str,
+        drift_reason: str,
+        thread_debug: dict[str, Any],
+    ) -> dict[str, Any]:
+        plan = build_thread_integrity_plan(
+            user_text_norm=user_text_norm,
+            drift_reason=drift_reason,
+            intent=intent,
+        )
+        envelope = validate_envelope(
+            {
+                "ok": True,
+                "intent": intent,
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": str(plan.message or "").strip(),
+                "next_question": str(plan.next_question or "").strip(),
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+            }
+        )
+        envelope_payload = dict(envelope)
+        envelope_payload["clarification"] = {
+            "reason": plan.reason,
+            "hints": list(plan.hints),
+            "suggested_intents": list(plan.suggested_intents),
+        }
+        envelope_payload["thread_integrity"] = {
+            "reason": str(drift_reason or "").strip().lower() or "topic_shift",
+            "debug": dict(thread_debug),
+        }
+        return {
+            "ok": bool(envelope_payload.get("ok", False)),
+            "intent": envelope_payload.get("intent", "chat"),
+            "confidence": float(envelope_payload.get("confidence", 0.0)),
+            "did_work": bool(envelope_payload.get("did_work", False)),
+            "error_kind": envelope_payload.get("error_kind", "internal_error"),
+            "message": envelope_payload.get("message") or "Internal error.",
+            "next_question": envelope_payload.get("next_question"),
+            "actions": envelope_payload.get("actions", []),
+            "errors": envelope_payload.get("errors", ["internal_error"]),
+            "trace_id": envelope_payload.get("trace_id") or "trace_unknown",
+            "envelope": envelope_payload,
+        }
 
     @staticmethod
     def _clarification_payload(
@@ -7949,9 +8021,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 trace_id = self._request_trace_id(payload)
                 input_text = self._extract_user_text_for_low_confidence(payload)
                 low_confidence = detect_low_confidence(input_text)
+                intent_name = "ask" if path == "/ask" else "chat"
+                norm_text = str(low_confidence.debug.get("norm") or "")
                 if low_confidence.is_low_confidence and not self._has_explicit_user_message(payload):
-                    intent_name = "ask" if path == "/ask" else "chat"
-                    norm_text = str(low_confidence.debug.get("norm") or "")
                     self._send_json(
                         200,
                         self._clarification_payload(
@@ -7960,6 +8032,26 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             raw_text=input_text,
                             norm_text=norm_text,
                             detector_reason=low_confidence.reason,
+                        ),
+                    )
+                    return
+                last_user_text_norm, last_assistant_text_norm = self._extract_recent_context_for_thread_integrity(payload)
+                thread_integrity = detect_thread_drift(
+                    user_text_raw=input_text,
+                    user_text_norm=norm_text,
+                    intent=intent_name,
+                    last_user_text_norm=last_user_text_norm,
+                    last_assistant_text_norm=last_assistant_text_norm,
+                )
+                if thread_integrity.is_thread_drift:
+                    self._send_json(
+                        200,
+                        self._thread_integrity_payload(
+                            intent=intent_name,
+                            trace_id=trace_id,
+                            user_text_norm=norm_text,
+                            drift_reason=thread_integrity.reason,
+                            thread_debug=thread_integrity.debug,
                         ),
                     )
                     return

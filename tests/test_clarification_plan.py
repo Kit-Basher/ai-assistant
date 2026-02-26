@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from agent.intent.clarification import build_clarification_plan
+from agent.intent.clarification import build_clarification_plan, build_thread_integrity_plan
 
 
 class TestClarificationPlan(unittest.TestCase):
@@ -34,6 +34,25 @@ class TestClarificationPlan(unittest.TestCase):
                     detector_reason=reason,
                     intent="chat",
                 ).message)
+
+    def test_thread_integrity_plan_messages(self) -> None:
+        explicit = build_thread_integrity_plan(
+            user_text_norm="switch topics",
+            drift_reason="explicit_switch",
+            intent="chat",
+        )
+        self.assertEqual("thread_integrity", explicit.reason)
+        self.assertIn("start a new thread", explicit.message)
+        self.assertEqual(explicit.message, explicit.next_question)
+
+        shifted = build_thread_integrity_plan(
+            user_text_norm="recipe request",
+            drift_reason="topic_shift",
+            intent="chat",
+        )
+        self.assertEqual("thread_integrity", shifted.reason)
+        self.assertIn("continuing the current thread", shifted.message)
+        self.assertEqual([], shifted.suggested_intents)
 
 
 if __name__ == "__main__":

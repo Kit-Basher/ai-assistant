@@ -1483,6 +1483,53 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(["needs_clarification"], payload.get("errors"))
         self.assertEqual(payload.get("message"), payload.get("next_question"))
 
+    def test_chat_thread_integrity_drift_returns_clarification_contract(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        payload = {
+            "messages": [
+                {"role": "user", "content": "help me debug a python traceback"},
+                {"role": "assistant", "content": "sure paste the traceback"},
+                {
+                    "role": "user",
+                    "content": "can you help with this traceback and also write a dinner recipe for chicken and rice tonight?",
+                },
+            ]
+        }
+        handler = _HandlerForTest(runtime, payload)
+        with patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+            handler.do_POST()
+
+        response = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, response.get("ok"))
+        self.assertEqual("needs_clarification", response.get("error_kind"))
+        envelope = response.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        self.assertTrue(isinstance((envelope or {}).get("clarification"), dict))
+        thread_integrity = (envelope or {}).get("thread_integrity")
+        self.assertTrue(isinstance(thread_integrity, dict))
+        self.assertIn(
+            str((thread_integrity or {}).get("reason") or ""),
+            {"multi_intent", "topic_shift"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
