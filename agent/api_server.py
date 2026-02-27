@@ -121,6 +121,7 @@ _PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 _MEMORY_V2_BOOTSTRAP_COMPLETED_KEY = "memory_v2.bootstrap_completed"
 _MEMORY_V2_BOOTSTRAP_COMPLETED_AT_KEY = "memory_v2.bootstrap_completed_at"
+_MEMORY_V2_LAST_BOOTSTRAP_TS_KEY = "memory_v2.last_bootstrap_ts"
 _MEMORY_V2_GREETED_ONCE_KEY = "memory_v2.greeted_once"
 _BOOTSTRAP_GREETING_TEXT = "Hi — I’m here and ready to help. What can I do for you?"
 _AUTOPILOT_APPLY_ACTIONS = {
@@ -2403,6 +2404,11 @@ class AgentRuntime:
             str(int(now_ts)),
             updated_at=int(now_ts),
         )
+        self._memory_v2_store.set_state(
+            _MEMORY_V2_LAST_BOOTSTRAP_TS_KEY,
+            str(int(now_ts)),
+            updated_at=int(now_ts),
+        )
 
     def _memory_v2_greeted_once(self) -> bool:
         if self._memory_v2_store is None:
@@ -2426,6 +2432,82 @@ class AgentRuntime:
         now_ts = int(time.time())
         self._set_memory_v2_greeted_once(now_ts=now_ts)
         return _BOOTSTRAP_GREETING_TEXT
+
+    def run_memory_v2_bootstrap(
+        self,
+        *,
+        source_ref: str,
+        promote_semantic: bool,
+        reason: str | None = None,
+        now_ts: int | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        if not bool(self.config.memory_v2_enabled):
+            return False, {
+                "ok": False,
+                "error": "memory_v2_disabled",
+                "message": "memory_v2 is disabled.",
+            }
+        if self._memory_v2_store is None:
+            return False, {
+                "ok": False,
+                "error": "memory_v2_store_unavailable",
+                "message": "memory_v2 store is unavailable.",
+            }
+        run_ts = int(now_ts if now_ts is not None else int(time.time()))
+        try:
+            snapshot = collect_bootstrap_snapshot(self, now_ts=run_ts)
+            ingest_result = ingest_bootstrap_snapshot(
+                store=self._memory_v2_store,
+                snapshot=snapshot,
+                source_ref=str(source_ref or "bootstrap_run"),
+                promote_semantic=bool(promote_semantic),
+                now_ts=run_ts,
+                trigger_reason=reason,
+            )
+            self._set_memory_v2_bootstrap_completed(now_ts=run_ts)
+            if self._memory_v2_store.get_state(_MEMORY_V2_GREETED_ONCE_KEY) is None:
+                self._memory_v2_store.set_state(_MEMORY_V2_GREETED_ONCE_KEY, "0", updated_at=run_ts)
+            self._memory_v2_bootstrap_status = {
+                "ran": True,
+                "ok": True,
+                "created_at_ts": int(snapshot.created_at_ts),
+                "episodic_count": len(ingest_result.get("episodic_ids") or []),
+                "semantic_count": len((ingest_result.get("semantic_updates") or {}).get("inserted") or []),
+            }
+            log_event(
+                self.config.log_path,
+                "memory_v2_bootstrap",
+                {
+                    "ok": True,
+                    "created_at_ts": int(snapshot.created_at_ts),
+                    "episodic_count": len(ingest_result.get("episodic_ids") or []),
+                    "semantic_count": len((ingest_result.get("semantic_updates") or {}).get("inserted") or []),
+                    "source_ref": str(source_ref or "bootstrap_run"),
+                    "promote_semantic": bool(promote_semantic),
+                },
+            )
+            return True, {
+                "ok": True,
+                "created_at_ts": int(snapshot.created_at_ts),
+                "notes": list(snapshot.notes),
+                "ingest": ingest_result,
+            }
+        except Exception as exc:
+            self._memory_v2_bootstrap_status = {"ran": True, "ok": False, "reason": exc.__class__.__name__}
+            log_event(
+                self.config.log_path,
+                "memory_v2_bootstrap",
+                {
+                    "ok": False,
+                    "error": exc.__class__.__name__,
+                    "source_ref": str(source_ref or "bootstrap_run"),
+                },
+            )
+            return False, {
+                "ok": False,
+                "error": "bootstrap_failed",
+                "message": f"Bootstrap failed: {exc.__class__.__name__}",
+            }
 
     def _initialize_memory_v2_bootstrap(self) -> None:
         if not bool(self.config.memory_v2_enabled):
@@ -9182,6 +9264,119 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         "envelope": envelope,
                     }
                 self._send_json(200 if ok else 400, body)
+                return
+            if path == "/bootstrap/run":
+                trace_id = self._request_trace_id(payload)
+                if payload.get("force") is not True:
+                    question = 'Include {"force": true} to run bootstrap snapshot?'
+                    envelope = validate_envelope(
+                        {
+                            "ok": True,
+                            "intent": "bootstrap",
+                            "confidence": 0.0,
+                            "did_work": False,
+                            "error_kind": "needs_clarification",
+                            "message": question,
+                            "next_question": question,
+                            "actions": [],
+                            "errors": ["needs_clarification"],
+                            "trace_id": trace_id,
+                        }
+                    )
+                    self._send_json(
+                        200,
+                        {
+                            "ok": bool(envelope.get("ok", False)),
+                            "intent": envelope.get("intent", "bootstrap"),
+                            "confidence": float(envelope.get("confidence", 0.0)),
+                            "did_work": bool(envelope.get("did_work", False)),
+                            "error_kind": envelope.get("error_kind", "needs_clarification"),
+                            "message": envelope.get("message") or question,
+                            "next_question": envelope.get("next_question"),
+                            "actions": envelope.get("actions", []),
+                            "errors": envelope.get("errors", ["needs_clarification"]),
+                            "trace_id": envelope.get("trace_id") or trace_id,
+                            "envelope": envelope,
+                        },
+                    )
+                    return
+
+                promote_semantic = bool(payload.get("promote_semantic", True))
+                reason = str(payload.get("reason") or "").strip() or None
+                ok, body = self.runtime.run_memory_v2_bootstrap(
+                    source_ref=f"api_bootstrap_run:{trace_id}",
+                    promote_semantic=promote_semantic,
+                    reason=reason,
+                )
+                if not ok:
+                    body = body if isinstance(body, dict) else {}
+                    error_kind = classify_error_kind(payload=body, context={"route": "/bootstrap/run"})
+                    message = (
+                        str(body.get("message") or "").strip()
+                        or str(body.get("detail") or "").strip()
+                        or str(body.get("error") or "").strip()
+                        or "Bootstrap run failed."
+                    )
+                    envelope = failure(
+                        message,
+                        intent="bootstrap",
+                        error_kind=error_kind,
+                        trace_id=trace_id,
+                        errors=[str(body.get("error") or "bootstrap_failed")],
+                    )
+                    self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": str(body.get("error") or "bootstrap_failed"),
+                            "error_kind": envelope["error_kind"],
+                            "message": envelope["message"],
+                            "trace_id": envelope["trace_id"],
+                            "envelope": envelope,
+                        },
+                    )
+                    return
+
+                body = body if isinstance(body, dict) else {}
+                ingest = body.get("ingest") if isinstance(body.get("ingest"), dict) else {}
+                semantic_updates = ingest.get("semantic_updates") if isinstance(ingest.get("semantic_updates"), dict) else {}
+                inserted = semantic_updates.get("inserted") if isinstance(semantic_updates.get("inserted"), list) else []
+                episodic_ids = ingest.get("episodic_ids") if isinstance(ingest.get("episodic_ids"), list) else []
+                message = (
+                    "Bootstrap snapshot captured. "
+                    f"Updated {len(inserted)} semantic facts; recorded {len(episodic_ids)} episodic sections."
+                )
+                envelope = ok_result(
+                    intent="bootstrap",
+                    message=message,
+                    confidence=1.0,
+                    did_work=True,
+                    trace_id=trace_id,
+                )
+                envelope_payload = dict(envelope)
+                envelope_payload["bootstrap"] = {
+                    "completed": True,
+                    "snapshot_ts": int(body.get("created_at_ts") or int(time.time())),
+                    "episodic_ids": [str(item) for item in episodic_ids],
+                    "semantic_updates": semantic_updates,
+                    "notes": [str(item) for item in (body.get("notes") if isinstance(body.get("notes"), list) else [])],
+                }
+                self._send_json(
+                    200,
+                    {
+                        "ok": bool(envelope_payload.get("ok", False)),
+                        "intent": envelope_payload.get("intent", "bootstrap"),
+                        "confidence": float(envelope_payload.get("confidence", 0.0)),
+                        "did_work": bool(envelope_payload.get("did_work", False)),
+                        "error_kind": envelope_payload.get("error_kind"),
+                        "message": envelope_payload.get("message") or message,
+                        "next_question": envelope_payload.get("next_question"),
+                        "actions": envelope_payload.get("actions", []),
+                        "errors": envelope_payload.get("errors", []),
+                        "trace_id": envelope_payload.get("trace_id") or trace_id,
+                        "envelope": envelope_payload,
+                    },
+                )
                 return
             if path == "/llm/models/check":
                 ok, body = self.runtime.llm_models_check(payload)

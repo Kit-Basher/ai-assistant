@@ -5,7 +5,7 @@ import json
 import os
 import sqlite3
 import time
-from typing import Protocol
+from typing import Any, Protocol
 
 from agent.memory_v2.types import MemoryItem, MemoryLevel
 
@@ -20,10 +20,16 @@ CREATE TABLE IF NOT EXISTS memory_items (
     tags_json TEXT NOT NULL,
     source_kind TEXT NOT NULL,
     source_ref TEXT NOT NULL,
-    pinned INTEGER NOT NULL DEFAULT 0
+    pinned INTEGER NOT NULL DEFAULT 0,
+    fact_key TEXT,
+    fact_group TEXT,
+    superseded_at INTEGER,
+    is_current INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS idx_memory_items_level_updated
     ON memory_items(level, updated_at DESC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_memory_items_semantic_current
+    ON memory_items(level, fact_group, fact_key, is_current, updated_at DESC, id ASC);
 
 CREATE TABLE IF NOT EXISTS memory_events (
     id TEXT PRIMARY KEY,
@@ -48,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_bootstrap_state_updated
 
 
 class MemoryStorage(Protocol):
-    def list_memory_items(self, *, level: MemoryLevel) -> list[MemoryItem]:
+    def list_memory_items(self, *, level: MemoryLevel, include_history: bool = False) -> list[MemoryItem]:
         ...
 
     def list_episodic_events(self, *, limit: int = 500) -> list[MemoryItem]:
@@ -72,9 +78,23 @@ class SQLiteMemoryStore:
         conn = self._connect()
         try:
             conn.executescript(_SCHEMA_SQL)
+            self._ensure_memory_items_columns(conn)
             conn.commit()
         finally:
             conn.close()
+
+    def _ensure_memory_items_columns(self, conn: sqlite3.Connection) -> None:
+        cur = conn.execute("PRAGMA table_info(memory_items)")
+        rows = cur.fetchall()
+        existing = {str(row["name"]) for row in rows}
+        if "fact_key" not in existing:
+            conn.execute("ALTER TABLE memory_items ADD COLUMN fact_key TEXT")
+        if "fact_group" not in existing:
+            conn.execute("ALTER TABLE memory_items ADD COLUMN fact_group TEXT")
+        if "superseded_at" not in existing:
+            conn.execute("ALTER TABLE memory_items ADD COLUMN superseded_at INTEGER")
+        if "is_current" not in existing:
+            conn.execute("ALTER TABLE memory_items ADD COLUMN is_current INTEGER NOT NULL DEFAULT 1")
 
     @staticmethod
     def _normalize_tags(tags: dict[str, str] | None) -> dict[str, str]:
@@ -121,6 +141,10 @@ class SQLiteMemoryStore:
     @staticmethod
     def _row_to_item(row: sqlite3.Row) -> MemoryItem:
         level = SQLiteMemoryStore._coerce_level(str(row["level"]))
+        fact_key_raw = row["fact_key"] if "fact_key" in row.keys() else None
+        fact_group_raw = row["fact_group"] if "fact_group" in row.keys() else None
+        superseded_raw = row["superseded_at"] if "superseded_at" in row.keys() else None
+        is_current_raw = row["is_current"] if "is_current" in row.keys() else 1
         return MemoryItem(
             id=str(row["id"]),
             level=level,
@@ -131,6 +155,12 @@ class SQLiteMemoryStore:
             source_kind=str(row["source_kind"]),
             source_ref=str(row["source_ref"]),
             pinned=bool(int(row["pinned"])),
+            fact_key=str(fact_key_raw).strip() if fact_key_raw is not None and str(fact_key_raw).strip() else None,
+            fact_group=(
+                str(fact_group_raw).strip() if fact_group_raw is not None and str(fact_group_raw).strip() else None
+            ),
+            superseded_at=int(superseded_raw) if superseded_raw is not None else None,
+            is_current=bool(int(is_current_raw)),
         )
 
     def upsert_memory_item(self, item: MemoryItem) -> MemoryItem:
@@ -151,14 +181,19 @@ class SQLiteMemoryStore:
             str(item.source_kind or "unknown"),
             str(item.source_ref or ""),
             1 if bool(item.pinned) else 0,
+            str(item.fact_key).strip() if item.fact_key is not None and str(item.fact_key).strip() else None,
+            str(item.fact_group).strip() if item.fact_group is not None and str(item.fact_group).strip() else None,
+            int(item.superseded_at) if item.superseded_at is not None else None,
+            1 if bool(item.is_current) else 0,
         )
         conn = self._connect()
         try:
             conn.execute(
                 """
                 INSERT INTO memory_items (
-                    id, level, text, created_at, updated_at, tags_json, source_kind, source_ref, pinned
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, level, text, created_at, updated_at, tags_json, source_kind, source_ref, pinned,
+                    fact_key, fact_group, superseded_at, is_current
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     level = excluded.level,
                     text = excluded.text,
@@ -167,7 +202,11 @@ class SQLiteMemoryStore:
                     tags_json = excluded.tags_json,
                     source_kind = excluded.source_kind,
                     source_ref = excluded.source_ref,
-                    pinned = excluded.pinned
+                    pinned = excluded.pinned,
+                    fact_key = excluded.fact_key,
+                    fact_group = excluded.fact_group,
+                    superseded_at = excluded.superseded_at,
+                    is_current = excluded.is_current
                 """,
                 payload,
             )
@@ -184,6 +223,12 @@ class SQLiteMemoryStore:
             source_kind=str(item.source_kind or "unknown"),
             source_ref=str(item.source_ref or ""),
             pinned=bool(item.pinned),
+            fact_key=str(item.fact_key).strip() if item.fact_key is not None and str(item.fact_key).strip() else None,
+            fact_group=(
+                str(item.fact_group).strip() if item.fact_group is not None and str(item.fact_group).strip() else None
+            ),
+            superseded_at=int(item.superseded_at) if item.superseded_at is not None else None,
+            is_current=bool(item.is_current),
         )
 
     def append_episodic_event(
@@ -268,25 +313,81 @@ class SQLiteMemoryStore:
             )
         return output
 
-    def list_memory_items(self, *, level: MemoryLevel) -> list[MemoryItem]:
+    def list_memory_items(self, *, level: MemoryLevel, include_history: bool = False) -> list[MemoryItem]:
         normalized = self._coerce_level(level)
         if normalized == MemoryLevel.EPISODIC:
             return self.list_episodic_events(limit=500)
+        where = "WHERE level = ?"
+        params: list[Any] = [normalized.value]
+        if normalized == MemoryLevel.SEMANTIC and not include_history:
+            where += " AND is_current = 1"
         conn = self._connect()
         try:
             cur = conn.execute(
-                """
-                SELECT id, level, text, created_at, updated_at, tags_json, source_kind, source_ref, pinned
+                f"""
+                SELECT
+                    id, level, text, created_at, updated_at, tags_json, source_kind, source_ref, pinned,
+                    fact_key, fact_group, superseded_at, is_current
                 FROM memory_items
-                WHERE level = ?
+                {where}
                 ORDER BY pinned DESC, updated_at DESC, id ASC
                 """,
-                (normalized.value,),
+                tuple(params),
             )
             rows = cur.fetchall()
         finally:
             conn.close()
         return [self._row_to_item(row) for row in rows]
+
+    def get_current_semantic(self, *, fact_group: str, fact_key: str) -> MemoryItem | None:
+        group = str(fact_group or "").strip()
+        key = str(fact_key or "").strip()
+        if not group or not key:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                """
+                SELECT
+                    id, level, text, created_at, updated_at, tags_json, source_kind, source_ref, pinned,
+                    fact_key, fact_group, superseded_at, is_current
+                FROM memory_items
+                WHERE level = ? AND fact_group = ? AND fact_key = ? AND is_current = 1
+                ORDER BY updated_at DESC, id ASC
+                LIMIT 1
+                """,
+                (MemoryLevel.SEMANTIC.value, group, key),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return self._row_to_item(row)
+
+    def supersede_semantic(self, *, item_id: str, superseded_at: int) -> None:
+        identifier = str(item_id or "").strip()
+        if not identifier:
+            return
+        ts = int(superseded_at)
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                UPDATE memory_items
+                SET is_current = 0,
+                    superseded_at = ?,
+                    updated_at = CASE
+                        WHEN updated_at < ? THEN ?
+                        ELSE updated_at
+                    END
+                WHERE id = ? AND level = ?
+                """,
+                (ts, ts, ts, identifier, MemoryLevel.SEMANTIC.value),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def get_state(self, key: str) -> str | None:
         normalized = str(key or "").strip()

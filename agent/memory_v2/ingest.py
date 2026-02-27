@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from agent.bootstrap.snapshot import BootstrapSnapshot, snapshot_to_dict
@@ -35,6 +36,25 @@ def _stable_json(value: Any) -> str:
 def _semantic_id(key: str) -> str:
     slug = key.replace(".", "-").replace("_", "-")
     return f"S-bootstrap-{slug}"
+
+
+def _semantic_versioned_id(*, key: str, text: str) -> str:
+    base = _semantic_id(key)
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return f"{base}-{digest}"
+
+
+def _normalize_semantic_text(text: str) -> str:
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _normalize_reason(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    normalized = re.sub(r"\s+", " ", str(reason)).strip()
+    if not normalized:
+        return None
+    return normalized[:160]
 
 
 def _semantic_text_for_allowlist(
@@ -95,12 +115,16 @@ def ingest_bootstrap_snapshot(
     store: SQLiteMemoryStore,
     snapshot: BootstrapSnapshot,
     source_ref: str,
+    promote_semantic: bool = True,
+    now_ts: int | None = None,
+    trigger_reason: str | None = None,
 ) -> dict[str, Any]:
     snapshot_dict = snapshot_to_dict(snapshot)
-    created_at = int(snapshot.created_at_ts)
+    created_at = int(now_ts if now_ts is not None else int(snapshot.created_at_ts))
     section_to_event_id: dict[str, str] = {}
     section_payload_text: dict[str, str] = {}
     episodic_ids: list[str] = []
+    reason_tag = _normalize_reason(trigger_reason)
 
     for section in _SECTION_ORDER:
         section_payload = snapshot_dict.get(section)
@@ -113,6 +137,13 @@ def ingest_bootstrap_snapshot(
             text=section_text,
             created_at=created_at,
             tags={
+                **(
+                    {
+                        "trigger_reason": reason_tag,
+                    }
+                    if reason_tag
+                    else {}
+                ),
                 "project": "personal-agent",
                 "kind": "bootstrap_snapshot",
                 "section": section,
@@ -127,6 +158,9 @@ def ingest_bootstrap_snapshot(
     semantic_ids: list[str] = []
     promoted_keys: list[str] = []
     semantic_to_provenance: dict[str, list[str]] = {}
+    semantic_inserted: list[dict[str, str]] = []
+    semantic_unchanged: list[dict[str, str]] = []
+    semantic_superseded: list[dict[str, str]] = []
 
     key_to_section = {
         "os.name": ["os"],
@@ -136,47 +170,75 @@ def ingest_bootstrap_snapshot(
         "interfaces.available": ["interfaces"],
     }
 
-    for allowlist_key in _ALLOWLIST_KEYS:
-        semantic_text = _semantic_text_for_allowlist(
-            key=allowlist_key,
-            snapshot_dict=snapshot_dict,
-            section_payload_text=section_payload_text,
-        )
-        if not semantic_text:
-            continue
-        semantic_id = _semantic_id(allowlist_key)
-        source_event_ids = [
-            section_to_event_id[section]
-            for section in key_to_section.get(allowlist_key, [])
-            if section in section_to_event_id
-        ]
-        source_ref_value = ",".join(sorted(source_event_ids))
-        store.upsert_memory_item(
-            MemoryItem(
-                id=semantic_id,
-                level=MemoryLevel.SEMANTIC,
-                text=semantic_text,
-                created_at=created_at,
-                updated_at=created_at,
-                tags={
-                    "project": "personal-agent",
-                    "kind": "bootstrap_semantic",
-                    "allowlist_key": allowlist_key,
-                },
-                source_kind="bootstrap",
-                source_ref=source_ref_value,
-                pinned=True,
+    if bool(promote_semantic):
+        for allowlist_key in _ALLOWLIST_KEYS:
+            semantic_text = _semantic_text_for_allowlist(
+                key=allowlist_key,
+                snapshot_dict=snapshot_dict,
+                section_payload_text=section_payload_text,
             )
-        )
-        semantic_ids.append(semantic_id)
-        promoted_keys.append(allowlist_key)
-        semantic_to_provenance[semantic_id] = sorted(source_event_ids)
+            if not semantic_text:
+                continue
+            source_event_ids = [
+                section_to_event_id[section]
+                for section in key_to_section.get(allowlist_key, [])
+                if section in section_to_event_id
+            ]
+            source_ref_value = ",".join(sorted(source_event_ids))
+            current_item = store.get_current_semantic(
+                fact_group="bootstrap",
+                fact_key=allowlist_key,
+            )
+            if current_item is not None:
+                current_text = _normalize_semantic_text(current_item.text)
+                next_text = _normalize_semantic_text(semantic_text)
+                if current_text == next_text:
+                    semantic_unchanged.append({"fact_key": allowlist_key, "id": current_item.id})
+                    promoted_keys.append(allowlist_key)
+                    semantic_to_provenance[current_item.id] = sorted(
+                        [part for part in str(current_item.source_ref or "").split(",") if part]
+                    )
+                    continue
+                store.supersede_semantic(item_id=current_item.id, superseded_at=created_at)
+                semantic_superseded.append({"fact_key": allowlist_key, "id": current_item.id})
+
+            semantic_id = _semantic_versioned_id(key=allowlist_key, text=semantic_text)
+            inserted = store.upsert_memory_item(
+                MemoryItem(
+                    id=semantic_id,
+                    level=MemoryLevel.SEMANTIC,
+                    text=semantic_text,
+                    created_at=created_at,
+                    updated_at=created_at,
+                    tags={
+                        "project": "personal-agent",
+                        "kind": "bootstrap_semantic",
+                        "allowlist_key": allowlist_key,
+                    },
+                    source_kind="bootstrap",
+                    source_ref=source_ref_value,
+                    pinned=True,
+                    fact_key=allowlist_key,
+                    fact_group="bootstrap",
+                    superseded_at=None,
+                    is_current=True,
+                )
+            )
+            semantic_ids.append(inserted.id)
+            promoted_keys.append(allowlist_key)
+            semantic_inserted.append({"fact_key": allowlist_key, "id": inserted.id})
+            semantic_to_provenance[inserted.id] = sorted(source_event_ids)
 
     return {
         "created_at_ts": created_at,
         "episodic_ids": sorted(episodic_ids),
         "semantic_ids": sorted(semantic_ids),
         "promoted_keys": sorted(promoted_keys),
+        "semantic_updates": {
+            "inserted": sorted(semantic_inserted, key=lambda row: (row["fact_key"], row["id"])),
+            "unchanged": sorted(semantic_unchanged, key=lambda row: (row["fact_key"], row["id"])),
+            "superseded": sorted(semantic_superseded, key=lambda row: (row["fact_key"], row["id"])),
+        },
         "section_to_episodic_id": dict(sorted(section_to_event_id.items(), key=lambda item: item[0])),
         "semantic_provenance": {
             key: semantic_to_provenance[key]

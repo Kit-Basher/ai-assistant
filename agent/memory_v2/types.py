@@ -22,6 +22,10 @@ class MemoryItem:
     source_kind: str = "unknown"
     source_ref: str = ""
     pinned: bool = False
+    fact_key: str | None = None
+    fact_group: str | None = None
+    superseded_at: int | None = None
+    is_current: bool = True
 
 
 @dataclass(frozen=True)

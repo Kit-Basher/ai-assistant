@@ -87,29 +87,39 @@ class TestBootstrapIngest(unittest.TestCase):
             self.assertEqual(expected_os_text, os_event.text)
 
             semantic_items = store.list_memory_items(level=MemoryLevel.SEMANTIC)
-            semantic_ids = sorted(item.id for item in semantic_items)
+            self.assertEqual(5, len(semantic_items))
+            semantic_fact_keys = sorted(str(item.fact_key) for item in semantic_items)
             self.assertEqual(
                 [
-                    "S-bootstrap-capsules-installed",
-                    "S-bootstrap-hardware-gpu-available",
-                    "S-bootstrap-interfaces-available",
-                    "S-bootstrap-os-name",
-                    "S-bootstrap-providers-enabled-ids",
+                    "capsules.installed",
+                    "hardware.gpu.available",
+                    "interfaces.available",
+                    "os.name",
+                    "providers.enabled_ids",
                 ],
-                semantic_ids,
+                semantic_fact_keys,
             )
-
-            semantic_map = {item.id: item for item in semantic_items}
-            self.assertIn('"name": "Ubuntu 24.04"', semantic_map["S-bootstrap-os-name"].text)
-            self.assertIn('"available": true', semantic_map["S-bootstrap-hardware-gpu-available"].text)
+            semantic_by_key = {str(item.fact_key): item for item in semantic_items}
+            self.assertIn('"name": "Ubuntu 24.04"', semantic_by_key["os.name"].text)
+            self.assertIn('"available": true', semantic_by_key["hardware.gpu.available"].text)
 
             for item in semantic_items:
                 self.assertEqual("bootstrap", item.source_kind)
+                self.assertEqual("bootstrap", item.fact_group)
+                self.assertTrue(item.is_current)
                 self.assertTrue(bool(item.source_ref.strip()))
                 event_refs = [part for part in item.source_ref.split(",") if part]
                 self.assertTrue(event_refs)
                 for event_id in event_refs:
                     self.assertIn(event_id, by_id)
+
+            semantic_updates = result.get("semantic_updates") if isinstance(result.get("semantic_updates"), dict) else {}
+            inserted = semantic_updates.get("inserted") if isinstance(semantic_updates.get("inserted"), list) else []
+            unchanged = semantic_updates.get("unchanged") if isinstance(semantic_updates.get("unchanged"), list) else []
+            superseded = semantic_updates.get("superseded") if isinstance(semantic_updates.get("superseded"), list) else []
+            self.assertEqual(5, len(inserted))
+            self.assertEqual([], unchanged)
+            self.assertEqual([], superseded)
 
 
 if __name__ == "__main__":
