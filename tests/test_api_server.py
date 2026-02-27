@@ -11,6 +11,7 @@ from unittest.mock import patch
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.llm.types import LLMError, Response, Usage
+from agent.modelops.discovery import ModelInfo
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -1529,6 +1530,135 @@ class TestAPIServerRuntime(unittest.TestCase):
             str((thread_integrity or {}).get("reason") or ""),
             {"multi_intent", "topic_shift"},
         )
+
+    def test_chat_success_includes_intent_assessment_envelope(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        handler = _HandlerForTest(
+            runtime,
+            {"messages": [{"role": "user", "content": "hello there"}]},
+        )
+        with patch.object(
+            runtime,
+            "chat",
+            return_value=(True, {"ok": True, "assistant": {"role": "assistant", "content": "hi"}}),
+        ):
+            handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        envelope = handler.response_payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        intent_assessment = (envelope or {}).get("intent_assessment")
+        self.assertTrue(isinstance(intent_assessment, dict))
+        self.assertIn("decision", intent_assessment or {})
+        self.assertIn("candidates", intent_assessment or {})
+
+    def test_llm_models_check_endpoint_returns_stable_envelope(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        seen_path = os.path.join(self.tmpdir.name, "modelops_seen_models.json")
+        os.environ["AGENT_MODELOPS_SEEN_MODELS_PATH"] = seen_path
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/llm/models/check"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        fake_models = [
+            ModelInfo(
+                provider="ollama",
+                model_id="qwen2.5:7b-instruct",
+                display_name="qwen2.5:7b-instruct",
+                context_tokens=32768,
+                tags=["chat"],
+                created_at=None,
+                metadata={},
+            ),
+            ModelInfo(
+                provider="ollama",
+                model_id="deepseek-coder:6.7b",
+                display_name="deepseek-coder:6.7b",
+                context_tokens=16384,
+                tags=["code"],
+                created_at=None,
+                metadata={},
+            ),
+        ]
+        handler = _HandlerForTest(runtime, {"purposes": ["chat", "code"]})
+        with patch("agent.api_server.list_models_ollama", return_value=fake_models):
+            handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        payload = handler.response_payload
+        self.assertTrue(bool(payload.get("ok")))
+        self.assertEqual("modelops_check", payload.get("intent"))
+        self.assertTrue(str(payload.get("message") or "").strip())
+        envelope = payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        self.assertIn("recommendations_by_purpose", envelope or {})
+        self.assertIn("current_model", envelope or {})
+        self.assertTrue(str(payload.get("trace_id") or "").strip())
+
+    def test_llm_models_check_handles_missing_openrouter_key(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.registry_document["providers"] = {
+            "openrouter": {
+                "enabled": True,
+                "api_key_source": {"type": "env", "name": "OPENROUTER_API_KEY"},
+            }
+        }
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime) -> None:
+                self.runtime = runtime_obj
+                self.path = "/llm/models/check"
+                self.headers = {"Content-Length": "0"}
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return {}
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        handler = _HandlerForTest(runtime)
+        handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(bool(handler.response_payload.get("ok")))
+        envelope = handler.response_payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        warnings = (envelope or {}).get("warnings")
+        self.assertTrue(isinstance(warnings, list))
+        self.assertIn("openrouter_not_configured", warnings or [])
 
 
 if __name__ == "__main__":

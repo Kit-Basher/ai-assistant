@@ -25,7 +25,14 @@ from agent.config import Config, load_config
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import bad_request_next_question, friendly_error_message
 from agent.fallback_ladder import run_with_fallback
+from agent.intent.assessment import (
+    IntentAssessment,
+    IntentCandidate,
+    assess_intent_deterministic,
+    rebuild_assessment_from_candidates,
+)
 from agent.intent.clarification import build_clarification_plan, build_thread_integrity_plan
+from agent.intent.llm_rerank import rerank_intents_with_llm
 from agent.intent.low_confidence import detect_low_confidence
 from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
@@ -90,6 +97,13 @@ from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Message, Request
 from agent.modelops import ModelOpsExecutor, ModelOpsPlanner, SafeRunner
+from agent.modelops.discovery import ModelInfo, list_models_ollama, list_models_openrouter
+from agent.modelops.recommend import (
+    load_seen_model_ids,
+    recommend_models,
+    recommendation_to_dict,
+    save_seen_model_ids,
+)
 from agent.orchestrator import classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
@@ -7448,6 +7462,370 @@ class AgentRuntime:
             "result": result,
         }
 
+    def _modelops_seen_models_path(self) -> Path:
+        explicit = os.getenv("AGENT_MODELOPS_SEEN_MODELS_PATH", "").strip()
+        if explicit:
+            return Path(explicit).expanduser().resolve()
+        runtime_path = self._runtime_state_path(
+            self.config,
+            configured_path=None,
+            filename="modelops_seen_models.json",
+        )
+        if runtime_path:
+            return Path(runtime_path).expanduser().resolve()
+        return (Path.home() / ".local" / "share" / "personal-agent" / "modelops_seen_models.json").resolve()
+
+    def _modelops_trace_id(self, prefix: str, payload: dict[str, Any]) -> str:
+        canonical_payload = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        seed = f"{prefix}:{canonical_payload}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+    @staticmethod
+    def _normalize_modelops_purposes(payload: dict[str, Any]) -> list[str]:
+        allowed = {"chat", "code", "organize", "story"}
+        raw = payload.get("purposes") if isinstance(payload.get("purposes"), list) else []
+        values = sorted({str(item).strip().lower() for item in raw if str(item).strip()})
+        normalized = [item for item in values if item in allowed]
+        return normalized or ["chat", "code", "organize", "story"]
+
+    def _active_provider_ids(self) -> list[str]:
+        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        output = [
+            provider_id
+            for provider_id, row in providers.items()
+            if isinstance(row, dict) and bool(row.get("enabled", True))
+        ]
+        return sorted({str(item).strip().lower() for item in output if str(item).strip()})
+
+    def _collect_modelops_available_models(self) -> tuple[list[ModelInfo], list[str], dict[str, int]]:
+        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        active_providers = self._active_provider_ids()
+        warnings: list[str] = []
+        provider_counts: dict[str, int] = {}
+        rows: list[ModelInfo] = []
+
+        for provider_id in active_providers:
+            if provider_id == "ollama":
+                discovered = list_models_ollama()
+                provider_counts[provider_id] = len(discovered)
+                rows.extend(discovered)
+                if not discovered:
+                    warnings.append("ollama_discovery_unavailable_or_empty")
+                continue
+            if provider_id == "openrouter":
+                provider_payload = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
+                api_key = self._provider_api_key(provider_payload if isinstance(provider_payload, dict) else {})
+                if not api_key:
+                    provider_counts[provider_id] = 0
+                    warnings.append("openrouter_not_configured")
+                    continue
+                discovered = list_models_openrouter(api_key)
+                provider_counts[provider_id] = len(discovered)
+                rows.extend(discovered)
+                if not discovered:
+                    warnings.append("openrouter_discovery_unavailable")
+                continue
+            provider_counts[provider_id] = 0
+
+        deduped: dict[str, ModelInfo] = {}
+        for row in rows:
+            key = f"{row.provider}:{row.model_id}"
+            if key not in deduped:
+                deduped[key] = row
+        output = sorted(deduped.values(), key=lambda row: (row.provider, row.model_id))
+        return output, sorted(set(warnings)), provider_counts
+
+    def llm_models_check(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        trace_id = self._modelops_trace_id("llm_models_check", payload if isinstance(payload, dict) else {})
+        purposes = self._normalize_modelops_purposes(payload if isinstance(payload, dict) else {})
+        defaults = self.get_defaults()
+        current = {
+            "provider": str(defaults.get("default_provider") or "").strip().lower(),
+            "model_id": str(defaults.get("default_model") or "").strip(),
+        }
+        available, warnings, provider_counts = self._collect_modelops_available_models()
+        recommendations = recommend_models(
+            available=available,
+            current=current,
+            purposes=purposes,
+            prefer_local=bool(self.config.prefer_local),
+        )
+        seen_path = self._modelops_seen_models_path()
+        try:
+            seen_ids = load_seen_model_ids(seen_path)
+        except Exception:
+            seen_ids = set()
+        current_ids = {f"{row.provider}:{row.model_id}" for row in available}
+        new_ids = sorted(current_ids - seen_ids)
+        try:
+            save_seen_model_ids(seen_path, current_ids)
+        except Exception:
+            warnings = sorted(set([*warnings, "seen_state_write_failed"]))
+
+        recommendations_by_purpose: dict[str, list[dict[str, Any]]] = {}
+        for purpose in purposes:
+            rows = recommendations.get(purpose, [])
+            current_score = 0.0
+            for row in rows:
+                if f"{row.provider}:{row.model_id}" == current.get("model_id"):
+                    current_score = max(current_score, float(row.score))
+            filtered = [
+                row
+                for row in rows
+                if f"{row.provider}:{row.model_id}" in new_ids
+                or float(row.score) >= (current_score + 0.10)
+            ]
+            if not filtered:
+                filtered = rows[:1]
+            recommendations_by_purpose[purpose] = [recommendation_to_dict(row) for row in filtered[:3]]
+
+        total_candidates = sum(len(rows) for rows in recommendations_by_purpose.values())
+        message = f"Found {len(new_ids)} new candidate models. Want details or switch?"
+        if total_candidates == 0:
+            message = "No new candidate models were found right now."
+
+        return True, {
+            "ok": True,
+            "intent": "modelops_check",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": message,
+            "next_question": (
+                "Do you want details for one recommendation or a switch plan?"
+                if total_candidates > 0
+                else None
+            ),
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": {
+                "available_count": len(available),
+                "new_models_count": len(new_ids),
+                "recommendations_by_purpose": recommendations_by_purpose,
+                "current_model": {
+                    "provider": current.get("provider"),
+                    "model": current.get("model_id"),
+                },
+                "warnings": warnings,
+                "provider_counts": dict(sorted(provider_counts.items())),
+            },
+        }
+
+    def llm_models_recommend(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        trace_id = self._modelops_trace_id("llm_models_recommend", payload if isinstance(payload, dict) else {})
+        provider = str(payload.get("provider") or "").strip().lower()
+        model_id = str(payload.get("model_id") or payload.get("model") or "").strip()
+        purpose = str(payload.get("purpose") or "chat").strip().lower() or "chat"
+        if purpose not in {"chat", "code", "organize", "story"}:
+            purpose = "chat"
+        if not provider or not model_id:
+            return False, {
+                "ok": False,
+                "intent": "modelops_recommend",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "provider and model_id are required.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {},
+            }
+
+        defaults = self.get_defaults()
+        current = {
+            "provider": str(defaults.get("default_provider") or "").strip().lower(),
+            "model_id": str(defaults.get("default_model") or "").strip(),
+        }
+        available, warnings, _provider_counts = self._collect_modelops_available_models()
+        selected = next(
+            (row for row in available if row.provider == provider and row.model_id == model_id),
+            None,
+        )
+        if selected is None:
+            return False, {
+                "ok": False,
+                "intent": "modelops_recommend",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "Requested model was not found in discovered providers.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {"warnings": warnings},
+            }
+
+        per_purpose = recommend_models(
+            available=available,
+            current=current,
+            purposes=[purpose],
+            prefer_local=bool(self.config.prefer_local),
+        )
+        selected_recommendation = recommend_models(
+            available=[selected],
+            current=current,
+            purposes=[purpose],
+            prefer_local=bool(self.config.prefer_local),
+        )[purpose][0]
+        top_for_purpose = per_purpose[purpose][0] if per_purpose.get(purpose) else selected_recommendation
+        return True, {
+            "ok": True,
+            "intent": "modelops_recommend",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": f"Recommendation details for {provider}:{model_id} ({purpose}).",
+            "next_question": "Do you want a switch plan for this model?",
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": {
+                "purpose": purpose,
+                "selected": recommendation_to_dict(selected_recommendation),
+                "top_for_purpose": recommendation_to_dict(top_for_purpose),
+                "warnings": warnings,
+            },
+        }
+
+    def llm_models_switch(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        trace_id = self._modelops_trace_id("llm_models_switch", payload if isinstance(payload, dict) else {})
+        provider = str(payload.get("provider") or "").strip().lower()
+        model_id = str(payload.get("model_id") or payload.get("model") or "").strip()
+        purpose = str(payload.get("purpose") or "chat").strip().lower() or "chat"
+        confirm = bool(payload.get("confirm", False))
+        if purpose not in {"chat", "code", "organize", "story"}:
+            purpose = "chat"
+        if not provider or not model_id:
+            return False, {
+                "ok": False,
+                "intent": "modelops_switch",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "provider and model_id are required.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {},
+            }
+
+        defaults_before = self.get_defaults()
+        available, warnings, _provider_counts = self._collect_modelops_available_models()
+        available_ids = {f"{row.provider}:{row.model_id}" for row in available}
+        canonical_model = f"{provider}:{model_id}"
+        operations: list[dict[str, Any]] = []
+        if provider == "ollama" and canonical_model not in available_ids:
+            operations.append(
+                {
+                    "id": "pull_model",
+                    "action": "modelops.pull_ollama_model",
+                    "params": {"model": model_id},
+                }
+            )
+        operations.append(
+            {
+                "id": "set_default_model",
+                "action": "modelops.set_default_model",
+                "params": {"default_provider": provider, "default_model": canonical_model},
+            }
+        )
+
+        if not confirm:
+            return True, {
+                "ok": True,
+                "intent": "modelops_switch",
+                "confidence": 1.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": "I can apply this change. Reply 'confirm' to proceed.",
+                "next_question": "I can apply this change. Reply 'confirm' to proceed.",
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "purpose": purpose,
+                    "target": {"provider": provider, "model_id": model_id},
+                    "plan_steps": operations,
+                    "warnings": warnings,
+                },
+            }
+
+        execution_results: list[dict[str, Any]] = []
+        for operation in operations:
+            ok, body = self.modelops_execute(
+                {
+                    "action": operation.get("action"),
+                    "params": operation.get("params"),
+                    "confirm": True,
+                    "dry_run": False,
+                    "actor": "modelops_advisor",
+                }
+            )
+            execution_results.append(
+                {
+                    "id": operation.get("id"),
+                    "action": operation.get("action"),
+                    "ok": bool(ok),
+                    "body": body if isinstance(body, dict) else {},
+                }
+            )
+            if not ok:
+                message = str((body if isinstance(body, dict) else {}).get("error") or "Model switch failed.")
+                return False, {
+                    "ok": False,
+                    "intent": "modelops_switch",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": classify_error_kind(payload={"ok": False, "error": message}),
+                    "message": message,
+                    "next_question": None,
+                    "actions": [],
+                    "errors": ["switch_failed"],
+                    "trace_id": trace_id,
+                    "envelope": {
+                        "purpose": purpose,
+                        "target": {"provider": provider, "model_id": model_id},
+                        "execution": execution_results,
+                        "rollback": {
+                            "default_provider": defaults_before.get("default_provider"),
+                            "default_model": defaults_before.get("default_model"),
+                        },
+                    },
+                }
+
+        rollback_payload = {
+            "action": "modelops.set_default_model",
+            "params": {
+                "default_provider": defaults_before.get("default_provider"),
+                "default_model": defaults_before.get("default_model"),
+            },
+            "confirm": True,
+        }
+        return True, {
+            "ok": True,
+            "intent": "modelops_switch",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": f"Switched to {canonical_model} for {purpose}.",
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": {
+                "purpose": purpose,
+                "target": {"provider": provider, "model_id": model_id},
+                "execution": execution_results,
+                "rollback_suggestion": rollback_payload,
+                "warnings": warnings,
+            },
+        }
+
     def webui_dev_landing_html(self) -> str:
         return (
             "<!doctype html>"
@@ -7748,6 +8126,70 @@ class APIServerHandler(BaseHTTPRequestHandler):
             "envelope": envelope_payload,
         }
 
+    @staticmethod
+    def _intent_assessment_obj(assessment: IntentAssessment) -> dict[str, Any]:
+        return {
+            "decision": assessment.decision,
+            "confidence": round(float(assessment.confidence), 4),
+            "candidates": [
+                {
+                    "intent": row.intent,
+                    "score": round(float(row.score), 4),
+                    "reason": row.reason,
+                }
+                for row in assessment.candidates
+            ],
+            "next_question": assessment.next_question,
+        }
+
+    @staticmethod
+    def _intent_ambiguity_payload(
+        *,
+        intent: str,
+        trace_id: str,
+        assessment: IntentAssessment,
+    ) -> dict[str, Any]:
+        question = (
+            str(assessment.next_question or "").strip()
+            or "I can do that. Which of these is your goal: chat, ask, or model check/switch?"
+        )
+        envelope = validate_envelope(
+            {
+                "ok": True,
+                "intent": intent,
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": question,
+                "next_question": question,
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+            }
+        )
+        envelope_payload = dict(envelope)
+        envelope_payload["clarification"] = {
+            "reason": "intent_ambiguity",
+            "hints": [
+                "Tell me whether you want chat, ask, or model check/switch.",
+            ],
+            "suggested_intents": [],
+        }
+        envelope_payload["intent_assessment"] = APIServerHandler._intent_assessment_obj(assessment)
+        return {
+            "ok": bool(envelope_payload.get("ok", False)),
+            "intent": envelope_payload.get("intent", "chat"),
+            "confidence": float(envelope_payload.get("confidence", 0.0)),
+            "did_work": bool(envelope_payload.get("did_work", False)),
+            "error_kind": envelope_payload.get("error_kind", "internal_error"),
+            "message": envelope_payload.get("message") or "Internal error.",
+            "next_question": envelope_payload.get("next_question"),
+            "actions": envelope_payload.get("actions", []),
+            "errors": envelope_payload.get("errors", ["internal_error"]),
+            "trace_id": envelope_payload.get("trace_id") or "trace_unknown",
+            "envelope": envelope_payload,
+        }
+
     def _error_envelope_payload(
         self,
         *,
@@ -7988,6 +8430,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
         try:
             path, parts = self._path_parts()
             payload = self._read_json()
+            intent_assessment: IntentAssessment | None = None
             json_error = str(getattr(self, "_last_json_error", "") or "").strip().lower() or None
             if path in {"/chat", "/ask", "/done"} and json_error in {"content_type_not_json", "invalid_json_body"}:
                 trace_id = self._request_trace_id(payload)
@@ -8052,6 +8495,35 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             user_text_norm=norm_text,
                             drift_reason=thread_integrity.reason,
                             thread_debug=thread_integrity.debug,
+                        ),
+                    )
+                    return
+                intent_assessment = assess_intent_deterministic(
+                    user_text_raw=input_text,
+                    user_text_norm=norm_text,
+                    route_intent=intent_name,
+                    context={"low_confidence": False, "thread_integrity": False},
+                )
+                if bool(self.runtime.config.intent_llm_rerank_enabled):
+                    reranked_candidates = rerank_intents_with_llm(
+                        candidates=list(intent_assessment.candidates),
+                        user_text=norm_text,
+                        runtime=self.runtime,
+                    )
+                    intent_assessment = rebuild_assessment_from_candidates(
+                        candidates=reranked_candidates,
+                        debug={
+                            **dict(intent_assessment.debug),
+                            "reranked": True,
+                        },
+                    )
+                if intent_assessment.decision == "clarify":
+                    self._send_json(
+                        200,
+                        self._intent_ambiguity_payload(
+                            intent=intent_name,
+                            trace_id=trace_id,
+                            assessment=intent_assessment,
                         ),
                     )
                     return
@@ -8243,6 +8715,11 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         body["next_question"] = envelope.get("next_question")
                     body.setdefault("trace_id", envelope.get("trace_id"))
                     body.setdefault("envelope", envelope)
+                if intent_assessment is not None:
+                    envelope_payload = body.get("envelope") if isinstance(body.get("envelope"), dict) else {}
+                    envelope_payload = dict(envelope_payload)
+                    envelope_payload["intent_assessment"] = self._intent_assessment_obj(intent_assessment)
+                    body["envelope"] = envelope_payload
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -8335,6 +8812,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         "trace_id": envelope["trace_id"],
                         "envelope": envelope,
                     }
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/models/check":
+                ok, body = self.runtime.llm_models_check(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/models/recommend":
+                ok, body = self.runtime.llm_models_recommend(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/models/switch":
+                ok, body = self.runtime.llm_models_switch(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/health/run":

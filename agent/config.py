@@ -58,6 +58,7 @@ class Config:
     model_watch_state_path: str | None = None
     model_watch_config_path: str | None = None
     model_watch_catalog_path: str | None = None
+    intent_llm_rerank_enabled: bool = False
     perception_enabled: bool = True
     perception_roots: tuple[str, ...] = ("/home", "/data/projects")
     perception_interval_seconds: int = 5
@@ -263,6 +264,13 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     model_watch_state_path = os.getenv("AGENT_MODEL_WATCH_STATE_PATH", "").strip() or None
     model_watch_config_path = os.getenv("AGENT_MODEL_WATCH_CONFIG_PATH", "").strip() or None
     model_watch_catalog_path = os.getenv("AGENT_MODEL_WATCH_CATALOG_PATH", "").strip() or None
+    intent_llm_rerank_enabled = os.getenv("AGENT_INTENT_LLM_RERANK_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     perception_enabled = os.getenv("PERCEPTION_ENABLED", "1").strip().lower() in {
         "1",
         "true",
@@ -554,6 +562,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         model_watch_state_path=model_watch_state_path,
         model_watch_config_path=model_watch_config_path,
         model_watch_catalog_path=model_watch_catalog_path,
+        intent_llm_rerank_enabled=intent_llm_rerank_enabled,
         perception_enabled=perception_enabled,
         perception_roots=perception_roots,
         perception_interval_seconds=perception_interval_seconds,
