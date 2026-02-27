@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import socket
 from typing import Any
 import urllib.error
@@ -14,6 +15,7 @@ ERROR_KINDS = (
     "internal_error",
     "rate_limited",
     "policy_blocked",
+    "feature_disabled",
     "unknown",
 )
 
@@ -75,6 +77,18 @@ def _has_any(texts: list[str], needles: set[str]) -> bool:
     return any(token in merged for token in needles)
 
 
+_FEATURE_DISABLED_RE = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*_disabled$")
+
+
+def _is_feature_disabled_code(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    if text == "memory_v2_disabled":
+        return True
+    return _FEATURE_DISABLED_RE.fullmatch(text) is not None
+
+
 def _health_is_down(context: dict[str, Any]) -> bool:
     health_state = context.get("health_state") if isinstance(context.get("health_state"), dict) else {}
     providers = health_state.get("providers") if isinstance(health_state.get("providers"), dict) else {}
@@ -112,6 +126,20 @@ def classify_error_kind(
     )
     if explicit != "unknown":
         return explicit
+
+    disabled_markers = [
+        context_data.get("error_kind"),
+        context_data.get("error"),
+        context_data.get("reason"),
+        payload_data.get("error_kind"),
+        payload_data.get("error"),
+        payload_data.get("reason"),
+        payload_meta.get("error_kind"),
+        payload_meta.get("error"),
+        payload_meta.get("reason"),
+    ]
+    if any(_is_feature_disabled_code(value) for value in disabled_markers):
+        return "feature_disabled"
 
     if bool(context_data.get("policy_blocked")):
         return "policy_blocked"

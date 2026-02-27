@@ -200,6 +200,10 @@ class TestErrorKindContract(unittest.TestCase):
         self.assertEqual("payment_required", classify_error_kind(payload={"ok": False, "error": "payment_required"}))
         self.assertEqual("policy_blocked", classify_error_kind(payload={"ok": False, "error": "safe_mode_blocked"}))
 
+    def test_classify_feature_disabled_from_memory_v2_disabled(self) -> None:
+        self.assertEqual("feature_disabled", classify_error_kind(payload={"ok": False, "error": "memory_v2_disabled"}))
+        self.assertEqual("feature_disabled", classify_error_kind(payload={"ok": False, "error": "delivery_disabled"}))
+
     def test_upstream_down_message_includes_cooldown_iso_and_remaining(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._health_monitor.state = {  # type: ignore[attr-defined]
@@ -262,6 +266,22 @@ class TestErrorKindContract(unittest.TestCase):
         self.assertEqual(400, handler.status_code)
         self.assertEqual("bad_request", handler.response_payload.get("error_kind"))
         self.assertIn('"messages"', str(handler.response_payload.get("next_question") or ""))
+
+    def test_bootstrap_run_returns_feature_disabled_when_memory_v2_disabled(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, memory_v2_enabled=False))
+        handler = _HandlerForPostTest(runtime, "/bootstrap/run", {"force": True})
+        handler.do_POST()
+
+        self.assertEqual(400, handler.status_code)
+        self.assertEqual(False, handler.response_payload.get("ok"))
+        self.assertEqual("feature_disabled", handler.response_payload.get("error_kind"))
+        self.assertTrue(str(handler.response_payload.get("message") or "").strip())
+        envelope = handler.response_payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        self.assertEqual("feature_disabled", str((envelope or {}).get("error_kind") or ""))
+        errors = (envelope or {}).get("errors") if isinstance(envelope, dict) else []
+        self.assertTrue(isinstance(errors, list))
+        self.assertIn("memory_v2_disabled", errors)
 
     def test_telegram_fallback_uses_friendly_upstream_message_without_traceback(self) -> None:
         envelope = _envelope_from_exception(
