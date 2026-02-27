@@ -110,7 +110,8 @@ from agent.memory_v2.ingest import ingest_bootstrap_snapshot
 from agent.memory_v2.retrieval import select_memory
 from agent.memory_v2.storage import SQLiteMemoryStore
 from agent.memory_v2.types import MemoryLevel, MemoryQuery
-from agent.packs.manifest import PackManifestError, load_manifest
+from agent.packs.manifest import PackManifestError, compute_permissions_hash, load_manifest, normalize_permissions
+from agent.packs.policy import is_iface_allowed
 from agent.packs.store import PackStore
 from agent.orchestrator import classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
@@ -137,6 +138,14 @@ _AUTOPILOT_APPLY_ACTIONS = {
 }
 _SAFE_MODE_BLOCKED_DEDUPE_SECONDS = 600
 _SAFE_MODE_PAUSED_HEALTH_NOTIFY_SECONDS = 21600
+_MODEL_SCOUT_PACK_ID = "model_scout"
+_MODEL_SCOUT_IFACES = (
+    "model_scout.status",
+    "model_scout.suggestions",
+    "model_scout.run",
+    "model_scout.dismiss",
+    "model_scout.mark_installed",
+)
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -661,6 +670,48 @@ class AgentRuntime:
                 permissions=permissions,
                 manifest_path=skill.pack_manifest_path,
             )
+        self.pack_store.ensure_native_pack(
+            pack_id=_MODEL_SCOUT_PACK_ID,
+            version=str(self.version or "0.1.0"),
+            permissions=self._model_scout_pack_permissions(),
+            manifest_path=None,
+        )
+
+    @staticmethod
+    def _model_scout_pack_permissions() -> dict[str, Any]:
+        return normalize_permissions({"ifaces": list(_MODEL_SCOUT_IFACES)})
+
+    def _model_scout_pack_gate(self, *, iface: str) -> tuple[bool, dict[str, Any] | None]:
+        iface_name = str(iface or "").strip() or "model_scout.run"
+        function_name = iface_name.split(".")[-1]
+        decision = is_iface_allowed(
+            pack_id=_MODEL_SCOUT_PACK_ID,
+            iface=iface_name,
+            fallback_iface=function_name,
+            pack_record=self.pack_store.get_pack(_MODEL_SCOUT_PACK_ID),
+            trust="native",
+            expected_permissions_hash=compute_permissions_hash(self._model_scout_pack_permissions()),
+        )
+        if decision.allowed:
+            return True, None
+        message = (
+            f"This skill pack is not allowed to call {function_name}. "
+            f"Approve pack {_MODEL_SCOUT_PACK_ID} for {function_name}?"
+        )
+        return (
+            False,
+            {
+                "ok": False,
+                "error": "pack_permission_denied",
+                "error_kind": "bad_request",
+                "message": message,
+                "next_question": f"Approve pack {_MODEL_SCOUT_PACK_ID} for {function_name}?",
+                "errors": ["pack_permission_denied"],
+                "pack_id": _MODEL_SCOUT_PACK_ID,
+                "iface": iface_name,
+                "reason": decision.reason,
+            },
+        )
 
     @staticmethod
     def _pack_error(
@@ -6783,6 +6834,9 @@ class AgentRuntime:
         }
 
     def model_scout_status(self) -> dict[str, Any]:
+        allowed, denied = self._model_scout_pack_gate(iface="model_scout.status")
+        if not allowed:
+            return dict(denied or {"ok": False, "error": "pack_permission_denied"})
         status = self.model_scout.status()
         return {
             "ok": True,
@@ -6791,6 +6845,9 @@ class AgentRuntime:
         }
 
     def model_scout_suggestions(self) -> dict[str, Any]:
+        allowed, denied = self._model_scout_pack_gate(iface="model_scout.suggestions")
+        if not allowed:
+            return dict(denied or {"ok": False, "error": "pack_permission_denied"})
         suggestions = self.model_scout.list_suggestions(limit=200)
         return {
             "ok": True,
@@ -6798,6 +6855,11 @@ class AgentRuntime:
         }
 
     def run_model_scout(self) -> tuple[bool, dict[str, Any]]:
+        allowed, denied = self._model_scout_pack_gate(iface="model_scout.run")
+        if not allowed:
+            body = dict(denied or {"ok": False, "error": "pack_permission_denied"})
+            self._log_request("/model_scout/run", False, body)
+            return False, body
         result = self.model_scout.run(
             registry_document=self.registry_document,
             router_snapshot=self._router.doctor_snapshot(),
@@ -6817,6 +6879,9 @@ class AgentRuntime:
         return bool(result.get("ok")), {"ok": bool(result.get("ok")), **result}
 
     def dismiss_model_scout_suggestion(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
+        allowed, denied = self._model_scout_pack_gate(iface="model_scout.dismiss")
+        if not allowed:
+            return False, dict(denied or {"ok": False, "error": "pack_permission_denied"})
         target = urllib.parse.unquote(str(suggestion_id or "")).strip()
         if not target:
             return False, {"ok": False, "error": "suggestion id is required"}
@@ -6825,6 +6890,9 @@ class AgentRuntime:
         return True, {"ok": True, "id": target, "status": "dismissed"}
 
     def mark_model_scout_installed(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
+        allowed, denied = self._model_scout_pack_gate(iface="model_scout.mark_installed")
+        if not allowed:
+            return False, dict(denied or {"ok": False, "error": "pack_permission_denied"})
         target = urllib.parse.unquote(str(suggestion_id or "")).strip()
         if not target:
             return False, {"ok": False, "error": "suggestion id is required"}
