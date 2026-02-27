@@ -54,6 +54,7 @@ from agent.response_envelope import failure, ok_result, validate_envelope
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog, redact as redact_audit_value
+from agent.bootstrap.snapshot import collect_bootstrap_snapshot
 from agent.llm.action_ledger import ActionLedgerStore
 from agent.llm.autopilot_safety import AutopilotSafetyStateStore, detect_autopilot_churn
 from agent.llm.autoconfig import apply_autoconfig_plan, build_autoconfig_plan
@@ -105,6 +106,7 @@ from agent.modelops.recommend import (
     save_seen_model_ids,
 )
 from agent.memory_v2.inject import with_built_context
+from agent.memory_v2.ingest import ingest_bootstrap_snapshot
 from agent.memory_v2.retrieval import select_memory
 from agent.memory_v2.storage import SQLiteMemoryStore
 from agent.memory_v2.types import MemoryLevel, MemoryQuery
@@ -117,6 +119,10 @@ from memory.db import MemoryDB
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]{2,64}$")
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
+_MEMORY_V2_BOOTSTRAP_COMPLETED_KEY = "memory_v2.bootstrap_completed"
+_MEMORY_V2_BOOTSTRAP_COMPLETED_AT_KEY = "memory_v2.bootstrap_completed_at"
+_MEMORY_V2_GREETED_ONCE_KEY = "memory_v2.greeted_once"
+_BOOTSTRAP_GREETING_TEXT = "Hi — I’m here and ready to help. What can I do for you?"
 _AUTOPILOT_APPLY_ACTIONS = {
     "llm.autoconfig.apply",
     "llm.hygiene.apply",
@@ -518,6 +524,8 @@ class AgentRuntime:
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
         self._reload_router()
+        self._memory_v2_bootstrap_status: dict[str, Any] = {"ran": False, "ok": False}
+        self._initialize_memory_v2_bootstrap()
         self._router.set_external_health_state(self._health_monitor.state)
         self._start_background_scheduler_if_enabled()
 
@@ -2380,6 +2388,93 @@ class AgentRuntime:
             f"I couldn’t read local system data via {tool_name} ({reason}). "
             f"Do you want me to retry {tool_name} now?"
         )
+
+    def _memory_v2_bootstrap_completed(self) -> bool:
+        if self._memory_v2_store is None:
+            return False
+        return self._memory_v2_store.get_bool_state(_MEMORY_V2_BOOTSTRAP_COMPLETED_KEY)
+
+    def _set_memory_v2_bootstrap_completed(self, *, now_ts: int) -> None:
+        if self._memory_v2_store is None:
+            return
+        self._memory_v2_store.set_state(_MEMORY_V2_BOOTSTRAP_COMPLETED_KEY, "1", updated_at=int(now_ts))
+        self._memory_v2_store.set_state(
+            _MEMORY_V2_BOOTSTRAP_COMPLETED_AT_KEY,
+            str(int(now_ts)),
+            updated_at=int(now_ts),
+        )
+
+    def _memory_v2_greeted_once(self) -> bool:
+        if self._memory_v2_store is None:
+            return False
+        return self._memory_v2_store.get_bool_state(_MEMORY_V2_GREETED_ONCE_KEY)
+
+    def _set_memory_v2_greeted_once(self, *, now_ts: int) -> None:
+        if self._memory_v2_store is None:
+            return
+        self._memory_v2_store.set_state(_MEMORY_V2_GREETED_ONCE_KEY, "1", updated_at=int(now_ts))
+
+    def consume_bootstrap_greeting_if_needed(self) -> str | None:
+        if not bool(self.config.memory_v2_enabled):
+            return None
+        if self._memory_v2_store is None:
+            return None
+        if not self._memory_v2_bootstrap_completed():
+            return None
+        if self._memory_v2_greeted_once():
+            return None
+        now_ts = int(time.time())
+        self._set_memory_v2_greeted_once(now_ts=now_ts)
+        return _BOOTSTRAP_GREETING_TEXT
+
+    def _initialize_memory_v2_bootstrap(self) -> None:
+        if not bool(self.config.memory_v2_enabled):
+            self._memory_v2_bootstrap_status = {"ran": False, "ok": False, "reason": "memory_v2_disabled"}
+            return
+        if self._memory_v2_store is None:
+            self._memory_v2_bootstrap_status = {"ran": False, "ok": False, "reason": "memory_v2_store_unavailable"}
+            return
+        if self._memory_v2_bootstrap_completed():
+            self._memory_v2_bootstrap_status = {"ran": False, "ok": True, "reason": "already_completed"}
+            return
+        now_ts = int(time.time())
+        try:
+            snapshot = collect_bootstrap_snapshot(self, now_ts=now_ts)
+            ingest_result = ingest_bootstrap_snapshot(
+                store=self._memory_v2_store,
+                snapshot=snapshot,
+                source_ref="agent_runtime_startup",
+            )
+            self._set_memory_v2_bootstrap_completed(now_ts=now_ts)
+            if self._memory_v2_store.get_state(_MEMORY_V2_GREETED_ONCE_KEY) is None:
+                self._memory_v2_store.set_state(_MEMORY_V2_GREETED_ONCE_KEY, "0", updated_at=now_ts)
+            self._memory_v2_bootstrap_status = {
+                "ran": True,
+                "ok": True,
+                "created_at_ts": int(snapshot.created_at_ts),
+                "episodic_count": len(ingest_result.get("episodic_ids") or []),
+                "semantic_count": len(ingest_result.get("semantic_ids") or []),
+            }
+            log_event(
+                self.config.log_path,
+                "memory_v2_bootstrap",
+                {
+                    "ok": True,
+                    "created_at_ts": int(snapshot.created_at_ts),
+                    "episodic_count": len(ingest_result.get("episodic_ids") or []),
+                    "semantic_count": len(ingest_result.get("semantic_ids") or []),
+                },
+            )
+        except Exception as exc:  # pragma: no cover - defensive bootstrap path
+            self._memory_v2_bootstrap_status = {"ran": True, "ok": False, "reason": exc.__class__.__name__}
+            log_event(
+                self.config.log_path,
+                "memory_v2_bootstrap",
+                {
+                    "ok": False,
+                    "error": exc.__class__.__name__,
+                },
+            )
 
     @staticmethod
     def _normalize_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
@@ -8334,6 +8429,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
         }
 
     @staticmethod
+    def _with_replaced_message(payload: dict[str, Any], message: str) -> dict[str, Any]:
+        updated = dict(payload if isinstance(payload, dict) else {})
+        text = str(message or "").strip() or "Internal error."
+        updated["message"] = text
+        updated["next_question"] = text
+        envelope = updated.get("envelope") if isinstance(updated.get("envelope"), dict) else {}
+        envelope_payload = dict(envelope)
+        envelope_payload["message"] = text
+        envelope_payload["next_question"] = text
+        updated["envelope"] = envelope_payload
+        return updated
+
+    @staticmethod
     def _intent_assessment_obj(assessment: IntentAssessment) -> dict[str, Any]:
         return {
             "decision": assessment.decision,
@@ -8676,15 +8784,23 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 intent_name = "ask" if path == "/ask" else "chat"
                 norm_text = str(low_confidence.debug.get("norm") or "")
                 if low_confidence.is_low_confidence and not self._has_explicit_user_message(payload):
+                    clarification_payload = self._clarification_payload(
+                        intent=intent_name,
+                        trace_id=trace_id,
+                        raw_text=input_text,
+                        norm_text=norm_text,
+                        detector_reason=low_confidence.reason,
+                    )
+                    if (
+                        intent_name == "chat"
+                        and str(low_confidence.reason or "").strip().lower() == "empty"
+                    ):
+                        greeting = self.runtime.consume_bootstrap_greeting_if_needed()
+                        if greeting:
+                            clarification_payload = self._with_replaced_message(clarification_payload, greeting)
                     self._send_json(
                         200,
-                        self._clarification_payload(
-                            intent=intent_name,
-                            trace_id=trace_id,
-                            raw_text=input_text,
-                            norm_text=norm_text,
-                            detector_reason=low_confidence.reason,
-                        ),
+                        clarification_payload,
                     )
                     return
                 last_user_text_norm, last_assistant_text_norm = self._extract_recent_context_for_thread_integrity(payload)
@@ -8926,6 +9042,12 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if not assistant_text:
                     assistant_text = str(envelope.get("message") or "").strip() or "I couldn't complete that request."
                     body["assistant"] = {"role": "assistant", "content": assistant_text}
+                if ok and original_path == "/chat":
+                    greeting = self.runtime.consume_bootstrap_greeting_if_needed()
+                    if greeting:
+                        combined = greeting if not assistant_text else f"{greeting}\n\n{assistant_text}"
+                        body["assistant"] = {"role": "assistant", "content": combined}
+                        body["message"] = combined
                 if not ok:
                     body["message"] = str(body.get("message") or "").strip() or str(envelope.get("message") or "").strip() or assistant_text
                     body["error_kind"] = str(

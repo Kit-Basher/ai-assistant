@@ -36,6 +36,14 @@ CREATE TABLE IF NOT EXISTS memory_events (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_events_created
     ON memory_events(created_at DESC, id ASC);
+
+CREATE TABLE IF NOT EXISTS bootstrap_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bootstrap_state_updated
+    ON bootstrap_state(updated_at DESC, key ASC);
 """
 
 
@@ -279,3 +287,46 @@ class SQLiteMemoryStore:
         finally:
             conn.close()
         return [self._row_to_item(row) for row in rows]
+
+    def get_state(self, key: str) -> str | None:
+        normalized = str(key or "").strip()
+        if not normalized:
+            return None
+        conn = self._connect()
+        try:
+            cur = conn.execute(
+                "SELECT value FROM bootstrap_state WHERE key = ? LIMIT 1",
+                (normalized,),
+            )
+            row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return str(row["value"])
+
+    def set_state(self, key: str, value: str, *, updated_at: int | None = None) -> None:
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            raise ValueError("state key is required")
+        normalized_value = str(value)
+        ts = int(updated_at) if updated_at is not None else int(time.time())
+        conn = self._connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO bootstrap_state (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (normalized_key, normalized_value, ts),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_bool_state(self, key: str) -> bool:
+        value = str(self.get_state(key) or "").strip().lower()
+        return value in {"1", "true", "yes", "y", "on"}
