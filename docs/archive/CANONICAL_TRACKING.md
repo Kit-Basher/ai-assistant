@@ -2,7 +2,7 @@
 
 > Status: historical snapshot only.  
 > Do not use this file as current truth.  
-> Current truth lives in `PROJECT_STATUS.md` and mission direction in `CANONICAL_HANDOFF_V3.md`.
+> Authoritative current-branch status lives at repo root: `PROJECT_STATUS.md`.
 
 ## Project Identity + Non-Negotiables
 Personal Agent is a local-first, Telegram-first assistant that treats Telegram input as untrusted and enforces safe, auditable, reversible, bounded behavior; it separates factual reports from optional narration or opinion and forbids surprise actions, with audit hard-fail semantics and explicit confirmation gates for sensitive operations.
