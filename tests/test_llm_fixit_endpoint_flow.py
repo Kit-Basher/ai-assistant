@@ -143,7 +143,9 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertEqual(200, second.status_code)
         second_payload = json.loads(second.body.decode("utf-8"))
         self.assertEqual("needs_confirmation", second_payload["status"])
-        self.assertTrue(second_payload["confirm_token"])
+        self.assertEqual(1, second_payload["confirm_code"])
+        self.assertEqual(2, second_payload["cancel_code"])
+        self.assertNotIn("confirm_token", second_payload)
 
         with patch.object(
             runtime,
@@ -153,7 +155,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             third = _HandlerForTest(
                 runtime,
                 "/llm/fixit",
-                {"confirm": True, "confirm_token": second_payload["confirm_token"]},
+                {"confirm": True},
             )
             third.do_POST()
 
@@ -162,6 +164,80 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertTrue(third_payload["ok"])
         self.assertTrue(third_payload["did_work"])
         self.assertEqual("llm_fixit", third_payload["intent"])
+        self.assertFalse(bool(runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
+
+    def test_fixit_confirm_expired_returns_needs_clarification(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._llm_fixit_store.save(  # type: ignore[attr-defined]
+            {
+                "active": True,
+                "issue_hash": "x",
+                "issue_code": "openrouter_down",
+                "step": "awaiting_confirm",
+                "question": "Apply this fix-it plan now?",
+                "choices": [],
+                "pending_plan": [
+                    {
+                        "id": "01_provider.set_enabled",
+                        "kind": "safe_action",
+                        "action": "provider.set_enabled",
+                        "reason": "Disable OpenRouter while it is failing.",
+                        "params": {"provider": "openrouter", "enabled": False},
+                        "safe_to_execute": True,
+                    }
+                ],
+                "pending_confirm_token": "token",
+                "pending_created_ts": 100,
+                "pending_expires_ts": 101,
+                "pending_issue_code": "openrouter_down",
+                "last_prompt_ts": 100,
+            }
+        )
+        with patch("agent.api_server.time.time", return_value=200):
+            handler = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
+            handler.do_POST()
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual("needs_clarification", payload["error_kind"])
+        self.assertIn("expired", payload["message"])
+
+    def test_fixit_cancel_clears_pending_plan(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._llm_fixit_store.save(  # type: ignore[attr-defined]
+            {
+                "active": True,
+                "issue_hash": "x",
+                "issue_code": "openrouter_down",
+                "step": "awaiting_confirm",
+                "question": "Apply this fix-it plan now?",
+                "choices": [],
+                "pending_plan": [
+                    {
+                        "id": "01_provider.set_enabled",
+                        "kind": "safe_action",
+                        "action": "provider.set_enabled",
+                        "reason": "Disable OpenRouter while it is failing.",
+                        "params": {"provider": "openrouter", "enabled": False},
+                        "safe_to_execute": True,
+                    }
+                ],
+                "pending_confirm_token": "token",
+                "pending_created_ts": 100,
+                "pending_expires_ts": 400,
+                "pending_issue_code": "openrouter_down",
+                "last_prompt_ts": 100,
+            }
+        )
+        handler = _HandlerForTest(runtime, "/llm/fixit", {"answer": "cancel"})
+        handler.do_POST()
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual("cancelled", payload["status"])
+        self.assertEqual("Cancelled.", payload["message"])
         self.assertFalse(bool(runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
 
     def test_llm_status_endpoint_returns_defaults_and_health(self) -> None:

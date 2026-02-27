@@ -109,6 +109,7 @@ from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
     build_plan_for_choice as wizard_build_plan_for_choice,
     confirm_token_for_plan as wizard_confirm_token_for_plan,
+    confirm_token_for_plan_rows as wizard_confirm_token_for_plan_rows,
     decision_issue_hash as wizard_decision_issue_hash,
     decision_to_json as wizard_decision_to_json,
     evaluate_wizard_decision,
@@ -5906,27 +5907,107 @@ class AgentRuntime:
         issue_hash = wizard_decision_issue_hash(decision, status_payload)
         wizard_state = self._llm_fixit_store.state if isinstance(self._llm_fixit_store.state, dict) else self._llm_fixit_store.empty_state()
 
+        explicit_confirm_flag = "confirm" in payload
         confirm = bool(payload.get("confirm", False))
+        answer_value = str(payload.get("answer") or "").strip().lower()
+        if (explicit_confirm_flag and not confirm) or answer_value in {"cancel", "no", "2"}:
+            self._llm_fixit_store.clear()
+            return True, {
+                "ok": True,
+                "intent": "llm_fixit",
+                "confidence": 1.0,
+                "did_work": False,
+                "error_kind": None,
+                "message": "Cancelled.",
+                "next_question": None,
+                "actions": [],
+                "errors": [],
+                "status": "cancelled",
+                "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
+                "trace_id": f"fixit-{now_epoch}",
+            }
+
         if confirm:
-            confirm_token = str(payload.get("confirm_token") or "").strip()
-            expected_token = str(wizard_state.get("confirm_token") or "").strip()
-            if not expected_token or confirm_token != expected_token:
+            pending_plan = wizard_state.get("pending_plan") if isinstance(wizard_state.get("pending_plan"), list) else []
+            expected_token = (
+                str(wizard_state.get("pending_confirm_token") or "").strip()
+                or str(wizard_state.get("confirm_token") or "").strip()
+            )
+            if not pending_plan or not expected_token:
                 return True, {
                     "ok": True,
                     "intent": "llm_fixit",
                     "confidence": 0.0,
                     "did_work": False,
                     "error_kind": "needs_clarification",
-                    "message": "Please confirm with the exact confirm_token from the previous step.",
-                    "next_question": "Apply the pending fix-it plan now?",
+                    "message": "No pending plan to confirm.",
+                    "next_question": "Ask me to run fix-it again.",
                     "actions": [],
                     "errors": ["needs_clarification"],
                     "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
                     "choices": [],
                     "trace_id": f"fixit-{now_epoch}",
                 }
-            pending_plan = wizard_state.get("pending_plan") if isinstance(wizard_state.get("pending_plan"), list) else []
-            ok_exec, exec_payload = self._execute_llm_fixit_plan(plan_rows=[row for row in pending_plan if isinstance(row, dict)], actor=actor)
+
+            pending_expires_ts = int(wizard_state.get("pending_expires_ts") or 0)
+            if pending_expires_ts > 0 and now_epoch > pending_expires_ts:
+                self._llm_fixit_store.clear()
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": "That confirmation expired. Ask me to fix it again.",
+                    "next_question": "Run fix-it again now?",
+                    "actions": [],
+                    "errors": ["needs_clarification"],
+                    "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
+                    "choices": [],
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+
+            recomputed_token = wizard_confirm_token_for_plan_rows(
+                [row for row in pending_plan if isinstance(row, dict)]
+            )
+            if recomputed_token != expected_token:
+                self._llm_fixit_store.clear()
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": "Pending plan changed. Ask me to fix it again.",
+                    "next_question": "Run fix-it again now?",
+                    "actions": [],
+                    "errors": ["needs_clarification"],
+                    "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
+                    "choices": [],
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+
+            provided_token = str(payload.get("confirm_token") or "").strip()
+            if provided_token and provided_token != expected_token:
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": "Confirmation token did not match the pending plan.",
+                    "next_question": "Confirm the latest pending plan?",
+                    "actions": [],
+                    "errors": ["needs_clarification"],
+                    "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
+                    "choices": [],
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+
+            ok_exec, exec_payload = self._execute_llm_fixit_plan(
+                plan_rows=[row for row in pending_plan if isinstance(row, dict)],
+                actor=actor,
+            )
             self._llm_fixit_store.clear()
             message = "Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."
             return ok_exec, {
@@ -6001,7 +6082,10 @@ class AgentRuntime:
                 "question": "Apply this fix-it plan now?",
                 "choices": choices_json,
                 "pending_plan": plan_json,
-                "confirm_token": confirm_token,
+                "pending_confirm_token": confirm_token,
+                "pending_created_ts": now_epoch,
+                "pending_expires_ts": now_epoch + 300,
+                "pending_issue_code": decision.issue_code,
                 "last_prompt_ts": now_epoch,
             }
             self._llm_fixit_store.save(state_to_save)
@@ -6011,13 +6095,14 @@ class AgentRuntime:
                 "confidence": 0.0,
                 "did_work": False,
                 "error_kind": "needs_clarification",
-                "message": "I prepared a safe fix plan. Confirm to apply it.",
-                "next_question": "Apply this fix-it plan now?",
+                "message": "I prepared a safe fix plan. Reply YES to apply, or NO to cancel.",
+                "next_question": "Apply this fix-it plan now? Reply YES or NO.",
                 "actions": [],
                 "errors": ["needs_clarification"],
                 "status": "needs_confirmation",
                 "issue_code": decision.issue_code,
-                "confirm_token": confirm_token,
+                "confirm_code": 1,
+                "cancel_code": 2,
                 "plan": plan_json,
                 "trace_id": f"fixit-{now_epoch}",
             }
@@ -6050,7 +6135,10 @@ class AgentRuntime:
                 "question": str(decision.question or ""),
                 "choices": choices_json,
                 "pending_plan": [],
-                "confirm_token": None,
+                "pending_confirm_token": None,
+                "pending_created_ts": None,
+                "pending_expires_ts": None,
+                "pending_issue_code": None,
                 "last_prompt_ts": now_epoch,
             }
         )

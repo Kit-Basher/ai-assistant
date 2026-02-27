@@ -65,7 +65,11 @@ class LLMFixitWizardStore:
             "question": None,
             "choices": [],
             "pending_plan": [],
-            "confirm_token": None,
+            "pending_confirm_token": None,
+            "pending_created_ts": None,
+            "pending_expires_ts": None,
+            "pending_issue_code": None,
+            "confirm_token": None,  # legacy compatibility
             "last_prompt_ts": None,
         }
 
@@ -118,7 +122,22 @@ class LLMFixitWizardStore:
                 }
             )
         state["pending_plan"] = plan
-        state["confirm_token"] = str(raw.get("confirm_token") or "").strip() or None
+        pending_confirm = (
+            str(raw.get("pending_confirm_token") or "").strip()
+            or str(raw.get("confirm_token") or "").strip()
+            or None
+        )
+        state["pending_confirm_token"] = pending_confirm
+        try:
+            state["pending_created_ts"] = int(raw.get("pending_created_ts") or 0) or None
+        except (TypeError, ValueError):
+            state["pending_created_ts"] = None
+        try:
+            state["pending_expires_ts"] = int(raw.get("pending_expires_ts") or 0) or None
+        except (TypeError, ValueError):
+            state["pending_expires_ts"] = None
+        state["pending_issue_code"] = str(raw.get("pending_issue_code") or "").strip() or None
+        state["confirm_token"] = pending_confirm  # legacy compatibility
         try:
             state["last_prompt_ts"] = int(raw.get("last_prompt_ts") or 0) or None
         except (TypeError, ValueError):
@@ -129,6 +148,10 @@ class LLMFixitWizardStore:
             state["question"] = None
             state["choices"] = []
             state["pending_plan"] = []
+            state["pending_confirm_token"] = None
+            state["pending_created_ts"] = None
+            state["pending_expires_ts"] = None
+            state["pending_issue_code"] = None
             state["confirm_token"] = None
         return state
 
@@ -643,6 +666,34 @@ def confirm_token_for_plan(plan: list[DeterministicAction]) -> str:
             "safe_to_execute": bool(item.safe_to_execute),
         }
         for item in plan
+    ]
+    return sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def confirm_token_for_plan_rows(plan_rows: list[dict[str, Any]]) -> str:
+    payload = [
+        {
+            "id": str(item.get("id") or "").strip(),
+            "kind": str(item.get("kind") or "").strip(),
+            "action": str(item.get("action") or "").strip(),
+            "reason": str(item.get("reason") or "").strip(),
+            "params": dict(
+                sorted(
+                    (
+                        params_key,
+                        params_value,
+                    )
+                    for params_key, params_value in (
+                        (item.get("params") if isinstance(item.get("params"), dict) else {}).items()
+                    )
+                )
+            ),
+            "safe_to_execute": bool(item.get("safe_to_execute", False)),
+        }
+        for item in sorted(
+            [row for row in plan_rows if isinstance(row, dict)],
+            key=lambda row: str(row.get("id") or ""),
+        )
     ]
     return sha256(json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
