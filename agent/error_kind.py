@@ -7,6 +7,7 @@ import urllib.error
 
 ERROR_KINDS = (
     "bad_request",
+    "needs_clarification",
     "payment_required",
     "upstream_down",
     "timeout",

@@ -118,27 +118,35 @@ class TestErrorKindContract(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
-    def test_chat_invalid_payload_sets_bad_request_error_kind(self) -> None:
+    def test_chat_empty_payload_sets_needs_clarification(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         handler = _HandlerForPostTest(runtime, "/chat", {})
         handler.do_POST()
 
-        self.assertEqual(400, handler.status_code)
-        self.assertEqual(False, handler.response_payload.get("ok"))
-        self.assertEqual("bad_request", handler.response_payload.get("error_kind"))
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, handler.response_payload.get("ok"))
+        self.assertEqual("needs_clarification", handler.response_payload.get("error_kind"))
+        self.assertEqual(0.0, handler.response_payload.get("confidence"))
+        self.assertEqual(False, handler.response_payload.get("did_work"))
         self.assertTrue(str(handler.response_payload.get("message") or "").strip())
         envelope = handler.response_payload.get("envelope")
         self.assertTrue(isinstance(envelope, dict))
-        self.assertIn('"messages"', str((envelope or {}).get("next_question") or ""))
+        self.assertEqual(["needs_clarification"], handler.response_payload.get("errors"))
+        self.assertEqual(
+            str((envelope or {}).get("message") or ""),
+            str((envelope or {}).get("next_question") or ""),
+        )
 
-    def test_ask_invalid_payload_sets_bad_request_error_kind(self) -> None:
+    def test_ask_empty_payload_sets_needs_clarification(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         handler = _HandlerForPostTest(runtime, "/ask", {})
         handler.do_POST()
 
-        self.assertEqual(400, handler.status_code)
-        self.assertEqual(False, handler.response_payload.get("ok"))
-        self.assertEqual("bad_request", handler.response_payload.get("error_kind"))
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, handler.response_payload.get("ok"))
+        self.assertEqual("needs_clarification", handler.response_payload.get("error_kind"))
+        self.assertEqual("ask", handler.response_payload.get("intent"))
+        self.assertEqual(["needs_clarification"], handler.response_payload.get("errors"))
         self.assertTrue(str(handler.response_payload.get("message") or "").strip())
 
     def test_done_invalid_payload_sets_bad_request_error_kind(self) -> None:
