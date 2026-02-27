@@ -16,7 +16,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any
+from typing import Any, Callable
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -694,174 +694,132 @@ class AgentRuntime:
         )
         self._scheduler_thread.start()
 
-    def _scheduler_loop(self) -> None:
+    def _scheduler_loop(
+        self,
+        *,
+        sleep_fn: Callable[[float], None] | None = None,
+        stop_event: threading.Event | None = None,
+        max_iters: int | None = None,
+    ) -> None:
         latest_inventory: dict[str, Any] = {}
-        while not self._scheduler_stop.wait(1.0):
-            now = time.time()
-            cycle_started = False
-            cycle_before_state: dict[str, Any] | None = None
-            cycle_reasons: set[str] = set()
-            cycle_extra_changes: list[str] = []
+        stop = stop_event or self._scheduler_stop
+        iterations = 0
+        consecutive_failures = 0
+        last_failure_ts: int | None = None
+        job_error_last_log_at: dict[str, int] = {}
 
-            def _start_cycle() -> None:
-                nonlocal cycle_started, cycle_before_state
-                if not cycle_started:
-                    cycle_before_state = self._autopilot_notify_state_snapshot()
-                    cycle_started = True
+        def _record_job_error(*, job: str, exc: Exception) -> None:
+            now_epoch = int(time.time())
+            last_logged = int(job_error_last_log_at.get(job) or 0)
+            if now_epoch - last_logged < 60:
+                return
+            job_error_last_log_at[job] = now_epoch
+            self._safe_log_event(
+                "scheduler_job_error",
+                {
+                    "job": str(job),
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                },
+            )
 
-            def _collect_safe_mode_block(body: dict[str, Any] | None) -> None:
-                payload = body if isinstance(body, dict) else {}
-                reason = str(payload.get("safe_mode_blocked_reason") or "").strip()
-                if not reason:
-                    return
-                cycle_reasons.add("safe_mode_blocked")
-                cycle_extra_changes.append(f"Safe mode blocked: {reason}")
-
-            try:
-                if now >= float(self._scheduler_next_run.get("refresh", 0.0)):
-                    _start_cycle()
-                    ok, body = self.refresh_models({"actor": "scheduler"})
-                    if ok and isinstance(body, dict) and isinstance(body.get("inventory"), dict):
-                        latest_inventory = body.get("inventory") or {}
-                    if ok and bool((body or {}).get("changed")):
-                        cycle_reasons.add("refreshed_provider_inventory")
-                    self._scheduler_next_run["refresh"] = now + max(30.0, float(self.config.llm_health_interval_seconds))
-            except Exception:
-                self._scheduler_next_run["refresh"] = now + max(60.0, float(self.config.llm_health_interval_seconds))
+        while True:
+            if max_iters is not None and iterations >= int(max_iters):
+                break
+            if self._scheduler_wait(stop_event=stop, seconds=1.0, sleep_fn=sleep_fn):
+                break
+            iterations += 1
 
             try:
-                if "bootstrap" in self._scheduler_next_run and now >= float(self._scheduler_next_run.get("bootstrap", 0.0)):
-                    _start_cycle()
-                    ok, body = self.llm_autopilot_bootstrap(
-                        {"actor": "scheduler", "confirm": False},
-                        trigger="scheduler",
-                    )
-                    if ok and bool((body or {}).get("applied")):
-                        plan = body.get("plan") if isinstance(body, dict) else {}
-                        cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
-                    _collect_safe_mode_block(body if isinstance(body, dict) else None)
-                    self._scheduler_next_run["bootstrap"] = now + max(
-                        86400.0, float(self.config.llm_self_heal_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["bootstrap"] = now + max(
-                    86400.0, float(self.config.llm_self_heal_interval_seconds)
-                )
+                now = time.time()
+                cycle_started = False
+                cycle_before_state: dict[str, Any] | None = None
+                cycle_reasons: set[str] = set()
+                cycle_extra_changes: list[str] = []
 
-            try:
-                if "catalog" in self._scheduler_next_run and now >= float(self._scheduler_next_run.get("catalog", 0.0)):
-                    _start_cycle()
-                    ok, body = self.run_llm_catalog_refresh(trigger="scheduler")
-                    if ok and bool((body or {}).get("changed")):
-                        cycle_reasons.add("refreshed_model_catalog")
-                        for line in (body or {}).get("notable_changes") or []:
-                            text = str(line or "").strip()
-                            if text:
-                                cycle_extra_changes.append(text)
-                    self._scheduler_next_run["catalog"] = now + max(
-                        60.0, float(self.config.llm_catalog_refresh_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["catalog"] = now + max(
-                    300.0, float(self.config.llm_catalog_refresh_interval_seconds)
-                )
+                def _start_cycle() -> None:
+                    nonlocal cycle_started, cycle_before_state
+                    if not cycle_started:
+                        cycle_before_state = self._autopilot_notify_state_snapshot()
+                        cycle_started = True
 
-            try:
-                if (
-                    "capabilities_reconcile" in self._scheduler_next_run
-                    and now >= float(self._scheduler_next_run.get("capabilities_reconcile", 0.0))
-                ):
-                    _start_cycle()
-                    ok, body = self.llm_capabilities_reconcile_apply(
-                        {
-                            "actor": "scheduler",
-                            "confirm": False,
-                        },
-                        trigger="scheduler",
-                    )
-                    if ok and bool((body or {}).get("applied")):
-                        plan = body.get("plan") if isinstance(body, dict) else {}
-                        cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
-                        changes = (
-                            plan.get("changes")
-                            if isinstance(plan, dict) and isinstance(plan.get("changes"), list)
-                            else []
+                def _collect_safe_mode_block(body: dict[str, Any] | None) -> None:
+                    payload = body if isinstance(body, dict) else {}
+                    reason = str(payload.get("safe_mode_blocked_reason") or "").strip()
+                    if not reason:
+                        return
+                    cycle_reasons.add("safe_mode_blocked")
+                    cycle_extra_changes.append(f"Safe mode blocked: {reason}")
+
+                try:
+                    if now >= float(self._scheduler_next_run.get("refresh", 0.0)):
+                        _start_cycle()
+                        ok, body = self.refresh_models({"actor": "scheduler"})
+                        if ok and isinstance(body, dict) and isinstance(body.get("inventory"), dict):
+                            latest_inventory = body.get("inventory") or {}
+                        if ok and bool((body or {}).get("changed")):
+                            cycle_reasons.add("refreshed_provider_inventory")
+                        self._scheduler_next_run["refresh"] = now + max(
+                            30.0,
+                            float(self.config.llm_health_interval_seconds),
                         )
-                        for row in changes[:3]:
-                            if not isinstance(row, dict):
-                                continue
-                            model_id = str(row.get("id") or "").strip()
-                            field = str(row.get("field") or "").strip()
-                            if not model_id or not field:
-                                continue
-                            cycle_extra_changes.append(f"Capabilities: {model_id} updated {field}")
-                    self._scheduler_next_run["capabilities_reconcile"] = now + max(
-                        30.0, float(self.config.llm_health_interval_seconds)
+                except Exception as exc:
+                    _record_job_error(job="refresh", exc=exc)
+                    self._scheduler_next_run["refresh"] = now + max(
+                        60.0,
+                        float(self.config.llm_health_interval_seconds),
                     )
-            except Exception:
-                self._scheduler_next_run["capabilities_reconcile"] = now + max(
-                    120.0, float(self.config.llm_health_interval_seconds)
-                )
 
-            try:
-                if now >= float(self._scheduler_next_run.get("health", 0.0)):
-                    _start_cycle()
-                    self.run_llm_health(trigger="scheduler")
-                    self._scheduler_next_run["health"] = now + max(1.0, float(self.config.llm_health_interval_seconds))
-            except Exception:
-                self._scheduler_next_run["health"] = now + max(30.0, float(self.config.llm_health_interval_seconds))
+                try:
+                    if "bootstrap" in self._scheduler_next_run and now >= float(self._scheduler_next_run.get("bootstrap", 0.0)):
+                        _start_cycle()
+                        ok, body = self.llm_autopilot_bootstrap(
+                            {"actor": "scheduler", "confirm": False},
+                            trigger="scheduler",
+                        )
+                        if ok and bool((body or {}).get("applied")):
+                            plan = body.get("plan") if isinstance(body, dict) else {}
+                            cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
+                        _collect_safe_mode_block(body if isinstance(body, dict) else None)
+                        self._scheduler_next_run["bootstrap"] = now + max(
+                            86400.0,
+                            float(self.config.llm_self_heal_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="bootstrap", exc=exc)
+                    self._scheduler_next_run["bootstrap"] = now + max(
+                        86400.0,
+                        float(self.config.llm_self_heal_interval_seconds),
+                    )
 
-            try:
-                if now >= float(self._scheduler_next_run.get("hygiene", 0.0)):
-                    _start_cycle()
-                    ok, body = self.llm_hygiene_apply(
-                        {
-                            "actor": "scheduler",
-                            "confirm": False,
-                            "provider_inventory": latest_inventory,
-                        }
+                try:
+                    if "catalog" in self._scheduler_next_run and now >= float(self._scheduler_next_run.get("catalog", 0.0)):
+                        _start_cycle()
+                        ok, body = self.run_llm_catalog_refresh(trigger="scheduler")
+                        if ok and bool((body or {}).get("changed")):
+                            cycle_reasons.add("refreshed_model_catalog")
+                            for line in (body or {}).get("notable_changes") or []:
+                                text = str(line or "").strip()
+                                if text:
+                                    cycle_extra_changes.append(text)
+                        self._scheduler_next_run["catalog"] = now + max(
+                            60.0,
+                            float(self.config.llm_catalog_refresh_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="catalog", exc=exc)
+                    self._scheduler_next_run["catalog"] = now + max(
+                        300.0,
+                        float(self.config.llm_catalog_refresh_interval_seconds),
                     )
-                    if ok and bool((body or {}).get("applied")):
-                        plan = body.get("plan") if isinstance(body, dict) else {}
-                        cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
-                    _collect_safe_mode_block(body if isinstance(body, dict) else None)
-                    self._scheduler_next_run["hygiene"] = now + max(
-                        300.0, float(self.config.llm_hygiene_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["hygiene"] = now + max(
-                    600.0, float(self.config.llm_hygiene_interval_seconds)
-                )
 
-            try:
-                if "cleanup" in self._scheduler_next_run and now >= float(self._scheduler_next_run.get("cleanup", 0.0)):
-                    _start_cycle()
-                    ok, body = self.llm_cleanup_apply(
-                        {
-                            "actor": "scheduler",
-                            "confirm": False,
-                            "provider_failure_streak": self.config.llm_hygiene_provider_failure_streak,
-                        },
-                        trigger="scheduler",
-                    )
-                    if ok and bool((body or {}).get("applied")):
-                        plan = body.get("plan") if isinstance(body, dict) else {}
-                        cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
-                    _collect_safe_mode_block(body if isinstance(body, dict) else None)
-                    self._scheduler_next_run["cleanup"] = now + max(
-                        300.0, float(self.config.llm_hygiene_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["cleanup"] = now + max(
-                    600.0, float(self.config.llm_hygiene_interval_seconds)
-                )
-
-            try:
-                if now >= float(self._scheduler_next_run.get("self_heal", 0.0)):
-                    _start_cycle()
-                    drift = self._current_drift_report()
-                    if bool(drift.get("has_drift")):
-                        ok, body = self.llm_self_heal_apply(
+                try:
+                    if (
+                        "capabilities_reconcile" in self._scheduler_next_run
+                        and now >= float(self._scheduler_next_run.get("capabilities_reconcile", 0.0))
+                    ):
+                        _start_cycle()
+                        ok, body = self.llm_capabilities_reconcile_apply(
                             {
                                 "actor": "scheduler",
                                 "confirm": False,
@@ -871,85 +829,222 @@ class AgentRuntime:
                         if ok and bool((body or {}).get("applied")):
                             plan = body.get("plan") if isinstance(body, dict) else {}
                             cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
-                        _collect_safe_mode_block(body if isinstance(body, dict) else None)
-                    self._scheduler_next_run["self_heal"] = now + max(
-                        300.0, float(self.config.llm_self_heal_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["self_heal"] = now + max(
-                    600.0, float(self.config.llm_self_heal_interval_seconds)
-                )
-
-            try:
-                if now >= float(self._scheduler_next_run.get("autoconfig", 0.0)):
-                    _start_cycle()
-                    ok, body = self.llm_autoconfig_apply(
-                        {
-                            "actor": "scheduler",
-                            "confirm": False,
-                            "disable_auth_failed_providers": True,
-                        }
-                    )
-                    if ok and bool((body or {}).get("applied")):
-                        plan = body.get("plan") if isinstance(body, dict) else {}
-                        cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
-                    _collect_safe_mode_block(body if isinstance(body, dict) else None)
-                    self._scheduler_next_run["autoconfig"] = now + max(
-                        300.0, float(self.config.llm_autoconfig_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["autoconfig"] = now + max(
-                    600.0, float(self.config.llm_autoconfig_interval_seconds)
-                )
-
-            try:
-                if now >= float(self._scheduler_next_run.get("model_scout", 0.0)):
-                    self.run_model_scout()
-                    self._scheduler_next_run["model_scout"] = now + max(
-                        60.0, float(self.config.llm_model_scout_interval_seconds)
-                    )
-            except Exception:
-                self._scheduler_next_run["model_scout"] = now + max(
-                    300.0, float(self.config.llm_model_scout_interval_seconds)
-                )
-
-            if "model_watch" in self._scheduler_next_run:
-                try:
-                    if now >= float(self._scheduler_next_run.get("model_watch", 0.0)):
-                        ok_watch, watch_body = self.run_model_watch_once(trigger="scheduler")
-                        next_after = int(watch_body.get("next_check_after_seconds") or 0)
-                        if next_after <= 0:
-                            next_after = int(self.config.model_watch_interval_seconds)
-                        self._scheduler_next_run["model_watch"] = now + max(60.0, float(next_after))
-                        if not ok_watch:
-                            log_event(
-                                self.config.log_path,
-                                "model_watch_scheduler_error",
-                                {"error": str(watch_body.get("error") or "run_failed")},
+                            changes = (
+                                plan.get("changes")
+                                if isinstance(plan, dict) and isinstance(plan.get("changes"), list)
+                                else []
                             )
+                            for row in changes[:3]:
+                                if not isinstance(row, dict):
+                                    continue
+                                model_id = str(row.get("id") or "").strip()
+                                field = str(row.get("field") or "").strip()
+                                if not model_id or not field:
+                                    continue
+                                cycle_extra_changes.append(f"Capabilities: {model_id} updated {field}")
+                        self._scheduler_next_run["capabilities_reconcile"] = now + max(
+                            30.0,
+                            float(self.config.llm_health_interval_seconds),
+                        )
                 except Exception as exc:
-                    log_event(
-                        self.config.log_path,
-                        "model_watch_scheduler_error",
-                        {"error": str(exc)},
-                    )
-                    self._scheduler_next_run["model_watch"] = now + max(
-                        300.0,
-                        float(self.config.model_watch_interval_seconds),
+                    _record_job_error(job="capabilities_reconcile", exc=exc)
+                    self._scheduler_next_run["capabilities_reconcile"] = now + max(
+                        120.0,
+                        float(self.config.llm_health_interval_seconds),
                     )
 
-            if cycle_started and cycle_before_state is not None:
-                churn = self._evaluate_autopilot_churn(now_epoch=int(now), trigger="scheduler")
-                if bool(churn.get("entered_safe_mode")):
-                    cycle_reasons.add("safe_mode_churn_detected")
-                    cycle_extra_changes.append(str(churn.get("notification_line") or ""))
-                self._process_scheduler_notification_cycle(
-                    before_state=cycle_before_state,
-                    after_state=self._autopilot_notify_state_snapshot(),
-                    reasons=sorted(cycle_reasons),
-                    extra_changes=sorted({str(item).strip() for item in cycle_extra_changes if str(item).strip()}),
-                    trigger="scheduler",
+                try:
+                    if now >= float(self._scheduler_next_run.get("health", 0.0)):
+                        _start_cycle()
+                        self.run_llm_health(trigger="scheduler")
+                        self._scheduler_next_run["health"] = now + max(
+                            1.0,
+                            float(self.config.llm_health_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="health", exc=exc)
+                    self._scheduler_next_run["health"] = now + max(
+                        30.0,
+                        float(self.config.llm_health_interval_seconds),
+                    )
+
+                try:
+                    if now >= float(self._scheduler_next_run.get("hygiene", 0.0)):
+                        _start_cycle()
+                        ok, body = self.llm_hygiene_apply(
+                            {
+                                "actor": "scheduler",
+                                "confirm": False,
+                                "provider_inventory": latest_inventory,
+                            }
+                        )
+                        if ok and bool((body or {}).get("applied")):
+                            plan = body.get("plan") if isinstance(body, dict) else {}
+                            cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
+                        _collect_safe_mode_block(body if isinstance(body, dict) else None)
+                        self._scheduler_next_run["hygiene"] = now + max(
+                            300.0,
+                            float(self.config.llm_hygiene_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="hygiene", exc=exc)
+                    self._scheduler_next_run["hygiene"] = now + max(
+                        600.0,
+                        float(self.config.llm_hygiene_interval_seconds),
+                    )
+
+                try:
+                    if "cleanup" in self._scheduler_next_run and now >= float(self._scheduler_next_run.get("cleanup", 0.0)):
+                        _start_cycle()
+                        ok, body = self.llm_cleanup_apply(
+                            {
+                                "actor": "scheduler",
+                                "confirm": False,
+                                "provider_failure_streak": self.config.llm_hygiene_provider_failure_streak,
+                            },
+                            trigger="scheduler",
+                        )
+                        if ok and bool((body or {}).get("applied")):
+                            plan = body.get("plan") if isinstance(body, dict) else {}
+                            cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
+                        _collect_safe_mode_block(body if isinstance(body, dict) else None)
+                        self._scheduler_next_run["cleanup"] = now + max(
+                            300.0,
+                            float(self.config.llm_hygiene_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="cleanup", exc=exc)
+                    self._scheduler_next_run["cleanup"] = now + max(
+                        600.0,
+                        float(self.config.llm_hygiene_interval_seconds),
+                    )
+
+                try:
+                    if now >= float(self._scheduler_next_run.get("self_heal", 0.0)):
+                        _start_cycle()
+                        drift = self._current_drift_report()
+                        if bool(drift.get("has_drift")):
+                            ok, body = self.llm_self_heal_apply(
+                                {
+                                    "actor": "scheduler",
+                                    "confirm": False,
+                                },
+                                trigger="scheduler",
+                            )
+                            if ok and bool((body or {}).get("applied")):
+                                plan = body.get("plan") if isinstance(body, dict) else {}
+                                cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
+                            _collect_safe_mode_block(body if isinstance(body, dict) else None)
+                        self._scheduler_next_run["self_heal"] = now + max(
+                            300.0,
+                            float(self.config.llm_self_heal_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="self_heal", exc=exc)
+                    self._scheduler_next_run["self_heal"] = now + max(
+                        600.0,
+                        float(self.config.llm_self_heal_interval_seconds),
+                    )
+
+                try:
+                    if now >= float(self._scheduler_next_run.get("autoconfig", 0.0)):
+                        _start_cycle()
+                        ok, body = self.llm_autoconfig_apply(
+                            {
+                                "actor": "scheduler",
+                                "confirm": False,
+                                "disable_auth_failed_providers": True,
+                            }
+                        )
+                        if ok and bool((body or {}).get("applied")):
+                            plan = body.get("plan") if isinstance(body, dict) else {}
+                            cycle_reasons.update(self._plan_reasons(plan if isinstance(plan, dict) else {}))
+                        _collect_safe_mode_block(body if isinstance(body, dict) else None)
+                        self._scheduler_next_run["autoconfig"] = now + max(
+                            300.0,
+                            float(self.config.llm_autoconfig_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="autoconfig", exc=exc)
+                    self._scheduler_next_run["autoconfig"] = now + max(
+                        600.0,
+                        float(self.config.llm_autoconfig_interval_seconds),
+                    )
+
+                try:
+                    if now >= float(self._scheduler_next_run.get("model_scout", 0.0)):
+                        self.run_model_scout()
+                        self._scheduler_next_run["model_scout"] = now + max(
+                            60.0,
+                            float(self.config.llm_model_scout_interval_seconds),
+                        )
+                except Exception as exc:
+                    _record_job_error(job="model_scout", exc=exc)
+                    self._scheduler_next_run["model_scout"] = now + max(
+                        300.0,
+                        float(self.config.llm_model_scout_interval_seconds),
+                    )
+
+                if "model_watch" in self._scheduler_next_run:
+                    try:
+                        if now >= float(self._scheduler_next_run.get("model_watch", 0.0)):
+                            ok_watch, watch_body = self.run_model_watch_once(trigger="scheduler")
+                            next_after = int(watch_body.get("next_check_after_seconds") or 0)
+                            if next_after <= 0:
+                                next_after = int(self.config.model_watch_interval_seconds)
+                            self._scheduler_next_run["model_watch"] = now + max(60.0, float(next_after))
+                            if not ok_watch:
+                                self._safe_log_event(
+                                    "model_watch_scheduler_error",
+                                    {"error": str(watch_body.get("error") or "run_failed")},
+                                )
+                    except Exception as exc:
+                        _record_job_error(job="model_watch", exc=exc)
+                        self._safe_log_event(
+                            "model_watch_scheduler_error",
+                            {"error": str(exc)},
+                        )
+                        self._scheduler_next_run["model_watch"] = now + max(
+                            300.0,
+                            float(self.config.model_watch_interval_seconds),
+                        )
+
+                if cycle_started and cycle_before_state is not None:
+                    churn = self._evaluate_autopilot_churn(now_epoch=int(now), trigger="scheduler")
+                    if bool(churn.get("entered_safe_mode")):
+                        cycle_reasons.add("safe_mode_churn_detected")
+                        cycle_extra_changes.append(str(churn.get("notification_line") or ""))
+                    self._process_scheduler_notification_cycle(
+                        before_state=cycle_before_state,
+                        after_state=self._autopilot_notify_state_snapshot(),
+                        reasons=sorted(cycle_reasons),
+                        extra_changes=sorted(
+                            {str(item).strip() for item in cycle_extra_changes if str(item).strip()}
+                        ),
+                        trigger="scheduler",
+                    )
+
+                consecutive_failures = 0
+                last_failure_ts = None
+            except Exception as exc:  # pragma: no cover - fail-safe loop guard
+                consecutive_failures += 1
+                last_failure_ts = int(time.time())
+                if consecutive_failures <= 5:
+                    backoff_seconds = 5.0
+                else:
+                    backoff_seconds = min(60.0, 5.0 * float(consecutive_failures - 4))
+                self._safe_log_event(
+                    "scheduler_loop_error",
+                    {
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                        "consecutive_failures": int(consecutive_failures),
+                        "last_failure_ts": int(last_failure_ts),
+                        "backoff_seconds": int(backoff_seconds),
+                    },
                 )
+                if self._scheduler_wait(stop_event=stop, seconds=backoff_seconds, sleep_fn=sleep_fn):
+                    break
 
     def _schedule_autoconfig_soon(self, seconds: float = 10.0) -> None:
         if not bool(self.config.llm_automation_enabled):
@@ -1290,6 +1385,30 @@ class AgentRuntime:
             "payload": payload,
         }
         self._request_log.appendleft(record)
+
+    def _safe_log_event(self, event_type: str, payload: dict[str, Any]) -> None:
+        event = str(event_type or "").strip() or "runtime_event"
+        body = payload if isinstance(payload, dict) else {"value": str(payload)}
+        try:
+            log_event(self.config.log_path, event, body)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _scheduler_wait(
+        *,
+        stop_event: threading.Event,
+        seconds: float,
+        sleep_fn: Callable[[float], None] | None,
+    ) -> bool:
+        duration = max(0.0, float(seconds))
+        if sleep_fn is None:
+            return bool(stop_event.wait(duration))
+        try:
+            sleep_fn(duration)
+        except Exception:
+            return bool(stop_event.is_set())
+        return bool(stop_event.is_set())
 
     @staticmethod
     def _provider_public_payload(provider_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -6515,8 +6634,7 @@ class AgentRuntime:
                         "last_run_at": last_run_at,
                         "next_check_after_seconds": max(1, interval_seconds - elapsed),
                     }
-                    log_event(
-                        self.config.log_path,
+                    self._safe_log_event(
                         "model_watch_tick",
                         {
                             "trigger": trigger,
@@ -6530,8 +6648,7 @@ class AgentRuntime:
         try:
             result = run_watch_once_for_config(self.config, trigger=trigger, now_epoch=now)
         except Exception as exc:
-            log_event(
-                self.config.log_path,
+            self._safe_log_event(
                 "model_watch_tick",
                 {
                     "trigger": trigger,
@@ -6569,8 +6686,7 @@ class AgentRuntime:
                 "catalog_snapshot_model_count": int(body.get("catalog_snapshot_model_count") or 0),
             },
         )
-        log_event(
-            self.config.log_path,
+        self._safe_log_event(
             "model_watch_tick",
             {
                 "trigger": trigger,

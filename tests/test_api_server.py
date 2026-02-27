@@ -4,6 +4,7 @@ import copy
 import io
 import json
 import os
+import threading
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -814,6 +815,48 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(3, payload["fetched_candidates"])
         self.assertTrue(log_event_mock.called)
+
+    def test_scheduler_loop_survives_scheduled_job_exception(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._scheduler_next_run = {"model_watch": 0.0}
+        stop_event = threading.Event()
+        calls: list[str] = []
+        sleep_calls: list[float] = []
+
+        def _model_watch_side_effect(*, trigger: str = "scheduler") -> tuple[bool, dict[str, object]]:
+            calls.append(str(trigger))
+            if len(calls) == 1:
+                raise RuntimeError("boom")
+            return True, {"ok": True, "next_check_after_seconds": 1}
+
+        with patch.object(runtime, "run_model_watch_once", side_effect=_model_watch_side_effect):
+            runtime._scheduler_loop(
+                sleep_fn=lambda seconds: sleep_calls.append(float(seconds)),
+                stop_event=stop_event,
+                max_iters=2,
+            )
+
+        self.assertEqual(["scheduler"], calls)
+        self.assertEqual([1.0, 1.0], sleep_calls)
+        self.assertGreater(float(runtime._scheduler_next_run.get("model_watch") or 0.0), 0.0)
+
+    def test_scheduler_loop_does_not_die_when_log_event_nameerror_occurs(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._scheduler_next_run = {"model_watch": 0.0}
+        stop_event = threading.Event()
+
+        with patch.object(
+            runtime,
+            "run_model_watch_once",
+            return_value=(False, {"ok": False, "error": "run_failed", "next_check_after_seconds": 1}),
+        ), patch("agent.api_server.log_event", side_effect=NameError("log_event is not defined")):
+            runtime._scheduler_loop(
+                sleep_fn=lambda _seconds: None,
+                stop_event=stop_event,
+                max_iters=1,
+            )
+
+        self.assertIn("model_watch", runtime._scheduler_next_run)
 
     def test_llm_health_autoconfig_and_hygiene_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
