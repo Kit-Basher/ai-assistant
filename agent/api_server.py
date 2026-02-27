@@ -110,10 +110,13 @@ from agent.memory_v2.ingest import ingest_bootstrap_snapshot
 from agent.memory_v2.retrieval import select_memory
 from agent.memory_v2.storage import SQLiteMemoryStore
 from agent.memory_v2.types import MemoryLevel, MemoryQuery
+from agent.packs.manifest import PackManifestError, load_manifest
+from agent.packs.store import PackStore
 from agent.orchestrator import classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
 from agent.secret_store import SecretStore
+from agent.skills_loader import SkillLoader
 from memory.db import MemoryDB
 
 
@@ -416,6 +419,7 @@ class AgentRuntime:
         self.registry_store = RegistryStore(registry_path)
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
         self.permission_policy = PermissionPolicy()
+        self.pack_store = PackStore(self.config.db_path)
         self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
         self.webui_dist_path = Path(
             os.getenv("AGENT_WEBUI_DIST_PATH", "").strip() or str(self._repo_root / "agent" / "webui" / "dist")
@@ -524,6 +528,7 @@ class AgentRuntime:
         }
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
+        self._ensure_native_packs_registered()
         self._reload_router()
         self._memory_v2_bootstrap_status: dict[str, Any] = {"ran": False, "ok": False}
         self._initialize_memory_v2_bootstrap()
@@ -635,6 +640,227 @@ class AgentRuntime:
         except (OSError, subprocess.SubprocessError):
             pass
         return None
+
+    def _ensure_native_packs_registered(self) -> None:
+        try:
+            loaded_skills = SkillLoader(self.config.skills_path).load_all()
+        except Exception as exc:  # pragma: no cover - defensive startup path
+            log_event(
+                self.config.log_path,
+                "pack_seed_failed",
+                {"error": exc.__class__.__name__},
+            )
+            return
+        for skill in loaded_skills.values():
+            if str(skill.pack_trust or "").strip().lower() != "native":
+                continue
+            permissions = skill.pack_permissions if isinstance(skill.pack_permissions, dict) else {"ifaces": []}
+            self.pack_store.ensure_native_pack(
+                pack_id=str(skill.pack_id or skill.name),
+                version=str(skill.version or "0.1.0"),
+                permissions=permissions,
+                manifest_path=skill.pack_manifest_path,
+            )
+
+    @staticmethod
+    def _pack_error(
+        *,
+        error: str,
+        message: str,
+        error_kind: str = "bad_request",
+        next_question: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        body: dict[str, Any] = {
+            "ok": False,
+            "error": error,
+            "error_kind": error_kind,
+            "message": message,
+            "errors": [error],
+        }
+        if next_question:
+            body["next_question"] = next_question
+        return False, body
+
+    @staticmethod
+    def _pack_clarification(*, intent: str, message: str, trace_id: str = "packs") -> tuple[bool, dict[str, Any]]:
+        envelope = validate_envelope(
+            {
+                "ok": True,
+                "intent": intent,
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": message,
+                "next_question": message,
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+            }
+        )
+        return True, {
+            "ok": bool(envelope.get("ok", True)),
+            "intent": str(envelope.get("intent") or intent),
+            "confidence": float(envelope.get("confidence", 0.0)),
+            "did_work": bool(envelope.get("did_work", False)),
+            "error_kind": str(envelope.get("error_kind") or "needs_clarification"),
+            "message": str(envelope.get("message") or message),
+            "next_question": envelope.get("next_question"),
+            "actions": envelope.get("actions", []),
+            "errors": envelope.get("errors", ["needs_clarification"]),
+            "trace_id": envelope.get("trace_id") or trace_id,
+            "envelope": envelope,
+        }
+
+    def list_packs(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "packs": self.pack_store.list_packs(),
+        }
+
+    def packs_install(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        source = str(payload.get("source") or "").strip()
+        pack_dir = str(payload.get("path") or "").strip()
+        if not pack_dir:
+            if source and source not in {"path", "local"} and "://" not in source:
+                pack_dir = source
+            elif source in {"path", "local"}:
+                pack_dir = str(payload.get("pack_path") or "").strip()
+        if not pack_dir:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack source path is required",
+                next_question="Provide a local pack directory path containing pack.json.",
+            )
+        if "://" in source and source not in {"path", "local"}:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="only local path installs are supported",
+                next_question="Use a local filesystem path for now.",
+            )
+        manifest_path = os.path.join(pack_dir, "pack.json")
+        try:
+            manifest = load_manifest(manifest_path)
+        except PackManifestError as exc:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message=f"invalid pack manifest: {exc}",
+                next_question="Fix pack.json and retry install.",
+            )
+        requested_pack_id = str(payload.get("pack_id") or "").strip()
+        if requested_pack_id and requested_pack_id != manifest.pack_id:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack_id does not match manifest",
+                next_question=f"Use pack_id {manifest.pack_id} or update pack.json.",
+            )
+        enable = bool(payload.get("enable", False))
+        pack_row = self.pack_store.install_pack(manifest, manifest_path=manifest_path, enable=enable)
+        log_event(
+            self.config.log_path,
+            "pack_installed",
+            {
+                "pack_id": manifest.pack_id,
+                "trust": manifest.trust,
+                "enabled": bool(pack_row.get("enabled")),
+            },
+        )
+        message = f"Installed pack {manifest.pack_id}."
+        if manifest.trust != "native":
+            message += f" Approve pack {manifest.pack_id} before running it?"
+        return True, {
+            "ok": True,
+            "pack": pack_row,
+            "message": message,
+            "requires_approval": manifest.trust != "native",
+        }
+
+    def packs_approve(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        pack_id = str(payload.get("pack_id") or "").strip()
+        if not pack_id:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack_id is required",
+                next_question="Which pack_id should be approved?",
+            )
+        current = self.pack_store.get_pack(pack_id)
+        if current is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"pack not found: {pack_id}",
+                next_question="Install the pack first, then approve it.",
+            )
+        if payload.get("approve") is not True:
+            return self._pack_clarification(
+                intent="packs.approve",
+                message=f"Approve pack {pack_id} for its declared permissions?",
+            )
+        approved = self.pack_store.set_approval_hash(pack_id, str(current.get("permissions_hash") or ""))
+        if approved is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"pack not found: {pack_id}",
+                next_question="Install the pack first, then approve it.",
+            )
+        if "enable" in payload:
+            approved = self.pack_store.set_enabled(pack_id, bool(payload.get("enable")))
+        log_event(
+            self.config.log_path,
+            "pack_approved",
+            {
+                "pack_id": pack_id,
+                "enabled": bool((approved or {}).get("enabled", False)),
+            },
+        )
+        return True, {
+            "ok": True,
+            "pack": approved,
+            "message": f"Approved permissions for pack {pack_id}.",
+        }
+
+    def packs_enable(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        pack_id = str(payload.get("pack_id") or "").strip()
+        if not pack_id:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack_id is required",
+                next_question="Which pack_id should be enabled or disabled?",
+            )
+        if "enabled" not in payload:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="enabled flag is required",
+                next_question='Include {"enabled": true} or {"enabled": false}.',
+            )
+        updated = self.pack_store.set_enabled(pack_id, bool(payload.get("enabled")))
+        if updated is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"pack not found: {pack_id}",
+                next_question="Install the pack first, then enable it.",
+            )
+        log_event(
+            self.config.log_path,
+            "pack_enabled_updated",
+            {
+                "pack_id": pack_id,
+                "enabled": bool(updated.get("enabled")),
+            },
+        )
+        return True, {
+            "ok": True,
+            "pack": updated,
+            "message": f"Pack {pack_id} {'enabled' if bool(updated.get('enabled')) else 'disabled'}.",
+        }
 
     def _reload_router(self) -> None:
         with self._registry_lock:
@@ -8792,6 +9018,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/permissions":
                 self._send_json(200, self.runtime.get_permissions())
                 return
+            if path == "/packs":
+                self._send_json(200, self.runtime.list_packs())
+                return
             if path == "/audit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 limit_raw = query.get("limit", [20])[0]
@@ -9379,6 +9608,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         "trace_id": envelope["trace_id"],
                         "envelope": envelope,
                     }
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/packs/install":
+                ok, body = self.runtime.packs_install(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/packs/approve":
+                ok, body = self.runtime.packs_approve(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/packs/enable":
+                ok, body = self.runtime.packs_enable(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/bootstrap/run":

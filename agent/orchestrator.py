@@ -24,6 +24,8 @@ from agent.logging_utils import log_event, redact_payload
 from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
 from agent.conversation_memory import record_event
 import agent.memory_ingest as memory_ingest
+from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
+from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
 from agent.changed_report import build_changed_report_from_system_facts
@@ -226,6 +228,17 @@ class Orchestrator:
     ) -> None:
         self.db = db
         self.skills = SkillLoader(skills_path).load_all()
+        self._pack_store = PackStore(db.db_path)
+        for skill in self.skills.values():
+            if str(skill.pack_trust).strip().lower() != "native":
+                continue
+            permissions = skill.pack_permissions if isinstance(skill.pack_permissions, dict) else {"ifaces": []}
+            self._pack_store.ensure_native_pack(
+                pack_id=str(skill.pack_id or skill.name),
+                version=str(skill.version or "0.1.0"),
+                permissions=permissions,
+                manifest_path=skill.pack_manifest_path,
+            )
         self.log_path = log_path
         self.timezone = timezone
         self.llm_client = llm_client
@@ -1492,6 +1505,33 @@ class Orchestrator:
         func = skill.functions.get(function_name)
         if not func:
             return OrchestratorResponse("Function not found.")
+
+        pack_id = str(skill.pack_id or skill_name).strip() or skill_name
+        iface = f"{skill_name}.{function_name}"
+        try:
+            enforce_iface_allowed(
+                pack_id=pack_id,
+                iface=iface,
+                fallback_iface=function_name,
+                pack_record=self._pack_store.get_pack(pack_id),
+                trust=str(skill.pack_trust or "native").strip().lower() or "native",
+                expected_permissions_hash=str(skill.pack_permissions_hash or "").strip(),
+            )
+        except PackPermissionDenied as exc:
+            log_event(
+                self.log_path,
+                "pack_permission_denied",
+                {
+                    "pack_id": pack_id,
+                    "skill": skill_name,
+                    "function": function_name,
+                    "reason": exc.reason,
+                },
+            )
+            return OrchestratorResponse(
+                f"This skill pack is not allowed to call {function_name}. "
+                f"Approve pack {pack_id} for {function_name}?"
+            )
 
         action = {"action_type": action_type or ""}
         decision = evaluate_policy(skill.permissions, requested_permissions, action)
