@@ -28,6 +28,29 @@ class TestConfig(unittest.TestCase):
             config = load_config()
         self.assertTrue(config.enable_writes)
 
+    def test_memory_v2_default_false(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "token", "LLM_PROVIDER": "none"},
+            clear=False,
+        ):
+            os.environ.pop("AGENT_MEMORY_V2_ENABLED", None)
+            config = load_config()
+        self.assertFalse(config.memory_v2_enabled)
+
+    def test_memory_v2_env_true(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "LLM_PROVIDER": "none",
+                "AGENT_MEMORY_V2_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            config = load_config()
+        self.assertTrue(config.memory_v2_enabled)
+
     def test_llm_notifications_allow_test_env_true(self) -> None:
         with patch.dict(
             os.environ,

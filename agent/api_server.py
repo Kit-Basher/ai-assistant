@@ -104,6 +104,10 @@ from agent.modelops.recommend import (
     recommendation_to_dict,
     save_seen_model_ids,
 )
+from agent.memory_v2.inject import with_built_context
+from agent.memory_v2.retrieval import select_memory
+from agent.memory_v2.storage import SQLiteMemoryStore
+from agent.memory_v2.types import MemoryLevel, MemoryQuery
 from agent.orchestrator import classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
@@ -430,6 +434,19 @@ class AgentRuntime:
             apply_defaults=self._modelops_apply_defaults,
             toggle_enabled=self._modelops_toggle_enabled,
         )
+        self._memory_v2_store: SQLiteMemoryStore | None = None
+        if bool(self.config.memory_v2_enabled):
+            try:
+                self._memory_v2_store = SQLiteMemoryStore(self.config.db_path)
+            except Exception as exc:  # pragma: no cover - defensive initialization path
+                self._memory_v2_store = None
+                log_event(
+                    self.config.log_path,
+                    "memory_v2_init_failed",
+                    {
+                        "error": exc.__class__.__name__,
+                    },
+                )
 
         self._scheduler_stop = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
@@ -2378,6 +2395,169 @@ class AgentRuntime:
             messages.append({"role": role, "content": content})
         return messages
 
+    @staticmethod
+    def _memory_message_content_text(content: Any) -> str:
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+        values: list[str] = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            text_value = part.get("text")
+            if isinstance(text_value, str) and text_value.strip():
+                values.append(text_value.strip())
+        return " ".join(values)
+
+    @staticmethod
+    def _extract_memory_query_text(payload: dict[str, Any], *, intent: str) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("text", "message", "content", "input", "query"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        raw_messages = payload.get("messages")
+        if not isinstance(raw_messages, list):
+            return ""
+        for row in reversed(raw_messages):
+            if not isinstance(row, dict):
+                continue
+            role = str(row.get("role") or "").strip().lower() or "user"
+            if role != "user":
+                continue
+            content = AgentRuntime._memory_message_content_text(row.get("content"))
+            if content:
+                text = content.strip()
+                lowered = text.lower()
+                for prefix in ("/ask ", "/done ", "/chat "):
+                    if lowered.startswith(prefix):
+                        text = text[len(prefix):].strip()
+                        lowered = text.lower()
+                        break
+                if lowered in {"/ask", "/done", "/chat"}:
+                    return ""
+                return text
+        return ""
+
+    @staticmethod
+    def _memory_query_tags(payload: dict[str, Any], *, intent: str) -> dict[str, str]:
+        tags: dict[str, str] = {}
+        if isinstance(payload, dict):
+            raw_tags = payload.get("memory_tags")
+            if isinstance(raw_tags, dict):
+                for key, value in sorted(raw_tags.items(), key=lambda item: str(item[0])):
+                    key_norm = str(key).strip().lower()
+                    value_norm = str(value).strip()
+                    if key_norm and value_norm:
+                        tags[key_norm] = value_norm
+            project = str(payload.get("project") or payload.get("project_tag") or "").strip()
+            if project:
+                tags["project"] = project
+        return tags
+
+    def build_memory_context_for_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        intent: str,
+        trace_id: str | None = None,
+        now_ts: int | None = None,
+    ) -> dict[str, Any] | None:
+        if not bool(self.config.memory_v2_enabled):
+            return None
+        if self._memory_v2_store is None:
+            return None
+        query_text = self._extract_memory_query_text(payload, intent=intent)
+        if not query_text:
+            return {
+                "selected_ids": [],
+                "levels": {
+                    MemoryLevel.EPISODIC.value: [],
+                    MemoryLevel.SEMANTIC.value: [],
+                    MemoryLevel.PROCEDURAL.value: [],
+                },
+                "debug": {
+                    "query": {"norm": "", "tokens": [], "entities": [], "tags": {}},
+                    "selected_ids": [],
+                    "selected": [],
+                    "skipped": [],
+                },
+                "merged_context_text": "",
+            }
+        try:
+            selection = with_built_context(
+                select_memory(
+                    MemoryQuery(
+                        text=query_text,
+                        tags=self._memory_query_tags(payload, intent=intent),
+                        now_ts=now_ts if now_ts is not None else int(time.time()),
+                    ),
+                    self._memory_v2_store,
+                )
+            )
+            levels = {
+                level.value: [item.id for item in selection.items_by_level.get(level, [])]
+                for level in (
+                    MemoryLevel.EPISODIC,
+                    MemoryLevel.SEMANTIC,
+                    MemoryLevel.PROCEDURAL,
+                )
+            }
+            selected_ids = [item_id for level in levels.values() for item_id in level]
+            return {
+                "selected_ids": selected_ids,
+                "levels": levels,
+                "debug": selection.debug,
+                "merged_context_text": selection.merged_context_text,
+            }
+        except Exception as exc:  # pragma: no cover - defensive path
+            log_event(
+                self.config.log_path,
+                "memory_v2_select_failed",
+                {
+                    "error": exc.__class__.__name__,
+                    "intent": str(intent or "").strip().lower() or "chat",
+                    "trace_id": str(trace_id or "").strip() or None,
+                },
+            )
+            return None
+
+    def _record_memory_event(
+        self,
+        *,
+        text: str,
+        tags: dict[str, str] | None = None,
+        source_kind: str,
+        source_ref: str,
+    ) -> None:
+        if not bool(self.config.memory_v2_enabled):
+            return
+        if self._memory_v2_store is None:
+            return
+        normalized_text = str(text or "").strip()
+        if not normalized_text:
+            return
+        try:
+            self._memory_v2_store.append_episodic_event(
+                text=normalized_text,
+                tags=tags or {},
+                source_kind=source_kind,
+                source_ref=source_ref,
+                pinned=False,
+            )
+        except Exception as exc:  # pragma: no cover - defensive logging only
+            log_event(
+                self.config.log_path,
+                "memory_v2_event_write_failed",
+                {
+                    "error": exc.__class__.__name__,
+                    "source_kind": str(source_kind or "").strip() or "unknown",
+                    "source_ref": str(source_ref or "").strip() or None,
+                },
+            )
+
     def chat(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         request_started_epoch = int(time.time())
         messages = self._normalize_messages(payload)
@@ -2389,7 +2569,11 @@ class AgentRuntime:
         provider_override = str(payload.get("provider") or "").strip().lower() or defaults.get("default_provider")
         explicit_require_tools = "require_tools" in payload
         require_tools = bool(payload.get("require_tools"))
-        routed_messages = list(messages)
+        memory_context_text = str(payload.get("memory_context_text") or "").strip()
+        memory_prefix_messages: list[dict[str, str]] = []
+        if memory_context_text:
+            memory_prefix_messages = [{"role": "system", "content": memory_context_text}]
+        routed_messages = [*memory_prefix_messages, *messages]
 
         last_user_text = ""
         for item in reversed(messages):
@@ -2432,6 +2616,7 @@ class AgentRuntime:
                             f"LOCAL_OBSERVATIONS\n{observations_json}"
                         ),
                     },
+                    *memory_prefix_messages,
                     *messages,
                 ]
                 require_tools = True
@@ -4634,6 +4819,17 @@ class AgentRuntime:
             message = "Safe remediation steps executed."
         else:
             message = "No executable remediation steps were found."
+
+        if executed_steps:
+            self._record_memory_event(
+                text=f"Remediation executed with {len(executed_steps)} safe step(s).",
+                tags={
+                    "project": "personal-agent",
+                    "topic": "llm_remediation",
+                },
+                source_kind="api",
+                source_ref="/llm/support/remediate/execute",
+            )
 
         return (False if failed_steps else True), {
             "ok": False if failed_steps else True,
@@ -7806,6 +8002,17 @@ class AgentRuntime:
             },
             "confirm": True,
         }
+        self._record_memory_event(
+            text=f"Switched default model to {canonical_model} for {purpose}.",
+            tags={
+                "project": "personal-agent",
+                "topic": "modelops",
+                "provider": provider,
+                "purpose": purpose,
+            },
+            source_kind="api",
+            source_ref="/llm/models/switch",
+        )
         return True, {
             "ok": True,
             "intent": "modelops_switch",
@@ -8429,8 +8636,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
+            original_path = path
             payload = self._read_json()
             intent_assessment: IntentAssessment | None = None
+            memory_debug_payload: dict[str, Any] | None = None
             json_error = str(getattr(self, "_last_json_error", "") or "").strip().lower() or None
             if path in {"/chat", "/ask", "/done"} and json_error in {"content_type_not_json", "invalid_json_body"}:
                 trace_id = self._request_trace_id(payload)
@@ -8583,6 +8792,30 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
             if path == "/chat":
                 trace_id = self._request_trace_id(payload)
+                memory_context_payload = self.runtime.build_memory_context_for_payload(
+                    payload,
+                    intent=str(original_path).lstrip("/") or "chat",
+                    trace_id=trace_id,
+                )
+                if isinstance(memory_context_payload, dict):
+                    selected_ids_raw = memory_context_payload.get("selected_ids")
+                    if not isinstance(selected_ids_raw, list):
+                        selected_ids_raw = []
+                    levels_raw = memory_context_payload.get("levels")
+                    if not isinstance(levels_raw, dict):
+                        levels_raw = {}
+                    debug_raw = memory_context_payload.get("debug")
+                    if not isinstance(debug_raw, dict):
+                        debug_raw = {}
+                    memory_debug_payload = {
+                        "selected_ids": [str(item) for item in selected_ids_raw],
+                        "levels": dict(levels_raw),
+                        "debug": dict(debug_raw),
+                    }
+                    context_text = str(memory_context_payload.get("merged_context_text") or "").strip()
+                    if context_text:
+                        payload = dict(payload)
+                        payload["memory_context_text"] = context_text
                 chat_result: tuple[bool, dict[str, Any]] | None = None
 
                 def _run_chat() -> dict[str, Any]:
@@ -8673,6 +8906,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         error_kind=str(envelope.get("error_kind") or "internal_error"),
                         status=500,
                     )
+                    if memory_debug_payload is not None:
+                        envelope_inner = (
+                            error_payload.get("envelope")
+                            if isinstance(error_payload.get("envelope"), dict)
+                            else {}
+                        )
+                        envelope_inner = dict(envelope_inner)
+                        envelope_inner["memory"] = memory_debug_payload
+                        error_payload["envelope"] = envelope_inner
                     self._send_json(status, error_payload)
                     return
 
@@ -8719,6 +8961,11 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     envelope_payload = body.get("envelope") if isinstance(body.get("envelope"), dict) else {}
                     envelope_payload = dict(envelope_payload)
                     envelope_payload["intent_assessment"] = self._intent_assessment_obj(intent_assessment)
+                    body["envelope"] = envelope_payload
+                if memory_debug_payload is not None:
+                    envelope_payload = body.get("envelope") if isinstance(body.get("envelope"), dict) else {}
+                    envelope_payload = dict(envelope_payload)
+                    envelope_payload["memory"] = memory_debug_payload
                     body["envelope"] = envelope_payload
                 self._send_json(200 if ok else 400, body)
                 return

@@ -58,6 +58,7 @@ class Config:
     model_watch_state_path: str | None = None
     model_watch_config_path: str | None = None
     model_watch_catalog_path: str | None = None
+    memory_v2_enabled: bool = False
     intent_llm_rerank_enabled: bool = False
     perception_enabled: bool = True
     perception_roots: tuple[str, ...] = ("/home", "/data/projects")
@@ -264,6 +265,13 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     model_watch_state_path = os.getenv("AGENT_MODEL_WATCH_STATE_PATH", "").strip() or None
     model_watch_config_path = os.getenv("AGENT_MODEL_WATCH_CONFIG_PATH", "").strip() or None
     model_watch_catalog_path = os.getenv("AGENT_MODEL_WATCH_CATALOG_PATH", "").strip() or None
+    memory_v2_enabled = os.getenv("AGENT_MEMORY_V2_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     intent_llm_rerank_enabled = os.getenv("AGENT_INTENT_LLM_RERANK_ENABLED", "0").strip().lower() in {
         "1",
         "true",
@@ -562,6 +570,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         model_watch_state_path=model_watch_state_path,
         model_watch_config_path=model_watch_config_path,
         model_watch_catalog_path=model_watch_catalog_path,
+        memory_v2_enabled=memory_v2_enabled,
         intent_llm_rerank_enabled=intent_llm_rerank_enabled,
         perception_enabled=perception_enabled,
         perception_roots=perception_roots,
