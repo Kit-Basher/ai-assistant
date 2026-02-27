@@ -105,6 +105,19 @@ from agent.modelops.recommend import (
     recommendation_to_dict,
     save_seen_model_ids,
 )
+from agent.ux.llm_fixit_wizard import (
+    LLMFixitWizardStore,
+    build_plan_for_choice as wizard_build_plan_for_choice,
+    confirm_token_for_plan as wizard_confirm_token_for_plan,
+    decision_issue_hash as wizard_decision_issue_hash,
+    decision_to_json as wizard_decision_to_json,
+    evaluate_wizard_decision,
+    failure_streak_threshold_crossed,
+    parse_choice_answer as wizard_parse_choice_answer,
+    provider_or_model_ok_down_transition,
+    render_wizard_prompt,
+    summarize_notification_message,
+)
 from agent.memory_v2.inject import with_built_context
 from agent.memory_v2.ingest import ingest_bootstrap_snapshot
 from agent.memory_v2.retrieval import select_memory
@@ -515,6 +528,12 @@ class AgentRuntime:
             max_age_days=max(0, int(self.config.llm_notifications_max_age_days)),
             compact=bool(self.config.llm_notifications_compact),
         )
+        llm_fixit_state_path = self._runtime_state_path(
+            self.config,
+            os.getenv("AGENT_LLM_FIXIT_WIZARD_STATE_PATH", "").strip() or None,
+            "llm_fixit_wizard_state.json",
+        )
+        self._llm_fixit_store = LLMFixitWizardStore(path=llm_fixit_state_path)
         self._safe_mode_last_blocked_reason: str | None = None
         self._safe_mode_last_escalation_reason: str | None = (
             str(self._autopilot_safety_state.status().get("last_churn_reason") or "").strip() or None
@@ -4355,6 +4374,7 @@ class AgentRuntime:
         message: str,
         allow_remote: bool,
     ) -> DeliveryResult:
+        outbound_message = self._autopilot_notification_user_message(message)
         token, chat_id = self._resolve_telegram_target()
         telegram_target = TelegramTarget(
             token=token,
@@ -4363,7 +4383,7 @@ class AgentRuntime:
             enabled=bool(allow_remote),
         )
         local_target = LocalTarget(enabled=True)
-        payload = {"message": str(message or "").strip()}
+        payload = {"message": str(outbound_message or "").strip()}
         telegram_descriptor = telegram_target.target
         local_descriptor = local_target.target
 
@@ -4390,6 +4410,13 @@ class AgentRuntime:
             error_kind="no_delivery_target",
             reason="not_configured",
         )
+
+    def _autopilot_notification_user_message(self, raw_message: str) -> str:
+        status_payload = self.llm_status()
+        decision = evaluate_wizard_decision(status_payload)
+        if decision.status != "ok":
+            return render_wizard_prompt(decision)
+        return summarize_notification_message(raw_message)
 
     def _process_scheduler_notification_cycle(
         self,
@@ -4429,6 +4456,18 @@ class AgentRuntime:
         )
         health_changed, non_health_changed = self._state_diff_health_flags(before_state, after_state)
         ok_down_transition = self._ok_down_transition_in_state_diff(before_state, after_state)
+        threshold_crossed = failure_streak_threshold_crossed(before_state, after_state)
+        if (
+            changed_any
+            and changed_defaults == 0
+            and health_changed
+            and not non_health_changed
+            and not ok_down_transition
+            and not threshold_crossed
+        ):
+            changed_any = False
+            message = ""
+            dedupe_hash = ""
         health_pause_key = "safe_mode_paused_health"
         should_track_paused_health_send = bool(
             self._autopilot_apply_pause_enabled()
@@ -5660,6 +5699,377 @@ class AgentRuntime:
             "bootstrap_policy": compute_autopilot_bootstrap_apply_policy(self),
         }
         return {"ok": True, "health": summary}
+
+    def _llm_status_payload(self, *, health_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+        health_payload = health_summary if isinstance(health_summary, dict) else self.llm_health_summary()
+        health = health_payload.get("health") if isinstance(health_payload.get("health"), dict) else {}
+        snapshot = self._router.doctor_snapshot()
+        defaults = self.get_defaults()
+        drift = health.get("drift") if isinstance(health.get("drift"), dict) else {}
+        drift_details = drift.get("details") if isinstance(drift.get("details"), dict) else {}
+        resolved_default_model = (
+            str(drift_details.get("resolved_default_model") or "").strip()
+            or str(defaults.get("default_model") or "").strip()
+            or None
+        )
+        default_provider = (
+            str(defaults.get("default_provider") or "").strip().lower()
+            or (
+                str(resolved_default_model or "").split(":", 1)[0].strip().lower()
+                if resolved_default_model and ":" in str(resolved_default_model)
+                else None
+            )
+        )
+        providers = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
+        models = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
+        provider_lookup = {
+            str(row.get("id") or "").strip().lower(): row
+            for row in providers
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        model_lookup = {
+            str(row.get("id") or "").strip(): row
+            for row in models
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        active_provider_row = provider_lookup.get(default_provider or "") if default_provider else None
+        active_model_row = model_lookup.get(str(resolved_default_model or ""))
+        active_provider_health = (
+            active_provider_row.get("health")
+            if isinstance(active_provider_row, dict) and isinstance(active_provider_row.get("health"), dict)
+            else {}
+        )
+        active_model_health = (
+            active_model_row.get("health")
+            if isinstance(active_model_row, dict) and isinstance(active_model_row.get("health"), dict)
+            else {}
+        )
+        safe_mode = self._safe_mode_health_payload()
+        return {
+            "ok": True,
+            "default_provider": default_provider,
+            "default_model": defaults.get("default_model"),
+            "resolved_default_model": resolved_default_model,
+            "routing_mode": defaults.get("routing_mode"),
+            "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
+            "safe_mode": safe_mode,
+            "active_provider_health": active_provider_health,
+            "active_model_health": active_model_health,
+            "providers": providers,
+            "models": models,
+        }
+
+    def llm_status(self) -> dict[str, Any]:
+        health_summary = self.llm_health_summary()
+        status = self._llm_status_payload(health_summary=health_summary)
+        status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
+        return status
+
+    def _execute_llm_fixit_plan(
+        self,
+        *,
+        plan_rows: list[dict[str, Any]],
+        actor: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        executed: list[dict[str, Any]] = []
+        blocked: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        for row in sorted(
+            [item for item in plan_rows if isinstance(item, dict)],
+            key=lambda item: str(item.get("id") or ""),
+        ):
+            action = str(row.get("action") or "").strip()
+            params = row.get("params") if isinstance(row.get("params"), dict) else {}
+            safe_to_execute = bool(row.get("safe_to_execute", False))
+            if not safe_to_execute:
+                blocked.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "reason": str(row.get("reason") or "manual_step"),
+                        "error": "user_action_required",
+                    }
+                )
+                continue
+
+            if action == "provider.set_enabled":
+                provider_id = str(params.get("provider") or "").strip().lower()
+                if not provider_id:
+                    failed.append({"id": str(row.get("id") or ""), "action": action, "error": "provider_required"})
+                    continue
+                ok, body = self.update_provider(provider_id, {"enabled": bool(params.get("enabled", False))})
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "update_failed"),
+                        }
+                    )
+                    continue
+                executed.append({"id": str(row.get("id") or ""), "action": action, "provider": provider_id})
+                continue
+
+            if action == "defaults.set":
+                ok, body = self.update_defaults(params)
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "update_failed"),
+                        }
+                    )
+                    continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "defaults": {
+                            "default_provider": body.get("default_provider"),
+                            "default_model": body.get("default_model"),
+                            "allow_remote_fallback": body.get("allow_remote_fallback"),
+                        },
+                    }
+                )
+                continue
+
+            if action == "autopilot.unpause":
+                ok, body = self.llm_autopilot_unpause({"confirm": True, "actor": actor})
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "unpause_failed"),
+                        }
+                    )
+                    continue
+                executed.append({"id": str(row.get("id") or ""), "action": action})
+                continue
+
+            if action == "provider.test":
+                provider_id = str(params.get("provider") or "").strip().lower()
+                if not provider_id:
+                    failed.append({"id": str(row.get("id") or ""), "action": action, "error": "provider_required"})
+                    continue
+                ok, body = self.test_provider(provider_id, {})
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "provider_test_failed"),
+                            "provider": provider_id,
+                        }
+                    )
+                    continue
+                executed.append({"id": str(row.get("id") or ""), "action": action, "provider": provider_id})
+                continue
+
+            if action == "health.run":
+                ok, body = self.run_llm_health(trigger="manual")
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "health_run_failed"),
+                        }
+                    )
+                    continue
+                executed.append({"id": str(row.get("id") or ""), "action": action})
+                continue
+
+            blocked.append(
+                {
+                    "id": str(row.get("id") or ""),
+                    "action": action,
+                    "reason": str(row.get("reason") or "unsupported_action"),
+                    "error": "unsupported_action",
+                }
+            )
+
+        ok = not failed
+        return ok, {
+            "ok": ok,
+            "executed_steps": executed,
+            "blocked_steps": blocked,
+            "failed_steps": failed,
+        }
+
+    def llm_fixit(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        actor = str(payload.get("actor") or "user").strip() or "user"
+        now_epoch = int(time.time())
+        status_payload = self.llm_status()
+        decision = evaluate_wizard_decision(status_payload)
+        issue_hash = wizard_decision_issue_hash(decision, status_payload)
+        wizard_state = self._llm_fixit_store.state if isinstance(self._llm_fixit_store.state, dict) else self._llm_fixit_store.empty_state()
+
+        confirm = bool(payload.get("confirm", False))
+        if confirm:
+            confirm_token = str(payload.get("confirm_token") or "").strip()
+            expected_token = str(wizard_state.get("confirm_token") or "").strip()
+            if not expected_token or confirm_token != expected_token:
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": "Please confirm with the exact confirm_token from the previous step.",
+                    "next_question": "Apply the pending fix-it plan now?",
+                    "actions": [],
+                    "errors": ["needs_clarification"],
+                    "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
+                    "choices": [],
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+            pending_plan = wizard_state.get("pending_plan") if isinstance(wizard_state.get("pending_plan"), list) else []
+            ok_exec, exec_payload = self._execute_llm_fixit_plan(plan_rows=[row for row in pending_plan if isinstance(row, dict)], actor=actor)
+            self._llm_fixit_store.clear()
+            message = "Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."
+            return ok_exec, {
+                "ok": ok_exec,
+                "intent": "llm_fixit",
+                "confidence": 1.0 if ok_exec else 0.0,
+                "did_work": bool(exec_payload.get("executed_steps")),
+                "error_kind": None if ok_exec else "upstream_down",
+                "message": message,
+                "next_question": None if ok_exec else "Do you want the detailed failed steps?",
+                "actions": [],
+                "errors": [] if ok_exec else ["execution_partial_failure"],
+                "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
+                "result": exec_payload,
+                "trace_id": f"fixit-{now_epoch}",
+            }
+
+        answer = str(payload.get("answer") or "").strip()
+        if answer:
+            choices = decision.choices
+            choices_json = wizard_decision_to_json(decision).get("choices", [])
+            selected = wizard_parse_choice_answer(answer, choices)
+            if not selected:
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": "I did not recognize that option.",
+                    "next_question": "Please reply with 1, 2, or 3.",
+                    "actions": [],
+                    "errors": ["needs_clarification"],
+                    "issue_code": decision.issue_code,
+                    "choices": choices_json,
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+            plan = wizard_build_plan_for_choice(issue_code=decision.issue_code, choice_id=selected, status_payload=status_payload)
+            if not plan:
+                details_message = "No changes staged. I can show details or wait."
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 1.0,
+                    "did_work": False,
+                    "error_kind": None,
+                    "message": details_message,
+                    "next_question": None,
+                    "actions": [],
+                    "errors": [],
+                    "issue_code": decision.issue_code,
+                    "details": decision.details,
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+            confirm_token = wizard_confirm_token_for_plan(plan)
+            plan_json = [
+                {
+                    "id": item.id,
+                    "kind": item.kind,
+                    "action": item.action,
+                    "reason": item.reason,
+                    "params": dict(sorted((item.params or {}).items())),
+                    "safe_to_execute": bool(item.safe_to_execute),
+                }
+                for item in plan
+            ]
+            state_to_save = {
+                "active": True,
+                "issue_hash": issue_hash,
+                "issue_code": decision.issue_code,
+                "step": "awaiting_confirm",
+                "question": "Apply this fix-it plan now?",
+                "choices": choices_json,
+                "pending_plan": plan_json,
+                "confirm_token": confirm_token,
+                "last_prompt_ts": now_epoch,
+            }
+            self._llm_fixit_store.save(state_to_save)
+            return True, {
+                "ok": True,
+                "intent": "llm_fixit",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": "I prepared a safe fix plan. Confirm to apply it.",
+                "next_question": "Apply this fix-it plan now?",
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "status": "needs_confirmation",
+                "issue_code": decision.issue_code,
+                "confirm_token": confirm_token,
+                "plan": plan_json,
+                "trace_id": f"fixit-{now_epoch}",
+            }
+
+        if decision.status == "ok":
+            self._llm_fixit_store.clear()
+            return True, {
+                "ok": True,
+                "intent": "llm_fixit",
+                "confidence": 1.0,
+                "did_work": True,
+                "error_kind": None,
+                "message": decision.message,
+                "next_question": None,
+                "actions": [],
+                "errors": [],
+                "status": "ok",
+                "issue_code": decision.issue_code,
+                "trace_id": f"fixit-{now_epoch}",
+            }
+
+        prompt = render_wizard_prompt(decision)
+        choices_json = wizard_decision_to_json(decision).get("choices", [])
+        self._llm_fixit_store.save(
+            {
+                "active": True,
+                "issue_hash": issue_hash,
+                "issue_code": decision.issue_code,
+                "step": "awaiting_choice",
+                "question": str(decision.question or ""),
+                "choices": choices_json,
+                "pending_plan": [],
+                "confirm_token": None,
+                "last_prompt_ts": now_epoch,
+            }
+        )
+        return True, {
+            "ok": True,
+            "intent": "llm_fixit",
+            "confidence": 0.0,
+            "did_work": False,
+            "error_kind": "needs_clarification",
+            "message": prompt,
+            "next_question": str(decision.question or ""),
+            "actions": [],
+            "errors": ["needs_clarification"],
+            "status": "needs_user_choice",
+            "issue_code": decision.issue_code,
+            "choices": choices_json,
+            "details": decision.details,
+            "trace_id": f"fixit-{now_epoch}",
+        }
 
     def run_llm_health(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
         start = time.monotonic()
@@ -9138,6 +9548,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/llm/health":
                 self._send_json(200, self.runtime.llm_health_summary())
                 return
+            if path == "/llm/status":
+                self._send_json(200, self.runtime.llm_status())
+                return
             if path == "/llm/catalog":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 provider_id = str(query.get("provider_id", [""])[0] or "").strip().lower() or None
@@ -9813,6 +10226,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/llm/models/switch":
                 ok, body = self.runtime.llm_models_switch(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/fixit":
+                ok, body = self.runtime.llm_fixit(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/health/run":

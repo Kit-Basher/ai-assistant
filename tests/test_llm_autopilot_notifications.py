@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import tempfile
@@ -361,6 +362,135 @@ class TestLLMAutopilotNotifications(unittest.TestCase):
             message.index("Catalog: pricing updated for openrouter:openai/gpt-4o-mini"),
             message.index("Cleanup: model ollama:llama3 marked unavailable (missing_from_catalog)"),
         )
+
+    def test_health_only_noise_without_threshold_crossing_is_suppressed(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                autopilot_notify_rate_limit_seconds=0,
+                autopilot_notify_dedupe_window_seconds=0,
+            )
+        )
+        runtime.set_listening("127.0.0.1", 8765)
+        before = _state(default_model="ollama:qwen2.5:3b-instruct", health_status="down")
+        after = copy.deepcopy(before)
+        after["providers"]["ollama"]["health"]["failure_streak"] = 2
+        after["providers"]["ollama"]["health"]["cooldown_until"] = 123456
+        after["models"]["ollama:qwen2.5:3b-instruct"]["health"]["failure_streak"] = 2
+        after["models"]["ollama:qwen2.5:3b-instruct"]["health"]["cooldown_until"] = 123456
+        with patch("agent.api_server.time.time", return_value=80_000):
+            result = runtime._process_scheduler_notification_cycle(  # type: ignore[attr-defined]
+                before_state=before,
+                after_state=after,
+                reasons=["health_probe"],
+                trigger="scheduler",
+            )
+        self.assertEqual("no_changes", result["reason"])
+        self.assertEqual([], runtime.llm_notifications(limit=5)["notifications"])
+
+    def test_health_threshold_crossing_sends_notification(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                autopilot_notify_rate_limit_seconds=0,
+                autopilot_notify_dedupe_window_seconds=0,
+            )
+        )
+        runtime.set_listening("127.0.0.1", 8765)
+        before = _state(default_model="ollama:qwen2.5:3b-instruct", health_status="down")
+        before["providers"]["ollama"]["health"]["failure_streak"] = 2
+        before["models"]["ollama:qwen2.5:3b-instruct"]["health"]["failure_streak"] = 2
+        after = copy.deepcopy(before)
+        after["providers"]["ollama"]["health"]["failure_streak"] = 3
+        after["models"]["ollama:qwen2.5:3b-instruct"]["health"]["failure_streak"] = 3
+        with patch("agent.api_server.time.time", return_value=81_000):
+            result = runtime._process_scheduler_notification_cycle(  # type: ignore[attr-defined]
+                before_state=before,
+                after_state=after,
+                reasons=["health_probe"],
+                trigger="scheduler",
+            )
+        self.assertEqual("sent", result["reason"])
+        self.assertEqual(1, len(runtime.llm_notifications(limit=5)["notifications"]))
+
+    def test_telegram_delivery_uses_friendly_summary_not_raw_diff(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                autopilot_notify_rate_limit_seconds=0,
+                autopilot_notify_dedupe_window_seconds=0,
+            )
+        )
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._health_monitor.state["providers"] = {
+            "ollama": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+            "openrouter": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+        }
+        before = _state(default_model="ollama:qwen2.5:3b")
+        after = _state(default_model="ollama:qwen2.5:3b-instruct")
+        sent_messages: list[str] = []
+
+        def _capture_send(_token: str, _chat_id: str, text: str) -> None:
+            sent_messages.append(text)
+
+        healthy_status = {
+            "ok": True,
+            "default_provider": "ollama",
+            "default_model": "ollama:qwen2.5:3b-instruct",
+            "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+            "safe_mode": {"paused": False, "reason": "not_paused"},
+            "providers": [
+                {"id": "ollama", "enabled": True, "health": {"status": "ok", "last_error_kind": None, "status_code": None}},
+                {"id": "openrouter", "enabled": True, "health": {"status": "ok", "last_error_kind": None, "status_code": None}},
+            ],
+            "models": [
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "health": {"status": "ok", "last_error_kind": None, "status_code": None},
+                }
+            ],
+        }
+        with patch.object(runtime, "_resolve_telegram_target", return_value=("token", "chat-1")), patch.object(
+            runtime, "_send_telegram_message", side_effect=_capture_send
+        ), patch.object(runtime, "llm_status", return_value=healthy_status), patch(
+            "agent.api_server.time.time", return_value=82_000
+        ):
+            result = runtime._process_scheduler_notification_cycle(  # type: ignore[attr-defined]
+                before_state=before,
+                after_state=after,
+                reasons=["autoconfig_repair"],
+                trigger="scheduler",
+            )
+        self.assertEqual("sent", result["reason"])
+        self.assertEqual(1, len(sent_messages))
+        self.assertIn("Default model changed to", sent_messages[0])
+        self.assertNotIn("LLM Autopilot updated configuration", sent_messages[0])
+        self.assertNotIn("Defaults: default_model ->", sent_messages[0])
 
 
 if __name__ == "__main__":
