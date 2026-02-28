@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import threading
 from typing import Any, Callable
 
@@ -155,14 +156,34 @@ class TelegramRunner:
         return bool(self._stop_event.is_set())
 
     def _run_application_loop(self, app: Any, *, token_source: str, attempt: int) -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        asyncio.run(
+            self._run_app_async(
+                app,
+                token_source=token_source,
+                attempt=attempt,
+            )
+        )
+
+    @staticmethod
+    async def _await_maybe(maybe_callable: Any, **kwargs: Any) -> Any:
+        if not callable(maybe_callable):
+            return None
+        result = maybe_callable(**kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    async def _run_app_async(self, app: Any, *, token_source: str, attempt: int) -> None:
         updater = getattr(app, "updater", None)
-        started = False
+        if updater is None:
+            raise RuntimeError("telegram_updater_missing")
+
+        app_started = False
         try:
-            self._maybe_await(loop, getattr(app, "initialize", None))
-            self._maybe_await(loop, getattr(app, "start", None))
-            started = True
+            await self._await_maybe(getattr(app, "initialize", None))
+            await self._await_maybe(getattr(app, "start", None))
+            app_started = True
+
             polling_kwargs: dict[str, Any] = {"drop_pending_updates": True}
             allowed_updates = None
             try:
@@ -173,42 +194,39 @@ class TelegramRunner:
                 allowed_updates = None
             if allowed_updates is not None:
                 polling_kwargs["allowed_updates"] = allowed_updates
-            self._maybe_await(loop, getattr(updater, "start_polling", None), **polling_kwargs)
-            self._safe_log(
-                "telegram.started",
-                {
-                    "mode": "embedded",
-                    "attempt": int(attempt),
-                    "token_source": token_source,
-                },
-            )
+
+            await self._await_maybe(getattr(updater, "start_polling", None), **polling_kwargs)
+
+            started_payload = {
+                "mode": "embedded",
+                "attempt": int(attempt),
+                "token_source": token_source,
+            }
+            self._safe_log("telegram.started", started_payload)
             self._safe_audit(
                 action="telegram.start",
                 reason="embedded",
                 outcome="success",
                 error_kind=None,
             )
-            while not self._stop_event.is_set():
-                if self._wait(0.25):
-                    break
-        finally:
-            self._maybe_await(loop, getattr(updater, "stop", None))
-            if started:
-                self._maybe_await(loop, getattr(app, "stop", None))
-            self._maybe_await(loop, getattr(app, "shutdown", None))
-            asyncio.set_event_loop(None)
-            loop.close()
 
-    @staticmethod
-    def _maybe_await(loop: asyncio.AbstractEventLoop, maybe_callable: Any, **kwargs: Any) -> Any:
-        if not callable(maybe_callable):
-            return None
-        result = maybe_callable(**kwargs)
-        if inspect.isawaitable(result):
-            return loop.run_until_complete(result)
-        return result
+            while not self._stop_event.is_set():
+                await asyncio.sleep(0.25)
+        finally:
+            await self._await_maybe(getattr(updater, "stop", None))
+            if app_started:
+                await self._await_maybe(getattr(app, "stop", None))
+            await self._await_maybe(getattr(app, "shutdown", None))
 
     def _safe_log(self, action: str, payload: dict[str, Any]) -> None:
+        if str(action).startswith("telegram."):
+            try:
+                print(
+                    f"{action} {json.dumps(payload if isinstance(payload, dict) else {}, ensure_ascii=True, sort_keys=True)}",
+                    flush=True,
+                )
+            except Exception:
+                pass
         if not self._log_path:
             return
         try:
