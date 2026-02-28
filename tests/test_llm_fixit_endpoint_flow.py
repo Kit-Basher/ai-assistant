@@ -128,6 +128,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
                 "next_probe_at": 160,
             },
         }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
 
         first = _HandlerForTest(runtime, "/llm/fixit", {})
         first.do_POST()
@@ -239,6 +240,114 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertEqual("cancelled", payload["status"])
         self.assertEqual("Cancelled.", payload["message"])
         self.assertFalse(bool(runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
+
+    def test_openrouter_repair_persists_last_test_and_updates_choices(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.set_provider_secret("openrouter", {"api_key": "sk-openrouter-test"})
+        runtime._health_monitor.state["providers"] = {
+            "openrouter": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            },
+            "ollama": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+
+        first = _HandlerForTest(runtime, "/llm/fixit", {})
+        first.do_POST()
+        first_payload = json.loads(first.body.decode("utf-8"))
+        self.assertEqual("openrouter_down", first_payload["issue_code"])
+        self.assertEqual("repair_openrouter", first_payload["choices"][1]["id"])
+
+        second = _HandlerForTest(runtime, "/llm/fixit", {"answer": "2"})
+        second.do_POST()
+        second_payload = json.loads(second.body.decode("utf-8"))
+        self.assertEqual("needs_confirmation", second_payload["status"])
+
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(
+                False,
+                {
+                    "ok": False,
+                    "provider": "openrouter",
+                    "error": "auth_error",
+                    "error_kind": "auth_error",
+                    "status_code": 401,
+                    "message": "Authentication failed for provider.",
+                },
+            ),
+        ):
+            third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
+            third.do_POST()
+        third_payload = json.loads(third.body.decode("utf-8"))
+        self.assertEqual("needs_user_choice", third_payload["status"])
+        self.assertEqual("openrouter_down", third_payload["issue_code"])
+        self.assertEqual("update_openrouter_key", third_payload["choices"][1]["id"])
+        state_last_test = runtime._llm_fixit_store.state.get("openrouter_last_test")  # type: ignore[attr-defined]
+        self.assertIsInstance(state_last_test, dict)
+        self.assertEqual(401, state_last_test.get("status_code"))
+        self.assertEqual("auth_error", state_last_test.get("error_kind"))
+
+    def test_fixit_accepts_openrouter_api_key_payload(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._health_monitor.state["providers"] = {
+            "openrouter": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            }
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(
+                False,
+                {
+                    "ok": False,
+                    "provider": "openrouter",
+                    "error": "payment_required",
+                    "error_kind": "payment_required",
+                    "status_code": 402,
+                    "message": "Provider test hit a credits/limit issue.",
+                },
+            ),
+        ):
+            handler = _HandlerForTest(runtime, "/llm/fixit", {"openrouter_api_key": "sk-or-new"})
+            handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("needs_user_choice", payload["status"])
+        self.assertEqual("switch_provider", payload["choices"][1]["id"])
+        self.assertEqual(
+            "sk-or-new",
+            runtime.secret_store.get_secret("provider:openrouter:api_key"),
+        )
 
     def test_llm_status_endpoint_returns_defaults_and_health(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

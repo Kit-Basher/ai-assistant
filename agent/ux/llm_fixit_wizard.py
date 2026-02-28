@@ -12,6 +12,16 @@ from typing import Any
 
 _WIZARD_SCHEMA_VERSION = 1
 _FAILURE_STREAK_THRESHOLDS = (3, 10, 50)
+_OPENROUTER_NETWORK_ERROR_KINDS = {
+    "provider_unavailable",
+    "server_error",
+    "timeout",
+    "upstream_down",
+    "network_error",
+    "http_502",
+    "http_503",
+    "http_504",
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +81,7 @@ class LLMFixitWizardStore:
             "pending_issue_code": None,
             "confirm_token": None,  # legacy compatibility
             "last_prompt_ts": None,
+            "openrouter_last_test": None,
         }
 
     def _normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -80,7 +91,9 @@ class LLMFixitWizardStore:
         state["issue_hash"] = str(raw.get("issue_hash") or "").strip() or None
         state["issue_code"] = str(raw.get("issue_code") or "").strip() or None
         step = str(raw.get("step") or "").strip().lower()
-        state["step"] = step if step in {"idle", "awaiting_choice", "awaiting_confirm"} else "idle"
+        state["step"] = (
+            step if step in {"idle", "awaiting_choice", "awaiting_confirm", "awaiting_openrouter_key"} else "idle"
+        )
         state["question"] = str(raw.get("question") or "").strip() or None
         choices_raw = raw.get("choices") if isinstance(raw.get("choices"), list) else []
         choices: list[dict[str, Any]] = []
@@ -142,6 +155,27 @@ class LLMFixitWizardStore:
             state["last_prompt_ts"] = int(raw.get("last_prompt_ts") or 0) or None
         except (TypeError, ValueError):
             state["last_prompt_ts"] = None
+        openrouter_last_test_raw = (
+            raw.get("openrouter_last_test") if isinstance(raw.get("openrouter_last_test"), dict) else None
+        )
+        openrouter_last_test: dict[str, Any] | None = None
+        if isinstance(openrouter_last_test_raw, dict):
+            try:
+                ts_value = int(openrouter_last_test_raw.get("ts") or 0) or None
+            except (TypeError, ValueError):
+                ts_value = None
+            try:
+                status_code_value = int(openrouter_last_test_raw.get("status_code") or 0) or None
+            except (TypeError, ValueError):
+                status_code_value = None
+            openrouter_last_test = {
+                "ts": ts_value,
+                "ok": bool(openrouter_last_test_raw.get("ok", False)),
+                "status_code": status_code_value,
+                "error_kind": str(openrouter_last_test_raw.get("error_kind") or "").strip().lower() or None,
+                "human_reason": str(openrouter_last_test_raw.get("human_reason") or "").strip() or None,
+            }
+        state["openrouter_last_test"] = openrouter_last_test
 
         if not bool(state["active"]):
             state["step"] = "idle"
@@ -429,10 +463,106 @@ def _question_for_issue(issue_code: str) -> str | None:
     return "Which option should I take?"
 
 
+def _openrouter_last_test_category(
+    *,
+    openrouter_secret_present: bool | None,
+    openrouter_last_test: dict[str, Any] | None,
+) -> str:
+    if openrouter_secret_present is False:
+        return "missing_key"
+    if not isinstance(openrouter_last_test, dict):
+        return "generic_down"
+    if bool(openrouter_last_test.get("ok", False)):
+        return "generic_down"
+    try:
+        status_code = int(openrouter_last_test.get("status_code") or 0) or None
+    except (TypeError, ValueError):
+        status_code = None
+    error_kind = str(openrouter_last_test.get("error_kind") or "").strip().lower()
+    if status_code in {401, 403} or error_kind in {"auth_error", "unauthorized", "http_401", "http_403"}:
+        return "unauthorized"
+    if status_code == 402 or error_kind in {"payment_required", "credits_insufficient", "insufficient_credits"}:
+        return "payment_required"
+    if error_kind in _OPENROUTER_NETWORK_ERROR_KINDS:
+        return "network_down"
+    if status_code in {408, 502, 503, 504}:
+        return "network_down"
+    return "generic_down"
 
-def evaluate_wizard_decision(status_payload: dict[str, Any]) -> WizardDecision:
+
+def _openrouter_message_for_category(category: str) -> str:
+    if category == "missing_key":
+        return "OpenRouter needs an API key."
+    if category == "unauthorized":
+        return "Your OpenRouter key looks invalid (401)."
+    if category == "payment_required":
+        return "OpenRouter returned payment required (402)."
+    if category == "network_down":
+        return "OpenRouter appears down or unreachable."
+    return "OpenRouter is currently unavailable, so remote routing through OpenRouter is failing."
+
+
+def _openrouter_choices_for_category(category: str) -> list[WizardChoice]:
+    if category == "missing_key":
+        return [
+            WizardChoice(id="local_only", label="Use local-only", recommended=True),
+            WizardChoice(id="add_openrouter_key", label="Add OpenRouter key", recommended=False),
+            WizardChoice(id="details", label="Show details", recommended=False),
+        ]
+    if category == "unauthorized":
+        return [
+            WizardChoice(id="local_only", label="Use local-only", recommended=True),
+            WizardChoice(id="update_openrouter_key", label="Update OpenRouter key", recommended=False),
+            WizardChoice(id="details", label="Show details", recommended=False),
+        ]
+    if category == "payment_required":
+        return [
+            WizardChoice(id="local_only", label="Use local-only", recommended=True),
+            WizardChoice(id="switch_provider", label="Switch to another provider", recommended=False),
+            WizardChoice(id="details", label="Show details", recommended=False),
+        ]
+    if category == "network_down":
+        return [
+            WizardChoice(id="local_only", label="Use local-only", recommended=True),
+            WizardChoice(id="retry_openrouter_test", label="Retry OpenRouter test", recommended=False),
+            WizardChoice(id="details", label="Show details", recommended=False),
+        ]
+    return _choices_for_issue("openrouter_down")
+
+
+
+def evaluate_wizard_decision(
+    status_payload: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> WizardDecision:
     issue_code, debug = _detect_issue_code(status_payload)
-    message = _message_for_issue(issue_code, status_payload, debug)
+    ctx = context if isinstance(context, dict) else {}
+    openrouter_secret_present = (
+        bool(ctx.get("openrouter_secret_present"))
+        if isinstance(ctx.get("openrouter_secret_present"), bool)
+        else None
+    )
+    openrouter_last_test = ctx.get("openrouter_last_test") if isinstance(ctx.get("openrouter_last_test"), dict) else None
+    openrouter_category = None
+    if issue_code == "openrouter_down":
+        openrouter_category = _openrouter_last_test_category(
+            openrouter_secret_present=openrouter_secret_present,
+            openrouter_last_test=openrouter_last_test,
+        )
+        debug["openrouter_category"] = openrouter_category
+        debug["openrouter_secret_present"] = openrouter_secret_present
+        if isinstance(openrouter_last_test, dict):
+            debug["openrouter_last_test"] = {
+                "ok": bool(openrouter_last_test.get("ok", False)),
+                "status_code": openrouter_last_test.get("status_code"),
+                "error_kind": openrouter_last_test.get("error_kind"),
+            }
+    message = (
+        _openrouter_message_for_category(openrouter_category)
+        if issue_code == "openrouter_down" and openrouter_category is not None
+        else _message_for_issue(issue_code, status_payload, debug)
+    )
     if issue_code == "ok":
         return WizardDecision(
             status="ok",
@@ -443,7 +573,11 @@ def evaluate_wizard_decision(status_payload: dict[str, Any]) -> WizardDecision:
             plan=[],
             details=debug,
         )
-    choices = _choices_for_issue(issue_code)
+    choices = (
+        _openrouter_choices_for_category(openrouter_category)
+        if issue_code == "openrouter_down" and openrouter_category is not None
+        else _choices_for_issue(issue_code)
+    )
     return WizardDecision(
         status="needs_user_choice",
         issue_code=issue_code,
@@ -548,6 +682,46 @@ def build_plan_for_choice(
             params={"provider": "openrouter"},
             safe=True,
         )
+        return actions
+
+    if choice == "retry_openrouter_test":
+        _append_action(
+            actions,
+            kind="safe_action",
+            action="provider.test",
+            reason="Retry deterministic OpenRouter connectivity test.",
+            params={"provider": "openrouter"},
+            safe=True,
+        )
+        return actions
+
+    if choice in {"add_openrouter_key", "update_openrouter_key"}:
+        return actions
+
+    if choice == "switch_provider":
+        local_model = _best_local_model(status_payload)
+        if local_model:
+            _append_action(
+                actions,
+                kind="safe_action",
+                action="defaults.set",
+                reason="Switch to a healthy local default model.",
+                params={
+                    "default_provider": "ollama",
+                    "default_model": local_model,
+                    "allow_remote_fallback": False,
+                },
+                safe=True,
+            )
+        else:
+            _append_action(
+                actions,
+                kind="safe_action",
+                action="defaults.set",
+                reason="Disable OpenRouter routing until credits are available.",
+                params={"allow_remote_fallback": False},
+                safe=True,
+            )
         return actions
 
     if choice == "fix_openai":

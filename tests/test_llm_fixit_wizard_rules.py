@@ -103,6 +103,67 @@ class TestLLMFixitWizardRules(unittest.TestCase):
         self.assertEqual("local_only", decision.choices[0].id)
         self.assertTrue(decision.choices[0].recommended)
 
+    def test_openrouter_down_without_key_offers_add_key(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(openrouter_status="down", openrouter_failure_streak=20),
+            context={"openrouter_secret_present": False, "openrouter_last_test": None},
+        )
+        self.assertEqual("openrouter_down", decision.issue_code)
+        self.assertEqual("OpenRouter needs an API key.", decision.message)
+        self.assertEqual("local_only", decision.choices[0].id)
+        self.assertEqual("add_openrouter_key", decision.choices[1].id)
+
+    def test_openrouter_down_with_401_offers_update_key(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(openrouter_status="down", openrouter_failure_streak=20),
+            context={
+                "openrouter_secret_present": True,
+                "openrouter_last_test": {
+                    "ok": False,
+                    "status_code": 401,
+                    "error_kind": "auth_error",
+                    "human_reason": "Authentication failed for provider.",
+                },
+            },
+        )
+        self.assertEqual("openrouter_down", decision.issue_code)
+        self.assertEqual("Your OpenRouter key looks invalid (401).", decision.message)
+        self.assertEqual("update_openrouter_key", decision.choices[1].id)
+
+    def test_openrouter_down_with_402_offers_switch_provider(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(openrouter_status="down", openrouter_failure_streak=20),
+            context={
+                "openrouter_secret_present": True,
+                "openrouter_last_test": {
+                    "ok": False,
+                    "status_code": 402,
+                    "error_kind": "payment_required",
+                    "human_reason": "Provider test hit a credits/limit issue.",
+                },
+            },
+        )
+        self.assertEqual("openrouter_down", decision.issue_code)
+        self.assertEqual("OpenRouter returned payment required (402).", decision.message)
+        self.assertEqual("switch_provider", decision.choices[1].id)
+
+    def test_openrouter_down_network_failure_offers_retry(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(openrouter_status="down", openrouter_failure_streak=20),
+            context={
+                "openrouter_secret_present": True,
+                "openrouter_last_test": {
+                    "ok": False,
+                    "status_code": 503,
+                    "error_kind": "provider_unavailable",
+                    "human_reason": "Provider server error.",
+                },
+            },
+        )
+        self.assertEqual("openrouter_down", decision.issue_code)
+        self.assertEqual("OpenRouter appears down or unreachable.", decision.message)
+        self.assertEqual("retry_openrouter_test", decision.choices[1].id)
+
     def test_safe_mode_paused_prompts_unpause(self) -> None:
         decision = evaluate_wizard_decision(
             _status_payload(safe_mode_paused=True),

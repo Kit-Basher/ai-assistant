@@ -107,6 +107,7 @@ from agent.modelops.recommend import (
 )
 from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
+    WizardDecision,
     build_plan_for_choice as wizard_build_plan_for_choice,
     confirm_token_for_plan as wizard_confirm_token_for_plan,
     confirm_token_for_plan_rows as wizard_confirm_token_for_plan_rows,
@@ -5766,6 +5767,41 @@ class AgentRuntime:
         status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
         return status
 
+    def _openrouter_secret_present(self) -> bool:
+        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        openrouter = providers.get("openrouter") if isinstance(providers.get("openrouter"), dict) else None
+        if not isinstance(openrouter, dict):
+            return False
+        return bool(self._provider_api_key(openrouter))
+
+    def _summarize_provider_test_result(
+        self,
+        *,
+        provider_id: str,
+        ok: bool,
+        body: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        payload = body if isinstance(body, dict) else {}
+        error_kind = str(payload.get("error_kind") or payload.get("error") or "").strip().lower() or None
+        try:
+            status_code = int(payload.get("status_code") or 0) or None
+        except (TypeError, ValueError):
+            status_code = None
+        if ok:
+            human_reason = "Provider test succeeded."
+        else:
+            provider_message = str(payload.get("message") or "").strip()
+            normalized_kind = self._normalize_provider_test_error(error_kind, status_code)
+            human_reason = provider_message or self._provider_test_message(normalized_kind)
+        return {
+            "provider": str(provider_id or "").strip().lower(),
+            "ts": int(time.time()),
+            "ok": bool(ok),
+            "status_code": status_code,
+            "error_kind": error_kind,
+            "human_reason": human_reason,
+        }
+
     def _execute_llm_fixit_plan(
         self,
         *,
@@ -5775,6 +5811,7 @@ class AgentRuntime:
         executed: list[dict[str, Any]] = []
         blocked: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
+        provider_tests: dict[str, dict[str, Any]] = {}
         for row in sorted(
             [item for item in plan_rows if isinstance(item, dict)],
             key=lambda item: str(item.get("id") or ""),
@@ -5855,6 +5892,11 @@ class AgentRuntime:
                     failed.append({"id": str(row.get("id") or ""), "action": action, "error": "provider_required"})
                     continue
                 ok, body = self.test_provider(provider_id, {})
+                provider_tests[provider_id] = self._summarize_provider_test_result(
+                    provider_id=provider_id,
+                    ok=ok,
+                    body=body,
+                )
                 if not ok:
                     failed.append(
                         {
@@ -5862,6 +5904,9 @@ class AgentRuntime:
                             "action": action,
                             "error": str((body or {}).get("error") or "provider_test_failed"),
                             "provider": provider_id,
+                            "error_kind": str((body or {}).get("error_kind") or (body or {}).get("error") or ""),
+                            "status_code": (body or {}).get("status_code"),
+                            "message": str((body or {}).get("message") or ""),
                         }
                     )
                     continue
@@ -5897,21 +5942,155 @@ class AgentRuntime:
             "executed_steps": executed,
             "blocked_steps": blocked,
             "failed_steps": failed,
+            "provider_tests": provider_tests,
         }
 
     def llm_fixit(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         actor = str(payload.get("actor") or "user").strip() or "user"
         now_epoch = int(time.time())
-        status_payload = self.llm_status()
-        decision = evaluate_wizard_decision(status_payload)
-        issue_hash = wizard_decision_issue_hash(decision, status_payload)
         wizard_state = self._llm_fixit_store.state if isinstance(self._llm_fixit_store.state, dict) else self._llm_fixit_store.empty_state()
+        openrouter_last_test = (
+            wizard_state.get("openrouter_last_test")
+            if isinstance(wizard_state.get("openrouter_last_test"), dict)
+            else None
+        )
+        decision_context = {
+            "openrouter_secret_present": self._openrouter_secret_present(),
+            "openrouter_last_test": openrouter_last_test,
+        }
+        status_payload = self.llm_status()
+        decision = evaluate_wizard_decision(status_payload, context=decision_context)
+        issue_hash = wizard_decision_issue_hash(decision, status_payload)
+
+        def _save_idle_state(*, last_test: dict[str, Any] | None) -> None:
+            self._llm_fixit_store.save(
+                {
+                    "active": False,
+                    "issue_hash": None,
+                    "issue_code": None,
+                    "step": "idle",
+                    "question": None,
+                    "choices": [],
+                    "pending_plan": [],
+                    "pending_confirm_token": None,
+                    "pending_created_ts": None,
+                    "pending_expires_ts": None,
+                    "pending_issue_code": None,
+                    "last_prompt_ts": now_epoch,
+                    "openrouter_last_test": last_test,
+                }
+            )
+
+        def _save_choice_state(
+            *,
+            decision_obj: WizardDecision,
+            status_obj: dict[str, Any],
+            last_test: dict[str, Any] | None,
+            step: str = "awaiting_choice",
+            question_override: str | None = None,
+        ) -> tuple[str, list[dict[str, Any]]]:
+            prompt = render_wizard_prompt(decision_obj)
+            choices_json = wizard_decision_to_json(decision_obj).get("choices", [])
+            issue_hash_value = wizard_decision_issue_hash(decision_obj, status_obj)
+            self._llm_fixit_store.save(
+                {
+                    "active": True,
+                    "issue_hash": issue_hash_value,
+                    "issue_code": decision_obj.issue_code,
+                    "step": step,
+                    "question": str(question_override or decision_obj.question or ""),
+                    "choices": choices_json,
+                    "pending_plan": [],
+                    "pending_confirm_token": None,
+                    "pending_created_ts": None,
+                    "pending_expires_ts": None,
+                    "pending_issue_code": None,
+                    "last_prompt_ts": now_epoch,
+                    "openrouter_last_test": last_test,
+                }
+            )
+            return prompt, choices_json
+
+        openrouter_api_key = str(payload.get("openrouter_api_key") or "").strip()
+        if openrouter_api_key:
+            ok_secret, secret_body = self.set_provider_secret("openrouter", {"api_key": openrouter_api_key})
+            if not ok_secret:
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": str(secret_body.get("error") or "Unable to save OpenRouter key."),
+                    "next_question": "Please send a valid OpenRouter API key.",
+                    "actions": [],
+                    "errors": [str(secret_body.get("error") or "needs_clarification")],
+                    "status": "needs_clarification",
+                    "issue_code": decision.issue_code,
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+            ok_test, test_body = self.test_provider("openrouter", {})
+            test_summary = self._summarize_provider_test_result(
+                provider_id="openrouter",
+                ok=ok_test,
+                body=test_body if isinstance(test_body, dict) else {},
+            )
+            status_after = self.llm_status()
+            decision_after = evaluate_wizard_decision(
+                status_after,
+                context={
+                    "openrouter_secret_present": self._openrouter_secret_present(),
+                    "openrouter_last_test": test_summary,
+                },
+            )
+            if decision_after.status == "ok":
+                _save_idle_state(last_test=test_summary)
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 1.0,
+                    "did_work": True,
+                    "error_kind": None,
+                    "message": "OpenRouter key saved and provider test succeeded.",
+                    "next_question": None,
+                    "actions": [],
+                    "errors": [],
+                    "status": "ok",
+                    "issue_code": decision_after.issue_code,
+                    "openrouter_last_test": test_summary,
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+            prompt_after, choices_after = _save_choice_state(
+                decision_obj=decision_after,
+                status_obj=status_after,
+                last_test=test_summary,
+            )
+            return True, {
+                "ok": True,
+                "intent": "llm_fixit",
+                "confidence": 0.0,
+                "did_work": True,
+                "error_kind": "needs_clarification",
+                "message": prompt_after,
+                "next_question": str(decision_after.question or ""),
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "status": "needs_user_choice",
+                "issue_code": decision_after.issue_code,
+                "choices": choices_after,
+                "openrouter_last_test": test_summary,
+                "trace_id": f"fixit-{now_epoch}",
+            }
 
         explicit_confirm_flag = "confirm" in payload
         confirm = bool(payload.get("confirm", False))
         answer_value = str(payload.get("answer") or "").strip().lower()
-        if (explicit_confirm_flag and not confirm) or answer_value in {"cancel", "no", "2"}:
-            self._llm_fixit_store.clear()
+        wizard_step = str(wizard_state.get("step") or "").strip().lower()
+        cancel_answers = {"cancel", "no"}
+        if wizard_step == "awaiting_confirm":
+            cancel_answers.add("2")
+        if (explicit_confirm_flag and not confirm) or answer_value in cancel_answers:
+            _save_idle_state(last_test=openrouter_last_test)
             return True, {
                 "ok": True,
                 "intent": "llm_fixit",
@@ -6008,7 +6187,45 @@ class AgentRuntime:
                 plan_rows=[row for row in pending_plan if isinstance(row, dict)],
                 actor=actor,
             )
-            self._llm_fixit_store.clear()
+            provider_tests = exec_payload.get("provider_tests") if isinstance(exec_payload.get("provider_tests"), dict) else {}
+            openrouter_test = (
+                provider_tests.get("openrouter")
+                if isinstance(provider_tests.get("openrouter"), dict)
+                else openrouter_last_test
+            )
+            if isinstance(openrouter_test, dict):
+                status_after = self.llm_status()
+                decision_after = evaluate_wizard_decision(
+                    status_after,
+                    context={
+                        "openrouter_secret_present": self._openrouter_secret_present(),
+                        "openrouter_last_test": openrouter_test,
+                    },
+                )
+                if decision_after.status != "ok":
+                    prompt_after, choices_after = _save_choice_state(
+                        decision_obj=decision_after,
+                        status_obj=status_after,
+                        last_test=openrouter_test,
+                    )
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 0.0,
+                        "did_work": bool(exec_payload.get("executed_steps")),
+                        "error_kind": "needs_clarification",
+                        "message": prompt_after,
+                        "next_question": str(decision_after.question or ""),
+                        "actions": [],
+                        "errors": ["needs_clarification"],
+                        "status": "needs_user_choice",
+                        "issue_code": decision_after.issue_code,
+                        "choices": choices_after,
+                        "result": exec_payload,
+                        "openrouter_last_test": openrouter_test,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+            _save_idle_state(last_test=openrouter_test if isinstance(openrouter_test, dict) else None)
             message = "Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."
             return ok_exec, {
                 "ok": ok_exec,
@@ -6043,6 +6260,38 @@ class AgentRuntime:
                     "errors": ["needs_clarification"],
                     "issue_code": decision.issue_code,
                     "choices": choices_json,
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+            if selected in {"add_openrouter_key", "update_openrouter_key"}:
+                self._llm_fixit_store.save(
+                    {
+                        "active": True,
+                        "issue_hash": issue_hash,
+                        "issue_code": decision.issue_code,
+                        "step": "awaiting_openrouter_key",
+                        "question": "Paste your OpenRouter API key now.",
+                        "choices": choices_json,
+                        "pending_plan": [],
+                        "pending_confirm_token": None,
+                        "pending_created_ts": None,
+                        "pending_expires_ts": None,
+                        "pending_issue_code": None,
+                        "last_prompt_ts": now_epoch,
+                        "openrouter_last_test": openrouter_last_test,
+                    }
+                )
+                return True, {
+                    "ok": True,
+                    "intent": "llm_fixit",
+                    "confidence": 0.0,
+                    "did_work": False,
+                    "error_kind": "needs_clarification",
+                    "message": "Paste your OpenRouter API key now.",
+                    "next_question": "Send it in openrouter_api_key and I will test it.",
+                    "actions": [],
+                    "errors": ["needs_clarification"],
+                    "status": "needs_clarification",
+                    "issue_code": decision.issue_code,
                     "trace_id": f"fixit-{now_epoch}",
                 }
             plan = wizard_build_plan_for_choice(issue_code=decision.issue_code, choice_id=selected, status_payload=status_payload)
@@ -6087,6 +6336,7 @@ class AgentRuntime:
                 "pending_expires_ts": now_epoch + 300,
                 "pending_issue_code": decision.issue_code,
                 "last_prompt_ts": now_epoch,
+                "openrouter_last_test": openrouter_last_test,
             }
             self._llm_fixit_store.save(state_to_save)
             return True, {
@@ -6108,7 +6358,7 @@ class AgentRuntime:
             }
 
         if decision.status == "ok":
-            self._llm_fixit_store.clear()
+            _save_idle_state(last_test=openrouter_last_test)
             return True, {
                 "ok": True,
                 "intent": "llm_fixit",
@@ -6124,23 +6374,10 @@ class AgentRuntime:
                 "trace_id": f"fixit-{now_epoch}",
             }
 
-        prompt = render_wizard_prompt(decision)
-        choices_json = wizard_decision_to_json(decision).get("choices", [])
-        self._llm_fixit_store.save(
-            {
-                "active": True,
-                "issue_hash": issue_hash,
-                "issue_code": decision.issue_code,
-                "step": "awaiting_choice",
-                "question": str(decision.question or ""),
-                "choices": choices_json,
-                "pending_plan": [],
-                "pending_confirm_token": None,
-                "pending_created_ts": None,
-                "pending_expires_ts": None,
-                "pending_issue_code": None,
-                "last_prompt_ts": now_epoch,
-            }
+        prompt, choices_json = _save_choice_state(
+            decision_obj=decision,
+            status_obj=status_payload,
+            last_test=openrouter_last_test,
         )
         return True, {
             "ok": True,
