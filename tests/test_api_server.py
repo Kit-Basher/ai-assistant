@@ -6,7 +6,9 @@ import json
 import os
 import threading
 import tempfile
+import time
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
@@ -618,6 +620,53 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(99, tested["telegram_user"]["id"])
         self.assertEqual("personal_agent_bot", tested["telegram_user"]["username"])
         self.assertNotIn("bot_token", json.dumps(tested, ensure_ascii=True))
+
+    def test_start_embedded_telegram_sets_running_state_and_prints_events(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        started = threading.Event()
+
+        class _FakeUpdater:
+            async def start_polling(self, **_kwargs: object) -> None:
+                started.set()
+
+            async def stop(self) -> None:
+                return
+
+        class _FakeApp:
+            def __init__(self) -> None:
+                self.updater = _FakeUpdater()
+
+            async def initialize(self) -> None:
+                return
+
+            async def start(self) -> None:
+                return
+
+            async def stop(self) -> None:
+                return
+
+            async def shutdown(self) -> None:
+                return
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            started_ok = runtime.start_embedded_telegram(
+                token_resolver=lambda: "x",
+                app_factory=lambda **_kwargs: _FakeApp(),
+            )
+            self.assertTrue(started_ok)
+            self.assertTrue(started.wait(1.0))
+            for _ in range(20):
+                if runtime.telegram_status().get("last_event") == "telegram.started":
+                    break
+                time.sleep(0.05)
+            status = runtime.telegram_status()
+            self.assertTrue(bool(status.get("embedded_running")))
+            runtime.stop_embedded_telegram()
+        text = output.getvalue()
+        self.assertIn("telegram.embedded: start called", text)
+        self.assertIn("telegram.embedded: start result=true", text)
+        self.assertIn("telegram.started", text)
 
     def test_version_endpoint_returns_runtime_metadata(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

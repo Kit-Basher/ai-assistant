@@ -960,17 +960,45 @@ class AgentRuntime:
             self._scheduler_thread.join(timeout=2.0)
         self.model_scout.close()
 
-    def start_embedded_telegram(self) -> bool:
+    def start_embedded_telegram(
+        self,
+        *,
+        app_factory: Callable[..., Any] | None = None,
+        token_resolver: Callable[[], tuple[str | None, str] | str | None] | None = None,
+        sleep_fn: Callable[[float], None] | None = None,
+    ) -> bool:
+        print(f"telegram.embedded: start called pid={self.pid}", flush=True)
         if self._telegram_runner is not None:
+            existing_source = "none"
+            try:
+                existing_source = str(self._telegram_runner.status().get("token_source") or "none")
+            except Exception:
+                existing_source = "none"
+            print(
+                f"telegram.embedded: start result=true token_source={existing_source}",
+                flush=True,
+            )
             return True
         runner = TelegramRunner(
             runtime=self,
             log_path=self.config.log_path,
             audit_log=self.audit_log,
+            app_factory=app_factory,
+            token_resolver=token_resolver,
+            sleep_fn=sleep_fn,
         )
         started = runner.start()
         if started:
             self._telegram_runner = runner
+        token_source = "none"
+        try:
+            token_source = str(runner.status().get("token_source") or "none")
+        except Exception:
+            token_source = "none"
+        print(
+            f"telegram.embedded: start result={'true' if started else 'false'} token_source={token_source}",
+            flush=True,
+        )
         return bool(started)
 
     def stop_embedded_telegram(self) -> None:
@@ -1845,10 +1873,26 @@ class AgentRuntime:
 
     def telegram_status(self) -> dict[str, Any]:
         token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
+        token_source = "secret_store" if token else "none"
+        if not token:
+            env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+            if env_token:
+                token = env_token
+                token_source = "env"
+        runner_status = (
+            self._telegram_runner.status()
+            if self._telegram_runner is not None and hasattr(self._telegram_runner, "status")
+            else {}
+        )
         return {
             "ok": True,
             "configured": bool(token),
-            "token_source": "secret_store" if token else "none",
+            "token_source": token_source,
+            "embedded_running": bool(runner_status.get("embedded_running", False)),
+            "last_event": str(runner_status.get("last_event") or ""),
+            "last_error": str(runner_status.get("last_error") or "") or None,
+            "last_ts": float(runner_status.get("last_ts") or 0.0),
+            "last_ts_iso": str(runner_status.get("last_ts_iso") or "") or None,
         }
 
     def _resolve_telegram_target(self) -> tuple[str | None, str | None]:

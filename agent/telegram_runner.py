@@ -4,6 +4,8 @@ import asyncio
 import inspect
 import json
 import threading
+import time
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from agent.audit_log import AuditLog
@@ -33,6 +35,13 @@ class TelegramRunner:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self.embedded_running = False
+        self.last_event = "idle"
+        self.last_error: str | None = None
+        self.last_ts = 0.0
+        self.last_ts_iso: str | None = None
+        self.token_source = "none"
+        self.last_attempt = 0
 
     def start(self) -> bool:
         with self._lock:
@@ -45,10 +54,13 @@ class TelegramRunner:
             token_source = str(resolved[1] or "resolver").strip() or "resolver"
         else:
             token = str(resolved or "").strip()
+        self.token_source = token_source
         if not token:
-            self._safe_log(
+            self._emit_event(
                 "telegram.disabled",
                 {"reason": "missing_token", "token_source": token_source, "mode": "embedded"},
+                running=False,
+                error="missing_token",
             )
             self._safe_audit(
                 action="telegram.disabled",
@@ -77,7 +89,12 @@ class TelegramRunner:
             self._thread = None
         if thread is not None:
             thread.join(timeout=5.0)
-        self._safe_log("telegram.stop", {"reason": "shutdown"})
+        self._emit_event(
+            "telegram.stop",
+            {"reason": "shutdown", "mode": "embedded", "token_source": self.token_source},
+            running=False,
+            error=None,
+        )
         self._safe_audit(
             action="telegram.stop",
             reason="shutdown",
@@ -116,7 +133,7 @@ class TelegramRunner:
                     break
                 consecutive_failures += 1
                 backoff_seconds = min(60, 5 * max(1, consecutive_failures))
-                self._safe_log(
+                self._emit_event(
                     "telegram.crash",
                     {
                         "error_type": exc.__class__.__name__,
@@ -124,15 +141,23 @@ class TelegramRunner:
                         "consecutive_failures": int(consecutive_failures),
                         "backoff_seconds": int(backoff_seconds),
                         "mode": "embedded",
+                        "token_source": token_source,
+                        "attempt": int(iterations),
                     },
+                    running=False,
+                    error=f"{exc.__class__.__name__}: {exc}",
                 )
-                self._safe_log(
+                self._emit_event(
                     "telegram.retry",
                     {
                         "backoff_seconds": int(backoff_seconds),
                         "consecutive_failures": int(consecutive_failures),
                         "mode": "embedded",
+                        "token_source": token_source,
+                        "attempt": int(iterations),
                     },
+                    running=False,
+                    error=f"{exc.__class__.__name__}: {exc}",
                 )
                 self._safe_audit(
                     action="telegram.crash",
@@ -202,7 +227,7 @@ class TelegramRunner:
                 "attempt": int(attempt),
                 "token_source": token_source,
             }
-            self._safe_log("telegram.started", started_payload)
+            self._emit_event("telegram.started", started_payload, running=True, error=None)
             self._safe_audit(
                 action="telegram.start",
                 reason="embedded",
@@ -217,6 +242,38 @@ class TelegramRunner:
             if app_started:
                 await self._await_maybe(getattr(app, "stop", None))
             await self._await_maybe(getattr(app, "shutdown", None))
+            self.embedded_running = False
+
+    def status(self) -> dict[str, Any]:
+        return {
+            "embedded_running": bool(self.embedded_running),
+            "last_event": str(self.last_event or ""),
+            "last_error": str(self.last_error or "") or None,
+            "last_ts": float(self.last_ts or 0.0),
+            "last_ts_iso": str(self.last_ts_iso or "") or None,
+            "token_source": str(self.token_source or "none"),
+            "attempt": int(self.last_attempt or 0),
+        }
+
+    def _emit_event(
+        self,
+        action: str,
+        payload: dict[str, Any],
+        *,
+        running: bool,
+        error: str | None,
+    ) -> None:
+        now_ts = time.time()
+        self.embedded_running = bool(running)
+        self.last_event = str(action or "telegram.unknown")
+        self.last_error = str(error).strip() if error else None
+        self.last_ts = float(now_ts)
+        self.last_ts_iso = datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat()
+        try:
+            self.last_attempt = int(payload.get("attempt") or self.last_attempt or 0)
+        except Exception:
+            pass
+        self._safe_log(action, payload)
 
     def _safe_log(self, action: str, payload: dict[str, Any]) -> None:
         if str(action).startswith("telegram."):
