@@ -43,6 +43,9 @@ Archived docs under `docs/archive/` are historical context only.
   - `/llm/autopilot/*`
   - `/llm/notifications/*`
 
+## Runtime Note
+- Telegram bot polling now runs inside `personal-agent-api.service` when a Telegram token is configured; no separate `python -m telegram_adapter` process is required.
+
 ## E) Active Endpoints (Generated)
 Endpoint inventory below is generated from `agent/api_server.py` using `tools/dump_routes.py`.
 

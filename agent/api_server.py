@@ -53,6 +53,7 @@ from agent.model_watch_skill import run_watch_once_for_config
 from agent.response_envelope import failure, ok_result, validate_envelope
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
+from agent.telegram_runner import TelegramRunner
 from agent.audit_log import AuditLog, redact as redact_audit_value
 from agent.bootstrap.snapshot import collect_bootstrap_snapshot
 from agent.llm.action_ledger import ActionLedgerStore
@@ -486,6 +487,7 @@ class AgentRuntime:
         self._scheduler_stop = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
         self._scheduler_next_run: dict[str, float] = {}
+        self._telegram_runner: TelegramRunner | None = None
         self._health_monitor = LLMHealthMonitor(
             HealthProbeSettings(
                 interval_seconds=max(1, int(self.config.llm_health_interval_seconds)),
@@ -952,10 +954,34 @@ class AgentRuntime:
         return self.router
 
     def close(self) -> None:
+        self.stop_embedded_telegram()
         self._scheduler_stop.set()
         if self._scheduler_thread is not None:
             self._scheduler_thread.join(timeout=2.0)
         self.model_scout.close()
+
+    def start_embedded_telegram(self) -> bool:
+        if self._telegram_runner is not None:
+            return True
+        runner = TelegramRunner(
+            runtime=self,
+            log_path=self.config.log_path,
+            audit_log=self.audit_log,
+        )
+        started = runner.start()
+        if started:
+            self._telegram_runner = runner
+        return bool(started)
+
+    def stop_embedded_telegram(self) -> None:
+        runner = self._telegram_runner
+        self._telegram_runner = None
+        if runner is None:
+            return
+        try:
+            runner.stop()
+        except Exception:
+            pass
 
     def _start_background_scheduler_if_enabled(self) -> None:
         if not bool(self.config.llm_automation_enabled):
@@ -10764,6 +10790,8 @@ def run_server(host: str, port: int) -> None:
             flush=True,
         )
         raise SystemExit(1) from exc
+
+    runtime.start_embedded_telegram()
 
     print(
         f"Personal Agent API started pid={runtime.pid} listening={runtime.listening_url} "

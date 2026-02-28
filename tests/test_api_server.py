@@ -858,6 +858,48 @@ class TestAPIServerRuntime(unittest.TestCase):
 
         self.assertIn("model_watch", runtime._scheduler_next_run)
 
+    def test_run_server_starts_embedded_telegram_runner(self) -> None:
+        started: list[bool] = []
+        closed: list[bool] = []
+
+        class _FakeRuntime:
+            listening_url = "http://127.0.0.1:8765"
+            pid = 123
+            registry_store = type("RegistryStoreStub", (), {"path": "/tmp/registry.json"})()
+            version = "test"
+            git_commit = "abc123"
+
+            def set_listening(self, _host: str, _port: int) -> None:
+                return
+
+            def start_embedded_telegram(self) -> bool:
+                started.append(True)
+                return True
+
+            def close(self) -> None:
+                closed.append(True)
+
+        class _FakeServer:
+            def __init__(self, _addr: tuple[str, int], _handler: object) -> None:
+                return
+
+            def serve_forever(self) -> None:
+                raise KeyboardInterrupt()
+
+            def server_close(self) -> None:
+                return
+
+        with patch("agent.api_server.build_runtime", return_value=_FakeRuntime()), patch(
+            "agent.api_server.ThreadingHTTPServer",
+            _FakeServer,
+        ):
+            from agent.api_server import run_server
+
+            run_server("127.0.0.1", 8765)
+
+        self.assertEqual([True], started)
+        self.assertEqual([True], closed)
+
     def test_llm_health_autoconfig_and_hygiene_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._health_monitor._probe_fn = lambda *_args: {"ok": True}  # type: ignore[attr-defined]
