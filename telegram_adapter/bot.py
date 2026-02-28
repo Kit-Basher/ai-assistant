@@ -20,7 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - testing without telegram insta
     MessageHandler = object  # type: ignore
     filters = object()  # type: ignore
 
-from agent.config import load_config
+from agent.config import Config, load_config
 from agent.fallback_ladder import run_with_fallback
 from agent.llm_router import LLMRouter
 from agent.llm_client import build_llm_broker
@@ -47,13 +47,20 @@ _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 _TELEGRAM_FALLBACK_TEXT = "I hit an internal error, but I’m still running. Try one of these:"
 
 
-def _resolve_telegram_bot_token() -> str | None:
+def resolve_telegram_bot_token_with_source() -> tuple[str | None, str]:
     secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
     secret_token = (secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
     if secret_token:
-        return secret_token
+        return secret_token, "secret_store"
     env_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    return env_token or None
+    if env_token:
+        return env_token, "env"
+    return None, "missing"
+
+
+def _resolve_telegram_bot_token() -> str | None:
+    token, _source = resolve_telegram_bot_token_with_source()
+    return token
 
 
 def _safe_reply_text(text: str | None) -> str:
@@ -904,55 +911,7 @@ async def _scheduled_daily_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
         db.set_preference("daily_brief_last_sent_date", decision.local_date)
 
 
-def build_app() -> Application:
-    config = load_config(require_telegram_token=False)
-    token = _resolve_telegram_bot_token()
-    if not token:
-        print(
-            "Missing Telegram bot token. Save it in Web UI (telegram:bot_token) or set TELEGRAM_BOT_TOKEN.",
-            file=sys.stderr,
-            flush=True,
-        )
-        raise SystemExit(1)
-    config = replace(config, telegram_bot_token=token)
-    db = MemoryDB(config.db_path)
-
-    schema_path = Path(__file__).resolve().parents[1] / "memory" / "schema.sql"
-    db.init_schema(str(schema_path))
-
-    llm_client = LLMRouter(config, log_path=config.log_path)
-
-    llm_broker, llm_broker_error = build_llm_broker(config)
-    model_scout = build_model_scout(config)
-    permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
-    audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
-
-    orchestrator = Orchestrator(
-        db=db,
-        skills_path=config.skills_path,
-        log_path=config.log_path,
-        timezone=config.agent_timezone,
-        llm_client=llm_client,
-        enable_writes=config.enable_writes,
-        llm_broker=llm_broker,
-        llm_broker_error=llm_broker_error,
-        perception_enabled=config.perception_enabled,
-        perception_roots=config.perception_roots,
-        perception_interval_seconds=config.perception_interval_seconds,
-    )
-    debug_protocol = DebugProtocol()
-
-    app = Application.builder().token(config.telegram_bot_token).build()
-
-    def _llm_fixit_internal(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        from agent.api_server import build_runtime
-
-        runtime = build_runtime(config=load_config(require_telegram_token=False))
-        try:
-            return runtime.llm_fixit(payload if isinstance(payload, dict) else {})
-        finally:
-            runtime.close()
-
+def register_handlers(app: Application) -> None:
     # Log exceptions to journalctl instead of swallowing them.
     app.add_error_handler(_on_error)
 
@@ -987,21 +946,88 @@ def build_app() -> Application:
     # Non-command messages only.
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, _handle_message))
 
+
+def build_app(
+    *,
+    config: Config | None = None,
+    token: str | None = None,
+    llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
+    llm_fixit_store: LLMFixitWizardStore | None = None,
+    audit_log: AuditLog | None = None,
+) -> Application:
+    loaded = config if isinstance(config, Config) else load_config(require_telegram_token=False)
+    resolved_token = str(token or _resolve_telegram_bot_token() or "").strip()
+    if not resolved_token:
+        print(
+            "Missing Telegram bot token. Save it in Web UI (telegram:bot_token) or set TELEGRAM_BOT_TOKEN.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(1)
+    loaded = replace(loaded, telegram_bot_token=resolved_token)
+    db = MemoryDB(loaded.db_path)
+
+    schema_path = Path(__file__).resolve().parents[1] / "memory" / "schema.sql"
+    db.init_schema(str(schema_path))
+
+    llm_client = LLMRouter(loaded, log_path=loaded.log_path)
+
+    llm_broker, llm_broker_error = build_llm_broker(loaded)
+    model_scout = build_model_scout(loaded)
+    permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
+    effective_audit_log = audit_log if isinstance(audit_log, AuditLog) else AuditLog(
+        path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None
+    )
+
+    orchestrator = Orchestrator(
+        db=db,
+        skills_path=loaded.skills_path,
+        log_path=loaded.log_path,
+        timezone=loaded.agent_timezone,
+        llm_client=llm_client,
+        enable_writes=loaded.enable_writes,
+        llm_broker=llm_broker,
+        llm_broker_error=llm_broker_error,
+        perception_enabled=loaded.perception_enabled,
+        perception_roots=loaded.perception_roots,
+        perception_interval_seconds=loaded.perception_interval_seconds,
+    )
+    debug_protocol = DebugProtocol()
+
+    app = Application.builder().token(loaded.telegram_bot_token).build()
+    register_handlers(app)
+
+    effective_llm_fixit_fn = llm_fixit_fn
+    if not callable(effective_llm_fixit_fn):
+        def _llm_fixit_internal(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+            from agent.api_server import build_runtime
+
+            runtime = build_runtime(config=load_config(require_telegram_token=False))
+            try:
+                return runtime.llm_fixit(payload if isinstance(payload, dict) else {})
+            finally:
+                runtime.close()
+
+        effective_llm_fixit_fn = _llm_fixit_internal
+    effective_llm_fixit_store = (
+        llm_fixit_store if isinstance(llm_fixit_store, LLMFixitWizardStore) else LLMFixitWizardStore()
+    )
+
     app.bot_data["db"] = db
     app.bot_data["orchestrator"] = orchestrator
     app.bot_data["debug_protocol"] = debug_protocol
-    app.bot_data["log_path"] = config.log_path
+    app.bot_data["log_path"] = loaded.log_path
     app.bot_data["home_path"] = os.path.expanduser("~")
-    app.bot_data["timezone"] = config.agent_timezone
+    app.bot_data["timezone"] = loaded.agent_timezone
     app.bot_data["model_scout"] = model_scout
     app.bot_data["permission_store"] = permission_store
-    app.bot_data["audit_log"] = audit_log
-    app.bot_data["llm_fixit_store"] = LLMFixitWizardStore()
-    app.bot_data["llm_fixit_fn"] = _llm_fixit_internal
+    app.bot_data["audit_log"] = effective_audit_log
+    app.bot_data["llm_fixit_store"] = effective_llm_fixit_store
+    app.bot_data["llm_fixit_fn"] = effective_llm_fixit_fn
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
-    if config.enable_scheduled_snapshots:
-        run_time = time(9, 0, tzinfo=ZoneInfo(config.agent_timezone))
+    if loaded.enable_scheduled_snapshots:
+        run_time = time(9, 0, tzinfo=ZoneInfo(loaded.agent_timezone))
         app.job_queue.run_daily(_scheduled_disk_snapshot, time=run_time, name="disk_snapshot_daily")
         app.job_queue.run_daily(_scheduled_storage_snapshot, time=run_time, name="storage_snapshot_daily")
         app.job_queue.run_daily(_scheduled_resource_snapshot, time=run_time, name="resource_snapshot_daily")
