@@ -431,6 +431,9 @@ class AgentRuntime:
         self.config = config
         self._registry_lock = threading.RLock()
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
+        self._telegram_configured_cached = False
+        self._telegram_token_source_cached = "none"
+        self._refresh_telegram_config_cache()
         self._repo_root = Path(__file__).resolve().parents[1]
         self.started_at = datetime.now(timezone.utc)
         self.started_at_iso = self.started_at.isoformat()
@@ -967,6 +970,7 @@ class AgentRuntime:
         token_resolver: Callable[[], tuple[str | None, str] | str | None] | None = None,
         sleep_fn: Callable[[float], None] | None = None,
     ) -> bool:
+        self._refresh_telegram_config_cache()
         print(f"telegram.embedded: start called pid={self.pid}", flush=True)
         if self._telegram_runner is not None:
             existing_source = "none"
@@ -1871,7 +1875,7 @@ class AgentRuntime:
         ]
         return {"providers": rows}
 
-    def telegram_status(self) -> dict[str, Any]:
+    def _refresh_telegram_config_cache(self) -> None:
         token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
         token_source = "secret_store" if token else "none"
         if not token:
@@ -1879,20 +1883,66 @@ class AgentRuntime:
             if env_token:
                 token = env_token
                 token_source = "env"
+        self._telegram_configured_cached = bool(token)
+        self._telegram_token_source_cached = token_source
+
+    def telegram_status(self) -> dict[str, Any]:
         runner_status = (
             self._telegram_runner.status()
             if self._telegram_runner is not None and hasattr(self._telegram_runner, "status")
             else {}
         )
+        state = str(runner_status.get("state") or "").strip() or "stopped"
+        if not self._telegram_configured_cached and state == "stopped":
+            state = "disabled_missing_token"
         return {
             "ok": True,
-            "configured": bool(token),
-            "token_source": token_source,
+            "configured": bool(self._telegram_configured_cached),
+            "token_source": str(self._telegram_token_source_cached or "none"),
+            "state": state,
             "embedded_running": bool(runner_status.get("embedded_running", False)),
             "last_event": str(runner_status.get("last_event") or ""),
             "last_error": str(runner_status.get("last_error") or "") or None,
             "last_ts": float(runner_status.get("last_ts") or 0.0),
             "last_ts_iso": str(runner_status.get("last_ts_iso") or "") or None,
+            "consecutive_failures": int(runner_status.get("consecutive_failures") or 0),
+        }
+
+    def ready_status(self) -> dict[str, Any]:
+        telegram = self.telegram_status()
+        telegram_state = str(telegram.get("state") or "stopped")
+        ready = telegram_state in {"running", "disabled_missing_token"}
+        if ready and telegram_state == "running":
+            message = "Agent is ready. Telegram is running."
+        elif ready and telegram_state == "disabled_missing_token":
+            message = "Agent is ready. Telegram is disabled (missing token)."
+        elif telegram_state == "starting":
+            message = "Agent is starting. Telegram is still starting."
+        elif telegram_state == "crash_loop":
+            message = "Agent is running, but Telegram is retrying after a failure."
+        else:
+            message = "Agent is running, but Telegram is stopped."
+        return {
+            "ok": True,
+            "ready": bool(ready),
+            "api": {
+                "version": self.version,
+                "git_commit": self.git_commit,
+                "pid": self.pid,
+                "started_at": self.started_at_iso,
+            },
+            "telegram": {
+                "configured": bool(telegram.get("configured", False)),
+                "token_source": str(telegram.get("token_source") or "none"),
+                "state": telegram_state,
+                "embedded_running": bool(telegram.get("embedded_running", False)),
+                "consecutive_failures": int(telegram.get("consecutive_failures") or 0),
+                "last_event": str(telegram.get("last_event") or ""),
+                "last_error": str(telegram.get("last_error") or "") or None,
+                "last_ts": float(telegram.get("last_ts") or 0.0),
+                "last_ts_iso": str(telegram.get("last_ts_iso") or "") or None,
+            },
+            "message": message,
         }
 
     def _resolve_telegram_target(self) -> tuple[str | None, str | None]:
@@ -1928,6 +1978,7 @@ class AgentRuntime:
         if not token:
             return False, {"ok": False, "error": "bot_token is required"}
         self.secret_store.set_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY, token)
+        self._refresh_telegram_config_cache()
         return True, {"ok": True}
 
     def test_telegram(self) -> tuple[bool, dict[str, Any]]:
@@ -9867,6 +9918,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
+            if path == "/ready":
+                self._send_json(200, self.runtime.ready_status())
+                return
             if path == "/health":
                 self._send_json(200, self.runtime.health())
                 return

@@ -1,0 +1,143 @@
+from __future__ import annotations
+
+import json
+import os
+import tempfile
+import unittest
+from dataclasses import replace
+
+from agent.api_server import APIServerHandler, AgentRuntime
+from agent.config import load_config
+
+
+def _config(registry_path: str, db_path: str):
+    cfg = load_config(require_telegram_token=False)
+    return replace(
+        cfg,
+        db_path=db_path,
+        log_path=os.path.join(os.path.dirname(db_path), "agent.log"),
+        llm_registry_path=registry_path,
+        llm_automation_enabled=False,
+    )
+
+
+class _HandlerForTest(APIServerHandler):
+    def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+        self.runtime = runtime_obj
+        self.path = path
+        self.headers = {}
+        self.status_code = 0
+        self.content_type = ""
+        self.body = b""
+
+    def _send_json(self, status: int, payload: dict[str, object]) -> None:
+        self.status_code = status
+        self.content_type = "application/json"
+        self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+    def _send_bytes(
+        self,
+        status: int,
+        body: bytes,
+        *,
+        content_type: str,
+        cache_control: str | None = None,
+    ) -> None:
+        _ = cache_control
+        self.status_code = status
+        self.content_type = content_type
+        self.body = body
+
+
+class _FakeRunner:
+    def __init__(self, status_payload: dict[str, object]) -> None:
+        self._status_payload = dict(status_payload)
+
+    def status(self) -> dict[str, object]:
+        return dict(self._status_payload)
+
+
+class TestReadyEndpoint(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.registry_path = os.path.join(self.tmpdir.name, "registry.json")
+        self.db_path = os.path.join(self.tmpdir.name, "agent.db")
+        self._env_backup = dict(os.environ)
+        os.environ["AGENT_SECRET_STORE_PATH"] = os.path.join(self.tmpdir.name, "secrets.enc.json")
+        os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+
+    def tearDown(self) -> None:
+        os.environ.clear()
+        os.environ.update(self._env_backup)
+        self.tmpdir.cleanup()
+
+    def test_ready_missing_token_reports_disabled_missing_token_and_ready_true(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._telegram_runner = None
+        runtime._telegram_configured_cached = False
+        runtime._telegram_token_source_cached = "none"
+
+        handler = _HandlerForTest(runtime, "/ready")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["ready"])
+        self.assertEqual("disabled_missing_token", payload["telegram"]["state"])
+        self.assertTrue(str(payload.get("message") or "").strip())
+
+    def test_ready_reports_not_ready_when_telegram_crash_loop(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._telegram_runner = _FakeRunner(
+            {
+                "state": "crash_loop",
+                "embedded_running": False,
+                "last_event": "telegram.retry",
+                "last_error": "RuntimeError: boom",
+                "last_ts": 1.0,
+                "last_ts_iso": "1970-01-01T00:00:01+00:00",
+                "token_source": "secret_store",
+                "consecutive_failures": 3,
+            }
+        )
+        runtime._telegram_configured_cached = True
+        runtime._telegram_token_source_cached = "secret_store"
+
+        handler = _HandlerForTest(runtime, "/ready")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["ready"])
+        self.assertEqual("crash_loop", payload["telegram"]["state"])
+
+    def test_ready_reports_ready_when_telegram_running(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime._telegram_runner = _FakeRunner(
+            {
+                "state": "running",
+                "embedded_running": True,
+                "last_event": "telegram.started",
+                "last_error": None,
+                "last_ts": 2.0,
+                "last_ts_iso": "1970-01-01T00:00:02+00:00",
+                "token_source": "secret_store",
+                "consecutive_failures": 0,
+            }
+        )
+        runtime._telegram_configured_cached = True
+        runtime._telegram_token_source_cached = "secret_store"
+
+        handler = _HandlerForTest(runtime, "/ready")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["ready"])
+        self.assertEqual("running", payload["telegram"]["state"])
+        self.assertIn("version", payload["api"])
+        self.assertIn("pid", payload["api"])
+
+
+if __name__ == "__main__":
+    unittest.main()

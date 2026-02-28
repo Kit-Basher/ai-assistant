@@ -45,6 +45,10 @@ Archived docs under `docs/archive/` are historical context only.
 
 ## Runtime Note
 - Telegram bot polling now runs inside `personal-agent-api.service` when a Telegram token is configured; no separate `python -m telegram_adapter` process is required.
+- Readiness check after restart:
+  1. `systemctl --user restart personal-agent-api.service`
+  2. `python tools/wait_ready.py`
+  3. Optional detail: `curl -s http://127.0.0.1:8765/ready`
 
 ## E) Active Endpoints (Generated)
 Endpoint inventory below is generated from `agent/api_server.py` using `tools/dump_routes.py`.
@@ -59,6 +63,7 @@ To refresh endpoint list:
 - /config
 - /defaults
 - /health
+- /ready
 - /llm/autopilot/explain_last
 - /llm/autopilot/ledger
 - /llm/autopilot/ledger/{part3}

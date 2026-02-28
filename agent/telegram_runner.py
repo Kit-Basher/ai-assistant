@@ -42,6 +42,7 @@ class TelegramRunner:
         self.last_ts_iso: str | None = None
         self.token_source = "none"
         self.last_attempt = 0
+        self._consecutive_failures = 0
 
     def start(self) -> bool:
         with self._lock:
@@ -55,6 +56,12 @@ class TelegramRunner:
         else:
             token = str(resolved or "").strip()
         self.token_source = token_source
+        self._emit_event(
+            "telegram.embedded.start",
+            {"mode": "embedded", "token_source": token_source},
+            running=False,
+            error=None,
+        )
         if not token:
             self._emit_event(
                 "telegram.disabled",
@@ -132,6 +139,7 @@ class TelegramRunner:
                 if self._stop_event.is_set():
                     break
                 consecutive_failures += 1
+                self._consecutive_failures = int(consecutive_failures)
                 backoff_seconds = min(60, 5 * max(1, consecutive_failures))
                 self._emit_event(
                     "telegram.crash",
@@ -169,6 +177,7 @@ class TelegramRunner:
                     break
             else:
                 consecutive_failures = 0
+                self._consecutive_failures = 0
 
     def _wait(self, seconds: float) -> bool:
         duration = max(0.0, float(seconds))
@@ -228,6 +237,7 @@ class TelegramRunner:
                 "token_source": token_source,
             }
             self._emit_event("telegram.started", started_payload, running=True, error=None)
+            self._consecutive_failures = 0
             self._safe_audit(
                 action="telegram.start",
                 reason="embedded",
@@ -245,14 +255,34 @@ class TelegramRunner:
             self.embedded_running = False
 
     def status(self) -> dict[str, Any]:
+        with self._lock:
+            embedded_running = bool(self.embedded_running)
+            last_event = str(self.last_event or "")
+            last_error = str(self.last_error or "") or None
+            last_ts = float(self.last_ts or 0.0)
+            last_ts_iso = str(self.last_ts_iso or "") or None
+            token_source = str(self.token_source or "none")
+            attempt = int(self.last_attempt or 0)
+            consecutive_failures = int(self._consecutive_failures or 0)
+        state = "stopped"
+        if last_event == "telegram.disabled" and last_error == "missing_token":
+            state = "disabled_missing_token"
+        elif embedded_running:
+            state = "running"
+        elif last_event in {"telegram.crash", "telegram.retry"}:
+            state = "crash_loop"
+        elif last_event == "telegram.embedded.start" and not embedded_running:
+            state = "starting"
         return {
-            "embedded_running": bool(self.embedded_running),
-            "last_event": str(self.last_event or ""),
-            "last_error": str(self.last_error or "") or None,
-            "last_ts": float(self.last_ts or 0.0),
-            "last_ts_iso": str(self.last_ts_iso or "") or None,
-            "token_source": str(self.token_source or "none"),
-            "attempt": int(self.last_attempt or 0),
+            "state": state,
+            "embedded_running": embedded_running,
+            "last_event": last_event,
+            "last_error": last_error,
+            "last_ts": last_ts,
+            "last_ts_iso": last_ts_iso,
+            "token_source": token_source,
+            "attempt": attempt,
+            "consecutive_failures": consecutive_failures,
         }
 
     def _emit_event(
@@ -264,15 +294,16 @@ class TelegramRunner:
         error: str | None,
     ) -> None:
         now_ts = time.time()
-        self.embedded_running = bool(running)
-        self.last_event = str(action or "telegram.unknown")
-        self.last_error = str(error).strip() if error else None
-        self.last_ts = float(now_ts)
-        self.last_ts_iso = datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat()
-        try:
-            self.last_attempt = int(payload.get("attempt") or self.last_attempt or 0)
-        except Exception:
-            pass
+        with self._lock:
+            self.embedded_running = bool(running)
+            self.last_event = str(action or "telegram.unknown")
+            self.last_error = str(error).strip() if error else None
+            self.last_ts = float(now_ts)
+            self.last_ts_iso = datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat()
+            try:
+                self.last_attempt = int(payload.get("attempt") or self.last_attempt or 0)
+            except Exception:
+                pass
         self._safe_log(action, payload)
 
     def _safe_log(self, action: str, payload: dict[str, Any]) -> None:
