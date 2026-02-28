@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import os
 from pathlib import Path
 import sys
+from typing import Any, Callable
 
 try:
     from telegram import Update
@@ -38,6 +39,7 @@ from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog
 from agent.secret_store import SecretStore
 from agent.permissions import PermissionStore
+from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
 from memory.db import MemoryDB
 
 
@@ -98,6 +100,156 @@ def _envelope_from_exception(
     )
 
 
+def _redact_chat_id(chat_id: str) -> str:
+    value = str(chat_id or "").strip()
+    if not value:
+        return "unknown"
+    if len(value) <= 4:
+        return "***"
+    return f"***{value[-4:]}"
+
+
+def _wizard_status_from_state(state: dict[str, Any]) -> str:
+    if not isinstance(state, dict):
+        return "idle"
+    if not bool(state.get("active", False)):
+        return "idle"
+    step = str(state.get("step") or "").strip().lower()
+    if step == "awaiting_choice":
+        return "needs_user_choice"
+    if step == "awaiting_confirm":
+        return "needs_confirmation"
+    return "idle"
+
+
+def _map_fixit_reply_to_payload(state: dict[str, Any], text: str) -> tuple[dict[str, Any] | None, str | None]:
+    status = _wizard_status_from_state(state)
+    if status == "idle":
+        return None, None
+    normalized = " ".join(str(text or "").strip().lower().split())
+    if not normalized:
+        if status == "needs_user_choice":
+            return None, "Reply 1, 2, or 3."
+        return None, "Reply YES (1) or NO (2)."
+
+    if status == "needs_user_choice":
+        raw_choices = state.get("choices") if isinstance(state.get("choices"), list) else []
+        choices: list[dict[str, str]] = []
+        for row in raw_choices:
+            if not isinstance(row, dict):
+                continue
+            choice_id = str(row.get("id") or "").strip()
+            label = str(row.get("label") or "").strip()
+            if not choice_id:
+                continue
+            choices.append({"id": choice_id, "label": label})
+        if not choices:
+            return None, "No pending choices right now. Ask me to run fix-it again."
+        if normalized.isdigit():
+            idx = int(normalized)
+            if 1 <= idx <= len(choices):
+                return {"answer": choices[idx - 1]["id"]}, None
+        for choice in choices:
+            choice_id = str(choice.get("id") or "").strip().lower()
+            label = str(choice.get("label") or "").strip().lower()
+            if normalized == choice_id or (label and normalized == label):
+                return {"answer": choice.get("id")}, None
+        return None, "Reply 1, 2, or 3."
+
+    if status == "needs_confirmation":
+        if normalized in {"1", "yes", "y", "apply", "ok"}:
+            return {"confirm": True}, None
+        if normalized in {"2", "no", "n", "cancel"}:
+            return {"confirm": False}, None
+        return None, "Reply YES (1) or NO (2)."
+
+    return None, None
+
+
+def maybe_handle_llm_fixit_reply(
+    *,
+    llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None,
+    wizard_store: LLMFixitWizardStore | None,
+    audit_log: AuditLog | None,
+    chat_id: str,
+    text: str,
+    log_path: str | None,
+) -> str | None:
+    if llm_fixit_fn is None or wizard_store is None:
+        return None
+    try:
+        state = wizard_store.load()
+        wizard_store.state = state
+    except Exception:
+        state = wizard_store.empty_state()
+    status = _wizard_status_from_state(state)
+    payload, hint_message = _map_fixit_reply_to_payload(state, text)
+    if payload is None:
+        if hint_message is None:
+            return None
+        if audit_log is not None:
+            try:
+                audit_log.append(
+                    actor="telegram",
+                    action="llm.fixit.telegram",
+                    params={
+                        "chat_id_redacted": _redact_chat_id(chat_id),
+                        "status": status,
+                        "mapped": False,
+                    },
+                    decision="allow",
+                    reason="reply_not_mapped",
+                    dry_run=False,
+                    outcome="handled",
+                    error_kind="needs_clarification",
+                    duration_ms=0,
+                )
+            except Exception:
+                pass
+        return hint_message
+
+    payload = dict(payload)
+    payload["actor"] = "telegram"
+    ok, body = llm_fixit_fn(payload)
+    message = str(body.get("message") or body.get("next_question") or "").strip()
+    if not message:
+        message = "I processed that fix-it step."
+    if audit_log is not None:
+        try:
+            audit_log.append(
+                actor="telegram",
+                action="llm.fixit.telegram",
+                params={
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "status": status,
+                    "mapped": True,
+                    "answer": payload.get("answer"),
+                    "confirm": payload.get("confirm"),
+                },
+                decision="allow",
+                reason="fixit_reply",
+                dry_run=False,
+                outcome="success" if ok else "failed",
+                error_kind=str(body.get("error_kind") or "") or None,
+                duration_ms=0,
+            )
+        except Exception:
+            pass
+    if log_path:
+        log_event(
+            log_path,
+            "llm_fixit_telegram",
+            {
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "status": status,
+                "mapped": True,
+                "ok": bool(ok),
+                "error_kind": str(body.get("error_kind") or "") or None,
+            },
+        )
+    return message
+
+
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
         return
@@ -111,10 +263,34 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     db: MemoryDB = context.application.bot_data["db"]
     log_path: str = context.application.bot_data["log_path"]
     trace_id = _trace_id_from_update(update)
+    llm_fixit_fn = context.application.bot_data.get("llm_fixit_fn")
+    wizard_store = context.application.bot_data.get("llm_fixit_store")
+    audit_log = context.application.bot_data.get("audit_log")
 
     try:
         # Remember which chat we're talking to (useful for reminders/jobs).
         db.set_preference("telegram_chat_id", chat_id)
+
+        fixit_reply = maybe_handle_llm_fixit_reply(
+            llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
+            wizard_store=wizard_store if isinstance(wizard_store, LLMFixitWizardStore) else None,
+            audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
+            chat_id=chat_id,
+            text=text,
+            log_path=log_path,
+        )
+        if fixit_reply is not None:
+            await update.effective_message.reply_text(_safe_reply_text(fixit_reply))
+            log_event(
+                log_path,
+                "telegram_fixit_intercept",
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "trace_id": trace_id,
+                },
+            )
+            return
 
         # Route ALL non-command text through the orchestrator (single brain).
         response = orchestrator.handle_message(text, user_id=chat_id)
@@ -768,6 +944,15 @@ def build_app() -> Application:
 
     app = Application.builder().token(config.telegram_bot_token).build()
 
+    def _llm_fixit_internal(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        from agent.api_server import build_runtime
+
+        runtime = build_runtime(config=load_config(require_telegram_token=False))
+        try:
+            return runtime.llm_fixit(payload if isinstance(payload, dict) else {})
+        finally:
+            runtime.close()
+
     # Log exceptions to journalctl instead of swallowing them.
     app.add_error_handler(_on_error)
 
@@ -811,6 +996,8 @@ def build_app() -> Application:
     app.bot_data["model_scout"] = model_scout
     app.bot_data["permission_store"] = permission_store
     app.bot_data["audit_log"] = audit_log
+    app.bot_data["llm_fixit_store"] = LLMFixitWizardStore()
+    app.bot_data["llm_fixit_fn"] = _llm_fixit_internal
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
     if config.enable_scheduled_snapshots:
