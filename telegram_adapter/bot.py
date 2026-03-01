@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import os
 from pathlib import Path
 import sys
+import time as pytime
 from typing import Any, Callable
 
 try:
@@ -45,6 +46,19 @@ from memory.db import MemoryDB
 
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 _TELEGRAM_FALLBACK_TEXT = "I hit an internal error, but I’m still running. Try one of these:"
+_TELEGRAM_HELP_TEXT = (
+    "Try one of these:\n"
+    "1) /brief\n"
+    "2) anything new on my PC?\n"
+    "3) /ask what changed in memory today?\n"
+    "Commands: /brief, /ask, /ask_opinion, /task_add, /done, /health, /scout, /help"
+)
+_TELEGRAM_UNKNOWN_FALLBACK_TEXT = (
+    "I can help with system updates, tasks, and troubleshooting.\n"
+    "Examples: /brief or \"anything new on my PC?\"\n"
+    "For more options, send /help."
+)
+_TELEGRAM_STATUS_TOKENS = {"ping", "hello", "hi"}
 
 
 def resolve_telegram_bot_token_with_source() -> tuple[str | None, str]:
@@ -66,6 +80,55 @@ def _resolve_telegram_bot_token() -> str | None:
 def _safe_reply_text(text: str | None) -> str:
     value = str(text or "").strip()
     return value if value else "I’m still here. What should I do next?"
+
+
+def _normalize_user_text(text: str | None) -> str:
+    return " ".join(str(text or "").strip().lower().split())
+
+
+def _format_commit_short(value: str | None) -> str:
+    commit = str(value or "").strip()
+    if not commit:
+        return "unknown"
+    return commit[:12]
+
+
+def _runtime_status_text(bot_data: dict[str, Any]) -> str:
+    runtime = bot_data.get("runtime")
+    version = str(getattr(runtime, "version", "") or bot_data.get("runtime_version") or "0.1.0").strip() or "0.1.0"
+    commit_value = str(getattr(runtime, "git_commit", "") or bot_data.get("runtime_git_commit") or "unknown").strip()
+    commit_short = _format_commit_short(commit_value)
+
+    started_at = getattr(runtime, "started_at", None)
+    uptime_seconds = 0
+    if isinstance(started_at, datetime):
+        uptime_seconds = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
+    else:
+        started_ts_raw = bot_data.get("runtime_started_ts")
+        try:
+            started_ts = float(started_ts_raw)
+        except Exception:
+            started_ts = pytime.time()
+        uptime_seconds = max(0, int(pytime.time() - started_ts))
+
+    return (
+        f"✅ Agent is running (v{version}, commit {commit_short}, uptime {uptime_seconds}s).\n"
+        "Try /brief or ask 'anything new on my PC?'"
+    )
+
+
+def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str | None, str | None]:
+    normalized = _normalize_user_text(text)
+    if normalized in {"/help", "help"}:
+        return _TELEGRAM_HELP_TEXT, "help"
+    if normalized in _TELEGRAM_STATUS_TOKENS:
+        return _runtime_status_text(bot_data), "status"
+    return None, None
+
+
+def _is_unknown_orchestrator_reply(text: str) -> bool:
+    normalized = _normalize_user_text(text)
+    return normalized.startswith("i didn’t understand that") or normalized.startswith("i didn't understand that")
 
 
 def _trace_id_from_update(update: Update, *, fallback_prefix: str = "tg") -> str:
@@ -320,9 +383,10 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     db: MemoryDB = context.application.bot_data["db"]
     log_path: str = context.application.bot_data["log_path"]
+    bot_data = context.application.bot_data
     trace_id = _trace_id_from_update(update)
-    llm_fixit_fn = context.application.bot_data.get("llm_fixit_fn")
-    wizard_store = context.application.bot_data.get("llm_fixit_store")
+    llm_fixit_fn = bot_data.get("llm_fixit_fn")
+    wizard_store = bot_data.get("llm_fixit_store")
     _safe_append_telegram_message_audit(
         audit_log=audit_log,
         action="telegram.message.received",
@@ -365,24 +429,50 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
+        smalltalk_reply, smalltalk_route = _smalltalk_preroute_reply(text, bot_data)
+        if smalltalk_reply is not None and smalltalk_route is not None:
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route=smalltalk_route,
+                outcome="handled",
+            )
+            await update.effective_message.reply_text(_safe_reply_text(smalltalk_reply))
+            log_event(
+                log_path,
+                "telegram_message",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": smalltalk_route,
+                    "trace_id": trace_id,
+                },
+            )
+            return
+
         # Route ALL non-command text through the orchestrator (single brain).
         response = orchestrator.handle_message(text, user_id=chat_id)
         reply_text = response.text.strip() if response and response.text else ""
         parse_mode = None
+        route = "chat"
         if response and isinstance(response.data, dict):
             ok, _ = validate_cards_payload(response.data)
             if ok:
                 reply_text = render_cards_markdown(response.data)
                 parse_mode = "Markdown"
-        if not reply_text:
-            reply_text = "Ask about disk, CPU, memory, or process changes."
+                route = "chat"
+        if not reply_text or _is_unknown_orchestrator_reply(reply_text):
+            reply_text = _TELEGRAM_UNKNOWN_FALLBACK_TEXT
+            parse_mode = None
+            route = "fallback"
         await update.effective_message.reply_text(_safe_reply_text(reply_text), parse_mode=parse_mode)
         _safe_append_telegram_message_audit(
             audit_log=audit_log,
             action="telegram.message.handled",
             chat_id=chat_id,
             message_kind="text",
-            route="chat",
+            route=route,
             outcome="handled",
         )
 
@@ -391,7 +481,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "telegram_message",
             {
                 "chat_id_redacted": _redact_chat_id(chat_id),
-                "route": "chat",
+                "route": route,
                 "trace_id": trace_id,
             },
         )
@@ -561,6 +651,40 @@ async def _handle_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     response = orchestrator.handle_message("/brief", user_id=chat_id)
     await update.effective_message.reply_text(_safe_reply_text(response.text))
+
+
+async def _handle_brief_alias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    audit_log_value = context.application.bot_data.get("audit_log")
+    audit_log = audit_log_value if isinstance(audit_log_value, AuditLog) else None
+    _safe_append_telegram_message_audit(
+        audit_log=audit_log,
+        action="telegram.message.handled",
+        chat_id=chat_id,
+        message_kind="command",
+        route="alias",
+        outcome="handled",
+    )
+    await _handle_brief(update, context)
+
+
+async def _handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    audit_log_value = context.application.bot_data.get("audit_log")
+    audit_log = audit_log_value if isinstance(audit_log_value, AuditLog) else None
+    _safe_append_telegram_message_audit(
+        audit_log=audit_log,
+        action="telegram.message.handled",
+        chat_id=chat_id,
+        message_kind="command",
+        route="help",
+        outcome="handled",
+    )
+    await update.effective_message.reply_text(_TELEGRAM_HELP_TEXT)
 
 
 async def _handle_network_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1017,6 +1141,8 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("storage_report", _handle_storage_report))
     app.add_handler(CommandHandler("resource_report", _handle_resource_report))
     app.add_handler(CommandHandler("brief", _handle_brief))
+    app.add_handler(CommandHandler("breif", _handle_brief_alias))
+    app.add_handler(CommandHandler("help", _handle_help))
     app.add_handler(CommandHandler("network_report", _handle_network_report))
     app.add_handler(CommandHandler("sys_metrics_snapshot", _handle_sys_metrics_snapshot))
     app.add_handler(CommandHandler("sys_health_report", _handle_sys_health_report))
@@ -1045,6 +1171,7 @@ def build_app(
     llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
     llm_fixit_store: LLMFixitWizardStore | None = None,
     audit_log: AuditLog | None = None,
+    runtime: Any | None = None,
 ) -> Application:
     loaded = config if isinstance(config, Config) else load_config(require_telegram_token=False)
     resolved_token = str(token or _resolve_telegram_bot_token() or "").strip()
@@ -1115,6 +1242,12 @@ def build_app(
     app.bot_data["audit_log"] = effective_audit_log
     app.bot_data["llm_fixit_store"] = effective_llm_fixit_store
     app.bot_data["llm_fixit_fn"] = effective_llm_fixit_fn
+    app.bot_data["runtime"] = runtime
+    app.bot_data["runtime_version"] = str(
+        getattr(runtime, "version", "") or getattr(loaded, "api_version", "") or "0.1.0"
+    )
+    app.bot_data["runtime_git_commit"] = str(getattr(runtime, "git_commit", "") or "unknown")
+    app.bot_data["runtime_started_ts"] = float(pytime.time())
 
     app.job_queue.run_repeating(_check_reminders, interval=30, first=5)
     if loaded.enable_scheduled_snapshots:

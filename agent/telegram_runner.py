@@ -126,6 +126,7 @@ class TelegramRunner:
                     llm_fixit_fn=self._runtime.llm_fixit,
                     llm_fixit_store=getattr(self._runtime, "_llm_fixit_store", None),
                     audit_log=self._audit_log,
+                    runtime=self._runtime,
                 )
                 self._run_application_loop(
                     app,
