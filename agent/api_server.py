@@ -168,6 +168,19 @@ def _is_truthy(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _startup_stdout_event(step: str, **fields: Any) -> None:
+    payload: dict[str, Any] = {
+        "step": str(step or "").strip() or "unknown",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    for key, value in fields.items():
+        payload[str(key)] = value
+    try:
+        print(f"startup.event {json.dumps(payload, ensure_ascii=True, sort_keys=True)}", flush=True)
+    except Exception:
+        return
+
+
 def compute_notification_test_policy(runtime: "AgentRuntime") -> dict[str, Any]:
     parsed = urllib.parse.urlparse(str(runtime.listening_url or ""))
     bind_host = str(parsed.hostname or "").strip()
@@ -427,10 +440,28 @@ class AgentRuntime:
             return str((db_parent / filename).resolve())
         return None
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, *, defer_bootstrap_warmup: bool = False) -> None:
+        init_started = time.monotonic()
+
+        def _mark(step: str, **fields: Any) -> None:
+            payload: dict[str, Any] = {
+                "elapsed_ms": int((time.monotonic() - init_started) * 1000),
+            }
+            payload.update(fields)
+            _startup_stdout_event(step, **payload)
+
         self.config = config
+        self._defer_bootstrap_warmup = bool(defer_bootstrap_warmup)
         self._registry_lock = threading.RLock()
+        self.startup_phase = "starting"
+        self._startup_warmup_lock = threading.Lock()
+        self._startup_warmup_remaining: list[str] = []
+        self._startup_warmup_thread: threading.Thread | None = None
+        self._startup_warmup_started = False
+        self._startup_last_error: str | None = None
+        _mark("runtime.init.begin", pid=os.getpid())
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
+        _mark("runtime.init.secret_store")
         self._telegram_configured_cached = False
         self._telegram_token_source_cached = "none"
         self._refresh_telegram_config_cache()
@@ -445,6 +476,7 @@ class AgentRuntime:
         if not registry_path:
             registry_path = str(self._repo_root / "llm_registry.json")
         self.registry_store = RegistryStore(registry_path)
+        _mark("runtime.init.registry_store", registry_path=self.registry_store.path)
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
         self.permission_policy = PermissionPolicy()
         self.pack_store = PackStore(self.config.db_path)
@@ -500,7 +532,9 @@ class AgentRuntime:
             store=HealthStateStore(path=self.config.llm_health_state_path),
             probe_fn=self._probe_llm_candidate,
         )
+        _mark("runtime.init.health_monitor")
         self._catalog_store = CatalogStore(path=self.config.llm_catalog_path)
+        _mark("runtime.init.catalog_store", catalog_path=self.config.llm_catalog_path)
         snapshots_dir = self._runtime_state_path(
             self.config,
             self.config.llm_registry_snapshots_dir,
@@ -563,12 +597,41 @@ class AgentRuntime:
         }
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
-        self._ensure_native_packs_registered()
-        self._reload_router()
         self._memory_v2_bootstrap_status: dict[str, Any] = {"ran": False, "ok": False}
-        self._initialize_memory_v2_bootstrap()
-        self._router.set_external_health_state(self._health_monitor.state)
-        self._start_background_scheduler_if_enabled()
+        if self._defer_bootstrap_warmup:
+            warmup_tasks = self._build_startup_warmup_tasks()
+            with self._startup_warmup_lock:
+                self._startup_warmup_remaining = list(warmup_tasks)
+            self._memory_v2_bootstrap_status = {"ran": False, "ok": False, "reason": "deferred_until_listening"}
+            _mark("runtime.init.warmup_deferred", warmup_remaining=list(warmup_tasks))
+            _mark(
+                "runtime.init.scheduler_init",
+                scheduler_enabled=False,
+                deferred=True,
+            )
+        else:
+            self._ensure_native_packs_registered()
+            _mark("runtime.init.native_packs")
+            self._reload_router()
+            _mark("runtime.init.router_reload")
+            if (
+                bool(self.config.memory_v2_enabled)
+                and self._memory_v2_store is not None
+                and not self._memory_v2_bootstrap_completed()
+            ):
+                self._initialize_memory_v2_bootstrap()
+                _mark("runtime.init.memory_bootstrap_ran")
+            else:
+                self._memory_v2_bootstrap_status = {"ran": False, "ok": True, "reason": "not_required_or_completed"}
+                _mark("runtime.init.memory_bootstrap_not_required")
+            self._router.set_external_health_state(self._health_monitor.state)
+            self._start_background_scheduler_if_enabled()
+            _mark(
+                "runtime.init.scheduler_init",
+                scheduler_enabled=bool(self._scheduler_thread is not None),
+                model_catalog_refresh="deferred",
+            )
+        _mark("runtime.init.complete")
 
     def _default_listening_url(self) -> str:
         host = os.getenv("AGENT_API_HOST", "127.0.0.1").strip() or "127.0.0.1"
@@ -956,8 +1019,142 @@ class AgentRuntime:
         assert self.router is not None
         return self.router
 
+    def _set_startup_phase(self, phase: str) -> None:
+        normalized = str(phase or "").strip().lower() or "starting"
+        if normalized not in {"starting", "listening", "warming", "ready", "degraded"}:
+            normalized = "starting"
+        self.startup_phase = normalized
+        _startup_stdout_event("runtime.startup_phase", phase=normalized)
+
+    def _warmup_remaining_snapshot(self) -> list[str]:
+        with self._startup_warmup_lock:
+            return list(self._startup_warmup_remaining)
+
+    def mark_server_listening(self) -> None:
+        self._startup_warmup_started = True
+        self._set_startup_phase("listening")
+        self._start_startup_warmup_thread()
+
+    def _build_startup_warmup_tasks(self) -> list[str]:
+        tasks: list[str] = [
+            "native_packs",
+            "router_reload",
+        ]
+        if (
+            bool(self.config.memory_v2_enabled)
+            and self._memory_v2_store is not None
+            and not self._memory_v2_bootstrap_completed()
+        ):
+            tasks.append("memory_bootstrap")
+        tasks.append("model_catalog_refresh")
+        return tasks
+
+    def _start_startup_warmup_thread(self) -> None:
+        pending = self._warmup_remaining_snapshot()
+        if not pending:
+            self._start_background_scheduler_if_enabled()
+            self._set_startup_phase("ready")
+            return
+        self._set_startup_phase("warming")
+        with self._startup_warmup_lock:
+            if self._startup_warmup_thread is not None and self._startup_warmup_thread.is_alive():
+                return
+            self._startup_warmup_thread = threading.Thread(
+                target=self._run_startup_warmup,
+                name="startup-warmup",
+                daemon=True,
+            )
+            self._startup_warmup_thread.start()
+
+    def _run_startup_warmup_task(self, task: str) -> None:
+        if task == "native_packs":
+            self._ensure_native_packs_registered()
+            return
+        if task == "router_reload":
+            self._reload_router()
+            if self.router is not None:
+                self.router.set_external_health_state(self._health_monitor.state)
+            return
+        if task == "memory_bootstrap":
+            if (
+                bool(self.config.memory_v2_enabled)
+                and self._memory_v2_store is not None
+                and not self._memory_v2_bootstrap_completed()
+            ):
+                self._initialize_memory_v2_bootstrap()
+            else:
+                _startup_stdout_event("runtime.warmup.task.skip", task=task, reason="not_required")
+            return
+        if task == "model_catalog_refresh":
+            if not bool(self.config.llm_automation_enabled):
+                _startup_stdout_event("runtime.warmup.task.skip", task=task, reason="automation_disabled")
+                return
+            ok, body = self.run_llm_catalog_refresh(trigger="startup_warmup")
+            if not ok:
+                reason = (
+                    str((body or {}).get("error") or "").strip()
+                    or str((body or {}).get("message") or "").strip()
+                    or "catalog_refresh_failed"
+                )
+                raise RuntimeError(reason)
+            return
+        _startup_stdout_event("runtime.warmup.task.skip", task=task, reason="unknown_task")
+
+    def _run_startup_warmup(self) -> None:
+        had_failure = False
+        while True:
+            with self._startup_warmup_lock:
+                if not self._startup_warmup_remaining:
+                    break
+                task = str(self._startup_warmup_remaining[0] or "").strip()
+            if not task:
+                with self._startup_warmup_lock:
+                    if self._startup_warmup_remaining:
+                        self._startup_warmup_remaining.pop(0)
+                continue
+            started = time.monotonic()
+            _startup_stdout_event("runtime.warmup.task.start", task=task)
+            try:
+                self._run_startup_warmup_task(task)
+            except Exception as exc:  # pragma: no cover - defensive warmup path
+                had_failure = True
+                self._startup_last_error = f"{task}:{exc.__class__.__name__}"
+                _startup_stdout_event(
+                    "runtime.warmup.task.error",
+                    task=task,
+                    error_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+            finally:
+                with self._startup_warmup_lock:
+                    if self._startup_warmup_remaining and self._startup_warmup_remaining[0] == task:
+                        self._startup_warmup_remaining.pop(0)
+                    else:
+                        self._startup_warmup_remaining = [row for row in self._startup_warmup_remaining if row != task]
+                _startup_stdout_event(
+                    "runtime.warmup.task.done",
+                    task=task,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
+                )
+        if not had_failure:
+            try:
+                self._start_background_scheduler_if_enabled()
+            except Exception as exc:  # pragma: no cover - defensive path
+                had_failure = True
+                self._startup_last_error = f"scheduler:{exc.__class__.__name__}"
+                _startup_stdout_event(
+                    "runtime.warmup.task.error",
+                    task="scheduler_start",
+                    error_type=exc.__class__.__name__,
+                    error=str(exc),
+                )
+        self._set_startup_phase("degraded" if had_failure else "ready")
+
     def close(self) -> None:
         self.stop_embedded_telegram()
+        warmup_thread = self._startup_warmup_thread
+        if warmup_thread is not None and warmup_thread.is_alive():
+            warmup_thread.join(timeout=1.0)
         self._scheduler_stop.set()
         if self._scheduler_thread is not None:
             self._scheduler_thread.join(timeout=2.0)
@@ -1911,10 +2108,21 @@ class AgentRuntime:
     def ready_status(self) -> dict[str, Any]:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
-        ready = telegram_state in {"running", "disabled_missing_token"}
+        phase = str(self.startup_phase or "starting").strip().lower() or "starting"
+        warmup_remaining = self._warmup_remaining_snapshot()
+        if phase == "starting" and not self._startup_warmup_started and not warmup_remaining:
+            # Runtime can be instantiated directly in tests/tools without going through run_server().
+            # Treat that mode as immediately ready.
+            phase = "ready"
+        telegram_ready = telegram_state in {"running", "disabled_missing_token"}
+        ready = bool(phase == "ready" and telegram_ready)
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
         recent_messages = self._ready_recent_telegram_messages(limit=5)
-        if ready and telegram_state == "running":
+        if phase == "degraded":
+            message = "Startup warmup degraded. Check logs and retry."
+        elif phase in {"starting", "listening", "warming"}:
+            message = "Starting up... retrying. Try /ready again in a moment."
+        elif ready and telegram_state == "running":
             message = "Agent is ready. Telegram is running."
         elif ready and telegram_state == "disabled_missing_token":
             message = "Agent is ready. Telegram is disabled (missing token)."
@@ -1923,6 +2131,9 @@ class AgentRuntime:
         return {
             "ok": True,
             "ready": bool(ready),
+            "phase": phase,
+            "warmup_remaining": list(warmup_remaining),
+            "last_error": str(self._startup_last_error or "") or None,
             "api": {
                 "version": self.version,
                 "git_commit": self.git_commit,
@@ -10905,21 +11116,46 @@ class APIServerHandler(BaseHTTPRequestHandler):
             self._handle_internal_error("DELETE", exc)
 
 
-def build_runtime(config: Config | None = None) -> AgentRuntime:
-    loaded = config or load_config(require_telegram_token=False)
-    return AgentRuntime(loaded)
+def build_runtime(config: Config | None = None, *, defer_bootstrap_warmup: bool = False) -> AgentRuntime:
+    build_started = time.monotonic()
+    if config is None:
+        _startup_stdout_event("runtime.build.config_load.start")
+        loaded = load_config(require_telegram_token=False)
+        _startup_stdout_event(
+            "runtime.build.config_load.done",
+            elapsed_ms=int((time.monotonic() - build_started) * 1000),
+        )
+    else:
+        loaded = config
+        _startup_stdout_event("runtime.build.config_load.done", elapsed_ms=0, source="provided")
+    _startup_stdout_event("runtime.build.init.start")
+    runtime = AgentRuntime(loaded, defer_bootstrap_warmup=defer_bootstrap_warmup)
+    _startup_stdout_event(
+        "runtime.build.init.done",
+        elapsed_ms=int((time.monotonic() - build_started) * 1000),
+    )
+    return runtime
 
 
 def run_server(host: str, port: int) -> None:
-    runtime = build_runtime()
+    server_started = time.monotonic()
+    _startup_stdout_event("server.start.begin", host=host, port=int(port))
+    runtime = build_runtime(defer_bootstrap_warmup=True)
+    _startup_stdout_event(
+        "server.start.runtime_built",
+        elapsed_ms=int((time.monotonic() - server_started) * 1000),
+    )
     runtime.set_listening(host, port)
+    _startup_stdout_event("server.start.route_wiring.start")
 
     class _Handler(APIServerHandler):
         pass
 
     _Handler.runtime = runtime
+    _startup_stdout_event("server.start.route_wiring.done")
 
     try:
+        _startup_stdout_event("server.start.bind.start", listening=runtime.listening_url)
         server = ThreadingHTTPServer((host, port), _Handler)
     except OSError as exc:
         print(
@@ -10928,8 +11164,16 @@ def run_server(host: str, port: int) -> None:
             flush=True,
         )
         raise SystemExit(1) from exc
+    _startup_stdout_event(
+        "server.start.bind.done",
+        listening=runtime.listening_url,
+        elapsed_ms=int((time.monotonic() - server_started) * 1000),
+    )
+    runtime.mark_server_listening()
 
+    _startup_stdout_event("server.start.telegram.start")
     runtime.start_embedded_telegram()
+    _startup_stdout_event("server.start.telegram.done")
 
     print(
         f"Personal Agent API started pid={runtime.pid} listening={runtime.listening_url} "

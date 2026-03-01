@@ -910,6 +910,7 @@ class TestAPIServerRuntime(unittest.TestCase):
     def test_run_server_starts_embedded_telegram_runner(self) -> None:
         started: list[bool] = []
         closed: list[bool] = []
+        listening_marked: list[bool] = []
 
         class _FakeRuntime:
             listening_url = "http://127.0.0.1:8765"
@@ -920,6 +921,9 @@ class TestAPIServerRuntime(unittest.TestCase):
 
             def set_listening(self, _host: str, _port: int) -> None:
                 return
+
+            def mark_server_listening(self) -> None:
+                listening_marked.append(True)
 
             def start_embedded_telegram(self) -> bool:
                 started.append(True)
@@ -946,8 +950,116 @@ class TestAPIServerRuntime(unittest.TestCase):
 
             run_server("127.0.0.1", 8765)
 
+        self.assertEqual([True], listening_marked)
         self.assertEqual([True], started)
         self.assertEqual([True], closed)
+
+    def test_ready_responds_quickly_while_warmup_pending_then_ready_after_completion(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        warmup_gate = threading.Event()
+
+        def _slow_bootstrap() -> None:
+            warmup_gate.wait(2.0)
+
+        with runtime._startup_warmup_lock:
+            runtime._startup_warmup_remaining = ["memory_bootstrap"]
+
+        with patch.object(runtime, "_initialize_memory_v2_bootstrap", side_effect=_slow_bootstrap):
+            class _HandlerForTest(APIServerHandler):
+                def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                    self.runtime = runtime_obj
+                    self.path = path
+                    self.headers = {}
+                    self.status_code = 0
+                    self.content_type = ""
+                    self.body = b""
+
+                def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                    self.status_code = status
+                    self.content_type = "application/json"
+                    self.body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+
+                def _send_bytes(
+                    self,
+                    status: int,
+                    body: bytes,
+                    *,
+                    content_type: str,
+                    cache_control: str | None = None,
+                ) -> None:
+                    _ = cache_control
+                    self.status_code = status
+                    self.content_type = content_type
+                    self.body = body
+
+            try:
+                runtime.set_listening("127.0.0.1", 8765)
+                runtime.mark_server_listening()
+
+                start = time.time()
+                handler = _HandlerForTest(runtime, "/ready")
+                handler.do_GET()
+                elapsed = time.time() - start
+                payload = json.loads(handler.body.decode("utf-8"))
+                self.assertLess(elapsed, 0.5)
+                self.assertTrue(payload.get("ok"))
+                self.assertFalse(payload.get("ready"))
+                self.assertIn(payload.get("phase"), {"warming", "listening"})
+                self.assertEqual(["memory_bootstrap"], payload.get("warmup_remaining"))
+
+                warmup_gate.set()
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    if runtime.startup_phase == "ready":
+                        break
+                    time.sleep(0.02)
+                handler_ready = _HandlerForTest(runtime, "/ready")
+                handler_ready.do_GET()
+                payload_ready = json.loads(handler_ready.body.decode("utf-8"))
+                self.assertTrue(payload_ready.get("ready"))
+                self.assertEqual("ready", payload_ready.get("phase"))
+                self.assertEqual([], payload_ready.get("warmup_remaining"))
+            finally:
+                warmup_gate.set()
+                runtime.close()
+
+    def test_deferred_warmup_skips_native_and_router_prebind(self) -> None:
+        call_order: list[str] = []
+        original_native = AgentRuntime._ensure_native_packs_registered
+        original_reload = AgentRuntime._reload_router
+
+        def _wrapped_native(runtime_obj: AgentRuntime) -> None:
+            call_order.append("native_packs")
+            return original_native(runtime_obj)
+
+        def _wrapped_reload(runtime_obj: AgentRuntime) -> None:
+            call_order.append("router_reload")
+            return original_reload(runtime_obj)
+
+        with patch.object(AgentRuntime, "_ensure_native_packs_registered", _wrapped_native), patch.object(
+            AgentRuntime, "_reload_router", _wrapped_reload
+        ):
+            runtime = AgentRuntime(_config(self.registry_path, self.db_path), defer_bootstrap_warmup=True)
+            try:
+                self.assertEqual([], call_order)
+                self.assertEqual(
+                    ["native_packs", "router_reload", "model_catalog_refresh"],
+                    runtime._warmup_remaining_snapshot(),
+                )
+                runtime.set_listening("127.0.0.1", 8765)
+                runtime.mark_server_listening()
+                deadline = time.time() + 2.0
+                while time.time() < deadline:
+                    if runtime.startup_phase in {"ready", "degraded"}:
+                        break
+                    time.sleep(0.02)
+                self.assertGreaterEqual(len(call_order), 2)
+                self.assertEqual("native_packs", call_order[0])
+                self.assertEqual("router_reload", call_order[1])
+                self.assertEqual("ready", runtime.startup_phase)
+                self.assertEqual([], runtime._warmup_remaining_snapshot())
+            finally:
+                runtime.close()
 
     def test_llm_health_autoconfig_and_hygiene_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
