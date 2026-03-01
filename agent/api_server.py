@@ -1912,16 +1912,14 @@ class AgentRuntime:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
         ready = telegram_state in {"running", "disabled_missing_token"}
+        uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
+        recent_messages = self._ready_recent_telegram_messages(limit=5)
         if ready and telegram_state == "running":
             message = "Agent is ready. Telegram is running."
         elif ready and telegram_state == "disabled_missing_token":
             message = "Agent is ready. Telegram is disabled (missing token)."
-        elif telegram_state == "starting":
-            message = "Agent is starting. Telegram is still starting."
-        elif telegram_state == "crash_loop":
-            message = "Agent is running, but Telegram is retrying after a failure."
         else:
-            message = "Agent is running, but Telegram is stopped."
+            message = "Starting up... retrying. Try /ready again in a moment."
         return {
             "ok": True,
             "ready": bool(ready),
@@ -1930,20 +1928,62 @@ class AgentRuntime:
                 "git_commit": self.git_commit,
                 "pid": self.pid,
                 "started_at": self.started_at_iso,
+                "uptime_seconds": uptime_seconds,
             },
             "telegram": {
                 "configured": bool(telegram.get("configured", False)),
                 "token_source": str(telegram.get("token_source") or "none"),
                 "state": telegram_state,
+                "status": telegram_state,
                 "embedded_running": bool(telegram.get("embedded_running", False)),
                 "consecutive_failures": int(telegram.get("consecutive_failures") or 0),
                 "last_event": str(telegram.get("last_event") or ""),
                 "last_error": str(telegram.get("last_error") or "") or None,
                 "last_ts": float(telegram.get("last_ts") or 0.0),
                 "last_ts_iso": str(telegram.get("last_ts_iso") or "") or None,
+                "recent_messages": recent_messages,
             },
             "message": message,
         }
+
+    @staticmethod
+    def _ready_sanitize_params_redacted(params: dict[str, Any]) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        for raw_key, raw_value in (params or {}).items():
+            key = str(raw_key or "").strip()
+            lowered = key.lower()
+            if not key:
+                continue
+            if lowered in {"text", "message", "content", "prompt", "chat_id", "raw_chat_id"}:
+                continue
+            if "chat_id" in lowered and "redacted" not in lowered:
+                continue
+            cleaned[key] = raw_value
+        return cleaned
+
+    def _ready_recent_telegram_messages(self, *, limit: int = 5) -> list[dict[str, Any]]:
+        max_rows = max(1, int(limit))
+        rows: list[dict[str, Any]] = []
+        for entry in self.audit_log.recent(limit=100):
+            if not isinstance(entry, dict):
+                continue
+            action = str(entry.get("action") or "").strip()
+            if not action.startswith("telegram.message."):
+                continue
+            params = entry.get("params_redacted") if isinstance(entry.get("params_redacted"), dict) else {}
+            rows.append(
+                {
+                    "ts": str(entry.get("ts") or ""),
+                    "action": action,
+                    "outcome": str(entry.get("outcome") or ""),
+                    "reason": str(entry.get("reason") or ""),
+                    "error_kind": str(entry.get("error_kind") or "") or None,
+                    "params_redacted": self._ready_sanitize_params_redacted(params),
+                }
+            )
+            if len(rows) >= max_rows:
+                break
+        return rows
 
     def _resolve_telegram_target(self) -> tuple[str | None, str | None]:
         token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
