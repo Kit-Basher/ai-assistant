@@ -116,6 +116,38 @@ def _redact_chat_id(chat_id: str) -> str:
     return f"***{value[-4:]}"
 
 
+def _safe_append_telegram_message_audit(
+    *,
+    audit_log: AuditLog | None,
+    action: str,
+    chat_id: str,
+    message_kind: str,
+    route: str,
+    outcome: str,
+    error_kind: str | None = None,
+) -> None:
+    if audit_log is None:
+        return
+    try:
+        audit_log.append(
+            actor="telegram",
+            action=action,
+            params={
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "message_kind": str(message_kind or "text"),
+                "route": str(route or "ignored"),
+            },
+            decision="allow",
+            reason=f"{route}:{outcome}",
+            dry_run=False,
+            outcome=str(outcome or "handled"),
+            error_kind=str(error_kind or "") or None,
+            duration_ms=0,
+        )
+    except Exception:
+        pass
+
+
 def _wizard_status_from_state(state: dict[str, Any]) -> str:
     if not isinstance(state, dict):
         return "idle"
@@ -258,12 +290,31 @@ def maybe_handle_llm_fixit_reply(
 
 
 async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    audit_log_value = context.application.bot_data.get("audit_log")
+    audit_log = audit_log_value if isinstance(audit_log_value, AuditLog) else None
+
     if update.effective_chat is None or update.effective_message is None:
+        _safe_append_telegram_message_audit(
+            audit_log=audit_log,
+            action="telegram.message.ignored",
+            chat_id="",
+            message_kind="non_text",
+            route="ignored",
+            outcome="ignored",
+        )
         return
 
     chat_id = str(update.effective_chat.id)
     text = (update.effective_message.text or "").strip()
     if not text:
+        _safe_append_telegram_message_audit(
+            audit_log=audit_log,
+            action="telegram.message.ignored",
+            chat_id=chat_id,
+            message_kind="text",
+            route="ignored",
+            outcome="ignored",
+        )
         return
 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
@@ -272,7 +323,14 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     trace_id = _trace_id_from_update(update)
     llm_fixit_fn = context.application.bot_data.get("llm_fixit_fn")
     wizard_store = context.application.bot_data.get("llm_fixit_store")
-    audit_log = context.application.bot_data.get("audit_log")
+    _safe_append_telegram_message_audit(
+        audit_log=audit_log,
+        action="telegram.message.received",
+        chat_id=chat_id,
+        message_kind="text",
+        route="chat",
+        outcome="received",
+    )
 
     try:
         # Remember which chat we're talking to (useful for reminders/jobs).
@@ -287,13 +345,21 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             log_path=log_path,
         )
         if fixit_reply is not None:
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route="fixit",
+                outcome="handled",
+            )
             await update.effective_message.reply_text(_safe_reply_text(fixit_reply))
             log_event(
                 log_path,
                 "telegram_fixit_intercept",
                 {
-                    "chat_id": chat_id,
-                    "text": text,
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": "fixit",
                     "trace_id": trace_id,
                 },
             )
@@ -311,9 +377,34 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not reply_text:
             reply_text = "Ask about disk, CPU, memory, or process changes."
         await update.effective_message.reply_text(_safe_reply_text(reply_text), parse_mode=parse_mode)
+        _safe_append_telegram_message_audit(
+            audit_log=audit_log,
+            action="telegram.message.handled",
+            chat_id=chat_id,
+            message_kind="text",
+            route="chat",
+            outcome="handled",
+        )
 
-        log_event(log_path, "telegram_message", {"chat_id": chat_id, "text": text, "trace_id": trace_id})
+        log_event(
+            log_path,
+            "telegram_message",
+            {
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "route": "chat",
+                "trace_id": trace_id,
+            },
+        )
     except Exception as exc:
+        _safe_append_telegram_message_audit(
+            audit_log=audit_log,
+            action="telegram.message.handled",
+            chat_id=chat_id,
+            message_kind="text",
+            route="chat",
+            outcome="failed",
+            error_kind=exc.__class__.__name__,
+        )
         envelope = _envelope_from_exception(
             exc=exc,
             intent="telegram.message",
