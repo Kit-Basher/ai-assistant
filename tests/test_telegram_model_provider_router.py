@@ -70,6 +70,7 @@ class _FakeRuntime:
         self.test_calls: list[tuple[str, dict[str, object]]] = []
         self.defaults_calls: list[dict[str, object]] = []
         self.model_watch_calls = 0
+        self._llm_available = True
         self._watch_payload: dict[str, object] = {"ok": True, "proposal": None}
         self._status_payload: dict[str, object] = {
             "ok": True,
@@ -107,6 +108,11 @@ class _FakeRuntime:
 
     def llm_status(self) -> dict[str, object]:
         return dict(self._status_payload)
+
+    def llm_availability_state(self) -> dict[str, object]:
+        if self._llm_available:
+            return {"available": True, "reason": "ok"}
+        return {"available": False, "reason": "provider_unhealthy"}
 
     def model_watch_latest(self) -> dict[str, object]:
         return {"ok": True, "found": False, "reason": "No model catalog snapshot available; run refresh"}
@@ -287,6 +293,66 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             asyncio.run(_handle_message(update, context))
             reply = str(update.effective_message.replies[-1]["text"] or "")
             self.assertIn("No active choice right now", reply)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_unknown_text_clarifies_when_llm_available(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            runtime._llm_available = True
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "fix it")
+            asyncio.run(_handle_message(update, context))
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Do you mean:", reply)
+            self.assertIn("A)", reply)
+            self.assertIn("B)", reply)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_unknown_text_suggests_and_numeric_choice_is_intercepted_when_llm_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            runtime._llm_available = False
+            orchestrator = _FakeOrchestrator()
+            wizard_store = TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json")
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "fixit prompt"}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": wizard_store,
+                }
+            )
+            first = _FakeUpdate(12345, "fix it")
+            asyncio.run(_handle_message(first, context))
+            first_reply = str(first.effective_message.replies[-1]["text"] or "")
+            self.assertIn("1)", first_reply)
+            self.assertIn("2)", first_reply)
+            self.assertIn("3)", first_reply)
+            self.assertEqual(
+                "awaiting_recovery_choice",
+                str(context.application.bot_data["model_provider_wizard_store"].state.get("step")),  # type: ignore[index]
+            )
+            second = _FakeUpdate(12345, "1")
+            asyncio.run(_handle_message(second, context))
+            second_reply = str(second.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Current provider/model:", second_reply)
+            self.assertFalse(bool(context.application.bot_data["model_provider_wizard_store"].state.get("active")))  # type: ignore[index]
             self.assertEqual([], orchestrator.calls)
 
     def test_model_command_returns_model_status(self) -> None:

@@ -319,10 +319,11 @@ class TestTelegramAuditLogging(unittest.TestCase):
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("/help", reply_text)
-            self.assertIn("/brief", reply_text)
-            self.assertIn("anything new on my PC?", reply_text)
-            self.assertEqual([("asdkjhasdkjh", chat_id)], orchestrator.calls)
+            self.assertIn("1)", reply_text)
+            self.assertIn("2)", reply_text)
+            self.assertIn("3)", reply_text)
+            self.assertIn("Reply 1, 2, or 3.", reply_text)
+            self.assertEqual([], orchestrator.calls)
 
             rows = _read_audit_rows(audit_path)
             handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]

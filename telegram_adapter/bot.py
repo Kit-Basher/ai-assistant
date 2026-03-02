@@ -42,6 +42,13 @@ from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog
 from agent.secret_store import SecretStore
 from agent.permissions import PermissionStore
+from agent.ux.clarify_suggest import (
+    build_clarify_message,
+    build_suggest_message,
+    classify_ambiguity,
+    parse_recovery_choice,
+    recovery_options,
+)
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
 from memory.db import MemoryDB
 
@@ -221,7 +228,7 @@ class TelegramModelProviderWizardStore:
         state["schema_version"] = _SETUP_WIZARD_SCHEMA_VERSION
         state["active"] = bool(raw.get("active", False))
         flow = str(raw.get("flow") or "").strip().lower()
-        state["flow"] = flow if flow in {"openrouter_setup", "ollama_setup"} else None
+        state["flow"] = flow if flow in {"openrouter_setup", "ollama_setup", "recovery"} else None
         step = str(raw.get("step") or "").strip().lower()
         valid_steps = {
             "idle",
@@ -232,6 +239,7 @@ class TelegramModelProviderWizardStore:
             "awaiting_ollama_size",
             "awaiting_ollama_pull",
             "awaiting_ollama_default",
+            "awaiting_recovery_choice",
         }
         state["step"] = step if step in valid_steps else "idle"
         state["question"] = str(raw.get("question") or "").strip() or None
@@ -353,6 +361,39 @@ def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str 
     if normalized in _TELEGRAM_STATUS_TOKENS:
         return _runtime_status_text(bot_data), "status"
     return None, None
+
+
+def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
+    runtime = bot_data.get("runtime")
+    if runtime is None or not hasattr(runtime, "llm_availability_state"):
+        return False, "llm_unavailable"
+    try:
+        state = runtime.llm_availability_state()  # type: ignore[attr-defined]
+    except Exception:
+        return False, "llm_unavailable"
+    if not isinstance(state, dict):
+        return False, "llm_unavailable"
+    return bool(state.get("available", False)), str(state.get("reason") or "llm_unavailable").strip().lower()
+
+
+def _set_recovery_wizard_state(
+    *,
+    wizard_store: TelegramModelProviderWizardStore | None,
+    chat_id: str,
+    reason: str,
+) -> None:
+    if wizard_store is None:
+        return
+    _save_setup_state(
+        wizard_store,
+        chat_id=chat_id,
+        flow="recovery",
+        step="awaiting_recovery_choice",
+        question="Reply 1, 2, or 3.",
+        issue_code="llm.recovery",
+        choices=recovery_options(),
+        pending={"reason": str(reason or "").strip().lower() or "llm_unavailable"},
+    )
 
 
 def _llm_status_payload(runtime: Any | None) -> dict[str, Any]:
@@ -612,6 +653,8 @@ def _setup_wizard_route_reply(
     *,
     runtime: Any | None,
     wizard_store: TelegramModelProviderWizardStore | None,
+    llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None,
+    orchestrator: Orchestrator | None,
     chat_id: str,
     text: str,
 ) -> str | None:
@@ -636,6 +679,29 @@ def _setup_wizard_route_reply(
     step = str(state.get("step") or "").strip().lower()
     pending = state.get("pending") if isinstance(state.get("pending"), dict) else {}
     issue_code = str(state.get("issue_code") or "provider.setup").strip()
+
+    if flow == "recovery" and step == "awaiting_recovery_choice":
+        options = state.get("choices") if isinstance(state.get("choices"), list) else recovery_options()
+        choice = parse_recovery_choice(text, options=options)
+        if not choice:
+            return "Reply 1, 2, or 3."
+        wizard_store.clear()
+        if choice == "status":
+            return _model_status_report(runtime=runtime)
+        if choice == "fixit":
+            if llm_fixit_fn is None:
+                return "LLM fix-it is unavailable right now."
+            ok, body = llm_fixit_fn({"actor": "telegram"})
+            message = str((body or {}).get("message") or (body or {}).get("next_question") or "").strip()
+            if message:
+                return message
+            return "LLM fix-it is ready." if ok else "LLM fix-it is unavailable right now."
+        if orchestrator is not None:
+            response = orchestrator.handle_message("/brief", user_id=chat_id)
+            reply = str((response.text if response else "") or "").strip()
+            if reply:
+                return reply
+        return "Brief summary is unavailable right now."
 
     if flow == "openrouter_setup":
         if step == "awaiting_openrouter_has_key":
@@ -1136,6 +1202,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
                 else None
             ),
+            llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
+            orchestrator=orchestrator if isinstance(orchestrator, Orchestrator) else None,
             chat_id=chat_id,
             text=text,
         )
@@ -1228,6 +1296,63 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "chat_id_redacted": _redact_chat_id(chat_id),
                     "route": smalltalk_route,
                     "trace_id": trace_id,
+                },
+            )
+            return
+
+        ambiguity = classify_ambiguity(text)
+        if ambiguity.ambiguous:
+            llm_available, availability_reason = _runtime_llm_availability(bot_data)
+            if llm_available:
+                clarify_text = build_clarify_message(text)
+                _safe_append_telegram_message_audit(
+                    audit_log=audit_log,
+                    action="telegram.message.handled",
+                    chat_id=chat_id,
+                    message_kind="text",
+                    route="chat",
+                    outcome="handled",
+                )
+                await update.effective_message.reply_text(_safe_reply_text(clarify_text))
+                log_event(
+                    log_path,
+                    "telegram_message",
+                    {
+                        "chat_id_redacted": _redact_chat_id(chat_id),
+                        "route": "chat",
+                        "trace_id": trace_id,
+                        "clarify_suggest_mode": "clarify",
+                    },
+                )
+                return
+            _set_recovery_wizard_state(
+                wizard_store=(
+                    model_provider_wizard_store
+                    if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
+                    else None
+                ),
+                chat_id=chat_id,
+                reason=availability_reason,
+            )
+            suggest_text = build_suggest_message(availability_reason=availability_reason)
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route="fallback",
+                outcome="handled",
+            )
+            await update.effective_message.reply_text(_safe_reply_text(suggest_text))
+            log_event(
+                log_path,
+                "telegram_message",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": "fallback",
+                    "trace_id": trace_id,
+                    "clarify_suggest_mode": "suggest",
+                    "availability_reason": availability_reason,
                 },
             )
             return

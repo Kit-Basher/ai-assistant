@@ -38,10 +38,14 @@ from agent.intent.low_confidence import detect_low_confidence
 from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
 from agent.model_watch import (
+    CatalogDelta,
     ModelWatchStore,
     latest_model_watch_batch,
+    map_buzz_leads_to_catalog,
     model_watch_last_run_at,
     normalize_model_watch_state,
+    buzz_scan as model_watch_buzz_scan,
+    scan_provider_catalogs,
     summarize_model_watch_batch,
 )
 from agent.model_watch_catalog import (
@@ -51,6 +55,12 @@ from agent.model_watch_catalog import (
     write_snapshot_atomic as write_model_watch_catalog_snapshot,
 )
 from agent.model_watch_skill import run_watch_once_for_config
+from agent.model_watch_hf import (
+    build_hf_local_download_proposal,
+    hf_snapshot_download,
+    hf_status as model_watch_hf_status,
+    scan_hf_watch,
+)
 from agent.response_envelope import failure, ok_result, validate_envelope
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
@@ -107,8 +117,10 @@ from agent.modelops.recommend import (
     recommendation_to_dict,
     save_seen_model_ids,
 )
+from agent.model_recommendation import RecommendationContext, rank_candidates
 from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
+    WizardChoice,
     WizardDecision,
     build_plan_for_choice as wizard_build_plan_for_choice,
     confirm_token_for_plan as wizard_confirm_token_for_plan,
@@ -121,6 +133,13 @@ from agent.ux.llm_fixit_wizard import (
     provider_or_model_ok_down_transition,
     render_wizard_prompt,
     summarize_notification_message,
+)
+from agent.ux.clarify_suggest import (
+    build_clarify_message,
+    build_suggest_message,
+    classify_ambiguity,
+    parse_recovery_choice,
+    recovery_options,
 )
 from agent.memory_v2.inject import with_built_context
 from agent.memory_v2.ingest import ingest_bootstrap_snapshot
@@ -510,6 +529,28 @@ class AgentRuntime:
         )
         self._model_watch_store = ModelWatchStore(path=model_watch_state_path)
         self._model_watch_catalog_path = model_watch_catalog_path_for_config(self.config)
+        model_watch_hf_state_path = self._runtime_state_path(
+            config,
+            self.config.model_watch_hf_state_path,
+            "model_watch_hf_state.json",
+        )
+        if model_watch_hf_state_path:
+            self._model_watch_hf_state_path = Path(model_watch_hf_state_path).expanduser().resolve()
+        else:
+            self._model_watch_hf_state_path = (
+                Path.home() / ".local" / "share" / "personal-agent" / "model_watch_hf_state.json"
+            ).resolve()
+        provider_catalog_state_path = self._runtime_state_path(
+            config,
+            self.config.provider_catalog_state_path,
+            "provider_catalog_state.json",
+        )
+        if provider_catalog_state_path:
+            self._provider_catalog_state_path = Path(provider_catalog_state_path).expanduser().resolve()
+        else:
+            self._provider_catalog_state_path = (
+                Path.home() / ".local" / "share" / "personal-agent" / "provider_catalog_state.json"
+            ).resolve()
         installer_script = self._repo_root / "agent" / "modelops" / "install_ollama.sh"
         self.modelops_planner = ModelOpsPlanner(installer_script_path=str(installer_script))
         self.modelops_executor = ModelOpsExecutor(
@@ -587,6 +628,14 @@ class AgentRuntime:
             "llm_fixit_wizard_state.json",
         )
         self._llm_fixit_store = LLMFixitWizardStore(path=llm_fixit_state_path)
+        self._model_watch_hf_last_status: dict[str, Any] = {
+            "enabled": bool(self.config.model_watch_hf_enabled),
+            "last_run_ts": None,
+            "last_error": None,
+            "discovered_count": 0,
+            "tracked_repos": 0,
+            "state_path": str(self._model_watch_hf_state_path),
+        }
         self._safe_mode_last_blocked_reason: str | None = None
         self._safe_mode_last_escalation_reason: str | None = (
             str(self._autopilot_safety_state.status().get("last_churn_reason") or "").strip() or None
@@ -609,6 +658,14 @@ class AgentRuntime:
         }
 
         self._request_log: deque[dict[str, Any]] = deque(maxlen=100)
+        self._clarify_recovery_state: dict[str, Any] = {
+            "active": False,
+            "source": None,
+            "reason": None,
+            "choices": [],
+            "created_ts": None,
+            "expires_ts": None,
+        }
         self._memory_v2_bootstrap_status: dict[str, Any] = {"ran": False, "ok": False}
         if self._defer_bootstrap_warmup:
             warmup_tasks = self._build_startup_warmup_tasks()
@@ -643,6 +700,10 @@ class AgentRuntime:
                 scheduler_enabled=bool(self._scheduler_thread is not None),
                 model_catalog_refresh="deferred",
             )
+        try:
+            self._set_model_watch_hf_status_cache(model_watch_hf_status(self))
+        except Exception:
+            pass
         _mark("runtime.init.complete")
 
     def _default_listening_url(self) -> str:
@@ -2120,6 +2181,7 @@ class AgentRuntime:
     def ready_status(self) -> dict[str, Any]:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
+        hf_status = self._model_watch_hf_status_snapshot()
         phase = str(self.startup_phase or "starting").strip().lower() or "starting"
         warmup_remaining = self._warmup_remaining_snapshot()
         if phase == "starting" and not self._startup_warmup_started and not warmup_remaining:
@@ -2166,7 +2228,25 @@ class AgentRuntime:
                 "last_ts_iso": str(telegram.get("last_ts_iso") or "") or None,
                 "recent_messages": recent_messages,
             },
+            "model_watch": {
+                "hf": hf_status,
+            },
             "message": message,
+        }
+
+    def _model_watch_hf_status_snapshot(self) -> dict[str, Any]:
+        status = self._model_watch_hf_last_status if isinstance(self._model_watch_hf_last_status, dict) else {}
+        last_run_ts_raw = status.get("last_run_ts")
+        try:
+            last_run_ts = int(last_run_ts_raw) if last_run_ts_raw is not None else None
+        except (TypeError, ValueError):
+            last_run_ts = None
+        return {
+            "enabled": bool(status.get("enabled", False)),
+            "last_run_ts": last_run_ts,
+            "last_error": str(status.get("last_error") or "").strip() or None,
+            "discovered_count": int(status.get("discovered_count") or 0),
+            "tracked_repos": int(status.get("tracked_repos") or 0),
         }
 
     @staticmethod
@@ -6250,6 +6330,151 @@ class AgentRuntime:
         status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
         return status
 
+    def llm_availability_state(self) -> dict[str, Any]:
+        try:
+            status = self.llm_status()
+        except Exception:
+            return {"available": False, "reason": "llm_unavailable"}
+        if not isinstance(status, dict):
+            return {"available": False, "reason": "llm_unavailable"}
+        safe_mode = status.get("safe_mode") if isinstance(status.get("safe_mode"), dict) else {}
+        if bool(safe_mode.get("paused", False)):
+            return {"available": False, "reason": "safe_mode_paused"}
+        resolved_model = str(status.get("resolved_default_model") or "").strip()
+        if not resolved_model:
+            return {"available": False, "reason": "llm_unavailable"}
+        provider_health = (
+            status.get("active_provider_health")
+            if isinstance(status.get("active_provider_health"), dict)
+            else {}
+        )
+        model_health = (
+            status.get("active_model_health")
+            if isinstance(status.get("active_model_health"), dict)
+            else {}
+        )
+        provider_state = str(provider_health.get("status") or "").strip().lower()
+        model_state = str(model_health.get("status") or "").strip().lower()
+        if provider_state != "ok":
+            return {"available": False, "reason": "provider_unhealthy"}
+        if model_state != "ok":
+            return {"available": False, "reason": "model_unhealthy"}
+        return {"available": True, "reason": "ok"}
+
+    def llm_available(self) -> bool:
+        state = self.llm_availability_state()
+        return bool(state.get("available", False))
+
+    def set_clarify_recovery_prompt(self, *, source: str, reason: str, ttl_seconds: int = 300) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        ttl = max(30, int(ttl_seconds))
+        state = {
+            "active": True,
+            "source": str(source or "").strip().lower() or "api",
+            "reason": str(reason or "").strip().lower() or "llm_unavailable",
+            "choices": recovery_options(),
+            "created_ts": now_epoch,
+            "expires_ts": now_epoch + ttl,
+        }
+        self._clarify_recovery_state = state
+        return dict(state)
+
+    def clear_clarify_recovery_prompt(self) -> None:
+        self._clarify_recovery_state = {
+            "active": False,
+            "source": None,
+            "reason": None,
+            "choices": [],
+            "created_ts": None,
+            "expires_ts": None,
+        }
+
+    def _llm_status_summary_line(self) -> str:
+        status = self.llm_status()
+        provider = str(status.get("default_provider") or "unknown").strip() or "unknown"
+        model = (
+            str(status.get("resolved_default_model") or "").strip()
+            or str(status.get("default_model") or "").strip()
+            or "unknown"
+        )
+        return f"Current provider/model: {provider} / {model}"
+
+    def _ready_summary_line(self) -> str:
+        ready = self.ready_payload()
+        ready_bool = bool(ready.get("ready", False))
+        phase = str(ready.get("phase") or "unknown").strip()
+        telegram = ready.get("telegram") if isinstance(ready.get("telegram"), dict) else {}
+        telegram_state = str(telegram.get("state") or "unknown").strip()
+        return f"Ready: {'yes' if ready_bool else 'no'} (phase {phase}, telegram {telegram_state})"
+
+    def consume_clarify_recovery_choice(self, *, source: str, text: str) -> tuple[bool, dict[str, Any]]:
+        state = self._clarify_recovery_state if isinstance(self._clarify_recovery_state, dict) else {}
+        if not bool(state.get("active", False)):
+            return False, {}
+        state_source = str(state.get("source") or "").strip().lower()
+        if state_source and state_source != str(source or "").strip().lower():
+            return False, {}
+        now_epoch = int(time.time())
+        expires_ts = int(state.get("expires_ts") or 0)
+        if expires_ts and now_epoch > expires_ts:
+            self.clear_clarify_recovery_prompt()
+            return True, {
+                "ok": True,
+                "intent": "chat",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": "No active choice right now. Ask again and I will show options.",
+                "next_question": "No active choice right now. Ask again and I will show options.",
+                "actions": [],
+                "errors": ["needs_clarification"],
+            }
+        choice = parse_recovery_choice(text, options=state.get("choices") if isinstance(state.get("choices"), list) else None)
+        if not choice:
+            return False, {}
+        self.clear_clarify_recovery_prompt()
+        if choice == "status":
+            message = self._llm_status_summary_line()
+            return True, {
+                "ok": True,
+                "intent": "chat",
+                "confidence": 1.0,
+                "did_work": True,
+                "error_kind": None,
+                "message": message,
+                "next_question": None,
+                "actions": [],
+                "errors": [],
+            }
+        if choice == "fixit":
+            ok, body = self.llm_fixit({"actor": "api"})
+            message = str((body or {}).get("message") or (body or {}).get("next_question") or "").strip()
+            if not message:
+                message = "LLM fix-it is ready."
+            return True, {
+                "ok": bool(ok),
+                "intent": "chat",
+                "confidence": 1.0 if ok else 0.0,
+                "did_work": bool(ok),
+                "error_kind": str((body or {}).get("error_kind") or "") or None,
+                "message": message,
+                "next_question": str((body or {}).get("next_question") or "").strip() or None,
+                "actions": [],
+                "errors": [str((body or {}).get("error") or "fixit")] if not ok else [],
+            }
+        message = self._ready_summary_line()
+        return True, {
+            "ok": True,
+            "intent": "chat",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": message,
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+        }
+
     def _openrouter_secret_present(self) -> bool:
         providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
         openrouter = providers.get("openrouter") if isinstance(providers.get("openrouter"), dict) else None
@@ -6408,6 +6633,223 @@ class AgentRuntime:
                     )
                     continue
                 executed.append({"id": str(row.get("id") or ""), "action": action})
+                continue
+
+            if action == "hf.snapshot_download":
+                repo_id = str(params.get("repo_id") or "").strip()
+                revision = str(params.get("revision") or "").strip() or "main"
+                target_dir = str(params.get("target_dir") or "").strip()
+                allow_patterns = (
+                    [str(item).strip() for item in params.get("allow_patterns", []) if str(item).strip()]
+                    if isinstance(params.get("allow_patterns"), list)
+                    else []
+                )
+                if not repo_id or not target_dir:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": "repo_id_and_target_dir_required",
+                        }
+                    )
+                    continue
+                try:
+                    downloaded_path = hf_snapshot_download(
+                        repo_id=repo_id,
+                        revision=revision,
+                        target_dir=target_dir,
+                        allow_patterns=allow_patterns,
+                    )
+                except Exception as exc:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": f"snapshot_download_failed:{exc.__class__.__name__}",
+                        }
+                    )
+                    continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "repo_id": repo_id,
+                        "revision": revision,
+                        "download_path": str(downloaded_path),
+                    }
+                )
+                continue
+
+            if action == "hf.generate_modelfile":
+                selected_gguf = str(params.get("selected_gguf") or "").strip()
+                target_dir = str(params.get("target_dir") or "").strip()
+                modelfile_path = str(params.get("modelfile_path") or "").strip()
+                if not selected_gguf or not target_dir or not modelfile_path:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": "selected_gguf_target_dir_modelfile_path_required",
+                        }
+                    )
+                    continue
+                gguf_path = (Path(target_dir).expanduser().resolve() / selected_gguf).resolve()
+                if not gguf_path.is_file():
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": "selected_gguf_missing",
+                            "gguf_path": str(gguf_path),
+                        }
+                    )
+                    continue
+                modelfile_target = Path(modelfile_path).expanduser().resolve()
+                modelfile_target.parent.mkdir(parents=True, exist_ok=True)
+                modelfile_content = f"FROM {str(gguf_path)}\n"
+                fd = -1
+                tmp_path = ""
+                try:
+                    fd, tmp_path = tempfile.mkstemp(
+                        prefix=f".{modelfile_target.name}.",
+                        suffix=".tmp",
+                        dir=str(modelfile_target.parent),
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        handle.write(modelfile_content)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    fd = -1
+                    os.replace(tmp_path, modelfile_target)
+                    tmp_path = ""
+                except Exception as exc:
+                    if fd >= 0:
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                    if tmp_path:
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": f"modelfile_write_failed:{exc.__class__.__name__}",
+                        }
+                    )
+                    continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "modelfile_path": str(modelfile_target),
+                    }
+                )
+                continue
+
+            if action == "hf.ollama_create":
+                modelfile_path = str(params.get("modelfile_path") or "").strip()
+                ollama_model_name = str(params.get("ollama_model_name") or "").strip()
+                if not modelfile_path or not ollama_model_name:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": "modelfile_path_and_ollama_model_name_required",
+                        }
+                    )
+                    continue
+                try:
+                    completed = subprocess.run(
+                        ["ollama", "create", ollama_model_name, "-f", modelfile_path],
+                        check=False,
+                        capture_output=True,
+                        text=True,
+                        timeout=900,
+                    )
+                except Exception as exc:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": f"ollama_create_failed:{exc.__class__.__name__}",
+                            "model": ollama_model_name,
+                        }
+                    )
+                    continue
+                if int(completed.returncode) != 0:
+                    stderr_text = str((completed.stderr or "").strip() or "ollama_create_failed")
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": "ollama_create_failed",
+                            "model": ollama_model_name,
+                            "detail": stderr_text[:240],
+                        }
+                    )
+                    continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "model": ollama_model_name,
+                    }
+                )
+                continue
+
+            if action == "hf.refresh_ollama_registry":
+                ok, body = self.refresh_models({"provider": "ollama"})
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "refresh_models_failed"),
+                        }
+                    )
+                    continue
+                executed.append({"id": str(row.get("id") or ""), "action": action})
+                continue
+
+            if action == "hf.mark_download_only":
+                repo_id = str(params.get("repo_id") or "").strip()
+                revision = str(params.get("revision") or "").strip()
+                target_dir = str(params.get("target_dir") or "").strip()
+                if target_dir:
+                    try:
+                        marker_path = (Path(target_dir).expanduser().resolve() / ".personal-agent-download-only.json").resolve()
+                        marker_path.parent.mkdir(parents=True, exist_ok=True)
+                        marker_payload = {
+                            "repo_id": repo_id,
+                            "revision": revision,
+                            "status": "download_only",
+                        }
+                        marker_bytes = (
+                            json.dumps(marker_payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+                        ).encode("utf-8")
+                        marker_path.write_bytes(marker_bytes)
+                    except Exception as exc:
+                        failed.append(
+                            {
+                                "id": str(row.get("id") or ""),
+                                "action": action,
+                                "error": f"download_marker_failed:{exc.__class__.__name__}",
+                            }
+                        )
+                        continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "repo_id": repo_id,
+                        "revision": revision,
+                        "target_dir": target_dir or None,
+                    }
+                )
                 continue
 
             blocked.append(
@@ -6727,8 +7169,37 @@ class AgentRuntime:
 
         answer = str(payload.get("answer") or "").strip()
         if answer:
-            choices = decision.choices
-            choices_json = wizard_decision_to_json(decision).get("choices", [])
+            state_choices_json = (
+                wizard_state.get("choices")
+                if isinstance(wizard_state.get("choices"), list)
+                else []
+            )
+            use_state_choices = bool(wizard_state.get("active")) and str(wizard_state.get("step") or "").strip().lower() == "awaiting_choice" and bool(state_choices_json)
+            if use_state_choices:
+                choices_json = [
+                    {
+                        "id": str(row.get("id") or "").strip(),
+                        "label": str(row.get("label") or "").strip(),
+                        "recommended": bool(row.get("recommended", False)),
+                    }
+                    for row in state_choices_json
+                    if isinstance(row, dict)
+                    and str(row.get("id") or "").strip()
+                    and str(row.get("label") or "").strip()
+                ]
+                choices = [
+                    WizardChoice(
+                        id=str(row.get("id") or "").strip(),
+                        label=str(row.get("label") or "").strip(),
+                        recommended=bool(row.get("recommended", False)),
+                    )
+                    for row in choices_json
+                ]
+                issue_code_for_choice = str(wizard_state.get("issue_code") or decision.issue_code)
+            else:
+                choices = decision.choices
+                choices_json = wizard_decision_to_json(decision).get("choices", [])
+                issue_code_for_choice = decision.issue_code
             selected = wizard_parse_choice_answer(answer, choices)
             if not selected:
                 return True, {
@@ -6741,16 +7212,134 @@ class AgentRuntime:
                     "next_question": "Please reply with 1, 2, or 3.",
                     "actions": [],
                     "errors": ["needs_clarification"],
-                    "issue_code": decision.issue_code,
+                    "issue_code": issue_code_for_choice,
                     "choices": choices_json,
                     "trace_id": f"fixit-{now_epoch}",
                 }
+            if issue_code_for_choice == "model_watch.proposal":
+                state_proposal_type = str(wizard_state.get("proposal_type") or "").strip().lower()
+                if selected == "snooze_model_watch":
+                    _save_idle_state(last_test=openrouter_last_test)
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 1.0,
+                        "did_work": False,
+                        "error_kind": None,
+                        "message": "Okay, I will keep the current model for now.",
+                        "next_question": None,
+                        "actions": [],
+                        "errors": [],
+                        "status": "snoozed",
+                        "issue_code": issue_code_for_choice,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+                if selected == "details":
+                    details_message = (
+                        str(wizard_state.get("proposal_details") or "").strip()
+                        or "No additional model-watch details are available."
+                    )
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 0.0,
+                        "did_work": False,
+                        "error_kind": "needs_clarification",
+                        "message": details_message,
+                        "next_question": (
+                            "Reply 1 to download/install, or 2 to snooze."
+                            if state_proposal_type == "local_download"
+                            else "Reply 1 to switch, or 2 to snooze."
+                        ),
+                        "actions": [],
+                        "errors": ["needs_clarification"],
+                        "status": "needs_user_choice",
+                        "issue_code": issue_code_for_choice,
+                        "choices": choices_json,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+                if selected in {"switch_to_proposal", "download_install_local"}:
+                    pending_plan_rows = (
+                        wizard_state.get("pending_plan")
+                        if isinstance(wizard_state.get("pending_plan"), list)
+                        else []
+                    )
+                    inferred_local_download = state_proposal_type == "local_download" or any(
+                        str((row if isinstance(row, dict) else {}).get("action") or "").strip().startswith("hf.")
+                        for row in pending_plan_rows
+                    )
+                    if not pending_plan_rows:
+                        return True, {
+                            "ok": True,
+                            "intent": "llm_fixit",
+                            "confidence": 0.0,
+                            "did_work": False,
+                            "error_kind": "needs_clarification",
+                            "message": "No proposal plan is pending. Run fix-it again.",
+                            "next_question": "Do you want me to check model recommendations again?",
+                            "actions": [],
+                            "errors": ["needs_clarification"],
+                            "status": "needs_clarification",
+                            "issue_code": issue_code_for_choice,
+                            "trace_id": f"fixit-{now_epoch}",
+                        }
+                    confirm_token = wizard_confirm_token_for_plan_rows(
+                        [row for row in pending_plan_rows if isinstance(row, dict)]
+                    )
+                    self._llm_fixit_store.save(
+                        {
+                            "active": True,
+                            "issue_hash": str(wizard_state.get("issue_hash") or issue_hash),
+                            "issue_code": issue_code_for_choice,
+                            "step": "awaiting_confirm",
+                            "question": (
+                                "Apply this download/install plan now?"
+                                if inferred_local_download
+                                else "Apply this fix-it plan now?"
+                            ),
+                            "choices": choices_json,
+                            "pending_plan": pending_plan_rows,
+                            "pending_confirm_token": confirm_token,
+                            "pending_created_ts": now_epoch,
+                            "pending_expires_ts": now_epoch + 300,
+                            "pending_issue_code": issue_code_for_choice,
+                            "last_prompt_ts": now_epoch,
+                            "openrouter_last_test": openrouter_last_test,
+                            "proposal_type": state_proposal_type or ("local_download" if inferred_local_download else "switch_default"),
+                            "proposal_details": str(wizard_state.get("proposal_details") or "").strip() or None,
+                        }
+                    )
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 0.0,
+                        "did_work": False,
+                        "error_kind": "needs_clarification",
+                        "message": (
+                            "I prepared a safe download/install plan. Reply YES to apply, or NO to cancel."
+                            if inferred_local_download
+                            else "I prepared a safe fix plan. Reply YES to apply, or NO to cancel."
+                        ),
+                        "next_question": (
+                            "Apply this download/install plan now? Reply YES or NO."
+                            if inferred_local_download
+                            else "Apply this fix-it plan now? Reply YES or NO."
+                        ),
+                        "actions": [],
+                        "errors": ["needs_clarification"],
+                        "status": "needs_confirmation",
+                        "issue_code": issue_code_for_choice,
+                        "confirm_code": 1,
+                        "cancel_code": 2,
+                        "plan": [row for row in pending_plan_rows if isinstance(row, dict)],
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
             if selected in {"add_openrouter_key", "update_openrouter_key"}:
                 self._llm_fixit_store.save(
                     {
                         "active": True,
                         "issue_hash": issue_hash,
-                        "issue_code": decision.issue_code,
+                        "issue_code": issue_code_for_choice,
                         "step": "awaiting_openrouter_key",
                         "question": "Paste your OpenRouter API key now.",
                         "choices": choices_json,
@@ -6774,10 +7363,14 @@ class AgentRuntime:
                     "actions": [],
                     "errors": ["needs_clarification"],
                     "status": "needs_clarification",
-                    "issue_code": decision.issue_code,
+                    "issue_code": issue_code_for_choice,
                     "trace_id": f"fixit-{now_epoch}",
                 }
-            plan = wizard_build_plan_for_choice(issue_code=decision.issue_code, choice_id=selected, status_payload=status_payload)
+            plan = wizard_build_plan_for_choice(
+                issue_code=issue_code_for_choice,
+                choice_id=selected,
+                status_payload=status_payload,
+            )
             if not plan:
                 details_message = "No changes staged. I can show details or wait."
                 return True, {
@@ -6790,7 +7383,7 @@ class AgentRuntime:
                     "next_question": None,
                     "actions": [],
                     "errors": [],
-                    "issue_code": decision.issue_code,
+                    "issue_code": issue_code_for_choice,
                     "details": decision.details,
                     "trace_id": f"fixit-{now_epoch}",
                 }
@@ -6809,7 +7402,7 @@ class AgentRuntime:
             state_to_save = {
                 "active": True,
                 "issue_hash": issue_hash,
-                "issue_code": decision.issue_code,
+                "issue_code": issue_code_for_choice,
                 "step": "awaiting_confirm",
                 "question": "Apply this fix-it plan now?",
                 "choices": choices_json,
@@ -6817,9 +7410,11 @@ class AgentRuntime:
                 "pending_confirm_token": confirm_token,
                 "pending_created_ts": now_epoch,
                 "pending_expires_ts": now_epoch + 300,
-                "pending_issue_code": decision.issue_code,
+                "pending_issue_code": issue_code_for_choice,
                 "last_prompt_ts": now_epoch,
                 "openrouter_last_test": openrouter_last_test,
+                "proposal_type": str(wizard_state.get("proposal_type") or "").strip().lower() or None,
+                "proposal_details": str(wizard_state.get("proposal_details") or "").strip() or None,
             }
             self._llm_fixit_store.save(state_to_save)
             return True, {
@@ -6833,7 +7428,7 @@ class AgentRuntime:
                 "actions": [],
                 "errors": ["needs_clarification"],
                 "status": "needs_confirmation",
-                "issue_code": decision.issue_code,
+                "issue_code": issue_code_for_choice,
                 "confirm_code": 1,
                 "cancel_code": 2,
                 "plan": plan_json,
@@ -8585,9 +9180,431 @@ class AgentRuntime:
             return False, {"ok": False, "error": "suggestion not found"}
         return True, {"ok": True, "id": target, "status": "installed"}
 
+    @staticmethod
+    def _model_watch_enabled_provider_set(registry_document: dict[str, Any]) -> frozenset[str]:
+        providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
+        return frozenset(
+            str(provider_id).strip().lower()
+            for provider_id, row in sorted(providers.items())
+            if isinstance(row, dict) and bool(row.get("enabled", False))
+        )
+
+    @staticmethod
+    def _model_watch_scoring_candidate(
+        *,
+        model_id: str,
+        row: dict[str, Any],
+        provider_row: dict[str, Any],
+    ) -> dict[str, Any]:
+        pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+        capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), list) else []
+        provider_id = str(row.get("provider") or "").strip().lower()
+        model_name = str(row.get("model") or "").strip()
+        available = bool(row.get("enabled", False)) and bool(row.get("available", False))
+        if "routable" in row:
+            available = available and bool(row.get("routable", False))
+        context_tokens = None
+        try:
+            context_tokens = int(row.get("max_context_tokens")) if row.get("max_context_tokens") is not None else None
+        except (TypeError, ValueError):
+            context_tokens = None
+        return {
+            "provider_id": provider_id,
+            "model_id": model_name or str(model_id).split(":", 1)[-1],
+            "context_tokens": context_tokens,
+            "capabilities": [
+                str(item).strip().lower()
+                for item in capabilities
+                if str(item).strip()
+            ]
+            or ["chat"],
+            "local": bool(provider_row.get("local", False)),
+            "availability": bool(available),
+            "price_in": pricing.get("input_per_million_tokens"),
+            "price_out": pricing.get("output_per_million_tokens"),
+        }
+
+    def _build_model_watch_proposal(
+        self,
+        *,
+        delta_rows: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        registry_document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults = registry_document.get("defaults") if isinstance(registry_document.get("defaults"), dict) else {}
+        models = registry_document.get("models") if isinstance(registry_document.get("models"), dict) else {}
+        providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
+        current_model = str(defaults.get("default_model") or "").strip()
+        if not current_model:
+            return None
+        if current_model not in models:
+            return None
+
+        delta_model_ids = sorted(
+            {
+                str(row.get("model_id") or "").strip()
+                for row in delta_rows
+                if isinstance(row, dict) and str(row.get("model_id") or "").strip()
+            }
+        )
+        if not delta_model_ids:
+            return None
+
+        candidate_ids = sorted({current_model, *delta_model_ids})
+        candidate_rows: list[dict[str, Any]] = []
+        for model_id in candidate_ids:
+            row = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
+            if not isinstance(row, dict):
+                continue
+            provider_id = str(row.get("provider") or "").strip().lower()
+            provider_row = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
+            if not provider_id or not isinstance(provider_row, dict):
+                continue
+            candidate_rows.append(
+                self._model_watch_scoring_candidate(
+                    model_id=model_id,
+                    row=row,
+                    provider_row=provider_row,
+                )
+            )
+        if not candidate_rows:
+            return None
+
+        ranking = rank_candidates(
+            candidate_rows,
+            RecommendationContext(
+                purpose="chat",
+                default_model=current_model,
+                allow_remote_fallback=bool(defaults.get("allow_remote_fallback", True)),
+                enabled_providers=self._model_watch_enabled_provider_set(registry_document),
+                vram_gb=None,
+            ),
+        )
+        ranked_by_id = {str(row.canonical_model_id): row for row in ranking.ranked}
+        current_row = ranked_by_id.get(current_model)
+        if current_row is None:
+            return None
+
+        delta_ranked = [
+            row
+            for row in ranking.ranked
+            if str(row.canonical_model_id) in set(delta_model_ids)
+            and str(row.canonical_model_id) != current_model
+        ]
+        if not delta_ranked:
+            return None
+        top_new = delta_ranked[0]
+        improvement_ratio = (float(top_new.total_score) - float(current_row.total_score)) / 100.0
+        min_improvement = max(0.0, float(self.config.model_watch_min_improvement))
+        if improvement_ratio < min_improvement:
+            return None
+
+        from_model = current_model
+        to_model = str(top_new.canonical_model_id)
+        to_provider = str(top_new.provider_id)
+        score_delta = round(improvement_ratio, 4)
+        tradeoffs = [str(item).strip() for item in top_new.tradeoffs if str(item).strip()]
+        reason_lines = [str(item).strip() for item in top_new.reasons if str(item).strip()] or [
+            "Deterministic rubric ranked this candidate above the current default."
+        ]
+        details_lines = [
+            f"Current default: {from_model} (score {float(current_row.total_score):.2f})",
+            f"Proposed default: {to_model} (score {float(top_new.total_score):.2f})",
+            f"Score improvement: +{score_delta:.2f} (threshold {min_improvement:.2f})",
+            f"Reason: {reason_lines[0]}",
+        ]
+        if tradeoffs:
+            details_lines.append(f"Tradeoff: {tradeoffs[0]}")
+
+        plan_rows = [
+            {
+                "id": "01_defaults.set",
+                "kind": "safe_action",
+                "action": "defaults.set",
+                "reason": f"Switch default model to {to_model}.",
+                "params": {
+                    "default_provider": to_provider,
+                    "default_model": to_model,
+                    "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
+                },
+                "safe_to_execute": True,
+            }
+        ]
+        prompt = "\n".join(
+            [
+                "Model Watch found a better default candidate.",
+                f"Current default: {from_model}",
+                f"Recommended: {to_model} (+{score_delta:.2f})",
+                "Reply 1 to switch, 2 to snooze, or 3 for details.",
+            ]
+        )
+        return {
+            "issue_code": "model_watch.proposal",
+            "from_model": from_model,
+            "to_model": to_model,
+            "provider": to_provider,
+            "score_delta": score_delta,
+            "message": prompt,
+            "details": "\n".join(details_lines),
+            "plan_rows": plan_rows,
+            "choices": [
+                {"id": "switch_to_proposal", "label": f"Switch to {to_model}", "recommended": True},
+                {"id": "snooze_model_watch", "label": "Snooze", "recommended": False},
+                {"id": "details", "label": "Show details", "recommended": False},
+            ],
+        }
+
+    def _persist_model_watch_proposal_state(self, *, proposal: dict[str, Any]) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        proposal_type = str(proposal.get("proposal_type") or "switch_default").strip().lower()
+        prompt_question = (
+            "Do you want to download/install this model locally?"
+            if proposal_type == "local_download"
+            else "Do you want to switch to the proposed model?"
+        )
+        issue_hash_payload = {
+            "issue_code": str(proposal.get("issue_code") or ""),
+            "proposal_type": proposal_type,
+            "from_model": str(proposal.get("from_model") or ""),
+            "to_model": str(proposal.get("to_model") or ""),
+            "repo_id": str(proposal.get("repo_id") or ""),
+            "revision": str(proposal.get("revision") or ""),
+            "score_delta": float(proposal.get("score_delta") or 0.0),
+        }
+        issue_hash = hashlib.sha256(
+            json.dumps(issue_hash_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        state = {
+            "active": True,
+            "issue_hash": issue_hash,
+            "issue_code": str(proposal.get("issue_code") or "model_watch.proposal"),
+            "step": "awaiting_choice",
+            "question": prompt_question,
+            "choices": proposal.get("choices") if isinstance(proposal.get("choices"), list) else [],
+            "pending_plan": proposal.get("plan_rows") if isinstance(proposal.get("plan_rows"), list) else [],
+            "pending_confirm_token": None,
+            "pending_created_ts": None,
+            "pending_expires_ts": None,
+            "pending_issue_code": None,
+            "last_prompt_ts": now_epoch,
+            "proposal_type": proposal_type,
+            "proposal_details": str(proposal.get("details") or "").strip() or None,
+            "openrouter_last_test": (
+                self._llm_fixit_store.state.get("openrouter_last_test")
+                if isinstance(self._llm_fixit_store.state, dict)
+                else None
+            ),
+        }
+        return self._llm_fixit_store.save(state)
+
+    def _notify_model_watch_proposal(
+        self,
+        *,
+        actor: str,
+        trigger: str,
+        proposal: dict[str, Any],
+    ) -> dict[str, Any]:
+        proposal_type = str(proposal.get("proposal_type") or "switch_default").strip().lower()
+        audit_action = (
+            "llm.model_watch.hf_proposal_created"
+            if proposal_type == "local_download"
+            else "llm.model_watch.proposal_created"
+        )
+        telegram = self.telegram_status()
+        state = str(telegram.get("state") or "").strip().lower()
+        if state != "running":
+            return {"emitted": False, "reason": "telegram_not_running"}
+        token, chat_id = self._resolve_telegram_target()
+        if not token or not chat_id:
+            return {"emitted": False, "reason": "telegram_not_configured_or_no_chat"}
+        start = time.monotonic()
+        try:
+            self._send_telegram_message(token, chat_id, str(proposal.get("message") or "").strip())
+        except Exception as exc:
+            return {"emitted": False, "reason": f"telegram_send_failed:{exc.__class__.__name__}"}
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self._audit_telegram_fixit_prompt_shown(
+            chat_id=chat_id,
+            status="needs_user_choice",
+            issue_code=str(proposal.get("issue_code") or "model_watch.proposal"),
+            step="awaiting_choice",
+        )
+        try:
+            self.audit_log.append(
+                actor=actor,
+                action=audit_action,
+                params={
+                    "trigger": trigger,
+                    "proposal_type": proposal_type,
+                    "from_model": str(proposal.get("from_model") or ""),
+                    "to_model": str(proposal.get("to_model") or ""),
+                    "provider": str(proposal.get("provider") or ""),
+                    "score_delta": float(proposal.get("score_delta") or 0.0),
+                    "repo_id": str(proposal.get("repo_id") or ""),
+                    "revision": str(proposal.get("revision") or ""),
+                    "installability": str(proposal.get("installability") or ""),
+                    "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
+                },
+                decision="allow",
+                reason="proposal_created",
+                dry_run=False,
+                outcome="sent",
+                error_kind=None,
+                duration_ms=duration_ms,
+            )
+        except Exception:
+            pass
+        return {"emitted": True, "reason": "sent"}
+
+    def _set_model_watch_hf_status_cache(self, payload: dict[str, Any]) -> None:
+        status_payload = payload if isinstance(payload, dict) else {}
+        self._model_watch_hf_last_status = {
+            "enabled": bool(status_payload.get("enabled", False)),
+            "last_run_ts": status_payload.get("last_run_ts"),
+            "last_error": str(status_payload.get("last_error") or "").strip() or None,
+            "discovered_count": int(status_payload.get("discovered_count") or 0),
+            "tracked_repos": int(status_payload.get("tracked_repos") or 0),
+            "state_path": str(status_payload.get("state_path") or str(self._model_watch_hf_state_path)),
+        }
+
+    def model_watch_hf_status(self) -> dict[str, Any]:
+        payload = model_watch_hf_status(self)
+        self._set_model_watch_hf_status_cache(payload)
+        return payload
+
+    def model_watch_hf_scan(
+        self,
+        *,
+        trigger: str = "manual",
+        notify_proposal: bool = True,
+        persist_proposal: bool = True,
+    ) -> tuple[bool, dict[str, Any]]:
+        actor = "system" if trigger == "scheduler" else "user"
+        scan_payload = scan_hf_watch(self)
+        self._set_model_watch_hf_status_cache(model_watch_hf_status(self))
+        scan_ok = bool(scan_payload.get("ok", False))
+        discovered_count = int(scan_payload.get("discovered_count") or 0)
+        scanned_repos = int(scan_payload.get("scanned_repos") or 0)
+        try:
+            self.audit_log.append(
+                actor=actor,
+                action="llm.model_watch.hf_scan",
+                params={
+                    "trigger": trigger,
+                    "enabled": bool(scan_payload.get("enabled", False)),
+                    "scanned_repos": scanned_repos,
+                    "discovered_count": discovered_count,
+                },
+                decision="allow",
+                reason=(
+                    "scan_completed"
+                    if scan_ok
+                    else f"scan_failed:{str(scan_payload.get('detail') or scan_payload.get('error') or 'unknown')}"
+                ),
+                dry_run=False,
+                outcome="success" if scan_ok else "failed",
+                error_kind=None if scan_ok else str(scan_payload.get("error") or "hf_scan_failed"),
+                duration_ms=0,
+            )
+        except Exception:
+            pass
+
+        if not scan_ok:
+            body = {
+                "ok": False,
+                "error": str(scan_payload.get("error") or "hf_scan_failed"),
+                "detail": str(scan_payload.get("detail") or "").strip() or None,
+                "trigger": trigger,
+                "scan": scan_payload,
+            }
+            self._log_request(
+                "/model_watch/hf/scan",
+                False,
+                {
+                    "ok": False,
+                    "trigger": trigger,
+                    "error": str(body.get("error") or "hf_scan_failed"),
+                },
+            )
+            return False, body
+
+        proposal = build_hf_local_download_proposal(self, scan_payload=scan_payload)
+        notify_result = {"emitted": False, "reason": "no_change"}
+        if proposal is None:
+            try:
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.model_watch.hf_no_change",
+                    params={
+                        "trigger": trigger,
+                        "scanned_repos": scanned_repos,
+                        "discovered_count": discovered_count,
+                    },
+                    decision="allow",
+                    reason="no_hf_proposal",
+                    dry_run=False,
+                    outcome="no_change",
+                    error_kind=None,
+                    duration_ms=0,
+                )
+            except Exception:
+                pass
+        else:
+            if persist_proposal:
+                self._persist_model_watch_proposal_state(proposal=proposal)
+            if notify_proposal:
+                notify_result = self._notify_model_watch_proposal(
+                    actor=actor,
+                    trigger=trigger,
+                    proposal=proposal,
+                )
+            try:
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.model_watch.hf_proposal_created",
+                    params={
+                        "trigger": trigger,
+                        "repo_id": str(proposal.get("repo_id") or ""),
+                        "revision": str(proposal.get("revision") or ""),
+                        "installability": str(proposal.get("installability") or ""),
+                        "notify_reason": str(notify_result.get("reason") or "not_sent"),
+                    },
+                    decision="allow",
+                    reason="proposal_created",
+                    dry_run=False,
+                    outcome="sent" if bool(notify_result.get("emitted", False)) else "detected",
+                    error_kind=None,
+                    duration_ms=0,
+                )
+            except Exception:
+                pass
+
+        body = {
+            "ok": True,
+            "trigger": trigger,
+            "scan": scan_payload,
+            "proposal_created": bool(proposal is not None),
+            "proposal": proposal,
+            "proposal_notification_emitted": bool(notify_result.get("emitted", False)),
+            "proposal_notification_reason": str(notify_result.get("reason") or "no_change"),
+        }
+        self._log_request(
+            "/model_watch/hf/scan",
+            True,
+            {
+                "ok": True,
+                "trigger": trigger,
+                "scanned_repos": scanned_repos,
+                "discovered_count": discovered_count,
+                "proposal_created": bool(proposal is not None),
+                "proposal_notification_emitted": bool(notify_result.get("emitted", False)),
+            },
+        )
+        return True, body
+
     def run_model_watch_once(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
         now = int(time.time())
         interval_seconds = max(1, int(self.config.model_watch_interval_seconds))
+        actor = "system" if trigger == "scheduler" else "user"
         if not bool(self.config.model_watch_enabled):
             body = {
                 "ok": True,
@@ -8647,11 +9664,182 @@ class AgentRuntime:
             self._log_request("/model_watch/run", False, body)
             return False, body
 
+        scan_ok = True
+        try:
+            catalog_delta = scan_provider_catalogs(self)
+        except Exception as exc:
+            scan_ok = False
+            catalog_delta = CatalogDelta(
+                provider_model_count=0,
+                new_models=tuple(),
+                changed_models=tuple(),
+                providers_considered=tuple(),
+                last_run_ts=now,
+            )
+            try:
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.model_watch.catalog_scan",
+                    params={"trigger": trigger},
+                    decision="allow",
+                    reason=f"scan_failed:{exc.__class__.__name__}",
+                    dry_run=False,
+                    outcome="failed",
+                    error_kind=exc.__class__.__name__,
+                    duration_ms=0,
+                )
+            except Exception:
+                pass
+        delta_rows = [
+            *[dict(row) for row in catalog_delta.new_models if isinstance(row, dict)],
+            *[dict(row) for row in catalog_delta.changed_models if isinstance(row, dict)],
+        ]
+        if scan_ok:
+            try:
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.model_watch.catalog_scan",
+                    params={
+                        "trigger": trigger,
+                        "providers_considered": list(catalog_delta.providers_considered),
+                        "provider_model_count": int(catalog_delta.provider_model_count),
+                        "new_models": len(catalog_delta.new_models),
+                        "changed_models": len(catalog_delta.changed_models),
+                    },
+                    decision="allow",
+                    reason="scan_completed",
+                    dry_run=False,
+                    outcome="success",
+                    error_kind=None,
+                    duration_ms=0,
+                )
+            except Exception:
+                pass
+
+        provider_proposal = self._build_model_watch_proposal(delta_rows=delta_rows)
+        hf_scan_ok = True
+        hf_scan_payload: dict[str, Any] = {
+            "ok": True,
+            "enabled": bool(self.config.model_watch_hf_enabled),
+            "scanned_repos": 0,
+            "discovered_count": 0,
+            "updates": [],
+        }
+        hf_proposal: dict[str, Any] | None = None
+        if bool(self.config.model_watch_hf_enabled):
+            hf_scan_ok, hf_body = self.model_watch_hf_scan(
+                trigger=trigger,
+                notify_proposal=False,
+                persist_proposal=False,
+            )
+            hf_scan_payload = (
+                hf_body.get("scan")
+                if isinstance(hf_body.get("scan"), dict)
+                else (
+                    hf_body
+                    if isinstance(hf_body, dict)
+                    else hf_scan_payload
+                )
+            )
+            hf_proposal = hf_body.get("proposal") if isinstance(hf_body.get("proposal"), dict) else None
+
+        proposal = provider_proposal if provider_proposal is not None else hf_proposal
+        proposal_type = str((proposal or {}).get("proposal_type") or "switch_default").strip().lower()
+        notify_result = {"emitted": False, "reason": "no_change"}
+        if proposal is not None:
+            self._persist_model_watch_proposal_state(proposal=proposal)
+            notify_result = self._notify_model_watch_proposal(
+                actor=actor,
+                trigger=trigger,
+                proposal=proposal,
+            )
+            if not bool(notify_result.get("emitted", False)):
+                try:
+                    self.audit_log.append(
+                        actor=actor,
+                        action=(
+                            "llm.model_watch.hf_proposal_created"
+                            if proposal_type == "local_download"
+                            else "llm.model_watch.proposal_created"
+                        ),
+                        params={
+                            "trigger": trigger,
+                            "proposal_type": proposal_type,
+                            "from_model": str(proposal.get("from_model") or ""),
+                            "to_model": str(proposal.get("to_model") or ""),
+                            "provider": str(proposal.get("provider") or ""),
+                            "score_delta": float(proposal.get("score_delta") or 0.0),
+                            "repo_id": str(proposal.get("repo_id") or ""),
+                            "revision": str(proposal.get("revision") or ""),
+                            "installability": str(proposal.get("installability") or ""),
+                            "notify_reason": str(notify_result.get("reason") or "not_sent"),
+                        },
+                        decision="allow",
+                        reason="proposal_created",
+                        dry_run=False,
+                        outcome="detected",
+                        error_kind=None,
+                        duration_ms=0,
+                    )
+                except Exception:
+                    pass
+        else:
+            try:
+                self.audit_log.append(
+                    actor=actor,
+                    action="llm.model_watch.no_change",
+                    params={
+                        "trigger": trigger,
+                        "new_models": len(catalog_delta.new_models),
+                        "changed_models": len(catalog_delta.changed_models),
+                        "hf_discovered_count": int(hf_scan_payload.get("discovered_count") or 0),
+                        "hf_scan_ok": bool(hf_scan_ok),
+                    },
+                    decision="allow",
+                    reason="no_better_candidate",
+                    dry_run=False,
+                    outcome="no_change",
+                    error_kind=None,
+                    duration_ms=0,
+                )
+            except Exception:
+                pass
+
+        buzz_results: list[dict[str, Any]] = []
+        if bool(self.config.model_watch_buzz_enabled):
+            buzz_results = map_buzz_leads_to_catalog(
+                leads=model_watch_buzz_scan(
+                    sources_allowlist=self.config.model_watch_buzz_sources_allowlist,
+                ),
+                runtime=self,
+            )
+
         body = {
             "ok": bool(result.get("ok")),
             **result,
             "trigger": trigger,
             "next_check_after_seconds": interval_seconds,
+            "catalog_delta": {
+                "provider_model_count": int(catalog_delta.provider_model_count),
+                "new_models": [dict(row) for row in catalog_delta.new_models],
+                "changed_models": [dict(row) for row in catalog_delta.changed_models],
+                "providers_considered": list(catalog_delta.providers_considered),
+                "last_run_ts": int(catalog_delta.last_run_ts),
+            },
+            "proposal_created": bool(proposal is not None),
+            "proposal": proposal,
+            "proposal_type": proposal_type if proposal is not None else None,
+            "proposal_notification_emitted": bool(notify_result.get("emitted", False)),
+            "proposal_notification_reason": str(notify_result.get("reason") or "no_change"),
+            "provider_proposal_created": bool(provider_proposal is not None),
+            "hf_enabled": bool(self.config.model_watch_hf_enabled),
+            "hf_scan_ok": bool(hf_scan_ok),
+            "hf_scan": hf_scan_payload,
+            "hf_proposal_created": bool(hf_proposal is not None),
+            "hf_proposal": hf_proposal,
+            "hf_proposal_selected": bool(proposal is not None and proposal is hf_proposal),
+            "buzz_enabled": bool(self.config.model_watch_buzz_enabled),
+            "buzz_leads": buzz_results,
         }
         self._log_request(
             "/model_watch/run",
@@ -8663,6 +9851,13 @@ class AgentRuntime:
                 "fetched_candidates": int(body.get("fetched_candidates") or 0),
                 "catalog_models_considered": int(body.get("catalog_models_considered") or 0),
                 "catalog_snapshot_model_count": int(body.get("catalog_snapshot_model_count") or 0),
+                "catalog_delta_new_models": len(catalog_delta.new_models),
+                "catalog_delta_changed_models": len(catalog_delta.changed_models),
+                "proposal_created": bool(proposal is not None),
+                "proposal_type": proposal_type if proposal is not None else None,
+                "proposal_notification_emitted": bool(notify_result.get("emitted", False)),
+                "hf_discovered_count": int(hf_scan_payload.get("discovered_count") or 0),
+                "hf_proposal_created": bool(hf_proposal is not None),
             },
         )
         self._safe_log_event(
@@ -10606,6 +11801,59 @@ class APIServerHandler(BaseHTTPRequestHandler):
         }
 
     @staticmethod
+    def _ambiguity_payload(
+        *,
+        intent: str,
+        trace_id: str,
+        mode: str,
+        message: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or "").strip().lower() or "clarify"
+        next_question = (
+            str(message or "").strip()
+            if normalized_mode == "clarify"
+            else "Reply 1, 2, or 3?"
+        )
+        envelope = validate_envelope(
+            {
+                "ok": True,
+                "intent": intent,
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": str(message or "").strip(),
+                "next_question": next_question,
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+            }
+        )
+        envelope_payload = dict(envelope)
+        envelope_payload["clarification"] = {
+            "reason": str(reason or "").strip().lower() or "ambiguous",
+            "hints": [],
+            "suggested_intents": [],
+        }
+        envelope_payload["clarify_suggest"] = {
+            "mode": normalized_mode,
+            "reason": str(reason or "").strip().lower() or "ambiguous",
+        }
+        return {
+            "ok": bool(envelope_payload.get("ok", False)),
+            "intent": envelope_payload.get("intent", "chat"),
+            "confidence": float(envelope_payload.get("confidence", 0.0)),
+            "did_work": bool(envelope_payload.get("did_work", False)),
+            "error_kind": envelope_payload.get("error_kind", "internal_error"),
+            "message": envelope_payload.get("message") or "Internal error.",
+            "next_question": envelope_payload.get("next_question"),
+            "actions": envelope_payload.get("actions", []),
+            "errors": envelope_payload.get("errors", ["internal_error"]),
+            "trace_id": envelope_payload.get("trace_id") or "trace_unknown",
+            "envelope": envelope_payload,
+        }
+
+    @staticmethod
     def _with_replaced_message(payload: dict[str, Any], message: str) -> dict[str, Any]:
         updated = dict(payload if isinstance(payload, dict) else {})
         text = str(message or "").strip() or "Internal error."
@@ -10823,6 +12071,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/model_watch/latest":
                 self._send_json(200, self.runtime.model_watch_latest())
                 return
+            if path == "/model_watch/hf/status":
+                self._send_json(200, self.runtime.model_watch_hf_status())
+                return
             if path == "/llm/health":
                 self._send_json(200, self.runtime.llm_health_summary())
                 return
@@ -10969,6 +12220,55 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 low_confidence = detect_low_confidence(input_text)
                 intent_name = "ask" if path == "/ask" else "chat"
                 norm_text = str(low_confidence.debug.get("norm") or "")
+                handled_choice, choice_payload = self.runtime.consume_clarify_recovery_choice(
+                    source="api",
+                    text=input_text,
+                )
+                if handled_choice and isinstance(choice_payload, dict):
+                    message = str(choice_payload.get("message") or "").strip() or "Done."
+                    response = {
+                        "ok": bool(choice_payload.get("ok", True)),
+                        "intent": str(choice_payload.get("intent") or intent_name),
+                        "confidence": float(choice_payload.get("confidence", 0.0)),
+                        "did_work": bool(choice_payload.get("did_work", False)),
+                        "error_kind": (
+                            str(choice_payload.get("error_kind") or "").strip()
+                            or ("needs_clarification" if not bool(choice_payload.get("did_work", False)) else None)
+                        ),
+                        "message": message,
+                        "next_question": choice_payload.get("next_question"),
+                        "actions": [],
+                        "errors": [
+                            str(item).strip()
+                            for item in (
+                                choice_payload.get("errors")
+                                if isinstance(choice_payload.get("errors"), list)
+                                else []
+                            )
+                            if str(item).strip()
+                        ],
+                        "trace_id": trace_id,
+                    }
+                    response["envelope"] = validate_envelope(
+                        {
+                            "ok": bool(response.get("ok", True)),
+                            "intent": str(response.get("intent") or intent_name),
+                            "confidence": float(response.get("confidence", 0.0)),
+                            "did_work": bool(response.get("did_work", False)),
+                            "error_kind": response.get("error_kind"),
+                            "message": message,
+                            "next_question": response.get("next_question"),
+                            "actions": [],
+                            "errors": (
+                                list(response.get("errors") or [])
+                                if isinstance(response.get("errors"), list)
+                                else []
+                            ),
+                            "trace_id": trace_id,
+                        }
+                    )
+                    self._send_json(200, response)
+                    return
                 if low_confidence.is_low_confidence and not self._has_explicit_user_message(payload):
                     clarification_payload = self._clarification_payload(
                         intent=intent_name,
@@ -11006,6 +12306,36 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             user_text_norm=norm_text,
                             drift_reason=thread_integrity.reason,
                             thread_debug=thread_integrity.debug,
+                        ),
+                    )
+                    return
+                ambiguity = classify_ambiguity(input_text)
+                if ambiguity.ambiguous:
+                    availability = self.runtime.llm_availability_state()
+                    if bool(availability.get("available", False)):
+                        clarify_message = build_clarify_message(input_text)
+                        self._send_json(
+                            200,
+                            self._ambiguity_payload(
+                                intent=intent_name,
+                                trace_id=trace_id,
+                                mode="clarify",
+                                message=clarify_message,
+                                reason=ambiguity.reason,
+                            ),
+                        )
+                        return
+                    reason = str(availability.get("reason") or "llm_unavailable").strip().lower()
+                    self.runtime.set_clarify_recovery_prompt(source="api", reason=reason)
+                    suggest_message = build_suggest_message(availability_reason=reason)
+                    self._send_json(
+                        200,
+                        self._ambiguity_payload(
+                            intent=intent_name,
+                            trace_id=trace_id,
+                            mode="suggest",
+                            message=suggest_message,
+                            reason=reason,
                         ),
                     )
                     return
@@ -11362,6 +12692,35 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         error_kind=error_kind,
                         trace_id=trace_id,
                         errors=[str(body.get("error") or "model_watch_refresh_failed")],
+                    )
+                    body = {
+                        **body,
+                        "ok": False,
+                        "error_kind": envelope["error_kind"],
+                        "message": envelope["message"],
+                        "trace_id": envelope["trace_id"],
+                        "envelope": envelope,
+                    }
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/model_watch/hf/scan":
+                ok, body = self.runtime.model_watch_hf_scan(trigger="manual")
+                if not ok:
+                    trace_id = self._request_trace_id(payload)
+                    body = body if isinstance(body, dict) else {}
+                    error_kind = classify_error_kind(payload=body, context={"route": "/model_watch/hf/scan"})
+                    message = (
+                        str(body.get("message") or "").strip()
+                        or str(body.get("detail") or "").strip()
+                        or str(body.get("error") or "").strip()
+                        or "Model watch HF scan failed."
+                    )
+                    envelope = failure(
+                        message,
+                        intent="model_watch.hf.scan",
+                        error_kind=error_kind,
+                        trace_id=trace_id,
+                        errors=[str(body.get("error") or "model_watch_hf_scan_failed")],
                     )
                     body = {
                         **body,

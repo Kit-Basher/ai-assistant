@@ -844,6 +844,13 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(latest_payload["found"])
         self.assertNotEqual("not_found", latest_payload.get("error"))
 
+        hf_status_handler = _HandlerForTest(runtime, "/model_watch/hf/status")
+        hf_status_handler.do_GET()
+        self.assertEqual(200, hf_status_handler.status_code)
+        hf_status_payload = json.loads(hf_status_handler.body.decode("utf-8"))
+        self.assertTrue(hf_status_payload["ok"])
+        self.assertIn("enabled", hf_status_payload)
+
         with patch.object(runtime, "run_model_watch_once", return_value=(True, {"ok": True, "fetched_candidates": 12})):
             run_handler = _HandlerForTest(runtime, "/model_watch/run", {})
             run_handler.do_POST()
@@ -859,6 +866,18 @@ class TestAPIServerRuntime(unittest.TestCase):
             refresh_payload = json.loads(refresh_handler.body.decode("utf-8"))
             self.assertTrue(refresh_payload["ok"])
             self.assertEqual(5, refresh_payload["model_count"])
+
+        with patch.object(
+            runtime,
+            "model_watch_hf_scan",
+            return_value=(True, {"ok": True, "scan": {"ok": True, "discovered_count": 1}, "proposal_created": True}),
+        ):
+            hf_scan_handler = _HandlerForTest(runtime, "/model_watch/hf/scan", {})
+            hf_scan_handler.do_POST()
+            self.assertEqual(200, hf_scan_handler.status_code)
+            hf_scan_payload = json.loads(hf_scan_handler.body.decode("utf-8"))
+            self.assertTrue(hf_scan_payload["ok"])
+            self.assertTrue(hf_scan_payload["proposal_created"])
 
     def test_run_model_watch_once_does_not_raise_nameerror(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1735,6 +1754,89 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("needs_clarification", payload.get("error_kind"))
         self.assertEqual(["needs_clarification"], payload.get("errors"))
         self.assertEqual(payload.get("message"), payload.get("next_question"))
+
+    def test_chat_ambiguous_clarifies_when_llm_available(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        payload = {"messages": [{"role": "user", "content": "fix it"}]}
+        handler = _HandlerForTest(runtime, payload)
+        with patch.object(
+            runtime,
+            "llm_availability_state",
+            return_value={"available": True, "reason": "ok"},
+        ), patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+            handler.do_POST()
+
+        response = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, response.get("ok"))
+        self.assertEqual("needs_clarification", response.get("error_kind"))
+        message = str(response.get("message") or "")
+        self.assertIn("Do you mean:", message)
+        self.assertIn("A)", message)
+        self.assertIn("B)", message)
+        self.assertNotIn("1)", message)
+
+    def test_chat_ambiguous_suggests_when_llm_unavailable_and_intercepts_numeric_choice(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        first = _HandlerForTest(runtime, {"messages": [{"role": "user", "content": "fix it"}]})
+        with patch.object(
+            runtime,
+            "llm_availability_state",
+            return_value={"available": False, "reason": "provider_unhealthy"},
+        ), patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+            first.do_POST()
+
+        response_first = first.response_payload
+        self.assertEqual(200, first.status_code)
+        self.assertEqual(True, response_first.get("ok"))
+        first_message = str(response_first.get("message") or "")
+        self.assertIn("1)", first_message)
+        self.assertIn("2)", first_message)
+        self.assertIn("3)", first_message)
+        self.assertIn("Reply 1, 2, or 3.", first_message)
+
+        second = _HandlerForTest(runtime, {"messages": [{"role": "user", "content": "1"}]})
+        with patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+            second.do_POST()
+        response_second = second.response_payload
+        self.assertEqual(200, second.status_code)
+        self.assertEqual(True, response_second.get("ok"))
+        self.assertTrue(bool(response_second.get("did_work")))
+        self.assertIn("Current provider/model:", str(response_second.get("message") or ""))
 
     def test_chat_thread_integrity_drift_returns_clarification_contract(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
