@@ -15,6 +15,7 @@ class TestTelegramCommandRegistration(unittest.TestCase):
         self.assertIn('CommandHandler("done", _handle_done)', source)
         self.assertIn('CommandHandler("breif", _handle_brief_alias)', source)
         self.assertIn('CommandHandler("help", _handle_help)', source)
+        self.assertIn('CommandHandler("model", _handle_model)', source)
         self.assertIn('CommandHandler("scout", _handle_scout)', source)
         self.assertIn('CommandHandler("scout_dismiss", _handle_scout_dismiss)', source)
         self.assertIn('CommandHandler("scout_installed", _handle_scout_installed)', source)
