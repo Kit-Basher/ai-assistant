@@ -286,6 +286,74 @@ class TestLLMAutopilotNotifications(unittest.TestCase):
         self.assertEqual("sent", summary["notifications"]["last_outcome"])
         self.assertTrue(summary["notifications"]["last_hash"])
 
+    def test_fixit_prompt_delivery_persists_state_and_audits_prompt(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        status_payload = {
+            "default_provider": "ollama",
+            "default_model": "ollama:qwen2.5:3b-instruct",
+            "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+            "safe_mode": {"paused": False, "reason": ""},
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "enabled": True,
+                    "available": True,
+                    "health": {
+                        "status": "down",
+                        "failure_streak": 12,
+                        "cooldown_until": None,
+                    },
+                },
+                {
+                    "id": "ollama",
+                    "enabled": True,
+                    "available": True,
+                    "health": {"status": "ok", "failure_streak": 0, "cooldown_until": None},
+                },
+            ],
+            "models": [
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "health": {"status": "ok"},
+                }
+            ],
+        }
+        with patch.object(runtime, "llm_status", return_value=status_payload), patch.object(
+            runtime, "_resolve_telegram_target", return_value=("token", "123456789")
+        ), patch.object(runtime, "_send_telegram_message", return_value=None):
+            result = runtime._deliver_autopilot_notification(  # type: ignore[attr-defined]
+                message="OpenRouter is unavailable.",
+                allow_remote=True,
+            )
+        self.assertTrue(result.ok)
+        self.assertEqual("telegram", result.delivered_to)
+
+        wizard_state = runtime._llm_fixit_store.load()  # type: ignore[attr-defined]
+        self.assertTrue(bool(wizard_state.get("active")))
+        self.assertEqual("awaiting_choice", str(wizard_state.get("step") or ""))
+        choices = wizard_state.get("choices") if isinstance(wizard_state.get("choices"), list) else []
+        self.assertTrue(choices)
+        self.assertEqual("local_only", str((choices[0] or {}).get("id") or ""))
+
+        entries = runtime.get_audit(limit=20)["entries"]
+        prompt_rows = [row for row in entries if row.get("action") == "telegram.fixit.prompt_shown"]
+        self.assertTrue(prompt_rows)
+        prompt_row = prompt_rows[0]
+        params = (
+            prompt_row.get("params_redacted")
+            if isinstance(prompt_row.get("params_redacted"), dict)
+            else {}
+        )
+        self.assertEqual("***6789", str(params.get("chat_id_redacted") or ""))
+        self.assertEqual("needs_user_choice", str(params.get("status") or ""))
+        self.assertEqual("openrouter_down", str(params.get("issue_code") or ""))
+        self.assertEqual("awaiting_choice", str(params.get("step") or ""))
+
     def test_loopback_without_telegram_falls_back_to_local_delivery(self) -> None:
         runtime = AgentRuntime(
             _config(
@@ -327,7 +395,7 @@ class TestLLMAutopilotNotifications(unittest.TestCase):
         after = _state(default_model="ollama:qwen2.5:3b-instruct")
         with patch.object(runtime, "_resolve_telegram_target", return_value=(None, None)), patch(
             "agent.api_server.time.time",
-            side_effect=[70_000, 70_001, 70_002, 70_003, 70_004, 70_005],
+            return_value=70_000,
         ):
             first = runtime._process_scheduler_notification_cycle(  # type: ignore[attr-defined]
                 before_state=before,

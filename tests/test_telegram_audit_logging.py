@@ -67,6 +67,66 @@ def _read_audit_rows(path: str) -> list[dict[str, object]]:
 
 
 class TestTelegramAuditLogging(unittest.TestCase):
+    def test_received_then_handled_fixit_choice_route_with_numeric_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            wizard_path = f"{tmpdir}/wizard.json"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=wizard_path)
+            wizard_store.save(
+                {
+                    "active": True,
+                    "issue_hash": "issue-1",
+                    "issue_code": "openrouter_down",
+                    "step": "awaiting_choice",
+                    "question": "Choose an option",
+                    "choices": [
+                        {"id": "local_only", "label": "Use local-only", "recommended": True},
+                        {"id": "repair_openrouter", "label": "Repair OpenRouter", "recommended": False},
+                        {"id": "details", "label": "Show details", "recommended": False},
+                    ],
+                    "pending_plan": [],
+                    "pending_confirm_token": None,
+                    "pending_created_ts": None,
+                    "pending_expires_ts": None,
+                    "pending_issue_code": None,
+                    "last_prompt_ts": 1,
+                }
+            )
+            orchestrator = _FakeOrchestrator(reply_text="should not be used")
+            db = _FakeDB()
+            chat_id = "123456789"
+            update = _FakeUpdate(int(chat_id), "1")
+            captured_payload: dict[str, object] = {}
+
+            def _llm_fixit(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+                captured_payload.update(payload)
+                return True, {"ok": True, "message": "Applied local-only."}
+
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": _llm_fixit,
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            rows = _read_audit_rows(audit_path)
+            actions = [str(row.get("action")) for row in rows if str(row.get("action", "")).startswith("telegram.message.")]
+            self.assertEqual(["telegram.message.received", "telegram.message.handled"], actions)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("fixit", params.get("route"))
+
+            self.assertEqual("local_only", captured_payload.get("answer"))
+            self.assertEqual("telegram", captured_payload.get("actor"))
+            self.assertEqual([], orchestrator.calls)
+
     def test_received_then_handled_fixit_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"

@@ -4748,7 +4748,7 @@ class AgentRuntime:
         message: str,
         allow_remote: bool,
     ) -> DeliveryResult:
-        outbound_message = self._autopilot_notification_user_message(message)
+        outbound_message, fixit_prompt_state = self._autopilot_notification_message_and_fixit(message)
         token, chat_id = self._resolve_telegram_target()
         telegram_target = TelegramTarget(
             token=token,
@@ -4764,6 +4764,13 @@ class AgentRuntime:
         if telegram_descriptor.enabled and telegram_descriptor.configured:
             result = telegram_target.deliver(payload)
             if result.ok:
+                if isinstance(fixit_prompt_state, dict):
+                    self._audit_telegram_fixit_prompt_shown(
+                        chat_id=chat_id,
+                        status=str(fixit_prompt_state.get("status") or ""),
+                        issue_code=str(fixit_prompt_state.get("issue_code") or ""),
+                        step=str(fixit_prompt_state.get("step") or ""),
+                    )
                 return result
             fallback = local_target.deliver(payload)
             if fallback.ok:
@@ -4785,12 +4792,104 @@ class AgentRuntime:
             reason="not_configured",
         )
 
-    def _autopilot_notification_user_message(self, raw_message: str) -> str:
+    @staticmethod
+    def _redact_telegram_chat_id(chat_id: str | None) -> str:
+        value = str(chat_id or "").strip()
+        if not value:
+            return "unknown"
+        if len(value) <= 4:
+            return "***"
+        return f"***{value[-4:]}"
+
+    def _persist_fixit_prompt_state_for_notification(
+        self,
+        *,
+        status_payload: dict[str, Any],
+        decision: WizardDecision,
+    ) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        existing_state = (
+            self._llm_fixit_store.state
+            if isinstance(self._llm_fixit_store.state, dict)
+            else self._llm_fixit_store.empty_state()
+        )
+        openrouter_last_test = (
+            existing_state.get("openrouter_last_test")
+            if isinstance(existing_state.get("openrouter_last_test"), dict)
+            else None
+        )
+        choices_json = wizard_decision_to_json(decision).get("choices", [])
+        state_to_save = {
+            "active": True,
+            "issue_hash": wizard_decision_issue_hash(decision, status_payload),
+            "issue_code": decision.issue_code,
+            "step": "awaiting_choice",
+            "question": str(decision.question or ""),
+            "choices": choices_json,
+            "pending_plan": [],
+            "pending_confirm_token": None,
+            "pending_created_ts": None,
+            "pending_expires_ts": None,
+            "pending_issue_code": None,
+            "last_prompt_ts": now_epoch,
+            "openrouter_last_test": openrouter_last_test,
+        }
+        try:
+            return self._llm_fixit_store.save(state_to_save)
+        except Exception:
+            return (
+                existing_state if isinstance(existing_state, dict) else self._llm_fixit_store.empty_state()
+            )
+
+    def _autopilot_notification_message_and_fixit(
+        self,
+        raw_message: str,
+    ) -> tuple[str, dict[str, Any] | None]:
         status_payload = self.llm_status()
         decision = evaluate_wizard_decision(status_payload)
         if decision.status != "ok":
-            return render_wizard_prompt(decision)
-        return summarize_notification_message(raw_message)
+            state = self._persist_fixit_prompt_state_for_notification(
+                status_payload=status_payload,
+                decision=decision,
+            )
+            return render_wizard_prompt(decision), {
+                "status": str(decision.status or "needs_user_choice"),
+                "issue_code": str(decision.issue_code or ""),
+                "step": str(state.get("step") or "awaiting_choice"),
+            }
+        return summarize_notification_message(raw_message), None
+
+    def _audit_telegram_fixit_prompt_shown(
+        self,
+        *,
+        chat_id: str | None,
+        status: str,
+        issue_code: str,
+        step: str,
+    ) -> None:
+        try:
+            self.audit_log.append(
+                actor="system",
+                action="telegram.fixit.prompt_shown",
+                params={
+                    "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
+                    "status": str(status or ""),
+                    "issue_code": str(issue_code or ""),
+                    "step": str(step or ""),
+                },
+                decision="allow",
+                reason="prompt_shown",
+                dry_run=False,
+                outcome="sent",
+                error_kind=None,
+                duration_ms=0,
+            )
+        except Exception:
+            pass
+
+    def _autopilot_notification_user_message(self, raw_message: str) -> str:
+        outbound_message, _fixit_prompt_state = self._autopilot_notification_message_and_fixit(raw_message)
+        return outbound_message
 
     def _process_scheduler_notification_cycle(
         self,
