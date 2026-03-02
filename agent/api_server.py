@@ -6580,6 +6580,238 @@ class AgentRuntime:
         status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
         return status
 
+    @staticmethod
+    def _value_policy_summary(policy: ValuePolicy) -> dict[str, Any]:
+        return {
+            "name": str(policy.name),
+            "cost_cap_per_1m": round(float(policy.cost_cap_per_1m), 4),
+            "allowlist": [str(item) for item in sorted(set(policy.allowlist))],
+            "weights": {
+                "quality": round(float(policy.quality_weight), 4),
+                "price": round(float(policy.price_weight), 4),
+                "latency": round(float(policy.latency_weight), 4),
+                "instability": round(float(policy.instability_weight), 4),
+            },
+        }
+
+    @staticmethod
+    def _compact_model_watch_candidate(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "id": str(row.get("id") or "").strip(),
+            "provider": str(row.get("provider") or "").strip().lower() or None,
+            "model": str(row.get("model") or "").strip() or None,
+            "score": round(float(row.get("score") or 0.0), 2),
+            "reason": str(row.get("reason") or "").strip() or None,
+            "tradeoffs": [
+                str(item).strip()
+                for item in (row.get("tradeoffs") if isinstance(row.get("tradeoffs"), list) else [])
+                if str(item).strip()
+            ][:3],
+            "utility_delta": (
+                round(float(row.get("utility_delta") or 0.0), 4)
+                if row.get("utility_delta") is not None
+                else None
+            ),
+            "quality_delta": (
+                round(float(row.get("quality_delta") or 0.0), 4)
+                if row.get("quality_delta") is not None
+                else None
+            ),
+            "expected_cost_delta": (
+                round(float(row.get("expected_cost_delta") or 0.0), 4)
+                if row.get("expected_cost_delta") is not None
+                else None
+            ),
+        }
+
+    def _latest_model_watch_summary(self) -> dict[str, Any]:
+        latest_payload = self.model_watch_latest()
+        latest_found = bool(latest_payload.get("found", False))
+        batch = latest_payload.get("batch") if isinstance(latest_payload.get("batch"), dict) else {}
+        top_pick = batch.get("top_pick") if isinstance(batch.get("top_pick"), dict) else {}
+        other = batch.get("other_candidates") if isinstance(batch.get("other_candidates"), list) else []
+        top_candidates: list[dict[str, Any]] = []
+        if top_pick:
+            top_candidates.append(self._compact_model_watch_candidate(top_pick))
+        for row in other:
+            if not isinstance(row, dict):
+                continue
+            if len(top_candidates) >= 4:
+                break
+            top_candidates.append(self._compact_model_watch_candidate(row))
+
+        latest_event: dict[str, Any] | None = None
+        for row in self.audit_log.recent(limit=200):
+            if not isinstance(row, dict):
+                continue
+            action = str(row.get("action") or "").strip()
+            if action in {
+                "llm.model_watch.proposal_created",
+                "llm.model_watch.hf_proposal_created",
+                "llm.model_watch.no_change",
+            }:
+                latest_event = row
+                break
+
+        status = "unknown"
+        event_action = str((latest_event or {}).get("action") or "").strip()
+        if event_action in {"llm.model_watch.proposal_created", "llm.model_watch.hf_proposal_created"}:
+            status = "proposal"
+        elif event_action == "llm.model_watch.no_change":
+            status = "no_change"
+        elif latest_found:
+            status = "latest_batch_available"
+
+        params = (
+            latest_event.get("params_redacted")
+            if isinstance(latest_event, dict) and isinstance(latest_event.get("params_redacted"), dict)
+            else {}
+        )
+        proposal = None
+        if status == "proposal":
+            proposal = {
+                "from_model": str(params.get("from_model") or "").strip() or None,
+                "to_model": str(params.get("to_model") or "").strip() or None,
+                "provider": str(params.get("provider") or "").strip().lower() or None,
+                "score_delta": (
+                    round(float(params.get("score_delta") or 0.0), 4)
+                    if params.get("score_delta") is not None
+                    else None
+                ),
+                "utility_delta": (
+                    round(float(params.get("utility_delta") or 0.0), 4)
+                    if params.get("utility_delta") is not None
+                    else None
+                ),
+                "quality_delta": (
+                    round(float(params.get("quality_delta") or 0.0), 4)
+                    if params.get("quality_delta") is not None
+                    else None
+                ),
+                "expected_cost_delta": (
+                    round(float(params.get("expected_cost_delta") or 0.0), 4)
+                    if params.get("expected_cost_delta") is not None
+                    else None
+                ),
+            }
+
+        summary_line = "Model Watch: no summary available."
+        if top_candidates:
+            top = top_candidates[0]
+            top_label = str(top.get("model") or top.get("id") or "unknown").strip()
+            top_score = float(top.get("score") or 0.0)
+            summary_line = f"Model Watch: top candidate {top_label} (score {top_score:.2f})."
+        elif str(latest_payload.get("reason") or "").strip():
+            summary_line = f"Model Watch: {str(latest_payload.get('reason') or '').strip()}."
+
+        return {
+            "status": status,
+            "found": latest_found,
+            "reason": str((latest_event or {}).get("reason") or latest_payload.get("reason") or "").strip() or None,
+            "latest_event": {
+                "ts": str((latest_event or {}).get("ts") or "").strip() or None,
+                "action": event_action or None,
+                "outcome": str((latest_event or {}).get("outcome") or "").strip() or None,
+                "error_kind": str((latest_event or {}).get("error_kind") or "").strip() or None,
+            },
+            "proposal": proposal,
+            "top_candidates": top_candidates,
+            "summary_line": summary_line,
+        }
+
+    def model_status(self) -> dict[str, Any]:
+        status = self.llm_status()
+        current_model = (
+            str(status.get("resolved_default_model") or "").strip()
+            or str(status.get("default_model") or "").strip()
+            or None
+        )
+        current_provider = (
+            str(status.get("default_provider") or "").strip().lower()
+            or (
+                str(current_model).split(":", 1)[0].strip().lower()
+                if current_model and ":" in str(current_model)
+                else None
+            )
+        )
+        providers_rows = status.get("providers") if isinstance(status.get("providers"), list) else []
+        local_up: list[str] = []
+        local_down: list[str] = []
+        local_unknown: list[str] = []
+        openrouter_payload = {
+            "known": False,
+            "status": "unknown",
+            "last_error_kind": None,
+            "status_code": None,
+            "cooldown_until": None,
+        }
+        configured_provider_ids: list[str] = []
+        for row in providers_rows:
+            if not isinstance(row, dict):
+                continue
+            provider_id = str(row.get("id") or "").strip().lower()
+            if not provider_id:
+                continue
+            configured_provider_ids.append(provider_id)
+            health = row.get("health") if isinstance(row.get("health"), dict) else {}
+            health_status = str(health.get("status") or "unknown").strip().lower()
+            if bool(row.get("local", False)):
+                if health_status == "ok":
+                    local_up.append(provider_id)
+                elif health_status == "down":
+                    local_down.append(provider_id)
+                else:
+                    local_unknown.append(provider_id)
+            if provider_id == "openrouter":
+                openrouter_payload = {
+                    "known": True,
+                    "status": health_status or "unknown",
+                    "last_error_kind": str(health.get("last_error_kind") or "").strip() or None,
+                    "status_code": (
+                        int(health.get("status_code"))
+                        if isinstance(health.get("status_code"), int)
+                        else None
+                    ),
+                    "cooldown_until": (
+                        int(health.get("cooldown_until"))
+                        if isinstance(health.get("cooldown_until"), int)
+                        else None
+                    ),
+                }
+
+        llm_available = self.llm_availability_state()
+        model_watch_summary = self._latest_model_watch_summary()
+        return {
+            "ok": True,
+            "current": {
+                "provider": current_provider,
+                "model_id": current_model,
+                "default_provider": str(status.get("default_provider") or "").strip().lower() or None,
+                "default_model": str(status.get("default_model") or "").strip() or None,
+                "resolved_default_model": str(status.get("resolved_default_model") or "").strip() or None,
+            },
+            "selection_policy": {
+                "default_policy": self._value_policy_summary(self._value_policy("default")),
+                "premium_policy": self._value_policy_summary(self._value_policy("premium")),
+                "premium_override": {
+                    "once": bool(self._premium_override_once),
+                    "until_ts": int(self._premium_override_until_ts) if self._premium_override_until_ts else None,
+                },
+            },
+            "model_watch": model_watch_summary,
+            "llm_availability": {
+                "available": bool(llm_available.get("available", False)),
+                "reason": str(llm_available.get("reason") or "unknown"),
+                "providers": {
+                    "configured": sorted({item for item in configured_provider_ids if item}),
+                    "local_up": sorted({item for item in local_up if item}),
+                    "local_down": sorted({item for item in local_down if item}),
+                    "local_unknown": sorted({item for item in local_unknown if item}),
+                },
+                "openrouter": openrouter_payload,
+            },
+        }
+
     def llm_availability_state(self) -> dict[str, Any]:
         try:
             status = self.llm_status()
@@ -12392,6 +12624,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/telegram/status":
                 self._send_json(200, self.runtime.telegram_status())
+                return
+            if path in {"/model", "/llm/model"}:
+                self._send_json(200, self.runtime.model_status())
                 return
             if path == "/models":
                 self._send_json(200, self.runtime.models())

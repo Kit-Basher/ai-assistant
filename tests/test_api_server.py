@@ -879,6 +879,128 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertTrue(hf_scan_payload["ok"])
             self.assertTrue(hf_scan_payload["proposal_created"])
 
+    def test_model_endpoint_returns_current_selection_payload(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.body = b""
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.body = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = (content_type, cache_control)
+                self.status_code = status
+                self.body = body
+
+        handler = _HandlerForTest(runtime, "/model")
+        handler.do_GET()
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertIn("current", payload)
+        self.assertIn("provider", payload["current"])
+        self.assertIn("model_id", payload["current"])
+        self.assertIn("selection_policy", payload)
+        self.assertIn("model_watch", payload)
+        self.assertIn("llm_availability", payload)
+
+    def test_llm_model_alias_returns_identical_payload(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        fixed_payload = {
+            "ok": True,
+            "current": {"provider": "openrouter", "model_id": "openrouter:gpt-4o-mini"},
+            "selection_policy": {},
+            "model_watch": {},
+            "llm_availability": {},
+        }
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.body = b""
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.body = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = (content_type, cache_control)
+                self.status_code = status
+                self.body = body
+
+        with patch.object(runtime, "model_status", return_value=fixed_payload):
+            model_handler = _HandlerForTest(runtime, "/model")
+            model_handler.do_GET()
+            llm_model_handler = _HandlerForTest(runtime, "/llm/model")
+            llm_model_handler.do_GET()
+
+        self.assertEqual(200, model_handler.status_code)
+        self.assertEqual(200, llm_model_handler.status_code)
+        model_payload = json.loads(model_handler.body.decode("utf-8"))
+        llm_model_payload = json.loads(llm_model_handler.body.decode("utf-8"))
+        self.assertEqual(model_payload, llm_model_payload)
+
+    def test_model_endpoint_does_not_leak_secrets(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        raw_secret = "sk-test-model-endpoint-secret"
+        runtime.secret_store.set_secret("provider:openrouter:api_key", raw_secret)
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+                self.runtime = runtime_obj
+                self.path = path
+                self.headers = {}
+                self.status_code = 0
+                self.body = b""
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:
+                self.status_code = status
+                self.body = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+
+            def _send_bytes(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str,
+                cache_control: str | None = None,
+            ) -> None:
+                _ = (content_type, cache_control)
+                self.status_code = status
+                self.body = body
+
+        handler = _HandlerForTest(runtime, "/model")
+        handler.do_GET()
+        self.assertEqual(200, handler.status_code)
+        body_text = handler.body.decode("utf-8")
+        self.assertNotIn("sk-", body_text)
+        self.assertNotIn("OPENROUTER_API_KEY", body_text)
+        self.assertNotIn(raw_secret, body_text)
+
     def test_run_model_watch_once_does_not_raise_nameerror(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 3}), patch(

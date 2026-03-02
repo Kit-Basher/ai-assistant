@@ -412,6 +412,39 @@ def _llm_status_payload(runtime: Any | None) -> dict[str, Any]:
 
 
 def _model_status_report(*, runtime: Any | None) -> str:
+    if runtime is not None and hasattr(runtime, "model_status"):
+        try:
+            payload = runtime.model_status()  # type: ignore[attr-defined]
+        except Exception:
+            payload = {}
+        if isinstance(payload, dict):
+            current = payload.get("current") if isinstance(payload.get("current"), dict) else {}
+            availability = (
+                payload.get("llm_availability")
+                if isinstance(payload.get("llm_availability"), dict)
+                else {}
+            )
+            providers = availability.get("providers") if isinstance(availability.get("providers"), dict) else {}
+            watch = payload.get("model_watch") if isinstance(payload.get("model_watch"), dict) else {}
+            default_provider = str(current.get("provider") or "unknown").strip() or "unknown"
+            resolved_model = str(current.get("model_id") or "unknown").strip() or "unknown"
+            provider_ids = providers.get("configured") if isinstance(providers.get("configured"), list) else []
+            provider_line = ", ".join(
+                sorted(
+                    str(item).strip().lower()
+                    for item in provider_ids
+                    if str(item).strip()
+                )
+            ) or "none"
+            model_watch_line = str(watch.get("summary_line") or "Model Watch: no summary available.").strip()
+            return "\n".join(
+                [
+                    f"Current provider/model: {default_provider} / {resolved_model}",
+                    f"Configured providers: {provider_line}",
+                    model_watch_line,
+                ]
+            )
+
     status = _llm_status_payload(runtime)
     default_provider = str(status.get("default_provider") or "unknown").strip() or "unknown"
     resolved_model = (
