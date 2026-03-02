@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -491,6 +492,17 @@ class AgentRuntime:
         self.router: LLMRouter | None = None
         self.registry_document: dict[str, Any] = {}
         self.model_scout = build_model_scout(config)
+        model_scout_notify_state_path = self._runtime_state_path(
+            config,
+            os.getenv("AGENT_MODEL_SCOUT_NOTIFY_STATE_PATH", "").strip() or None,
+            "model_scout_notify_state.json",
+        )
+        if model_scout_notify_state_path:
+            self._model_scout_notify_state_path = Path(model_scout_notify_state_path).expanduser().resolve()
+        else:
+            self._model_scout_notify_state_path = (
+                Path.home() / ".local" / "share" / "personal-agent" / "model_scout_notify_state.json"
+            ).resolve()
         model_watch_state_path = self._runtime_state_path(
             config,
             self.config.model_watch_state_path,
@@ -1526,7 +1538,7 @@ class AgentRuntime:
 
                 try:
                     if now >= float(self._scheduler_next_run.get("model_scout", 0.0)):
-                        self.run_model_scout()
+                        self.run_model_scout(trigger="scheduler")
                         self._scheduler_next_run["model_scout"] = now + max(
                             60.0,
                             float(self.config.llm_model_scout_interval_seconds),
@@ -8060,18 +8072,478 @@ class AgentRuntime:
             "suggestions": suggestions,
         }
 
-    def run_model_scout(self) -> tuple[bool, dict[str, Any]]:
+    @staticmethod
+    def _empty_model_scout_notify_state() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "initialized": False,
+            "last_default_provider": None,
+            "last_default_model": None,
+            "last_ollama_models": [],
+            "last_capabilities_signature": None,
+            "last_run_ts": None,
+        }
+
+    def _load_model_scout_notify_state(self) -> dict[str, Any]:
+        path = self._model_scout_notify_state_path
+        default_state = self._empty_model_scout_notify_state()
+        if not path.is_file():
+            return default_state
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return default_state
+        if not isinstance(raw, dict):
+            return default_state
+        state = dict(default_state)
+        state["initialized"] = bool(raw.get("initialized", False))
+        state["last_default_provider"] = str(raw.get("last_default_provider") or "").strip() or None
+        state["last_default_model"] = str(raw.get("last_default_model") or "").strip() or None
+        rows = raw.get("last_ollama_models") if isinstance(raw.get("last_ollama_models"), list) else []
+        state["last_ollama_models"] = sorted(
+            {
+                str(item).strip()
+                for item in rows
+                if str(item).strip()
+            }
+        )
+        state["last_capabilities_signature"] = str(raw.get("last_capabilities_signature") or "").strip() or None
+        try:
+            state["last_run_ts"] = int(raw.get("last_run_ts") or 0) or None
+        except (TypeError, ValueError):
+            state["last_run_ts"] = None
+        return state
+
+    def _save_model_scout_notify_state(self, state: dict[str, Any]) -> None:
+        path = self._model_scout_notify_state_path
+        normalized = self._empty_model_scout_notify_state()
+        normalized["initialized"] = bool(state.get("initialized", False))
+        normalized["last_default_provider"] = str(state.get("last_default_provider") or "").strip() or None
+        normalized["last_default_model"] = str(state.get("last_default_model") or "").strip() or None
+        raw_models = state.get("last_ollama_models") if isinstance(state.get("last_ollama_models"), list) else []
+        normalized["last_ollama_models"] = sorted(
+            {
+                str(item).strip()
+                for item in raw_models
+                if str(item).strip()
+            }
+        )
+        normalized["last_capabilities_signature"] = str(state.get("last_capabilities_signature") or "").strip() or None
+        try:
+            normalized["last_run_ts"] = int(state.get("last_run_ts") or 0) or None
+        except (TypeError, ValueError):
+            normalized["last_run_ts"] = None
+        payload = json.dumps(normalized, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _scout_defaults_from_document(document: dict[str, Any]) -> tuple[str | None, str | None]:
+        defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
+        provider = str(defaults.get("default_provider") or "").strip().lower() or None
+        model = str(defaults.get("default_model") or "").strip() or None
+        return provider, model
+
+    @staticmethod
+    def _scout_ollama_model_ids(document: dict[str, Any]) -> list[str]:
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        rows: list[str] = []
+        for model_id, payload in sorted(models.items()):
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("provider") or "").strip().lower() != "ollama":
+                continue
+            if not bool(payload.get("available", True)):
+                continue
+            rows.append(str(model_id).strip())
+        return sorted({item for item in rows if item})
+
+    @staticmethod
+    def _scout_capabilities_signature(document: dict[str, Any]) -> str:
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        provider_rows = []
+        for provider_id, payload in sorted(providers.items()):
+            if not isinstance(payload, dict):
+                continue
+            provider_rows.append(
+                {
+                    "id": str(provider_id).strip().lower(),
+                    "enabled": bool(payload.get("enabled", True)),
+                    "available": bool(payload.get("available", True)),
+                }
+            )
+        model_rows = []
+        for model_id, payload in sorted(models.items()):
+            if not isinstance(payload, dict):
+                continue
+            capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), list) else []
+            model_rows.append(
+                {
+                    "id": str(model_id).strip(),
+                    "provider": str(payload.get("provider") or "").strip().lower(),
+                    "enabled": bool(payload.get("enabled", True)),
+                    "available": bool(payload.get("available", True)),
+                    "routable": bool(payload.get("routable", False)),
+                    "capabilities": sorted(
+                        {
+                            str(item).strip().lower()
+                            for item in capabilities
+                            if str(item).strip()
+                        }
+                    ),
+                }
+            )
+        canonical = json.dumps(
+            {"providers": provider_rows, "models": model_rows},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+    def _scout_baseline_score_for_provider(self, provider_id: str) -> float | None:
+        store = getattr(self.model_scout, "store", None)
+        if store is None or not hasattr(store, "latest_baseline"):
+            return None
+        try:
+            baseline_payload = store.latest_baseline()
+        except Exception:
+            baseline_payload = None
+        snapshot = (
+            baseline_payload.get("snapshot")
+            if isinstance(baseline_payload, dict) and isinstance(baseline_payload.get("snapshot"), dict)
+            else {}
+        )
+        local = snapshot.get("local") if isinstance(snapshot.get("local"), dict) else {}
+        remote = snapshot.get("remote") if isinstance(snapshot.get("remote"), dict) else {}
+        provider_key = str(provider_id or "").strip().lower()
+        if provider_key == "ollama":
+            try:
+                return float(local.get("score")) if local.get("score") is not None else None
+            except (TypeError, ValueError):
+                return None
+        row = remote.get(provider_key) if isinstance(remote.get(provider_key), dict) else {}
+        try:
+            return float(row.get("score")) if row.get("score") is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _top_model_scout_candidate(result: dict[str, Any]) -> dict[str, Any] | None:
+        rows = result.get("new_suggestions") if isinstance(result.get("new_suggestions"), list) else []
+        candidates = [row for row in rows if isinstance(row, dict)]
+        candidates.sort(
+            key=lambda item: (
+                -float(item.get("score") or 0.0),
+                str(item.get("id") or ""),
+            )
+        )
+        for row in candidates:
+            model_id = str(row.get("model_id") or "").strip()
+            provider_id = str(row.get("provider_id") or "").strip().lower()
+            if model_id and provider_id:
+                return row
+        return None
+
+    @staticmethod
+    def _model_scout_event_priority(reason: str) -> int:
+        priority = {
+            "better_default_candidate": 0,
+            "ollama_model_installed": 1,
+            "registry_capabilities_changed": 2,
+        }
+        return int(priority.get(str(reason or ""), 99))
+
+    def _model_scout_change_events(
+        self,
+        *,
+        result: dict[str, Any],
+        state_before: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        default_provider, default_model = self._scout_defaults_from_document(self.registry_document)
+        events: list[dict[str, Any]] = []
+        top_candidate = self._top_model_scout_candidate(result)
+        candidate_model = ""
+        candidate_provider = ""
+        if isinstance(top_candidate, dict):
+            candidate_model = str(top_candidate.get("model_id") or "").strip()
+            candidate_provider = str(top_candidate.get("provider_id") or "").strip().lower()
+        if candidate_model and candidate_model != str(default_model or ""):
+            event_payload: dict[str, Any] = {
+                "from_model": str(default_model or ""),
+                "to_model": candidate_model,
+                "reason": "better_default_candidate",
+                "provider": candidate_provider or str(default_provider or ""),
+            }
+            baseline_score = self._scout_baseline_score_for_provider(candidate_provider or str(default_provider or ""))
+            try:
+                candidate_score = float((top_candidate or {}).get("score")) if top_candidate is not None else None
+            except (TypeError, ValueError):
+                candidate_score = None
+            if baseline_score is not None and candidate_score is not None:
+                event_payload["score_delta"] = round(float(candidate_score) - float(baseline_score), 2)
+            events.append(event_payload)
+
+        initialized = bool(state_before.get("initialized", False))
+        current_ollama = self._scout_ollama_model_ids(self.registry_document)
+        previous_ollama = sorted(
+            {
+                str(item).strip()
+                for item in (
+                    state_before.get("last_ollama_models")
+                    if isinstance(state_before.get("last_ollama_models"), list)
+                    else []
+                )
+                if str(item).strip()
+            }
+        )
+        if initialized:
+            added_ollama = sorted(set(current_ollama) - set(previous_ollama))
+            if added_ollama:
+                added_model = str(added_ollama[0] or "").strip()
+                if added_model:
+                    events.append(
+                        {
+                            "from_model": str(default_model or ""),
+                            "to_model": added_model,
+                            "reason": "ollama_model_installed",
+                            "provider": "ollama",
+                        }
+                    )
+            previous_sig = str(state_before.get("last_capabilities_signature") or "").strip()
+            current_sig = self._scout_capabilities_signature(self.registry_document)
+            if previous_sig and current_sig and previous_sig != current_sig:
+                recommended_model = candidate_model or str(default_model or "")
+                recommended_provider = candidate_provider or str(default_provider or "")
+                events.append(
+                    {
+                        "from_model": str(default_model or ""),
+                        "to_model": recommended_model,
+                        "reason": "registry_capabilities_changed",
+                        "provider": recommended_provider,
+                    }
+                )
+
+        deduped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+        for row in events:
+            key = (
+                str(row.get("reason") or ""),
+                str(row.get("provider") or ""),
+                str(row.get("from_model") or ""),
+                str(row.get("to_model") or ""),
+            )
+            deduped[key] = row
+        ordered = sorted(
+            deduped.values(),
+            key=lambda row: (
+                self._model_scout_event_priority(str(row.get("reason") or "")),
+                str(row.get("provider") or ""),
+                str(row.get("to_model") or ""),
+                str(row.get("from_model") or ""),
+            ),
+        )
+        return ordered
+
+    @staticmethod
+    def _model_scout_reason_human(reason: str) -> str:
+        normalized = str(reason or "").strip().lower()
+        if normalized == "better_default_candidate":
+            return "better default candidate"
+        if normalized == "ollama_model_installed":
+            return "new local model detected"
+        if normalized == "registry_capabilities_changed":
+            return "registry capabilities changed"
+        return "scout update"
+
+    def _format_model_scout_change_message(self, event: dict[str, Any]) -> str:
+        from_model = str(event.get("from_model") or "").strip() or "(none)"
+        to_model = str(event.get("to_model") or "").strip() or from_model
+        provider = str(event.get("provider") or "").strip().lower() or "ollama"
+        reason = self._model_scout_reason_human(str(event.get("reason") or ""))
+        apply_payload = json.dumps(
+            {"default_model": to_model, "default_provider": provider},
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        apply_cmd = (
+            "curl -sS -X PUT http://127.0.0.1:8765/defaults "
+            "-H 'content-type: application/json' "
+            f"-d '{apply_payload}'"
+        )
+        lines = [
+            f"Model Scout update: {reason}.",
+            f"Current default: {from_model}",
+            f"Recommended default: {to_model}",
+            f"Apply: {apply_cmd}",
+        ]
+        return "\n".join(lines)
+
+    def _audit_model_scout_changed(self, *, actor: str, event: dict[str, Any], trigger: str) -> None:
+        try:
+            self.audit_log.append(
+                actor=actor,
+                action="llm.model_scout.changed",
+                params={
+                    "from_model": str(event.get("from_model") or ""),
+                    "to_model": str(event.get("to_model") or ""),
+                    "reason": str(event.get("reason") or ""),
+                    "provider": str(event.get("provider") or ""),
+                    "score_delta": event.get("score_delta"),
+                    "trigger": trigger,
+                },
+                decision="allow",
+                reason=str(event.get("reason") or "changed"),
+                dry_run=False,
+                outcome="detected",
+                error_kind=None,
+                duration_ms=0,
+            )
+        except Exception:
+            pass
+
+    def _notify_model_scout_change(
+        self,
+        *,
+        actor: str,
+        trigger: str,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        telegram = self.telegram_status()
+        state = str(telegram.get("state") or "").strip().lower()
+        if state != "running":
+            self.audit_log.append(
+                actor=actor,
+                action="llm.model_scout.notify",
+                params={
+                    "trigger": trigger,
+                    "reason": str(event.get("reason") or ""),
+                    "provider": str(event.get("provider") or ""),
+                },
+                decision="allow",
+                reason="telegram_not_running",
+                dry_run=False,
+                outcome="skipped",
+                error_kind="telegram_not_running",
+                duration_ms=0,
+            )
+            return {"emitted": False, "reason": "telegram_not_running"}
+
+        token, chat_id = self._resolve_telegram_target()
+        if not token or not chat_id:
+            self.audit_log.append(
+                actor=actor,
+                action="llm.model_scout.notify",
+                params={
+                    "trigger": trigger,
+                    "reason": str(event.get("reason") or ""),
+                    "provider": str(event.get("provider") or ""),
+                },
+                decision="allow",
+                reason="telegram_not_configured_or_no_chat",
+                dry_run=False,
+                outcome="skipped",
+                error_kind="telegram_not_configured_or_no_chat",
+                duration_ms=0,
+            )
+            return {"emitted": False, "reason": "telegram_not_configured_or_no_chat"}
+
+        message = self._format_model_scout_change_message(event)
+        start = time.monotonic()
+        try:
+            self._send_telegram_message(token, chat_id, message)
+        except Exception as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="llm.model_scout.notify",
+                params={
+                    "trigger": trigger,
+                    "reason": str(event.get("reason") or ""),
+                    "provider": str(event.get("provider") or ""),
+                    "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
+                },
+                decision="allow",
+                reason=f"telegram_send_failed:{exc.__class__.__name__}",
+                dry_run=False,
+                outcome="failed",
+                error_kind=f"telegram_send_failed:{exc.__class__.__name__}",
+                duration_ms=duration_ms,
+            )
+            return {"emitted": False, "reason": f"telegram_send_failed:{exc.__class__.__name__}"}
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="llm.model_scout.notify",
+            params={
+                "trigger": trigger,
+                "reason": str(event.get("reason") or ""),
+                "provider": str(event.get("provider") or ""),
+                "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
+            },
+            decision="allow",
+            reason="sent",
+            dry_run=False,
+            outcome="sent",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return {"emitted": True, "reason": "sent"}
+
+    def run_model_scout(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
         allowed, denied = self._model_scout_pack_gate(iface="model_scout.run")
         if not allowed:
             body = dict(denied or {"ok": False, "error": "pack_permission_denied"})
             self._log_request("/model_scout/run", False, body)
             return False, body
+        actor = "system" if trigger == "scheduler" else "user"
+        notify_state_before = self._load_model_scout_notify_state()
         result = self.model_scout.run(
             registry_document=self.registry_document,
             router_snapshot=self._router.doctor_snapshot(),
             usage_stats_snapshot=self._router.usage_stats_snapshot(),
             notify_sender=None,
         )
+        change_events = self._model_scout_change_events(
+            result=result if isinstance(result, dict) else {},
+            state_before=notify_state_before,
+        )
+        for event in change_events:
+            self._audit_model_scout_changed(actor=actor, event=event, trigger=trigger)
+
+        notify_result = {"emitted": False, "reason": "no_change"}
+        if change_events:
+            notify_result = self._notify_model_scout_change(
+                actor=actor,
+                trigger=trigger,
+                event=change_events[0],
+            )
+
+        default_provider, default_model = self._scout_defaults_from_document(self.registry_document)
+        notify_state_after = {
+            "schema_version": 1,
+            "initialized": True,
+            "last_default_provider": default_provider,
+            "last_default_model": default_model,
+            "last_ollama_models": self._scout_ollama_model_ids(self.registry_document),
+            "last_capabilities_signature": self._scout_capabilities_signature(self.registry_document),
+            "last_run_ts": int(time.time()),
+        }
+        self._save_model_scout_notify_state(notify_state_after)
         self._log_request(
             "/model_scout/run",
             bool(result.get("ok")),
@@ -8080,9 +8552,17 @@ class AgentRuntime:
                 "error": result.get("error"),
                 "suggestions": len(result.get("suggestions") or []),
                 "new": len(result.get("new_suggestions") or []),
+                "changes": len(change_events),
+                "notified": bool(notify_result.get("emitted", False)),
             },
         )
-        return bool(result.get("ok")), {"ok": bool(result.get("ok")), **result}
+        return bool(result.get("ok")), {
+            "ok": bool(result.get("ok")),
+            **result,
+            "model_scout_change_events": change_events,
+            "notification_emitted": bool(notify_result.get("emitted", False)),
+            "notification_reason": str(notify_result.get("reason") or "no_change"),
+        }
 
     def dismiss_model_scout_suggestion(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
         allowed, denied = self._model_scout_pack_gate(iface="model_scout.dismiss")
@@ -10829,6 +11309,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/model_scout/run":
+                ok, body = self.runtime.run_model_scout()
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/scout/run":
                 ok, body = self.runtime.run_model_scout()
                 self._send_json(200 if ok else 400, body)
                 return

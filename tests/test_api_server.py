@@ -762,6 +762,12 @@ class TestAPIServerRuntime(unittest.TestCase):
             run_payload = json.loads(run_handler.body.decode("utf-8"))
             self.assertTrue(run_payload["ok"])
 
+            llm_run_handler = _HandlerForTest(runtime, "/llm/scout/run", {})
+            llm_run_handler.do_POST()
+            self.assertEqual(200, llm_run_handler.status_code)
+            llm_run_payload = json.loads(llm_run_handler.body.decode("utf-8"))
+            self.assertTrue(llm_run_payload["ok"])
+
         with patch.object(
             runtime,
             "dismiss_model_scout_suggestion",
