@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -58,6 +59,40 @@ class Config:
     model_watch_state_path: str | None = None
     model_watch_config_path: str | None = None
     model_watch_catalog_path: str | None = None
+    provider_catalog_state_path: str | None = None
+    model_watch_min_improvement: float = 0.08
+    model_watch_buzz_enabled: bool = False
+    model_watch_buzz_sources_allowlist: tuple[str, ...] = (
+        "huggingface_trending",
+        "openrouter_models",
+    )
+    model_watch_hf_enabled: bool = False
+    model_watch_hf_allowlist_repos: tuple[str, ...] = ()
+    model_watch_hf_allowlist_orgs: tuple[str, ...] = ()
+    model_watch_hf_require_gguf_for_install: bool = True
+    model_watch_hf_max_total_bytes: int = 40 * 1024 * 1024 * 1024
+    model_watch_hf_state_path: str | None = None
+    model_watch_hf_download_base_path: str | None = None
+    default_policy: dict[str, object] = field(
+        default_factory=lambda: {
+            "cost_cap_per_1m": 6.0,
+            "allowlist": [],
+            "quality_weight": 1.0,
+            "price_weight": 0.04,
+            "latency_weight": 0.25,
+            "instability_weight": 0.5,
+        }
+    )
+    premium_policy: dict[str, object] = field(
+        default_factory=lambda: {
+            "cost_cap_per_1m": 12.0,
+            "allowlist": [],
+            "quality_weight": 1.35,
+            "price_weight": 0.025,
+            "latency_weight": 0.2,
+            "instability_weight": 0.45,
+        }
+    )
     memory_v2_enabled: bool = False
     intent_llm_rerank_enabled: bool = False
     perception_enabled: bool = True
@@ -265,6 +300,136 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     model_watch_state_path = os.getenv("AGENT_MODEL_WATCH_STATE_PATH", "").strip() or None
     model_watch_config_path = os.getenv("AGENT_MODEL_WATCH_CONFIG_PATH", "").strip() or None
     model_watch_catalog_path = os.getenv("AGENT_MODEL_WATCH_CATALOG_PATH", "").strip() or None
+    provider_catalog_state_path = os.getenv("AGENT_PROVIDER_CATALOG_STATE_PATH", "").strip() or None
+    model_watch_min_improvement = float(os.getenv("AGENT_MODEL_WATCH_MIN_IMPROVEMENT", "0.08") or 0.08)
+    model_watch_buzz_enabled = os.getenv("AGENT_MODEL_WATCH_BUZZ_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    model_watch_buzz_sources_allowlist_raw = os.getenv(
+        "AGENT_MODEL_WATCH_BUZZ_SOURCES_ALLOWLIST",
+        "openrouter_models,huggingface_trending",
+    ).strip()
+    model_watch_buzz_sources_allowlist = tuple(
+        sorted(
+            {
+                item.strip().lower()
+                for item in model_watch_buzz_sources_allowlist_raw.split(",")
+                if item.strip()
+            }
+        )
+    ) or (
+        "huggingface_trending",
+        "openrouter_models",
+    )
+    model_watch_hf_enabled = os.getenv("AGENT_MODEL_WATCH_HF_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    model_watch_hf_allowlist_repos_raw = os.getenv(
+        "AGENT_MODEL_WATCH_HF_ALLOWLIST_REPOS",
+        "",
+    ).strip()
+    model_watch_hf_allowlist_repos = tuple(
+        sorted(
+            {
+                item.strip()
+                for item in model_watch_hf_allowlist_repos_raw.split(",")
+                if item.strip()
+            }
+        )
+    )
+    model_watch_hf_allowlist_orgs_raw = os.getenv(
+        "AGENT_MODEL_WATCH_HF_ALLOWLIST_ORGS",
+        "",
+    ).strip()
+    model_watch_hf_allowlist_orgs = tuple(
+        sorted(
+            {
+                item.strip()
+                for item in model_watch_hf_allowlist_orgs_raw.split(",")
+                if item.strip()
+            }
+        )
+    )
+    model_watch_hf_require_gguf_for_install = os.getenv(
+        "AGENT_MODEL_WATCH_HF_REQUIRE_GGUF_FOR_INSTALL",
+        "1",
+    ).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    model_watch_hf_max_total_bytes = int(
+        os.getenv("AGENT_MODEL_WATCH_HF_MAX_TOTAL_BYTES", str(40 * 1024 * 1024 * 1024))
+        or (40 * 1024 * 1024 * 1024)
+    )
+    model_watch_hf_state_path = os.getenv("AGENT_MODEL_WATCH_HF_STATE_PATH", "").strip() or None
+    model_watch_hf_download_base_path = (
+        os.getenv("AGENT_MODEL_WATCH_HF_DOWNLOAD_BASE_PATH", "").strip() or None
+    )
+
+    def _policy_from_env(prefix: str, fallback: dict[str, object]) -> dict[str, object]:
+        policy = dict(fallback)
+        raw_json = os.getenv(f"AGENT_{prefix}_POLICY", "").strip()
+        if raw_json:
+            try:
+                parsed = json.loads(raw_json)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"AGENT_{prefix}_POLICY must be valid JSON.") from exc
+            if not isinstance(parsed, dict):
+                raise RuntimeError(f"AGENT_{prefix}_POLICY must be a JSON object.")
+            policy.update(parsed)
+        cost_cap_raw = os.getenv(f"AGENT_{prefix}_POLICY_COST_CAP_PER_1M", "").strip()
+        if cost_cap_raw:
+            policy["cost_cap_per_1m"] = float(cost_cap_raw)
+        allowlist_raw = os.getenv(f"AGENT_{prefix}_POLICY_ALLOWLIST", "").strip()
+        if allowlist_raw:
+            policy["allowlist"] = sorted({item.strip() for item in allowlist_raw.split(",") if item.strip()})
+        for key in ("quality_weight", "price_weight", "latency_weight", "instability_weight"):
+            value_raw = os.getenv(f"AGENT_{prefix}_POLICY_{key.upper()}", "").strip()
+            if value_raw:
+                policy[key] = float(value_raw)
+        allowlist = policy.get("allowlist")
+        if isinstance(allowlist, (list, tuple, set, frozenset)):
+            policy["allowlist"] = sorted({str(item).strip() for item in allowlist if str(item).strip()})
+        else:
+            policy["allowlist"] = []
+        policy["cost_cap_per_1m"] = max(0.0, float(policy.get("cost_cap_per_1m", fallback["cost_cap_per_1m"])))
+        for key in ("quality_weight", "price_weight", "latency_weight", "instability_weight"):
+            policy[key] = max(0.0, float(policy.get(key, fallback[key])))
+        return policy
+
+    default_policy = _policy_from_env(
+        "DEFAULT",
+        {
+            "cost_cap_per_1m": 6.0,
+            "allowlist": [],
+            "quality_weight": 1.0,
+            "price_weight": 0.04,
+            "latency_weight": 0.25,
+            "instability_weight": 0.5,
+        },
+    )
+    premium_policy = _policy_from_env(
+        "PREMIUM",
+        {
+            "cost_cap_per_1m": 12.0,
+            "allowlist": [],
+            "quality_weight": 1.35,
+            "price_weight": 0.025,
+            "latency_weight": 0.2,
+            "instability_weight": 0.45,
+        },
+    )
     memory_v2_enabled = os.getenv("AGENT_MEMORY_V2_ENABLED", "0").strip().lower() in {
         "1",
         "true",
@@ -471,6 +636,14 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("AGENT_MODEL_WATCH_INTERVAL_SECONDS must be >= 1.")
     if model_watch_startup_grace_seconds < 0:
         raise RuntimeError("AGENT_MODEL_WATCH_STARTUP_GRACE_SECONDS must be >= 0.")
+    if model_watch_min_improvement < 0:
+        raise RuntimeError("AGENT_MODEL_WATCH_MIN_IMPROVEMENT must be >= 0.")
+    if model_watch_hf_max_total_bytes < 0:
+        raise RuntimeError("AGENT_MODEL_WATCH_HF_MAX_TOTAL_BYTES must be >= 0.")
+    if float(default_policy.get("cost_cap_per_1m", 0.0)) < 0:
+        raise RuntimeError("AGENT_DEFAULT_POLICY_COST_CAP_PER_1M must be >= 0.")
+    if float(premium_policy.get("cost_cap_per_1m", 0.0)) < 0:
+        raise RuntimeError("AGENT_PREMIUM_POLICY_COST_CAP_PER_1M must be >= 0.")
     if perception_interval_seconds < 1:
         raise RuntimeError("PERCEPTION_INTERVAL_SECONDS must be >= 1.")
     if llm_health_interval_seconds < 1:
@@ -570,6 +743,19 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         model_watch_state_path=model_watch_state_path,
         model_watch_config_path=model_watch_config_path,
         model_watch_catalog_path=model_watch_catalog_path,
+        provider_catalog_state_path=provider_catalog_state_path,
+        model_watch_min_improvement=model_watch_min_improvement,
+        model_watch_buzz_enabled=model_watch_buzz_enabled,
+        model_watch_buzz_sources_allowlist=model_watch_buzz_sources_allowlist,
+        model_watch_hf_enabled=model_watch_hf_enabled,
+        model_watch_hf_allowlist_repos=model_watch_hf_allowlist_repos,
+        model_watch_hf_allowlist_orgs=model_watch_hf_allowlist_orgs,
+        model_watch_hf_require_gguf_for_install=model_watch_hf_require_gguf_for_install,
+        model_watch_hf_max_total_bytes=model_watch_hf_max_total_bytes,
+        model_watch_hf_state_path=model_watch_hf_state_path,
+        model_watch_hf_download_base_path=model_watch_hf_download_base_path,
+        default_policy=default_policy,
+        premium_policy=premium_policy,
         memory_v2_enabled=memory_v2_enabled,
         intent_llm_rerank_enabled=intent_llm_rerank_enabled,
         perception_enabled=perception_enabled,

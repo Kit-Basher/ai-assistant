@@ -106,6 +106,13 @@ from agent.llm.support import (
     build_provider_diagnosis,
     sanitize_support_payload,
 )
+from agent.llm.value_policy import (
+    ValuePolicy,
+    detect_premium_escalation_triggers,
+    normalize_policy,
+    rank_candidates_by_utility,
+    utility_delta,
+)
 from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Message, Request
@@ -117,7 +124,6 @@ from agent.modelops.recommend import (
     recommendation_to_dict,
     save_seen_model_ids,
 )
-from agent.model_recommendation import RecommendationContext, rank_candidates
 from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
     WizardChoice,
@@ -666,6 +672,9 @@ class AgentRuntime:
             "created_ts": None,
             "expires_ts": None,
         }
+        self._premium_override_once = False
+        self._premium_override_until_ts: int | None = None
+        self._model_watch_last_proposal_evaluation: dict[str, Any] | None = None
         self._memory_v2_bootstrap_status: dict[str, Any] = {"ran": False, "ok": False}
         if self._defer_bootstrap_warmup:
             warmup_tasks = self._build_startup_warmup_tasks()
@@ -3616,6 +3625,135 @@ class AgentRuntime:
                 },
             )
 
+    def _value_policy(self, name: str) -> ValuePolicy:
+        policy_name = str(name or "default").strip().lower() or "default"
+        raw = self.config.premium_policy if policy_name == "premium" else self.config.default_policy
+        return normalize_policy(raw if isinstance(raw, dict) else {}, name=policy_name)
+
+    def _model_policy_candidates(self) -> list[dict[str, Any]]:
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        snapshot = self._router.doctor_snapshot()
+        snapshot_rows = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
+        snapshot_by_id = {
+            str(row.get("id") or "").strip(): row
+            for row in snapshot_rows
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        candidates: list[dict[str, Any]] = []
+        for model_id, model_row in sorted(models.items()):
+            if not isinstance(model_row, dict):
+                continue
+            provider_id = str(model_row.get("provider") or "").strip().lower()
+            provider_row = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
+            if not provider_id or not isinstance(provider_row, dict):
+                continue
+            pricing = model_row.get("pricing") if isinstance(model_row.get("pricing"), dict) else {}
+            snapshot_row = snapshot_by_id.get(str(model_id))
+            health = snapshot_row.get("health") if isinstance(snapshot_row, dict) and isinstance(snapshot_row.get("health"), dict) else {}
+            candidates.append(
+                {
+                    "model_id": str(model_id).strip(),
+                    "provider": provider_id,
+                    "local": bool(provider_row.get("local", False)),
+                    "enabled": bool(model_row.get("enabled", False)),
+                    "available": bool(model_row.get("available", False)),
+                    "routable": bool(snapshot_row.get("routable", False)) if isinstance(snapshot_row, dict) else False,
+                    "quality_rank": int(model_row.get("quality_rank", 0) or 0),
+                    "price_in": pricing.get("input_per_million_tokens"),
+                    "price_out": pricing.get("output_per_million_tokens"),
+                    "context_tokens": (
+                        int(model_row.get("max_context_tokens"))
+                        if model_row.get("max_context_tokens") is not None
+                        else None
+                    ),
+                    "health_status": str(health.get("status") or "unknown").strip().lower(),
+                }
+            )
+        return candidates
+
+    def _rank_models_for_policy(
+        self,
+        *,
+        policy: ValuePolicy,
+        allow_remote_fallback: bool,
+    ) -> tuple[list[Any], list[Any]]:
+        return rank_candidates_by_utility(
+            self._model_policy_candidates(),
+            policy=policy,
+            allow_remote_fallback=allow_remote_fallback,
+        )
+
+    def _premium_override_active(self, *, now_epoch: int) -> bool:
+        if self._premium_override_once:
+            return True
+        until = int(self._premium_override_until_ts or 0)
+        if until and now_epoch <= until:
+            return True
+        if until and now_epoch > until:
+            self._premium_override_until_ts = None
+        return False
+
+    def _persist_premium_over_cap_prompt(
+        self,
+        *,
+        baseline_model: str,
+        premium_model: str,
+        premium_cost: float,
+        premium_cap: float,
+    ) -> str:
+        now_epoch = int(time.time())
+        issue_hash_payload = {
+            "issue_code": "premium_over_cap",
+            "baseline_model": baseline_model,
+            "premium_model": premium_model,
+            "premium_cost": round(float(premium_cost), 6),
+            "premium_cap": round(float(premium_cap), 6),
+        }
+        issue_hash = hashlib.sha256(
+            json.dumps(issue_hash_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        choices = [
+            {"id": "continue_baseline", "label": "Continue baseline", "recommended": True},
+            {"id": "upgrade_once", "label": "Upgrade once", "recommended": False},
+            {"id": "set_premium_1h", "label": "Set premium for 1h", "recommended": False},
+        ]
+        self._llm_fixit_store.save(
+            {
+                "active": True,
+                "issue_hash": issue_hash,
+                "issue_code": "premium_over_cap",
+                "step": "awaiting_choice",
+                "question": "Reply 1, 2, or 3.",
+                "choices": choices,
+                "pending_plan": [],
+                "pending_confirm_token": None,
+                "pending_created_ts": None,
+                "pending_expires_ts": None,
+                "pending_issue_code": None,
+                "last_prompt_ts": now_epoch,
+            }
+        )
+        return "\n".join(
+            [
+                f"Premium escalation is over the cost cap ({premium_cost:.2f} > {premium_cap:.2f} per 1M tokens).",
+                "1) Continue baseline.",
+                "2) Upgrade once.",
+                "3) Set premium for 1h.",
+                "Reply 1, 2, or 3.",
+            ]
+        )
+
+    @staticmethod
+    def _last_user_message_text(messages: list[dict[str, str]]) -> str:
+        for item in reversed(messages):
+            if str(item.get("role") or "").strip().lower() == "user":
+                return str(item.get("content") or "")
+        if messages:
+            return str((messages[-1] or {}).get("content") or "")
+        return ""
+
     def chat(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         request_started_epoch = int(time.time())
         messages = self._normalize_messages(payload)
@@ -3623,8 +3761,11 @@ class AgentRuntime:
             return False, {"ok": False, "error": "messages must be a non-empty list"}
 
         defaults = self.get_defaults()
+        explicit_model_override = bool(str(payload.get("model") or "").strip())
+        explicit_provider_override = bool(str(payload.get("provider") or "").strip())
         model_override = str(payload.get("model") or "").strip() or defaults.get("default_model")
         provider_override = str(payload.get("provider") or "").strip().lower() or defaults.get("default_provider")
+        allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
         explicit_require_tools = "require_tools" in payload
         require_tools = bool(payload.get("require_tools"))
         memory_context_text = str(payload.get("memory_context_text") or "").strip()
@@ -3633,13 +3774,115 @@ class AgentRuntime:
             memory_prefix_messages = [{"role": "system", "content": memory_context_text}]
         routed_messages = [*memory_prefix_messages, *messages]
 
-        last_user_text = ""
-        for item in reversed(messages):
-            if item.get("role") == "user":
-                last_user_text = str(item.get("content") or "")
-                break
-        if not last_user_text:
-            last_user_text = str((messages[-1] or {}).get("content") or "")
+        last_user_text = self._last_user_message_text(messages)
+
+        # Default policy: keep current default unless policy allowlist/cap disallows it.
+        baseline_policy = self._value_policy("default")
+        default_allowed, default_rejected = self._rank_models_for_policy(
+            policy=baseline_policy,
+            allow_remote_fallback=allow_remote_fallback,
+        )
+        default_by_id = {str(row.model_id): row for row in [*default_allowed, *default_rejected]}
+        default_model_id = str(model_override or "").strip()
+        default_score = default_by_id.get(default_model_id)
+        if (
+            (not explicit_model_override)
+            and default_model_id
+            and default_score is not None
+            and not bool(default_score.allowed)
+            and default_allowed
+        ):
+            selected_default = default_allowed[0]
+            model_override = str(selected_default.model_id)
+            provider_override = str(selected_default.provider)
+            default_score = selected_default
+        elif default_score is None and default_allowed and (not explicit_model_override):
+            selected_default = default_allowed[0]
+            model_override = str(selected_default.model_id)
+            provider_override = str(selected_default.provider)
+            default_score = selected_default
+
+        escalation_reasons = detect_premium_escalation_triggers(user_text=last_user_text, payload=payload)
+        premium_selected = None
+        if escalation_reasons and not explicit_model_override and not explicit_provider_override:
+            premium_policy = self._value_policy("premium")
+            premium_allowed, premium_rejected = self._rank_models_for_policy(
+                policy=premium_policy,
+                allow_remote_fallback=allow_remote_fallback,
+            )
+            premium_unbounded = ValuePolicy(
+                name=premium_policy.name,
+                cost_cap_per_1m=1_000_000.0,
+                allowlist=premium_policy.allowlist,
+                quality_weight=premium_policy.quality_weight,
+                price_weight=premium_policy.price_weight,
+                latency_weight=premium_policy.latency_weight,
+                instability_weight=premium_policy.instability_weight,
+            )
+            premium_no_cap_allowed, _premium_no_cap_rejected = self._rank_models_for_policy(
+                policy=premium_unbounded,
+                allow_remote_fallback=allow_remote_fallback,
+            )
+            baseline_utility = float(default_score.utility) if default_score is not None else -10_000.0
+            top_premium = next(
+                (
+                    row
+                    for row in premium_allowed
+                    if str(row.model_id) != str(model_override or "")
+                ),
+                None,
+            )
+            top_no_cap = next(
+                (
+                    row
+                    for row in premium_no_cap_allowed
+                    if str(row.model_id) != str(model_override or "")
+                ),
+                None,
+            )
+            override_active = self._premium_override_active(now_epoch=request_started_epoch)
+            if top_no_cap is not None and (
+                float(top_no_cap.expected_cost_per_1m) > float(premium_policy.cost_cap_per_1m)
+            ):
+                if override_active and (float(top_no_cap.utility) > baseline_utility):
+                    premium_selected = top_no_cap
+                elif not override_active:
+                    prompt = self._persist_premium_over_cap_prompt(
+                        baseline_model=str(model_override or ""),
+                        premium_model=str(top_no_cap.model_id),
+                        premium_cost=float(top_no_cap.expected_cost_per_1m),
+                        premium_cap=float(premium_policy.cost_cap_per_1m),
+                    )
+                    response = {
+                        "ok": True,
+                        "assistant": {"role": "assistant", "content": prompt},
+                        "meta": {
+                            "provider": provider_override,
+                            "model": model_override,
+                            "fallback_used": False,
+                            "attempts": [],
+                            "duration_ms": 0,
+                            "error": None,
+                            "autopilot": self._chat_autopilot_meta(request_started_epoch),
+                            "selection_policy": {
+                                "mode": "premium_over_cap",
+                                "baseline_model": str(model_override or ""),
+                                "premium_candidate": str(top_no_cap.model_id),
+                                "premium_cost_per_1m": float(top_no_cap.expected_cost_per_1m),
+                                "premium_cap_per_1m": float(premium_policy.cost_cap_per_1m),
+                                "escalation_reasons": list(escalation_reasons),
+                            },
+                        },
+                    }
+                    self._log_request("/chat", True, response["meta"])
+                    return True, response
+            if premium_selected is None and top_premium is not None and float(top_premium.utility) > baseline_utility:
+                premium_selected = top_premium
+            if premium_selected is not None:
+                model_override = str(premium_selected.model_id)
+                provider_override = str(premium_selected.provider)
+                if self._premium_override_once:
+                    self._premium_override_once = False
 
         if not explicit_require_tools:
             domains = classify_authoritative_domain(last_user_text)
@@ -3706,6 +3949,13 @@ class AgentRuntime:
                 "duration_ms": int(result.get("duration_ms") or 0),
                 "error": result.get("error_class"),
                 "autopilot": self._chat_autopilot_meta(request_started_epoch),
+                "selection_policy": {
+                    "default_model": str(defaults.get("default_model") or ""),
+                    "selected_model": str(model_override or ""),
+                    "selected_provider": str(provider_override or ""),
+                    "escalation_reasons": list(escalation_reasons),
+                    "premium_selected": str(getattr(premium_selected, "model_id", "") or ""),
+                },
             },
         }
         self._log_request("/chat", bool(result.get("ok")), response["meta"])
@@ -7334,6 +7584,61 @@ class AgentRuntime:
                         "plan": [row for row in pending_plan_rows if isinstance(row, dict)],
                         "trace_id": f"fixit-{now_epoch}",
                     }
+            if issue_code_for_choice == "premium_over_cap":
+                if selected == "continue_baseline":
+                    self._premium_override_once = False
+                    self._premium_override_until_ts = None
+                    _save_idle_state(last_test=openrouter_last_test)
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 1.0,
+                        "did_work": False,
+                        "error_kind": None,
+                        "message": "Okay, I will keep using the baseline model.",
+                        "next_question": None,
+                        "actions": [],
+                        "errors": [],
+                        "status": "ok",
+                        "issue_code": issue_code_for_choice,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+                if selected == "upgrade_once":
+                    self._premium_override_once = True
+                    self._premium_override_until_ts = None
+                    _save_idle_state(last_test=openrouter_last_test)
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 1.0,
+                        "did_work": True,
+                        "error_kind": None,
+                        "message": "Understood. I will allow one premium upgrade on the next escalated request.",
+                        "next_question": None,
+                        "actions": [],
+                        "errors": [],
+                        "status": "ok",
+                        "issue_code": issue_code_for_choice,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+                if selected == "set_premium_1h":
+                    self._premium_override_once = False
+                    self._premium_override_until_ts = now_epoch + 3600
+                    _save_idle_state(last_test=openrouter_last_test)
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 1.0,
+                        "did_work": True,
+                        "error_kind": None,
+                        "message": "Understood. Premium upgrades are allowed for the next 1 hour.",
+                        "next_question": None,
+                        "actions": [],
+                        "errors": [],
+                        "status": "ok",
+                        "issue_code": issue_code_for_choice,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
             if selected in {"add_openrouter_key", "update_openrouter_key"}:
                 self._llm_fixit_store.save(
                     {
@@ -9197,31 +9502,29 @@ class AgentRuntime:
         provider_row: dict[str, Any],
     ) -> dict[str, Any]:
         pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
-        capabilities = row.get("capabilities") if isinstance(row.get("capabilities"), list) else []
         provider_id = str(row.get("provider") or "").strip().lower()
-        model_name = str(row.get("model") or "").strip()
         available = bool(row.get("enabled", False)) and bool(row.get("available", False))
+        routable = bool(row.get("routable", available))
         if "routable" in row:
             available = available and bool(row.get("routable", False))
+            routable = bool(row.get("routable", False))
         context_tokens = None
         try:
             context_tokens = int(row.get("max_context_tokens")) if row.get("max_context_tokens") is not None else None
         except (TypeError, ValueError):
             context_tokens = None
         return {
-            "provider_id": provider_id,
-            "model_id": model_name or str(model_id).split(":", 1)[-1],
+            "provider": provider_id,
+            "model_id": str(model_id).strip(),
             "context_tokens": context_tokens,
-            "capabilities": [
-                str(item).strip().lower()
-                for item in capabilities
-                if str(item).strip()
-            ]
-            or ["chat"],
             "local": bool(provider_row.get("local", False)),
-            "availability": bool(available),
+            "enabled": bool(row.get("enabled", False)),
+            "available": bool(available),
+            "routable": bool(routable),
+            "quality_rank": int(row.get("quality_rank", 0) or 0),
             "price_in": pricing.get("input_per_million_tokens"),
             "price_out": pricing.get("output_per_million_tokens"),
+            "health_status": "unknown",
         }
 
     def _build_model_watch_proposal(
@@ -9229,14 +9532,26 @@ class AgentRuntime:
         *,
         delta_rows: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        self._model_watch_last_proposal_evaluation = {
+            "status": "no_delta_candidates",
+            "reason": "no_delta_candidates",
+            "current_model": None,
+            "current_utility": None,
+            "min_improvement": round(max(0.0, float(self.config.model_watch_min_improvement)), 4),
+            "top_candidate": None,
+            "rejected_candidates": [],
+            "policy_rejections": [],
+        }
         registry_document = self.registry_document if isinstance(self.registry_document, dict) else {}
         defaults = registry_document.get("defaults") if isinstance(registry_document.get("defaults"), dict) else {}
         models = registry_document.get("models") if isinstance(registry_document.get("models"), dict) else {}
         providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
         current_model = str(defaults.get("default_model") or "").strip()
         if not current_model:
+            self._model_watch_last_proposal_evaluation["reason"] = "default_model_missing"
             return None
         if current_model not in models:
+            self._model_watch_last_proposal_evaluation["reason"] = "default_model_not_found"
             return None
 
         delta_model_ids = sorted(
@@ -9247,7 +9562,9 @@ class AgentRuntime:
             }
         )
         if not delta_model_ids:
+            self._model_watch_last_proposal_evaluation["reason"] = "no_delta_candidates"
             return None
+        delta_id_set = {item for item in delta_model_ids if item}
 
         candidate_ids = sorted({current_model, *delta_model_ids})
         candidate_rows: list[dict[str, Any]] = []
@@ -9267,53 +9584,106 @@ class AgentRuntime:
                 )
             )
         if not candidate_rows:
+            self._model_watch_last_proposal_evaluation["reason"] = "no_scoring_candidates"
             return None
 
-        ranking = rank_candidates(
+        default_policy = self._value_policy("default")
+        allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
+        allowed_rows, rejected_rows = rank_candidates_by_utility(
             candidate_rows,
-            RecommendationContext(
-                purpose="chat",
-                default_model=current_model,
-                allow_remote_fallback=bool(defaults.get("allow_remote_fallback", True)),
-                enabled_providers=self._model_watch_enabled_provider_set(registry_document),
-                vram_gb=None,
-            ),
+            policy=default_policy,
+            allow_remote_fallback=allow_remote_fallback,
         )
-        ranked_by_id = {str(row.canonical_model_id): row for row in ranking.ranked}
-        current_row = ranked_by_id.get(current_model)
+        all_rows_by_id = {str(row.model_id): row for row in [*allowed_rows, *rejected_rows]}
+        current_row = all_rows_by_id.get(current_model)
         if current_row is None:
+            self._model_watch_last_proposal_evaluation["reason"] = "default_not_routable"
             return None
 
-        delta_ranked = [
-            row
-            for row in ranking.ranked
-            if str(row.canonical_model_id) in set(delta_model_ids)
-            and str(row.canonical_model_id) != current_model
+        delta_allowed = [
+            row for row in allowed_rows if str(row.model_id) in delta_id_set and str(row.model_id) != current_model
         ]
-        if not delta_ranked:
-            return None
-        top_new = delta_ranked[0]
-        improvement_ratio = (float(top_new.total_score) - float(current_row.total_score)) / 100.0
+        delta_rejected = [
+            row for row in rejected_rows if str(row.model_id) in delta_id_set and str(row.model_id) != current_model
+        ]
+        rejected_candidates = [
+            {"model_id": str(row.model_id), "rejected_by": str(row.rejected_by or "unknown")}
+            for row in delta_rejected
+        ]
+        policy_rejections = sorted(
+            {
+                str(row.rejected_by or "unknown")
+                for row in delta_rejected
+                if str(row.rejected_by or "").strip()
+            }
+        )
+        top_new = delta_allowed[0] if delta_allowed else None
+        improvement_ratio = utility_delta(current=current_row, candidate=top_new)
+        quality_delta = (
+            round(float(top_new.quality) - float(current_row.quality), 4)
+            if top_new is not None
+            else 0.0
+        )
+        expected_cost_delta = (
+            round(float(top_new.expected_cost_per_1m) - float(current_row.expected_cost_per_1m), 4)
+            if top_new is not None
+            else 0.0
+        )
         min_improvement = max(0.0, float(self.config.model_watch_min_improvement))
+        self._model_watch_last_proposal_evaluation = {
+            "status": "evaluated",
+            "reason": "evaluated",
+            "current_model": current_model,
+            "current_utility": round(float(current_row.utility), 6),
+            "min_improvement": round(float(min_improvement), 4),
+            "top_candidate": (
+                {
+                    "model_id": str(top_new.model_id),
+                    "provider": str(top_new.provider),
+                    "utility_delta": round(float(improvement_ratio), 6),
+                    "quality_delta": round(float(quality_delta), 6),
+                    "expected_cost_delta": round(float(expected_cost_delta), 6),
+                    "expected_cost_per_1m": round(float(top_new.expected_cost_per_1m), 6),
+                }
+                if top_new is not None
+                else None
+            ),
+            "rejected_candidates": rejected_candidates,
+            "policy_rejections": policy_rejections,
+        }
+        if top_new is None:
+            self._model_watch_last_proposal_evaluation["reason"] = "no_allowed_delta_candidate"
+            return None
         if improvement_ratio < min_improvement:
+            self._model_watch_last_proposal_evaluation["reason"] = "improvement_below_threshold"
             return None
 
         from_model = current_model
-        to_model = str(top_new.canonical_model_id)
-        to_provider = str(top_new.provider_id)
+        to_model = str(top_new.model_id)
+        to_provider = str(top_new.provider)
         score_delta = round(improvement_ratio, 4)
-        tradeoffs = [str(item).strip() for item in top_new.tradeoffs if str(item).strip()]
-        reason_lines = [str(item).strip() for item in top_new.reasons if str(item).strip()] or [
-            "Deterministic rubric ranked this candidate above the current default."
-        ]
+        tradeoffs: list[str] = []
+        if expected_cost_delta > 0:
+            tradeoffs.append("higher_expected_cost")
+        if float(top_new.latency) > float(current_row.latency):
+            tradeoffs.append("higher_latency")
+        if float(top_new.risk) > float(current_row.risk):
+            tradeoffs.append("higher_instability_risk")
+        if policy_rejections:
+            tradeoffs.append(f"rejected_alternatives:{','.join(policy_rejections)}")
         details_lines = [
-            f"Current default: {from_model} (score {float(current_row.total_score):.2f})",
-            f"Proposed default: {to_model} (score {float(top_new.total_score):.2f})",
-            f"Score improvement: +{score_delta:.2f} (threshold {min_improvement:.2f})",
-            f"Reason: {reason_lines[0]}",
+            f"Current default: {from_model} (utility {float(current_row.utility):.2f})",
+            f"Proposed default: {to_model} (utility {float(top_new.utility):.2f})",
+            f"Utility improvement: +{score_delta:.2f} (threshold {min_improvement:.2f})",
+            f"Quality delta: {quality_delta:+.2f}",
+            f"Expected cost delta per 1M tokens: {expected_cost_delta:+.2f}",
         ]
         if tradeoffs:
             details_lines.append(f"Tradeoff: {tradeoffs[0]}")
+        if policy_rejections:
+            details_lines.append(f"Policy rejection reason(s): {', '.join(policy_rejections)}")
+        self._model_watch_last_proposal_evaluation["status"] = "proposal_created"
+        self._model_watch_last_proposal_evaluation["reason"] = "proposal_created"
 
         plan_rows = [
             {
@@ -9334,6 +9704,7 @@ class AgentRuntime:
                 "Model Watch found a better default candidate.",
                 f"Current default: {from_model}",
                 f"Recommended: {to_model} (+{score_delta:.2f})",
+                f"Cost delta per 1M tokens: {expected_cost_delta:+.2f}",
                 "Reply 1 to switch, 2 to snooze, or 3 for details.",
             ]
         )
@@ -9343,6 +9714,10 @@ class AgentRuntime:
             "to_model": to_model,
             "provider": to_provider,
             "score_delta": score_delta,
+            "utility_delta": score_delta,
+            "quality_delta": round(float(quality_delta), 4),
+            "expected_cost_delta": round(float(expected_cost_delta), 4),
+            "policy_rejections": policy_rejections,
             "message": prompt,
             "details": "\n".join(details_lines),
             "plan_rows": plan_rows,
@@ -9717,6 +10092,11 @@ class AgentRuntime:
                 pass
 
         provider_proposal = self._build_model_watch_proposal(delta_rows=delta_rows)
+        proposal_evaluation = (
+            dict(self._model_watch_last_proposal_evaluation)
+            if isinstance(self._model_watch_last_proposal_evaluation, dict)
+            else None
+        )
         hf_scan_ok = True
         hf_scan_payload: dict[str, Any] = {
             "ok": True,
@@ -9794,6 +10174,11 @@ class AgentRuntime:
                         "changed_models": len(catalog_delta.changed_models),
                         "hf_discovered_count": int(hf_scan_payload.get("discovered_count") or 0),
                         "hf_scan_ok": bool(hf_scan_ok),
+                        "proposal_eval_reason": (
+                            str((proposal_evaluation or {}).get("reason") or "")
+                            if isinstance(proposal_evaluation, dict)
+                            else ""
+                        ),
                     },
                     decision="allow",
                     reason="no_better_candidate",
@@ -9828,6 +10213,7 @@ class AgentRuntime:
             },
             "proposal_created": bool(proposal is not None),
             "proposal": proposal,
+            "proposal_evaluation": proposal_evaluation,
             "proposal_type": proposal_type if proposal is not None else None,
             "proposal_notification_emitted": bool(notify_result.get("emitted", False)),
             "proposal_notification_reason": str(notify_result.get("reason") or "no_change"),
