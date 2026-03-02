@@ -8403,7 +8403,6 @@ class AgentRuntime:
                     "reason": str(event.get("reason") or ""),
                     "provider": str(event.get("provider") or ""),
                     "score_delta": event.get("score_delta"),
-                    "trigger": trigger,
                 },
                 decision="allow",
                 reason=str(event.get("reason") or "changed"),
