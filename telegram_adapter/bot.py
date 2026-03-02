@@ -49,7 +49,7 @@ from agent.ux.clarify_suggest import (
     parse_recovery_choice,
     recovery_options,
 )
-from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
+from agent.ux.llm_fixit_wizard import LLMFixitWizardStore, confirm_token_for_plan_rows
 from memory.db import MemoryDB
 
 
@@ -134,6 +134,11 @@ def classify_model_provider_intent(text: str) -> str:
             "set up openrouter",
             "configure openrouter",
             "openrouter setup",
+            "repair openrouter",
+            "fix openrouter",
+            "openrouter down",
+            "openrouter broken",
+            "openrouter unavailable",
         ),
     ):
         return "provider.setup.openrouter"
@@ -654,6 +659,8 @@ def _setup_wizard_route_reply(
     runtime: Any | None,
     wizard_store: TelegramModelProviderWizardStore | None,
     llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None,
+    llm_fixit_store: LLMFixitWizardStore | None,
+    audit_log: AuditLog | None,
     orchestrator: Orchestrator | None,
     chat_id: str,
     text: str,
@@ -692,6 +699,21 @@ def _setup_wizard_route_reply(
             if llm_fixit_fn is None:
                 return "LLM fix-it is unavailable right now."
             ok, body = llm_fixit_fn({"actor": "telegram"})
+            persisted_state = _persist_fixit_prompt_state_from_response(
+                wizard_store=llm_fixit_store if isinstance(llm_fixit_store, LLMFixitWizardStore) else None,
+                body=body if isinstance(body, dict) else None,
+            )
+            if isinstance(persisted_state, dict):
+                prompt_step = str(persisted_state.get("step") or "").strip()
+                prompt_issue = str(persisted_state.get("issue_code") or "").strip()
+                prompt_status = "needs_confirmation" if prompt_step == "awaiting_confirm" else "needs_user_choice"
+                _safe_audit_fixit_prompt_shown(
+                    audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
+                    chat_id=chat_id,
+                    status=prompt_status,
+                    issue_code=prompt_issue,
+                    step=prompt_step,
+                )
             message = str((body or {}).get("message") or (body or {}).get("next_question") or "").strip()
             if message:
                 return message
@@ -976,6 +998,37 @@ def _safe_append_telegram_message_audit(
         pass
 
 
+def _safe_audit_fixit_prompt_shown(
+    *,
+    audit_log: AuditLog | None,
+    chat_id: str,
+    status: str,
+    issue_code: str,
+    step: str,
+) -> None:
+    if audit_log is None:
+        return
+    try:
+        audit_log.append(
+            actor="telegram",
+            action="telegram.fixit.prompt_shown",
+            params={
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "status": str(status or "").strip(),
+                "issue_code": str(issue_code or "").strip(),
+                "step": str(step or "").strip(),
+            },
+            decision="allow",
+            reason="prompt_shown",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=0,
+        )
+    except Exception:
+        pass
+
+
 def _wizard_status_from_state(state: dict[str, Any]) -> str:
     if not isinstance(state, dict):
         return "idle"
@@ -1033,7 +1086,114 @@ def _map_fixit_reply_to_payload(state: dict[str, Any], text: str) -> tuple[dict[
     return None, None
 
 
-def maybe_handle_llm_fixit_reply(
+def _normalize_fixit_choices(choices_raw: Any) -> list[dict[str, Any]]:
+    if not isinstance(choices_raw, list):
+        return []
+    choices: list[dict[str, Any]] = []
+    for row in choices_raw:
+        if not isinstance(row, dict):
+            continue
+        choice_id = str(row.get("id") or "").strip()
+        label = str(row.get("label") or "").strip()
+        if not choice_id or not label:
+            continue
+        choices.append(
+            {
+                "id": choice_id,
+                "label": label,
+                "recommended": bool(row.get("recommended", False)),
+            }
+        )
+    return choices
+
+
+def _persist_fixit_prompt_state_from_response(
+    *,
+    wizard_store: LLMFixitWizardStore | None,
+    body: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if wizard_store is None or not isinstance(body, dict):
+        return None
+    status = str(body.get("status") or "").strip().lower()
+    issue_code = str(body.get("issue_code") or "").strip()
+    message = str(body.get("message") or "").strip()
+    next_question = str(body.get("next_question") or "").strip()
+    now_epoch = int(pytime.time())
+    existing_state = (
+        wizard_store.state if isinstance(wizard_store.state, dict) else wizard_store.empty_state()
+    )
+    openrouter_last_test = (
+        existing_state.get("openrouter_last_test")
+        if isinstance(existing_state.get("openrouter_last_test"), dict)
+        else None
+    )
+
+    if status == "needs_user_choice":
+        choices = _normalize_fixit_choices(body.get("choices"))
+        if not choices:
+            return None
+        return wizard_store.save(
+            {
+                "active": True,
+                "issue_hash": str(existing_state.get("issue_hash") or "").strip() or None,
+                "issue_code": issue_code or str(existing_state.get("issue_code") or "").strip() or None,
+                "step": "awaiting_choice",
+                "question": next_question or message,
+                "choices": choices,
+                "pending_plan": [],
+                "pending_confirm_token": None,
+                "pending_created_ts": None,
+                "pending_expires_ts": None,
+                "pending_issue_code": None,
+                "last_prompt_ts": now_epoch,
+                "openrouter_last_test": openrouter_last_test,
+                "proposal_type": str(
+                    body.get("proposal_type") or existing_state.get("proposal_type") or ""
+                ).strip()
+                or None,
+                "proposal_details": str(
+                    body.get("proposal_details") or existing_state.get("proposal_details") or ""
+                ).strip()
+                or None,
+            }
+        )
+
+    if status == "needs_confirmation":
+        plan_rows_raw = body.get("plan")
+        plan_rows = [row for row in plan_rows_raw if isinstance(row, dict)] if isinstance(plan_rows_raw, list) else []
+        if not plan_rows:
+            return None
+        confirm_token = confirm_token_for_plan_rows(plan_rows)
+        choices = _normalize_fixit_choices(body.get("choices"))
+        return wizard_store.save(
+            {
+                "active": True,
+                "issue_hash": str(existing_state.get("issue_hash") or "").strip() or None,
+                "issue_code": issue_code or str(existing_state.get("issue_code") or "").strip() or None,
+                "step": "awaiting_confirm",
+                "question": next_question or message,
+                "choices": choices,
+                "pending_plan": plan_rows,
+                "pending_confirm_token": confirm_token,
+                "pending_created_ts": now_epoch,
+                "pending_expires_ts": now_epoch + 300,
+                "pending_issue_code": issue_code or str(existing_state.get("issue_code") or "").strip() or None,
+                "last_prompt_ts": now_epoch,
+                "openrouter_last_test": openrouter_last_test,
+                "proposal_type": str(
+                    body.get("proposal_type") or existing_state.get("proposal_type") or ""
+                ).strip()
+                or None,
+                "proposal_details": str(
+                    body.get("proposal_details") or existing_state.get("proposal_details") or ""
+                ).strip()
+                or None,
+            }
+        )
+    return None
+
+
+def _maybe_handle_llm_fixit_reply_with_route(
     *,
     llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None,
     wizard_store: LLMFixitWizardStore | None,
@@ -1041,9 +1201,9 @@ def maybe_handle_llm_fixit_reply(
     chat_id: str,
     text: str,
     log_path: str | None,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     if llm_fixit_fn is None or wizard_store is None:
-        return None
+        return None, None
     try:
         state = wizard_store.load()
         wizard_store.state = state
@@ -1053,7 +1213,7 @@ def maybe_handle_llm_fixit_reply(
     payload, hint_message = _map_fixit_reply_to_payload(state, text)
     if payload is None:
         if hint_message is None:
-            return None
+            return None, None
         if audit_log is not None:
             try:
                 audit_log.append(
@@ -1073,11 +1233,26 @@ def maybe_handle_llm_fixit_reply(
                 )
             except Exception:
                 pass
-        return hint_message
+        return hint_message, "fixit_invalid_choice"
 
     payload = dict(payload)
     payload["actor"] = "telegram"
     ok, body = llm_fixit_fn(payload)
+    persisted_state = _persist_fixit_prompt_state_from_response(
+        wizard_store=wizard_store,
+        body=body if isinstance(body, dict) else None,
+    )
+    if isinstance(persisted_state, dict):
+        prompt_step = str(persisted_state.get("step") or "").strip()
+        prompt_issue = str(persisted_state.get("issue_code") or "").strip()
+        prompt_status = "needs_confirmation" if prompt_step == "awaiting_confirm" else "needs_user_choice"
+        _safe_audit_fixit_prompt_shown(
+            audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
+            chat_id=chat_id,
+            status=prompt_status,
+            issue_code=prompt_issue,
+            step=prompt_step,
+        )
     message = str(body.get("message") or body.get("next_question") or "").strip()
     if not message:
         message = "I processed that fix-it step."
@@ -1114,6 +1289,26 @@ def maybe_handle_llm_fixit_reply(
                 "error_kind": str(body.get("error_kind") or "") or None,
             },
         )
+    return message, "fixit"
+
+
+def maybe_handle_llm_fixit_reply(
+    *,
+    llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None,
+    wizard_store: LLMFixitWizardStore | None,
+    audit_log: AuditLog | None,
+    chat_id: str,
+    text: str,
+    log_path: str | None,
+) -> str | None:
+    message, _route = _maybe_handle_llm_fixit_reply_with_route(
+        llm_fixit_fn=llm_fixit_fn,
+        wizard_store=wizard_store,
+        audit_log=audit_log,
+        chat_id=chat_id,
+        text=text,
+        log_path=log_path,
+    )
     return message
 
 
@@ -1166,7 +1361,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Remember which chat we're talking to (useful for reminders/jobs).
         db.set_preference("telegram_chat_id", chat_id)
 
-        fixit_reply = maybe_handle_llm_fixit_reply(
+        fixit_reply, fixit_route = _maybe_handle_llm_fixit_reply_with_route(
             llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
             wizard_store=wizard_store if isinstance(wizard_store, LLMFixitWizardStore) else None,
             audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
@@ -1175,12 +1370,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             log_path=log_path,
         )
         if fixit_reply is not None:
+            route = str(fixit_route or "fixit")
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
                 action="telegram.message.handled",
                 chat_id=chat_id,
                 message_kind="text",
-                route="fixit",
+                route=route,
                 outcome="handled",
             )
             await update.effective_message.reply_text(_safe_reply_text(fixit_reply))
@@ -1189,7 +1385,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "telegram_fixit_intercept",
                 {
                     "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": "fixit",
+                    "route": route,
                     "trace_id": trace_id,
                 },
             )
@@ -1203,6 +1399,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 else None
             ),
             llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
+            llm_fixit_store=wizard_store if isinstance(wizard_store, LLMFixitWizardStore) else None,
+            audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
             orchestrator=orchestrator if isinstance(orchestrator, Orchestrator) else None,
             chat_id=chat_id,
             text=text,
@@ -1229,13 +1427,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         normalized_text = _normalize_user_text(text)
-        if normalized_text in _WIZARD_CHOICE_TOKENS:
+        if normalized_text in {"1", "2", "3"}:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
                 action="telegram.message.handled",
                 chat_id=chat_id,
                 message_kind="text",
-                route="fallback",
+                route="numeric_no_wizard",
                 outcome="handled",
             )
             await update.effective_message.reply_text(_NO_ACTIVE_CHOICE_TEXT)
@@ -1244,7 +1442,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "telegram_message",
                 {
                     "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": "fallback",
+                    "route": "numeric_no_wizard",
                     "trace_id": trace_id,
                 },
             )
