@@ -399,7 +399,8 @@ class LLMHealthMonitor:
 
         error_kind = _normalize_error_kind(result.get("error_kind") or result.get("error"))
         status_code = _safe_int(result.get("status_code"), 0) or None
-        status = _status_for_error(error_kind, status_code)
+        status_hint = _normalize_status(result.get("status"))
+        status = status_hint if status_hint in {"down", "degraded"} else _status_for_error(error_kind, status_code)
         state["status"] = status
         state["last_error_kind"] = error_kind
         state["status_code"] = status_code

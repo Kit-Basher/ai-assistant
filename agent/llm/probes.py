@@ -9,6 +9,9 @@ import urllib.parse
 import urllib.request
 
 from agent.llm.capabilities import is_embedding_model_name
+from agent.llm.ollama_endpoints import join_base as ollama_join_base
+from agent.llm.ollama_endpoints import normalize_ollama_base_urls
+from agent.llm.ollama_endpoints import probe_ollama_connectivity
 
 
 ProbeResult = dict[str, Any]
@@ -241,8 +244,50 @@ def probe_provider(
         )
 
     provider_id = _provider_identity(cfg)
-    endpoint = "/api/tags" if provider_id == "ollama" or bool(cfg.get("local", False)) else "/v1/models"
     getter = http_get_json or _http_get_json
+    if provider_id == "ollama" or bool(cfg.get("local", False)):
+        ollama_probe = probe_ollama_connectivity(
+            base_url=base_url,
+            timeout_seconds=float(timeout_seconds),
+            headers=headers,
+            http_get_json=getter,
+        )
+        result = _result(
+            status="ok" if bool(ollama_probe.get("native_ok")) else "down",
+            error_kind=(
+                None
+                if bool(ollama_probe.get("native_ok"))
+                else str(ollama_probe.get("last_error_kind") or "provider_error")
+            ),
+            status_code=(
+                None
+                if bool(ollama_probe.get("native_ok"))
+                else (
+                    int(ollama_probe.get("last_status_code"))
+                    if isinstance(ollama_probe.get("last_status_code"), int)
+                    else None
+                )
+            ),
+            detail=str(ollama_probe.get("detail") or "provider probe ok"),
+            started=started,
+        )
+        result.update(
+            {
+                "configured_base_url": str(ollama_probe.get("configured_base_url") or ""),
+                "native_base": str(ollama_probe.get("native_base") or ""),
+                "openai_base": str(ollama_probe.get("openai_base") or ""),
+                "native_ok": bool(ollama_probe.get("native_ok")),
+                "openai_compat_ok": bool(ollama_probe.get("openai_compat_ok")),
+                "last_error_kind": str(ollama_probe.get("last_error_kind") or "").strip().lower() or None,
+                "last_status_code": (
+                    int(ollama_probe.get("last_status_code"))
+                    if isinstance(ollama_probe.get("last_status_code"), int)
+                    else None
+                ),
+            }
+        )
+        return result
+    endpoint = "/v1/models"
     try:
         getter(base_url + endpoint, timeout_seconds=float(timeout_seconds), headers=headers)
     except Exception as exc:  # pragma: no cover - mapped below
@@ -336,11 +381,13 @@ def probe_model(
         )
 
     if provider_id == "ollama" or bool(cfg.get("local", False)):
-        chat_path = "/v1/chat/completions"
+        ollama_bases = normalize_ollama_base_urls(base_url)
+        chat_url = ollama_join_base(str(ollama_bases.get("openai_base") or base_url), "/chat/completions")
     else:
         chat_path = str(cfg.get("chat_path") or "/v1/chat/completions").strip() or "/v1/chat/completions"
         if not chat_path.startswith("/"):
             chat_path = "/" + chat_path
+        chat_url = base_url + chat_path
     poster = http_post_json or _http_post_json
     request_payload = {
         "model": model_name,
@@ -350,7 +397,7 @@ def probe_model(
     }
     try:
         poster(
-            base_url + chat_path,
+            chat_url,
             payload=request_payload,
             timeout_seconds=float(timeout_seconds),
             headers=headers,

@@ -917,6 +917,18 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("selection_policy", payload)
         self.assertIn("model_watch", payload)
         self.assertIn("llm_availability", payload)
+        llm_availability = payload.get("llm_availability") if isinstance(payload.get("llm_availability"), dict) else {}
+        ollama = llm_availability.get("ollama") if isinstance(llm_availability.get("ollama"), dict) else {}
+        for key in (
+            "configured_base_url",
+            "native_base",
+            "openai_base",
+            "native_ok",
+            "openai_compat_ok",
+            "last_error_kind",
+            "last_status_code",
+        ):
+            self.assertIn(key, ollama)
 
     def test_llm_model_alias_returns_identical_payload(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

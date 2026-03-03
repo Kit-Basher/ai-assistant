@@ -91,6 +91,7 @@ from agent.llm.notifications import (
     sanitize_notification_text,
     should_send,
 )
+from agent.llm.ollama_endpoints import normalize_ollama_base_urls
 from agent.llm.notify_delivery import DeliveryResult, LocalTarget, TelegramTarget
 from agent.llm.probes import probe_model, probe_provider
 from agent.llm.provider_validation import validate_provider_call_format
@@ -675,6 +676,24 @@ class AgentRuntime:
         self._premium_override_once = False
         self._premium_override_until_ts: int | None = None
         self._model_watch_last_proposal_evaluation: dict[str, Any] | None = None
+        self._ollama_probe_state: dict[str, Any] = {
+            "configured_base_url": str(self.config.ollama_base_url or self.config.ollama_host or "").strip(),
+            "native_base": str(
+                normalize_ollama_base_urls(str(self.config.ollama_base_url or self.config.ollama_host or ""))
+                .get("native_base")
+                or ""
+            ).strip(),
+            "openai_base": str(
+                normalize_ollama_base_urls(str(self.config.ollama_base_url or self.config.ollama_host or ""))
+                .get("openai_base")
+                or ""
+            ).strip(),
+            "native_ok": False,
+            "openai_compat_ok": False,
+            "last_error_kind": None,
+            "last_status_code": None,
+            "last_checked_at": None,
+        }
         self._memory_v2_bootstrap_status: dict[str, Any] = {"ran": False, "ok": False}
         if self._defer_bootstrap_warmup:
             warmup_tasks = self._build_startup_warmup_tasks()
@@ -1744,11 +1763,27 @@ class AgentRuntime:
                 "detail": str(validation.get("message") or "provider validation failed"),
                 "duration_ms": 0,
             }
-        return probe_provider(
+        result = probe_provider(
             provider_cfg,
             timeout_seconds=float(timeout_seconds),
             http_get_json=self._http_get_json,
         )
+        if str(provider_id or "").strip().lower() == "ollama":
+            self._ollama_probe_state = {
+                "configured_base_url": str(result.get("configured_base_url") or provider_cfg.get("base_url") or "").strip(),
+                "native_base": str(result.get("native_base") or "").strip(),
+                "openai_base": str(result.get("openai_base") or "").strip(),
+                "native_ok": bool(result.get("native_ok", False)),
+                "openai_compat_ok": bool(result.get("openai_compat_ok", False)),
+                "last_error_kind": str(result.get("last_error_kind") or "").strip().lower() or None,
+                "last_status_code": (
+                    int(result.get("last_status_code"))
+                    if isinstance(result.get("last_status_code"), int)
+                    else None
+                ),
+                "last_checked_at": int(time.time()),
+            }
+        return result
 
     def _probe_llm_model(self, provider_id: str, model_id: str, timeout_seconds: float) -> dict[str, Any]:
         built = self._probe_provider_cfg(provider_id)
@@ -1787,9 +1822,17 @@ class AgentRuntime:
         if str(provider_probe.get("status") or "").strip().lower() != "ok":
             return {
                 "ok": False,
+                "status": str(provider_probe.get("status") or "").strip().lower() or "degraded",
                 "error_kind": provider_error or "provider_error",
                 "status_code": provider_probe.get("status_code"),
                 "message": str(provider_probe.get("detail") or ""),
+            }
+        if str(provider_id or "").strip().lower() == "ollama" and bool(provider_probe.get("native_ok", False)):
+            return {
+                "ok": True,
+                "provider": provider_id,
+                "model": model_id,
+                "message": "ollama native probe ok",
             }
 
         model_probe = self._probe_llm_model(provider_id, model_id, timeout_seconds)
@@ -1809,6 +1852,7 @@ class AgentRuntime:
             }
         return {
             "ok": False,
+            "status": str(model_probe.get("status") or "").strip().lower() or "degraded",
             "error_kind": model_error or "provider_error",
             "status_code": model_probe.get("status_code"),
             "message": str(model_probe.get("detail") or ""),
@@ -2803,6 +2847,43 @@ class AgentRuntime:
                 "message": str(validation.get("message") or self._provider_test_message(error_kind)),
                 "models": [],
             }
+        provider_key = str(provider_id or "").strip().lower()
+        if provider_key == "ollama" or bool(provider_payload.get("local", False)):
+            bases = normalize_ollama_base_urls(base_url)
+            native_url = str(bases.get("native_base") or "").strip()
+            try:
+                parsed = self._http_get_json(
+                    native_url + "/api/tags",
+                    timeout_seconds=timeout_seconds,
+                    headers=headers,
+                )
+                models_rows = parsed.get("models") if isinstance(parsed.get("models"), list) else []
+                model_names = sorted(
+                    {
+                        str(item.get("name") or item.get("model") or "").strip()
+                        for item in models_rows
+                        if isinstance(item, dict) and str(item.get("name") or item.get("model") or "").strip()
+                    }
+                )
+                return {"ok": True, "models": model_names, "count": len(model_names)}
+            except urllib.error.HTTPError as exc:
+                status_code = int(getattr(exc, "code", 0) or 0) or None
+                kind = self._normalize_provider_test_error(None, status_code)
+                return {
+                    "ok": False,
+                    "error": kind,
+                    "status_code": status_code,
+                    "message": self._provider_test_message(kind),
+                    "models": [],
+                }
+            except (OSError, TimeoutError, ValueError, UnicodeError, json.JSONDecodeError, urllib.error.URLError):
+                return {
+                    "ok": False,
+                    "error": "server_error",
+                    "status_code": None,
+                    "message": "Unable to query Ollama /api/tags.",
+                    "models": [],
+                }
         try:
             parsed = self._http_get_json(base_url + "/v1/models", timeout_seconds=timeout_seconds, headers=headers)
             data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
@@ -4032,8 +4113,13 @@ class AgentRuntime:
             tags_ok = False
 
             if is_local:
+                resolved_base_url = base_url
+                if str(provider_id).strip().lower() == "ollama":
+                    resolved_base_url = str(
+                        normalize_ollama_base_urls(base_url).get("native_base") or base_url
+                    ).strip().rstrip("/")
                 try:
-                    parsed = self._http_get_json(base_url + "/api/tags", headers=request_headers)
+                    parsed = self._http_get_json(resolved_base_url + "/api/tags", headers=request_headers)
                     tags = parsed.get("models") if isinstance(parsed.get("models"), list) else []
                     for item in tags:
                         if not isinstance(item, dict):
@@ -6735,9 +6821,28 @@ class AgentRuntime:
             )
         )
         providers_rows = status.get("providers") if isinstance(status.get("providers"), list) else []
+        providers_doc = (
+            self.registry_document.get("providers")
+            if isinstance(self.registry_document.get("providers"), dict)
+            else {}
+        )
+        ollama_cfg = providers_doc.get("ollama") if isinstance(providers_doc.get("ollama"), dict) else {}
+        configured_ollama_base = (
+            str(ollama_cfg.get("base_url") or "").strip()
+            or str(self.config.ollama_base_url or self.config.ollama_host or "").strip()
+        )
+        ollama_bases = normalize_ollama_base_urls(configured_ollama_base)
+        cached_ollama_probe = (
+            dict(self._ollama_probe_state)
+            if isinstance(self._ollama_probe_state, dict)
+            else {}
+        )
         local_up: list[str] = []
         local_down: list[str] = []
         local_unknown: list[str] = []
+        ollama_provider_status = "unknown"
+        ollama_provider_error_kind: str | None = None
+        ollama_provider_status_code: int | None = None
         openrouter_payload = {
             "known": False,
             "status": "unknown",
@@ -6762,6 +6867,14 @@ class AgentRuntime:
                     local_down.append(provider_id)
                 else:
                     local_unknown.append(provider_id)
+            if provider_id == "ollama":
+                ollama_provider_status = health_status or "unknown"
+                ollama_provider_error_kind = str(health.get("last_error_kind") or "").strip().lower() or None
+                ollama_provider_status_code = (
+                    int(health.get("status_code"))
+                    if isinstance(health.get("status_code"), int)
+                    else None
+                )
             if provider_id == "openrouter":
                 openrouter_payload = {
                     "known": True,
@@ -6780,6 +6893,26 @@ class AgentRuntime:
                 }
 
         llm_available = self.llm_availability_state()
+        native_ok_value = bool(cached_ollama_probe.get("native_ok", False))
+        if ollama_provider_status == "ok":
+            native_ok_value = True
+        elif ollama_provider_status == "down":
+            native_ok_value = False
+        openai_compat_ok_value = bool(cached_ollama_probe.get("openai_compat_ok", False))
+        ollama_last_error = (
+            ollama_provider_error_kind
+            or str(cached_ollama_probe.get("last_error_kind") or "").strip().lower()
+            or None
+        )
+        ollama_last_status_code = (
+            ollama_provider_status_code
+            if ollama_provider_status_code is not None
+            else (
+                int(cached_ollama_probe.get("last_status_code"))
+                if isinstance(cached_ollama_probe.get("last_status_code"), int)
+                else None
+            )
+        )
         model_watch_summary = self._latest_model_watch_summary()
         return {
             "ok": True,
@@ -6807,6 +6940,15 @@ class AgentRuntime:
                     "local_up": sorted({item for item in local_up if item}),
                     "local_down": sorted({item for item in local_down if item}),
                     "local_unknown": sorted({item for item in local_unknown if item}),
+                },
+                "ollama": {
+                    "configured_base_url": str(ollama_bases.get("configured_base_url") or configured_ollama_base or "").strip(),
+                    "native_base": str(ollama_bases.get("native_base") or "").strip(),
+                    "openai_base": str(ollama_bases.get("openai_base") or "").strip(),
+                    "native_ok": bool(native_ok_value),
+                    "openai_compat_ok": bool(openai_compat_ok_value),
+                    "last_error_kind": ollama_last_error,
+                    "last_status_code": ollama_last_status_code,
                 },
                 "openrouter": openrouter_payload,
             },
