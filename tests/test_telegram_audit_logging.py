@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 import json
+import logging
 import tempfile
 import unittest
 
 from agent.audit_log import AuditLog
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
-from telegram_adapter.bot import _handle_brief_alias, _handle_message
+from telegram_adapter.bot import _handle_brief_alias, _handle_message, _handle_status
 
 
 class _FakeResponse:
@@ -25,6 +26,13 @@ class _FakeOrchestrator:
     def handle_message(self, text: str, *, user_id: str) -> _FakeResponse:
         self.calls.append((text, user_id))
         return _FakeResponse(self.reply_text)
+
+
+class _RaisingOrchestrator:
+    def handle_message(self, text: str, *, user_id: str) -> _FakeResponse:
+        _ = text
+        _ = user_id
+        raise RuntimeError("boom")
 
 
 class _FakeDB:
@@ -273,7 +281,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertNotIn(user_text.lower(), params_text.lower())
             self.assertEqual([(user_text, chat_id)], orchestrator.calls)
 
-    def test_ping_returns_status_route_with_commit(self) -> None:
+    def test_status_command_returns_status_with_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"
             audit_log = AuditLog(path=audit_path)
@@ -281,7 +289,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
             orchestrator = _FakeOrchestrator(reply_text="unused")
             db = _FakeDB()
             chat_id = "12349876"
-            update = _FakeUpdate(int(chat_id), " ping ")
+            update = _FakeUpdate(int(chat_id), "/status")
             runtime = type(
                 "Runtime",
                 (),
@@ -303,7 +311,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                 }
             )
 
-            asyncio.run(_handle_message(update, context))
+            asyncio.run(_handle_status(update, context))
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
@@ -312,10 +320,33 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertIn("uptime", reply_text)
             self.assertEqual([], orchestrator.calls)
 
-            rows = _read_audit_rows(audit_path)
-            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
-            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
-            self.assertEqual("status", params.get("route"))
+    def test_hello_forwards_to_orchestrator_not_status_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="LLM_CHAT_REPLY")
+            db = _FakeDB()
+            chat_id = "246801357"
+            update = _FakeUpdate(int(chat_id), "hello")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("LLM_CHAT_REPLY", reply_text)
+            self.assertNotIn("✅ Agent is running", reply_text)
+            self.assertEqual([("hello", chat_id)], orchestrator.calls)
 
     def test_help_returns_help_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -418,3 +449,36 @@ class TestTelegramAuditLogging(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_orchestrator_exception_logs_traceback_and_returns_fallback(caplog):  # type: ignore[no-untyped-def]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audit_path = f"{tmpdir}/audit.jsonl"
+        audit_log = AuditLog(path=audit_path)
+        wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+        orchestrator = _RaisingOrchestrator()
+        db = _FakeDB()
+        chat_id = "9988776655"
+        update = _FakeUpdate(int(chat_id), "hello")
+        context = _FakeContext(
+            {
+                "orchestrator": orchestrator,
+                "db": db,
+                "log_path": f"{tmpdir}/agent.log",
+                "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                "llm_fixit_store": wizard_store,
+                "audit_log": audit_log,
+            }
+        )
+
+        caplog.set_level(logging.ERROR, logger="telegram_adapter.bot")
+        asyncio.run(_handle_message(update, context))
+
+        assert update.effective_message.replies
+        reply_text = str(update.effective_message.replies[-1]["text"] or "")
+        assert "I hit an internal error" in reply_text
+        assert "(trace " in reply_text
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "boom" in logged
+        assert "Traceback (most recent call last)" in logged

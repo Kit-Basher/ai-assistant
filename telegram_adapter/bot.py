@@ -5,11 +5,13 @@ from dataclasses import replace
 from datetime import datetime, timezone, time
 from zoneinfo import ZoneInfo
 import json
+import logging
 import os
 from pathlib import Path
 import sys
 import tempfile
 import time as pytime
+import traceback
 from typing import Any, Callable
 
 try:
@@ -52,6 +54,14 @@ from agent.ux.clarify_suggest import (
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore, confirm_token_for_plan_rows
 from memory.db import MemoryDB
 
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        handlers=[logging.StreamHandler(sys.stdout)],
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+_LOGGER = logging.getLogger(__name__)
 
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 _TELEGRAM_FALLBACK_TEXT = "I hit an internal error, but I’m still running. Try one of these:"
@@ -67,7 +77,6 @@ _TELEGRAM_UNKNOWN_FALLBACK_TEXT = (
     "Examples: /brief or \"anything new on my PC?\"\n"
     "For more options, send /help."
 )
-_TELEGRAM_STATUS_TOKENS = {"ping", "hello", "hi"}
 _MODEL_PROVIDER_INTENTS = {
     "model_watch.run_now",
     "provider.status",
@@ -112,6 +121,20 @@ def _resolve_telegram_bot_token() -> str | None:
 def _safe_reply_text(text: str | None) -> str:
     value = str(text or "").strip()
     return value if value else "I’m still here. What should I do next?"
+
+
+def _short_trace_token(trace_id: str | None) -> str:
+    compact = "".join(ch for ch in str(trace_id or "") if ch.isalnum())
+    if not compact:
+        return "unknown"
+    return compact[-6:]
+
+
+def _text_prefix(text: str | None, *, limit: int = 80) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip()
 
 
 def _normalize_user_text(text: str | None) -> str:
@@ -363,8 +386,6 @@ def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str 
     normalized = _normalize_user_text(text)
     if normalized in {"/help", "help"}:
         return _TELEGRAM_HELP_TEXT, "help"
-    if normalized in _TELEGRAM_STATUS_TOKENS:
-        return _runtime_status_text(bot_data), "status"
     return None, None
 
 
@@ -1381,6 +1402,27 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     llm_fixit_fn = bot_data.get("llm_fixit_fn")
     wizard_store = bot_data.get("llm_fixit_store")
     model_provider_wizard_store = bot_data.get("model_provider_wizard_store")
+    _LOGGER.info(
+        "telegram.in %s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "user_id": chat_id,
+                "text_prefix": _text_prefix(text),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+    )
+    log_event(
+        log_path,
+        "telegram.in",
+        {
+            "user_id": chat_id,
+            "text_prefix": _text_prefix(text),
+            "trace_id": trace_id,
+        },
+    )
     _safe_append_telegram_message_audit(
         audit_log=audit_log,
         action="telegram.message.received",
@@ -1412,7 +1454,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route=route,
                 outcome="handled",
             )
-            await update.effective_message.reply_text(_safe_reply_text(fixit_reply))
+            safe_reply = _safe_reply_text(fixit_reply)
+            await update.effective_message.reply_text(safe_reply)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": route,
+                    "reply_prefix": _text_prefix(safe_reply),
+                    "trace_id": trace_id,
+                },
+            )
             log_event(
                 log_path,
                 "telegram_fixit_intercept",
@@ -1447,7 +1500,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route="fixit",
                 outcome="handled",
             )
-            await update.effective_message.reply_text(_safe_reply_text(setup_reply))
+            safe_reply = _safe_reply_text(setup_reply)
+            await update.effective_message.reply_text(safe_reply)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": "fixit",
+                    "reply_prefix": _text_prefix(safe_reply),
+                    "trace_id": trace_id,
+                },
+            )
             log_event(
                 log_path,
                 "telegram_fixit_intercept",
@@ -1469,7 +1533,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route="numeric_no_wizard",
                 outcome="handled",
             )
-            await update.effective_message.reply_text(_NO_ACTIVE_CHOICE_TEXT)
+            safe_reply = _safe_reply_text(_NO_ACTIVE_CHOICE_TEXT)
+            await update.effective_message.reply_text(safe_reply)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": "numeric_no_wizard",
+                    "reply_prefix": _text_prefix(safe_reply),
+                    "trace_id": trace_id,
+                },
+            )
             log_event(
                 log_path,
                 "telegram_message",
@@ -1496,7 +1571,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route=preroute_route,
                 outcome="handled",
             )
-            await update.effective_message.reply_text(_safe_reply_text(preroute_reply))
+            safe_reply = _safe_reply_text(preroute_reply)
+            await update.effective_message.reply_text(safe_reply)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": preroute_route,
+                    "reply_prefix": _text_prefix(safe_reply),
+                    "trace_id": trace_id,
+                },
+            )
             log_event(
                 log_path,
                 "telegram_message",
@@ -1519,7 +1605,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route=smalltalk_route,
                 outcome="handled",
             )
-            await update.effective_message.reply_text(_safe_reply_text(smalltalk_reply))
+            safe_reply = _safe_reply_text(smalltalk_reply)
+            await update.effective_message.reply_text(safe_reply)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": smalltalk_route,
+                    "reply_prefix": _text_prefix(safe_reply),
+                    "trace_id": trace_id,
+                },
+            )
             log_event(
                 log_path,
                 "telegram_message",
@@ -1544,7 +1641,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     route="chat",
                     outcome="handled",
                 )
-                await update.effective_message.reply_text(_safe_reply_text(clarify_text))
+                safe_reply = _safe_reply_text(clarify_text)
+                await update.effective_message.reply_text(safe_reply)
+                log_event(
+                    log_path,
+                    "telegram.out",
+                    {
+                        "user_id": chat_id,
+                        "route": "chat",
+                        "reply_prefix": _text_prefix(safe_reply),
+                        "trace_id": trace_id,
+                    },
+                )
                 log_event(
                     log_path,
                     "telegram_message",
@@ -1574,7 +1682,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route="fallback",
                 outcome="handled",
             )
-            await update.effective_message.reply_text(_safe_reply_text(suggest_text))
+            safe_reply = _safe_reply_text(suggest_text)
+            await update.effective_message.reply_text(safe_reply)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": "fallback",
+                    "reply_prefix": _text_prefix(safe_reply),
+                    "trace_id": trace_id,
+                },
+            )
             log_event(
                 log_path,
                 "telegram_message",
@@ -1589,7 +1708,75 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         # Route ALL non-command text through the orchestrator (single brain).
-        response = orchestrator.handle_message(text, user_id=chat_id)
+        log_event(
+            log_path,
+            "telegram.forward",
+            {
+                "user_id": chat_id,
+                "text_prefix": _text_prefix(text),
+                "trace_id": trace_id,
+            },
+        )
+        _LOGGER.info(
+            "telegram.forward %s",
+            json.dumps(
+                {
+                    "trace_id": trace_id,
+                    "user_id": chat_id,
+                    "text_prefix": _text_prefix(text),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+        try:
+            response = orchestrator.handle_message(text, user_id=chat_id)
+        except Exception as exc:
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route="chat",
+                outcome="failed",
+                error_kind=exc.__class__.__name__,
+            )
+            _LOGGER.error(
+                "telegram.forward.error %s",
+                json.dumps(
+                    {
+                        "trace_id": trace_id,
+                        "user_id": chat_id,
+                        "text_prefix": _text_prefix(text),
+                        "error_type": exc.__class__.__name__,
+                        "error": str(exc),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+            _LOGGER.error("%s", traceback.format_exc())
+            envelope = _envelope_from_exception(
+                exc=exc,
+                intent="telegram.message",
+                trace_id=trace_id,
+                log_path=log_path,
+            )
+            fallback_message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
+            fallback_with_trace = f"{fallback_message} (trace {_short_trace_token(trace_id)})"
+            await update.effective_message.reply_text(fallback_with_trace)
+            log_event(
+                log_path,
+                "telegram.out",
+                {
+                    "user_id": chat_id,
+                    "route": "chat",
+                    "reply_prefix": _text_prefix(fallback_with_trace),
+                    "trace_id": trace_id,
+                    "error_kind": exc.__class__.__name__,
+                },
+            )
+            return
         reply_text = response.text.strip() if response and response.text else ""
         parse_mode = None
         route = "chat"
@@ -1603,7 +1790,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_text = _TELEGRAM_UNKNOWN_FALLBACK_TEXT
             parse_mode = None
             route = "fallback"
-        await update.effective_message.reply_text(_safe_reply_text(reply_text), parse_mode=parse_mode)
+        safe_reply = _safe_reply_text(reply_text)
+        await update.effective_message.reply_text(safe_reply, parse_mode=parse_mode)
         _safe_append_telegram_message_audit(
             audit_log=audit_log,
             action="telegram.message.handled",
@@ -1611,6 +1799,29 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             message_kind="text",
             route=route,
             outcome="handled",
+        )
+        log_event(
+            log_path,
+            "telegram.out",
+            {
+                "user_id": chat_id,
+                "route": route,
+                "reply_prefix": _text_prefix(safe_reply),
+                "trace_id": trace_id,
+            },
+        )
+        _LOGGER.info(
+            "telegram.out %s",
+            json.dumps(
+                {
+                    "trace_id": trace_id,
+                    "user_id": chat_id,
+                    "route": route,
+                    "reply_prefix": _text_prefix(safe_reply),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
         )
 
         log_event(
@@ -1640,6 +1851,17 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
         await update.effective_message.reply_text(message)
+        log_event(
+            log_path,
+            "telegram.out",
+            {
+                "user_id": chat_id,
+                "route": "chat",
+                "reply_prefix": _text_prefix(message),
+                "trace_id": trace_id,
+                "error_kind": exc.__class__.__name__,
+            },
+        )
 
 
 def _command_payload(text: str, command: str) -> str:
@@ -1675,11 +1897,8 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.effective_chat is None or update.effective_message is None:
         return
 
-    chat_id = str(update.effective_chat.id)
-    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
-
-    response = orchestrator.handle_message("/status", user_id=chat_id)
-    await update.effective_message.reply_text(_safe_reply_text(response.text))
+    reply_text = _runtime_status_text(context.application.bot_data)
+    await update.effective_message.reply_text(_safe_reply_text(reply_text))
 
 
 async def _handle_runtime_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2287,6 +2506,7 @@ def register_handlers(app: Application) -> None:
 
     # Explicit command handlers (commands should NOT go through the generic text handler).
     app.add_handler(CommandHandler("remind", _handle_remind))
+    app.add_handler(CommandHandler("start", _handle_status))
     app.add_handler(CommandHandler("status", _handle_status))
     app.add_handler(CommandHandler("runtime_status", _handle_runtime_status))
     app.add_handler(CommandHandler("disk_grow", _handle_disk_grow))
