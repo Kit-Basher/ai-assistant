@@ -120,6 +120,37 @@ class TestTelegramRunner(unittest.TestCase):
             self.assertIn("telegram.crash", event_types)
             self.assertIn("telegram.retry", event_types)
 
+    def test_run_loop_conflict_logs_guidance_and_uses_jitter_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sleep_calls: list[float] = []
+            runtime = types.SimpleNamespace(config=object(), llm_fixit=lambda payload: (True, {"ok": True}))
+            audit = _AuditCapture()
+            log_path = os.path.join(tmpdir, "agent.log")
+
+            class Conflict(Exception):
+                pass
+
+            def _conflict_app_factory(**_kwargs: object) -> object:
+                raise Conflict("terminated by other getUpdates request")
+
+            runner = TelegramRunner(
+                runtime=runtime,
+                log_path=log_path,
+                audit_log=audit,  # type: ignore[arg-type]
+                app_factory=_conflict_app_factory,
+                token_resolver=lambda: ("token", "env"),
+                sleep_fn=lambda seconds: sleep_calls.append(float(seconds)),
+            )
+            runner._run_loop(token="token", token_source="env", max_iters=1)
+            self.assertEqual([2.0], sleep_calls)
+            self.assertTrue(any(str(row.get("action")) == "telegram.crash" for row in audit.rows))
+            with open(log_path, "r", encoding="utf-8") as handle:
+                events = [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+            crash_rows = [row for row in events if str(row.get("type")) == "telegram.crash"]
+            self.assertTrue(crash_rows)
+            payload = crash_rows[-1].get("payload") if isinstance(crash_rows[-1], dict) else {}
+            self.assertIn("another poller is active", str((payload or {}).get("message") or ""))
+
     def test_async_polling_coroutine_is_awaited_without_runtime_warning(self) -> None:
         runtime = types.SimpleNamespace(config=object(), llm_fixit=lambda payload: (True, {"ok": True}))
         audit = _AuditCapture()

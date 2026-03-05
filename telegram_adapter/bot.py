@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone, time
 from zoneinfo import ZoneInfo
 import json
+import hashlib
 import logging
 import os
 from pathlib import Path
@@ -102,6 +103,13 @@ _OLLAMA_TIER_CHOICES = [
 ]
 
 
+@dataclass(frozen=True)
+class TelegramPollLock:
+    fd: int
+    path: str
+    token_hash: str
+
+
 def resolve_telegram_bot_token_with_source() -> tuple[str | None, str]:
     secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
     secret_token = (secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
@@ -121,6 +129,81 @@ def _resolve_telegram_bot_token() -> str | None:
 def _safe_reply_text(text: str | None) -> str:
     value = str(text or "").strip()
     return value if value else "I’m still here. What should I do next?"
+
+
+def _token_hash(token: str | None) -> str:
+    value = str(token or "").strip()
+    if not value:
+        return "default"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def telegram_poll_lock_path(token: str | None, *, base_dir: Path | None = None) -> Path:
+    env_dir = os.getenv("AGENT_TELEGRAM_POLL_LOCK_DIR", "").strip()
+    root = base_dir or (Path(env_dir).expanduser() if env_dir else (Path.home() / ".local" / "share" / "personal-agent"))
+    return root / f"telegram_poll.{_token_hash(token)}.lock"
+
+
+def acquire_telegram_poll_lock(token: str | None, *, base_dir: Path | None = None) -> TelegramPollLock | None:
+    primary_path = telegram_poll_lock_path(token, base_dir=base_dir)
+    candidates = [primary_path]
+    if base_dir is None:
+        candidates.append(Path("/tmp") / "personal-agent" / primary_path.name)
+    flags = os.O_RDWR | os.O_CREAT
+    for lock_path in candidates:
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(lock_path), flags, 0o600)
+        except PermissionError:
+            continue
+        except OSError:
+            return None
+        try:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return None
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+        except OSError:
+            pass
+        return TelegramPollLock(fd=fd, path=str(lock_path), token_hash=_token_hash(token))
+    return None
+
+
+def release_telegram_poll_lock(lock: TelegramPollLock | None) -> None:
+    if lock is None:
+        return
+    try:
+        import fcntl
+
+        fcntl.flock(lock.fd, fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        os.close(lock.fd)
+    except OSError:
+        pass
+
+
+def is_telegram_conflict_error(error: BaseException) -> bool:
+    if error.__class__.__name__ == "Conflict":
+        return True
+    lowered = str(error or "").lower()
+    if "terminated by other getupdates request" in lowered:
+        return True
+    return "getupdates" in lowered and "conflict" in lowered
+
+
+def telegram_conflict_backoff_seconds(attempt: int) -> float:
+    index = max(1, int(attempt))
+    return float(2 + ((index - 1) % 5))
 
 
 def _short_trace_token(trace_id: str | None) -> str:
@@ -215,6 +298,46 @@ def classify_model_provider_intent(text: str) -> str:
     ):
         return "provider.help"
     return "none"
+
+
+def _deterministic_text_command(text: str) -> str | None:
+    normalized = _normalize_user_text(text)
+    if not normalized:
+        return None
+    if _contains_any(
+        normalized,
+        (
+            "how is the bot health",
+            "bot health",
+            "health check",
+            "system health",
+            "running ok",
+            "show me the stats",
+        ),
+    ):
+        return "/health"
+    if _contains_any(
+        normalized,
+        (
+            "anything new on my pc",
+            "what changed on my pc",
+            "what changed on my computer",
+            "what changed on my system",
+            "changed on my pc",
+        ),
+    ):
+        return "/brief"
+    if _contains_any(
+        normalized,
+        (
+            "status",
+            "uptime",
+            "agent status",
+            "bot status",
+        ),
+    ):
+        return "/status"
+    return None
 
 
 class TelegramModelProviderWizardStore:
@@ -1431,6 +1554,16 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         route="chat",
         outcome="received",
     )
+    log_event(
+        log_path,
+        "telegram.route",
+        {
+            "user_id": chat_id,
+            "message_kind": "text",
+            "route": "text",
+            "trace_id": trace_id,
+        },
+    )
 
     try:
         # Remember which chat we're talking to (useful for reminders/jobs).
@@ -1628,8 +1761,23 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        ambiguity = classify_ambiguity(text)
-        if ambiguity.ambiguous:
+        deterministic_command = _deterministic_text_command(text)
+        if deterministic_command is None:
+            ambiguity = classify_ambiguity(text)
+        else:
+            ambiguity = None
+            log_event(
+                log_path,
+                "telegram.route",
+                {
+                    "user_id": chat_id,
+                    "message_kind": "text",
+                    "route": "command",
+                    "command": deterministic_command,
+                    "trace_id": trace_id,
+                },
+            )
+        if ambiguity is not None and ambiguity.ambiguous:
             llm_available, availability_reason = _runtime_llm_availability(bot_data)
             if llm_available:
                 clarify_text = build_clarify_message(text)
@@ -1708,12 +1856,14 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         # Route ALL non-command text through the orchestrator (single brain).
+        forward_text = deterministic_command or text
         log_event(
             log_path,
             "telegram.forward",
             {
                 "user_id": chat_id,
                 "text_prefix": _text_prefix(text),
+                "forwarded": forward_text if forward_text.startswith("/") else "text",
                 "trace_id": trace_id,
             },
         )
@@ -1730,7 +1880,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ),
         )
         try:
-            response = orchestrator.handle_message(text, user_id=chat_id)
+            response = orchestrator.handle_message(forward_text, user_id=chat_id)
         except Exception as exc:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -1764,7 +1914,27 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             fallback_message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
             fallback_with_trace = f"{fallback_message} (trace {_short_trace_token(trace_id)})"
-            await update.effective_message.reply_text(fallback_with_trace)
+            try:
+                await update.effective_message.reply_text(fallback_with_trace)
+            except Exception as reply_exc:
+                _LOGGER.error(
+                    "telegram.reply.error %s",
+                    json.dumps(
+                        {
+                            "trace_id": trace_id,
+                            "user_id": chat_id,
+                            "route": "chat",
+                            "reply_len": len(fallback_with_trace),
+                            "error_type": reply_exc.__class__.__name__,
+                            "error": str(reply_exc),
+                            "source_error_type": exc.__class__.__name__,
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                )
+                _LOGGER.error("%s", traceback.format_exc())
+                return
             log_event(
                 log_path,
                 "telegram.out",
@@ -1850,7 +2020,27 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             log_path=log_path,
         )
         message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
-        await update.effective_message.reply_text(message)
+        try:
+            await update.effective_message.reply_text(message)
+        except Exception as reply_exc:
+            _LOGGER.error(
+                "telegram.reply.error %s",
+                json.dumps(
+                    {
+                        "trace_id": trace_id,
+                        "user_id": chat_id,
+                        "route": "chat",
+                        "reply_len": len(message),
+                        "error_type": reply_exc.__class__.__name__,
+                        "error": str(reply_exc),
+                        "source_error_type": exc.__class__.__name__,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+            _LOGGER.error("%s", traceback.format_exc())
+            return
         log_event(
             log_path,
             "telegram.out",
@@ -1876,6 +2066,26 @@ def _command_payload(text: str, command: str) -> str:
     return ""
 
 
+def _log_command_route(
+    *,
+    log_path: str | None,
+    chat_id: str,
+    command: str,
+) -> None:
+    if not log_path:
+        return
+    log_event(
+        log_path,
+        "telegram.route",
+        {
+            "user_id": chat_id,
+            "message_kind": "command",
+            "route": "command",
+            "command": command,
+        },
+    )
+
+
 async def _handle_remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
         return
@@ -1887,6 +2097,7 @@ async def _handle_remind(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     log_path: str = context.application.bot_data["log_path"]
+    _log_command_route(log_path=log_path, chat_id=chat_id, command="/remind")
 
     response = orchestrator.handle_message(prompt, user_id=chat_id)
     await update.effective_message.reply_text(_safe_reply_text(response.text))
@@ -1897,6 +2108,9 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if update.effective_chat is None or update.effective_message is None:
         return
 
+    chat_id = str(update.effective_chat.id)
+    log_path: str = context.application.bot_data["log_path"]
+    _log_command_route(log_path=log_path, chat_id=chat_id, command="/status")
     reply_text = _runtime_status_text(context.application.bot_data)
     await update.effective_message.reply_text(_safe_reply_text(reply_text))
 
@@ -2004,6 +2218,8 @@ async def _handle_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    log_path: str = context.application.bot_data["log_path"]
+    _log_command_route(log_path=log_path, chat_id=chat_id, command="/brief")
 
     response = orchestrator.handle_message("/brief", user_id=chat_id)
     await update.effective_message.reply_text(_safe_reply_text(response.text))
@@ -2161,6 +2377,8 @@ async def _handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     chat_id = str(update.effective_chat.id)
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    log_path: str = context.application.bot_data["log_path"]
+    _log_command_route(log_path=log_path, chat_id=chat_id, command="/health")
     response = orchestrator.handle_message("/health", user_id=chat_id)
     await update.effective_message.reply_text(_safe_reply_text(response.text))
 
@@ -2268,10 +2486,17 @@ async def _on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:  # pragma: no cover - defensive import
         Conflict = None
     if Conflict is not None and isinstance(error, Conflict):
+        bot_data = getattr(getattr(context, "application", None), "bot_data", {}) or {}
+        conflict_count = int(bot_data.get("telegram_conflict_count") or 0) + 1
+        bot_data["telegram_conflict_count"] = conflict_count
+        backoff_seconds = telegram_conflict_backoff_seconds(conflict_count)
         logger.error(
-            "Telegram polling conflict detected. Another instance may be running or getUpdates is active elsewhere.",
+            "getUpdates conflict — another poller is active for this token. "
+            "Rotate token or stop the other instance. backoff=%.1fs",
+            backoff_seconds,
             exc_info=error,
         )
+        await asyncio.sleep(backoff_seconds)
         return
     logger.exception("Telegram handler error", exc_info=error)
     message = getattr(update, "effective_message", None)
@@ -2642,9 +2867,72 @@ def build_app(
     return app
 
 
+def run_polling_with_backoff(
+    *,
+    token: str,
+    token_source: str,
+    config: Config | None = None,
+    app_factory: Callable[..., Application] | None = None,
+    sleep_fn: Callable[[float], None] = pytime.sleep,
+    max_conflict_retries: int | None = None,
+) -> int:
+    builder = app_factory or build_app
+    conflict_retries = 0
+    allowed_updates = getattr(Update, "ALL_TYPES", None)
+    while True:
+        app = builder(config=config, token=token)
+        try:
+            polling_kwargs: dict[str, Any] = {"drop_pending_updates": True}
+            if allowed_updates is not None:
+                polling_kwargs["allowed_updates"] = allowed_updates
+            app.run_polling(**polling_kwargs)
+            return 0
+        except KeyboardInterrupt:
+            return 0
+        except Exception as exc:
+            if not is_telegram_conflict_error(exc):
+                raise
+            conflict_retries += 1
+            backoff_seconds = telegram_conflict_backoff_seconds(conflict_retries)
+            payload = {
+                "error_type": exc.__class__.__name__,
+                "error": str(exc),
+                "token_source": token_source,
+                "backoff_seconds": backoff_seconds,
+                "retry": conflict_retries,
+            }
+            _LOGGER.error(
+                "Telegram getUpdates conflict — another poller is active for this token. "
+                "Rotate token or stop the other instance. %s",
+                json.dumps(payload, ensure_ascii=True, sort_keys=True),
+            )
+            if max_conflict_retries is not None and conflict_retries >= int(max_conflict_retries):
+                return 0
+            sleep_fn(backoff_seconds)
+
+
 def main() -> None:
-    app = build_app()
-    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+    token, token_source = resolve_telegram_bot_token_with_source()
+    if not token:
+        app = build_app(token=None)
+        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
+        return
+    poll_lock = acquire_telegram_poll_lock(token)
+    if poll_lock is None:
+        warning_payload = {
+            "pid": os.getpid(),
+            "lock_path": str(telegram_poll_lock_path(token)),
+            "token_source": token_source,
+        }
+        _LOGGER.warning(
+            "Telegram polling already active for this token; exiting. %s",
+            json.dumps(warning_payload, ensure_ascii=True, sort_keys=True),
+        )
+        return
+    try:
+        run_polling_with_backoff(token=token, token_source=token_source)
+    finally:
+        release_telegram_poll_lock(poll_lock)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,15 @@ from typing import Any, Callable
 
 from agent.audit_log import AuditLog
 from agent.logging_utils import log_event
-from telegram_adapter.bot import build_app, resolve_telegram_bot_token_with_source
+from telegram_adapter.bot import (
+    acquire_telegram_poll_lock,
+    build_app,
+    is_telegram_conflict_error,
+    release_telegram_poll_lock,
+    resolve_telegram_bot_token_with_source,
+    telegram_conflict_backoff_seconds,
+    telegram_poll_lock_path,
+)
 
 
 class TelegramRunner:
@@ -119,6 +127,52 @@ class TelegramRunner:
             if max_iters is not None and iterations >= int(max_iters):
                 break
             iterations += 1
+            poll_lock = acquire_telegram_poll_lock(token)
+            if poll_lock is None:
+                consecutive_failures += 1
+                self._consecutive_failures = int(consecutive_failures)
+                backoff_seconds = telegram_conflict_backoff_seconds(consecutive_failures)
+                lock_path = str(telegram_poll_lock_path(token))
+                self._emit_event(
+                    "telegram.crash",
+                    {
+                        "error_type": "Conflict",
+                        "error": "poll_lock_held",
+                        "message": (
+                            "getUpdates conflict — another poller is active for this token. "
+                            "Rotate token or stop the other instance."
+                        ),
+                        "lock_path": lock_path,
+                        "consecutive_failures": int(consecutive_failures),
+                        "backoff_seconds": int(backoff_seconds),
+                        "mode": "embedded",
+                        "token_source": token_source,
+                        "attempt": int(iterations),
+                    },
+                    running=False,
+                    error="Conflict: poll_lock_held",
+                )
+                self._emit_event(
+                    "telegram.retry",
+                    {
+                        "backoff_seconds": int(backoff_seconds),
+                        "consecutive_failures": int(consecutive_failures),
+                        "mode": "embedded",
+                        "token_source": token_source,
+                        "attempt": int(iterations),
+                    },
+                    running=False,
+                    error="Conflict: poll_lock_held",
+                )
+                self._safe_audit(
+                    action="telegram.crash",
+                    reason="Conflict",
+                    outcome="failed",
+                    error_kind="internal_error",
+                )
+                if self._wait(float(backoff_seconds)):
+                    break
+                continue
             try:
                 app = self._app_factory(
                     config=self._runtime.config,
@@ -133,6 +187,8 @@ class TelegramRunner:
                     token_source=token_source,
                     attempt=int(iterations),
                 )
+                consecutive_failures = 0
+                self._consecutive_failures = 0
                 if self._stop_event.is_set():
                     break
                 raise RuntimeError("telegram_polling_stopped")
@@ -141,12 +197,21 @@ class TelegramRunner:
                     break
                 consecutive_failures += 1
                 self._consecutive_failures = int(consecutive_failures)
-                backoff_seconds = min(60, 5 * max(1, consecutive_failures))
+                if is_telegram_conflict_error(exc):
+                    backoff_seconds = telegram_conflict_backoff_seconds(consecutive_failures)
+                    error_message = (
+                        "getUpdates conflict — another poller is active for this token. "
+                        "Rotate token or stop the other instance."
+                    )
+                else:
+                    backoff_seconds = min(60, 5 * max(1, consecutive_failures))
+                    error_message = str(exc)
                 self._emit_event(
                     "telegram.crash",
                     {
                         "error_type": exc.__class__.__name__,
                         "error": str(exc),
+                        "message": error_message,
                         "consecutive_failures": int(consecutive_failures),
                         "backoff_seconds": int(backoff_seconds),
                         "mode": "embedded",
@@ -154,7 +219,7 @@ class TelegramRunner:
                         "attempt": int(iterations),
                     },
                     running=False,
-                    error=f"{exc.__class__.__name__}: {exc}",
+                    error=f"{exc.__class__.__name__}: {error_message}",
                 )
                 self._emit_event(
                     "telegram.retry",
@@ -166,7 +231,7 @@ class TelegramRunner:
                         "attempt": int(iterations),
                     },
                     running=False,
-                    error=f"{exc.__class__.__name__}: {exc}",
+                    error=f"{exc.__class__.__name__}: {error_message}",
                 )
                 self._safe_audit(
                     action="telegram.crash",
@@ -176,9 +241,8 @@ class TelegramRunner:
                 )
                 if self._wait(float(backoff_seconds)):
                     break
-            else:
-                consecutive_failures = 0
-                self._consecutive_failures = 0
+            finally:
+                release_telegram_poll_lock(poll_lock)
 
     def _wait(self, seconds: float) -> bool:
         duration = max(0.0, float(seconds))

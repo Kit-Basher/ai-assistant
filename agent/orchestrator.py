@@ -163,6 +163,8 @@ _AUTHORITATIVE_DOMAIN_TO_TOOL = {
     "system.health": "sys_health_report",
     "system.storage": "sys_inventory_summary",
 }
+_LLM_RUN_DIRECTIVE_RE = re.compile(r"\[\[RUN:(/[a-z_]+)\]\]", re.IGNORECASE)
+_LLM_RUN_DIRECTIVE_ALLOWLIST = {"/brief", "/status", "/health"}
 
 
 def _normalize_authoritative_text(text: str) -> str:
@@ -261,6 +263,144 @@ class Orchestrator:
         self._epistemic_monitor = EpistemicMonitor(db)
         self._epistemic_history: dict[tuple[str, str], list[MessageTurn]] = {}
         self._epistemic_thread_state: dict[str, dict[str, str | None]] = {}
+
+    def _llm_chat_available(self) -> bool:
+        client = self.llm_client
+        if not client:
+            return False
+        if not hasattr(client, "chat") or not callable(getattr(client, "chat", None)):
+            return False
+        enabled_fn = getattr(client, "enabled", None)
+        if not callable(enabled_fn):
+            return False
+        try:
+            return bool(enabled_fn())
+        except Exception:
+            return False
+
+    @staticmethod
+    def _bootstrap_no_chat_text() -> str:
+        return (
+            "No chat model available right now.\n"
+            "1) Start Ollama locally at http://127.0.0.1:11434.\n"
+            "2) Install a local chat model (for example qwen2.5:3b-instruct).\n"
+            "3) Run /model to confirm chat setup."
+        )
+
+    def _bootstrap_no_chat_response(self) -> OrchestratorResponse:
+        return OrchestratorResponse(self._bootstrap_no_chat_text())
+
+    def _llm_error_fallback_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        heuristic_command = self._heuristic_llm_command(text)
+        if heuristic_command:
+            try:
+                return self._handle_message_impl(heuristic_command, user_id)
+            except Exception:
+                pass
+        return OrchestratorResponse("LLM is unavailable right now. Try /brief or /status or /health.")
+
+    def _llm_chat(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = user_id
+        heuristic_command = self._heuristic_llm_command(text)
+        if heuristic_command:
+            try:
+                return self._handle_message_impl(heuristic_command, user_id)
+            except Exception:
+                pass
+        if not self._llm_chat_available():
+            return self._bootstrap_no_chat_response()
+        system_prompt = (
+            "You are Personal Agent, a local-first assistant.\n"
+            "Be the default chat UI. Keep replies concise and practical.\n"
+            "Ask one clarifying question when needed.\n"
+            "Never claim you ran checks/actions unless they actually ran.\n"
+            "If system state is unknown, say so and offer to check.\n"
+            "IF YOU NEED SYSTEM FACTS, YOU MUST reply with ONLY ONE LINE and NOTHING ELSE:\n"
+            "[[RUN:/brief]] or [[RUN:/status]] or [[RUN:/health]]\n"
+            "Use at most one RUN directive.\n"
+            "DO NOT suggest slash commands.\n"
+            "DO NOT print '/brief /status /help' in normal chat."
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": str(text or "")},
+        ]
+        result: Any
+        try:
+            try:
+                result = self.llm_client.chat(
+                    messages,
+                    purpose="chat",
+                    task_type="chat",
+                    compute_tier="low",
+                )
+            except TypeError:
+                try:
+                    result = self.llm_client.chat(messages, purpose="chat")
+                except TypeError:
+                    result = self.llm_client.chat(messages)
+        except Exception:
+            return self._llm_error_fallback_response(user_id, text)
+
+        if isinstance(result, dict):
+            llm_text = str(result.get("text") or "").strip()
+            if llm_text:
+                directive_command = self._parse_llm_run_directive(llm_text)
+                if directive_command:
+                    try:
+                        return self._handle_message_impl(directive_command, user_id)
+                    except Exception:
+                        return self._llm_error_fallback_response(user_id, text)
+                return OrchestratorResponse(
+                    llm_text,
+                    {
+                        "llm_chat": {
+                            "provider": str(result.get("provider") or "").strip() or None,
+                            "model": str(result.get("model") or "").strip() or None,
+                        }
+                    },
+                )
+        elif isinstance(result, str):
+            llm_text = result.strip()
+            if llm_text:
+                directive_command = self._parse_llm_run_directive(llm_text)
+                if directive_command:
+                    try:
+                        return self._handle_message_impl(directive_command, user_id)
+                    except Exception:
+                        return self._llm_error_fallback_response(user_id, text)
+                return OrchestratorResponse(llm_text, {"llm_chat": {}})
+
+        return self._llm_error_fallback_response(user_id, text)
+
+    @staticmethod
+    def _parse_llm_run_directive(llm_text: str) -> str | None:
+        lines = [line.strip() for line in str(llm_text or "").strip().splitlines() if line.strip()][:2]
+        for line in lines:
+            match = _LLM_RUN_DIRECTIVE_RE.search(line)
+            if not match:
+                continue
+            command = str(match.group(1) or "").strip().lower()
+            if command not in _LLM_RUN_DIRECTIVE_ALLOWLIST:
+                return None
+            return command
+        return None
+
+    @staticmethod
+    def _heuristic_llm_command(user_text: str) -> str | None:
+        normalized = " ".join(str(user_text or "").lower().split()).strip()
+        if not normalized:
+            return None
+        if re.search(r"(changed|what changed).*(pc|computer|system)", normalized):
+            return "/brief"
+        if re.search(r"(status|uptime|agent status|bot status)", normalized):
+            return "/status"
+        if re.search(
+            r"(how is the bot health|bot health|health check|system health|health|unhealthy|running ok|stats)",
+            normalized,
+        ):
+            return "/health"
+        return None
 
     @staticmethod
     def _next_action_enabled() -> bool:
@@ -3694,33 +3834,15 @@ class Orchestrator:
                         )
                         return self._cards_response(user_id, payload)
                 if nl_intent == "CHITCHAT":
-                    if re.match(r"^(hi|hello|hey)(\\b|[!.?]|$)", text.strip().lower()):
-                        pass
-                    else:
-                        cards_payload = build_cards_payload(
-                            [
-                                {
-                                    "key": "chitchat",
-                                    "title": "Personal Agent",
-                                    "lines": ["Ask about disk, CPU, memory, or process changes."],
-                                    "severity": "ok",
-                                }
-                            ],
-                            raw_available=False,
-                            summary="Ready for a read-only system check.",
-                            confidence=1.0,
-                            next_questions=["What changed on my disk?", "How are CPU and memory right now?"],
-                        )
-                        return self._cards_response(user_id, cards_payload)
+                    if not self._llm_chat_available():
+                        return self._bootstrap_no_chat_response()
 
             gate_result = handle_action_text(self.db, user_id, text, self.enable_writes)
             if gate_result:
                 return OrchestratorResponse(gate_result.get("message", ""))
 
-            if self.llm_client and getattr(self.llm_client, "enabled", lambda: False)():
-                intent = self.llm_client.intent_from_text(text)
-                if intent:
-                    return OrchestratorResponse("LLM intent parsing not wired yet.")
+            if self._llm_chat_available():
+                return self._llm_chat(user_id, text)
 
             # Rule-based intent routing (v0.1)
             intent_ctx = self._intent_context()
@@ -3849,8 +3971,12 @@ class Orchestrator:
 
             if decision.get("type") == "greeting":
                 self._last_offer_topic[user_id] = "brief_offer"
+                if not self._llm_chat_available():
+                    return self._bootstrap_no_chat_response()
                 return OrchestratorResponse('Hey 🙂 Want a quick /brief, or ask “anything new on my PC?”')
 
+            if not self._llm_chat_available():
+                return self._bootstrap_no_chat_response()
             return OrchestratorResponse("I didn’t understand that. Try /brief, or ask “anything new on my PC?”")
         finally:
             self._runner = None

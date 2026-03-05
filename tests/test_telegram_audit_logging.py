@@ -419,6 +419,33 @@ class TestTelegramAuditLogging(unittest.TestCase):
             params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
             self.assertEqual("fallback", params.get("route"))
 
+    def test_health_equivalent_text_routes_to_health_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="health ok")
+            db = _FakeDB()
+            chat_id = "777123999"
+            update = _FakeUpdate(int(chat_id), "how is the bot health")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("health ok", reply_text)
+            self.assertEqual([("/health", chat_id)], orchestrator.calls)
+
     def test_brief_alias_routes_to_brief_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"

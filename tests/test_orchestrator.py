@@ -2,10 +2,48 @@ import os
 import tempfile
 import unittest
 import json
+from unittest.mock import patch
 
 from agent.knowledge_cache import facts_hash
 from agent.orchestrator import Orchestrator, OrchestratorResponse
 from memory.db import MemoryDB
+
+
+class _FakeChatLLM:
+    def __init__(self, *, enabled: bool, text: str = "LLM reply") -> None:
+        self._enabled = bool(enabled)
+        self._text = text
+        self.chat_calls: list[dict[str, object]] = []
+
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "kwargs": kwargs,
+            }
+        )
+        return {"ok": True, "text": self._text, "provider": "ollama", "model": "llama3"}
+
+    def intent_from_text(self, text: str) -> dict[str, object] | None:
+        raise AssertionError(f"intent_from_text should not be called: {text}")
+
+
+class _RaisingChatLLM:
+    def __init__(self, *, enabled: bool = True) -> None:
+        self._enabled = bool(enabled)
+        self.chat_calls = 0
+
+    def enabled(self) -> bool:
+        return self._enabled
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        _ = messages
+        _ = kwargs
+        self.chat_calls += 1
+        raise RuntimeError("llm chat failure")
 
 
 class TestOrchestrator(unittest.TestCase):
@@ -37,6 +75,158 @@ class TestOrchestrator(unittest.TestCase):
         orchestrator = self._orchestrator()
         response = orchestrator.handle_message("hello there", "user1")
         self.assertIsInstance(response, OrchestratorResponse)
+        self.assertIn("No chat model available", response.text)
+
+    def test_llm_available_routes_free_text_to_llm_chat(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="hi from llm")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        response = orchestrator.handle_message("hello", "user1")
+        self.assertEqual("hi from llm", response.text)
+        self.assertEqual(1, len(llm.chat_calls))
+        call = llm.chat_calls[0]
+        kwargs = call.get("kwargs") if isinstance(call, dict) else {}
+        self.assertEqual("chat", (kwargs or {}).get("purpose"))
+        self.assertNotIn("/brief", response.text.lower())
+
+    def test_no_llm_available_returns_bootstrap_chat_setup(self) -> None:
+        llm = _FakeChatLLM(enabled=False)
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        response = orchestrator.handle_message("hello", "user1")
+        self.assertIn("No chat model available", response.text)
+        self.assertIn("Start Ollama", response.text)
+        self.assertEqual([], llm.chat_calls)
+
+    def test_llm_chat_run_directive_executes_internal_brief(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="[[RUN:/brief]]")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        expected = OrchestratorResponse("BRIEF_OUTPUT")
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._llm_chat("user1", "what changed on my pc")
+        self.assertEqual("BRIEF_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/brief", "user1")
+
+    def test_llm_chat_embedded_run_directive_executes_internal_health(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="Sure — [[RUN:/health]]")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        expected = OrchestratorResponse("HEALTH_OUTPUT")
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._llm_chat("user1", "is my system running ok")
+        self.assertEqual("HEALTH_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/health", "user1")
+
+    def test_llm_chat_heuristic_fallback_executes_internal_health(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="I can check that for you.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        expected = OrchestratorResponse("HEALTH_OUTPUT")
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._llm_chat("user1", "show me the stats")
+        self.assertEqual("HEALTH_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/health", "user1")
+
+    def test_llm_chat_heuristic_health_phrase_executes_internal_health(self) -> None:
+        llm = _RaisingChatLLM(enabled=True)
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        expected = OrchestratorResponse("HEALTH_OUTPUT")
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._llm_chat("user1", "how is the bot health")
+        self.assertEqual("HEALTH_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/health", "user1")
+        self.assertEqual(0, llm.chat_calls)
+
+    def test_llm_chat_without_run_directive_returns_llm_text(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="Regular chat answer")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        with patch.object(orchestrator, "_handle_message_impl") as run_mock:
+            response = orchestrator._llm_chat("user1", "hello")
+        self.assertEqual("Regular chat answer", response.text)
+        run_mock.assert_not_called()
+
+    def test_llm_chat_keeps_junk_command_suffix_unchanged_when_no_trigger(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="Regular answer /brief /status /help")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        with patch.object(orchestrator, "_handle_message_impl") as run_mock:
+            response = orchestrator._llm_chat("user1", "hello there")
+        self.assertEqual("Regular answer /brief /status /help", response.text)
+        run_mock.assert_not_called()
+
+    def test_llm_chat_exception_with_stats_uses_health_fallback(self) -> None:
+        llm = _RaisingChatLLM(enabled=True)
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        expected = OrchestratorResponse("HEALTH_OUTPUT")
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._llm_chat("user1", "show me the stats")
+        self.assertEqual("HEALTH_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/health", "user1")
+        self.assertEqual(0, llm.chat_calls)
+
+    def test_llm_chat_exception_without_heuristic_returns_friendly_fallback(self) -> None:
+        llm = _RaisingChatLLM(enabled=True)
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        with patch.object(orchestrator, "_handle_message_impl") as run_mock:
+            response = orchestrator._llm_chat("user1", "tell me a joke")
+        self.assertIn("LLM is unavailable right now", response.text)
+        run_mock.assert_not_called()
+        self.assertEqual(1, llm.chat_calls)
 
     def test_knowledge_query_cache_and_cta(self) -> None:
         orchestrator = self._orchestrator()
@@ -54,7 +244,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("source", response.data.get("data", {}))
         self.assertEqual(response.data["data"]["facts_hash"], entry.facts_hash)
 
-    def test_greeting_then_affirmation_runs_brief(self) -> None:
+    def test_greeting_then_affirmation_stays_in_bootstrap_when_no_llm(self) -> None:
         orch = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -137,10 +327,10 @@ class TestOrchestrator(unittest.TestCase):
         orch.skills["observe_now"].functions["observe_now"].handler = observe_handler
 
         first = orch.handle_message("hello", "user1")
-        self.assertIn("want a quick /brief", first.text.lower())
+        self.assertIn("no chat model available", first.text.lower())
 
         second = orch.handle_message("yes please", "user1")
-        self.assertIn("baseline created", second.text.lower())
+        self.assertIn("no chat model available", second.text.lower())
 
     def test_done_invalid_id(self) -> None:
         orch = self._orchestrator()
