@@ -9,6 +9,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path
+import re
 import sys
 import tempfile
 import time as pytime
@@ -338,6 +339,148 @@ def _deterministic_text_command(text: str) -> str | None:
     ):
         return "/status"
     return None
+
+
+def _truncate_telegram_text(text: str, *, max_len: int = 3900) -> tuple[str, bool]:
+    value = _safe_reply_text(text)
+    if len(value) <= int(max_len):
+        return value, False
+    suffix = "… (truncated)"
+    keep = max(0, int(max_len) - len(suffix))
+    trimmed = value[:keep].rstrip()
+    return f"{trimmed}{suffix}", True
+
+
+def _plain_text_retry_variant(text: str) -> str:
+    value = str(text or "")
+    plain = re.sub(r"[*_`\[\]\(\)~>#+\-=|{}.!]", "", value)
+    plain = plain.replace("\r", " ").replace("\x00", " ").strip()
+    return plain or "Message unavailable."
+
+
+def _is_bad_request_error(exc: Exception) -> bool:
+    if exc.__class__.__name__ == "BadRequest":
+        return True
+    lowered = str(exc or "").lower()
+    return "bad request" in lowered
+
+
+async def _send_reply(
+    *,
+    message: Any,
+    log_path: str | None,
+    chat_id: str,
+    route: str,
+    text: str,
+    trace_id: str,
+    parse_mode: str | None = None,
+    **kwargs: Any,
+) -> str:
+    primary_text, primary_truncated = _truncate_telegram_text(text)
+    primary_kwargs = dict(kwargs)
+    if parse_mode is not None:
+        primary_kwargs["parse_mode"] = parse_mode
+
+    delivered_text = primary_text
+    send_fallback = False
+
+    try:
+        await message.reply_text(primary_text, **primary_kwargs)
+    except Exception as exc:
+        if _is_bad_request_error(exc):
+            _LOGGER.error(
+                "telegram.reply.bad_request %s",
+                json.dumps(
+                    {
+                        "trace_id": trace_id,
+                        "chat_id": chat_id,
+                        "msg_len": len(primary_text),
+                        "parse_mode": str(parse_mode or "none"),
+                        "error": str(exc),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+            retry_text, retry_truncated = _truncate_telegram_text(_plain_text_retry_variant(primary_text))
+            retry_kwargs = dict(kwargs)
+            retry_kwargs["parse_mode"] = None
+            retry_kwargs["disable_web_page_preview"] = True
+            try:
+                await message.reply_text(retry_text, **retry_kwargs)
+            except TypeError:
+                retry_kwargs.pop("disable_web_page_preview", None)
+                await message.reply_text(retry_text, **retry_kwargs)
+            except Exception as retry_exc:
+                _LOGGER.error(
+                    "telegram.reply.error %s",
+                    json.dumps(
+                        {
+                            "trace_id": trace_id,
+                            "chat_id": chat_id,
+                            "msg_len": len(retry_text),
+                            "parse_mode": "none",
+                            "error": str(retry_exc),
+                        },
+                        ensure_ascii=True,
+                        sort_keys=True,
+                    ),
+                )
+                _LOGGER.error("%s", traceback.format_exc())
+                raise
+            delivered_text = retry_text
+            send_fallback = True
+            primary_truncated = primary_truncated or retry_truncated
+        else:
+            _LOGGER.error(
+                "telegram.reply.error %s",
+                json.dumps(
+                    {
+                        "trace_id": trace_id,
+                        "chat_id": chat_id,
+                        "msg_len": len(primary_text),
+                        "parse_mode": str(parse_mode or "none"),
+                        "error": str(exc),
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            )
+            _LOGGER.error("%s", traceback.format_exc())
+            raise
+
+    log_event(
+        log_path,
+        "telegram.out",
+        {
+            "user_id": chat_id,
+            "chat_id": chat_id,
+            "route": route,
+            "reply_prefix": _text_prefix(delivered_text),
+            "trace_id": trace_id,
+            "msg_len": len(delivered_text),
+            "send_fallback": bool(send_fallback),
+            "truncated": bool(primary_truncated),
+        },
+    )
+    _LOGGER.info(
+        "telegram.out %s",
+        json.dumps(
+            {
+                "trace_id": trace_id,
+                "user_id": chat_id,
+                "chat_id": chat_id,
+                "route": route,
+                "reply_prefix": _text_prefix(delivered_text),
+                "msg_len": len(delivered_text),
+                "send_fallback": bool(send_fallback),
+                "truncated": bool(primary_truncated),
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+    )
+    return delivered_text
 
 
 class TelegramModelProviderWizardStore:
@@ -1587,17 +1730,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route=route,
                 outcome="handled",
             )
-            safe_reply = _safe_reply_text(fixit_reply)
-            await update.effective_message.reply_text(safe_reply)
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": route,
-                    "reply_prefix": _text_prefix(safe_reply),
-                    "trace_id": trace_id,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route=route,
+                text=str(fixit_reply),
+                trace_id=trace_id,
             )
             log_event(
                 log_path,
@@ -1633,17 +1772,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route="fixit",
                 outcome="handled",
             )
-            safe_reply = _safe_reply_text(setup_reply)
-            await update.effective_message.reply_text(safe_reply)
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": "fixit",
-                    "reply_prefix": _text_prefix(safe_reply),
-                    "trace_id": trace_id,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="fixit",
+                text=str(setup_reply),
+                trace_id=trace_id,
             )
             log_event(
                 log_path,
@@ -1666,17 +1801,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route="numeric_no_wizard",
                 outcome="handled",
             )
-            safe_reply = _safe_reply_text(_NO_ACTIVE_CHOICE_TEXT)
-            await update.effective_message.reply_text(safe_reply)
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": "numeric_no_wizard",
-                    "reply_prefix": _text_prefix(safe_reply),
-                    "trace_id": trace_id,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="numeric_no_wizard",
+                text=_NO_ACTIVE_CHOICE_TEXT,
+                trace_id=trace_id,
             )
             log_event(
                 log_path,
@@ -1704,17 +1835,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route=preroute_route,
                 outcome="handled",
             )
-            safe_reply = _safe_reply_text(preroute_reply)
-            await update.effective_message.reply_text(safe_reply)
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": preroute_route,
-                    "reply_prefix": _text_prefix(safe_reply),
-                    "trace_id": trace_id,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route=preroute_route,
+                text=str(preroute_reply),
+                trace_id=trace_id,
             )
             log_event(
                 log_path,
@@ -1738,17 +1865,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route=smalltalk_route,
                 outcome="handled",
             )
-            safe_reply = _safe_reply_text(smalltalk_reply)
-            await update.effective_message.reply_text(safe_reply)
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": smalltalk_route,
-                    "reply_prefix": _text_prefix(safe_reply),
-                    "trace_id": trace_id,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route=smalltalk_route,
+                text=str(smalltalk_reply),
+                trace_id=trace_id,
             )
             log_event(
                 log_path,
@@ -1789,17 +1912,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     route="chat",
                     outcome="handled",
                 )
-                safe_reply = _safe_reply_text(clarify_text)
-                await update.effective_message.reply_text(safe_reply)
-                log_event(
-                    log_path,
-                    "telegram.out",
-                    {
-                        "user_id": chat_id,
-                        "route": "chat",
-                        "reply_prefix": _text_prefix(safe_reply),
-                        "trace_id": trace_id,
-                    },
+                await _send_reply(
+                    message=update.effective_message,
+                    log_path=log_path,
+                    chat_id=chat_id,
+                    route="chat",
+                    text=str(clarify_text),
+                    trace_id=trace_id,
                 )
                 log_event(
                     log_path,
@@ -1830,17 +1949,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 route="fallback",
                 outcome="handled",
             )
-            safe_reply = _safe_reply_text(suggest_text)
-            await update.effective_message.reply_text(safe_reply)
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": "fallback",
-                    "reply_prefix": _text_prefix(safe_reply),
-                    "trace_id": trace_id,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="fallback",
+                text=str(suggest_text),
+                trace_id=trace_id,
             )
             log_event(
                 log_path,
@@ -1914,37 +2029,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             fallback_message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
             fallback_with_trace = f"{fallback_message} (trace {_short_trace_token(trace_id)})"
-            try:
-                await update.effective_message.reply_text(fallback_with_trace)
-            except Exception as reply_exc:
-                _LOGGER.error(
-                    "telegram.reply.error %s",
-                    json.dumps(
-                        {
-                            "trace_id": trace_id,
-                            "user_id": chat_id,
-                            "route": "chat",
-                            "reply_len": len(fallback_with_trace),
-                            "error_type": reply_exc.__class__.__name__,
-                            "error": str(reply_exc),
-                            "source_error_type": exc.__class__.__name__,
-                        },
-                        ensure_ascii=True,
-                        sort_keys=True,
-                    ),
-                )
-                _LOGGER.error("%s", traceback.format_exc())
-                return
-            log_event(
-                log_path,
-                "telegram.out",
-                {
-                    "user_id": chat_id,
-                    "route": "chat",
-                    "reply_prefix": _text_prefix(fallback_with_trace),
-                    "trace_id": trace_id,
-                    "error_kind": exc.__class__.__name__,
-                },
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="chat",
+                text=fallback_with_trace,
+                trace_id=trace_id,
             )
             return
         reply_text = response.text.strip() if response and response.text else ""
@@ -1960,8 +2051,15 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             reply_text = _TELEGRAM_UNKNOWN_FALLBACK_TEXT
             parse_mode = None
             route = "fallback"
-        safe_reply = _safe_reply_text(reply_text)
-        await update.effective_message.reply_text(safe_reply, parse_mode=parse_mode)
+        await _send_reply(
+            message=update.effective_message,
+            log_path=log_path,
+            chat_id=chat_id,
+            route=route,
+            text=reply_text,
+            trace_id=trace_id,
+            parse_mode=parse_mode,
+        )
         _safe_append_telegram_message_audit(
             audit_log=audit_log,
             action="telegram.message.handled",
@@ -1970,30 +2068,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             route=route,
             outcome="handled",
         )
-        log_event(
-            log_path,
-            "telegram.out",
-            {
-                "user_id": chat_id,
-                "route": route,
-                "reply_prefix": _text_prefix(safe_reply),
-                "trace_id": trace_id,
-            },
-        )
-        _LOGGER.info(
-            "telegram.out %s",
-            json.dumps(
-                {
-                    "trace_id": trace_id,
-                    "user_id": chat_id,
-                    "route": route,
-                    "reply_prefix": _text_prefix(safe_reply),
-                },
-                ensure_ascii=True,
-                sort_keys=True,
-            ),
-        )
-
         log_event(
             log_path,
             "telegram_message",
@@ -2021,37 +2095,16 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
         try:
-            await update.effective_message.reply_text(message)
-        except Exception as reply_exc:
-            _LOGGER.error(
-                "telegram.reply.error %s",
-                json.dumps(
-                    {
-                        "trace_id": trace_id,
-                        "user_id": chat_id,
-                        "route": "chat",
-                        "reply_len": len(message),
-                        "error_type": reply_exc.__class__.__name__,
-                        "error": str(reply_exc),
-                        "source_error_type": exc.__class__.__name__,
-                    },
-                    ensure_ascii=True,
-                    sort_keys=True,
-                ),
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="chat",
+                text=message,
+                trace_id=trace_id,
             )
-            _LOGGER.error("%s", traceback.format_exc())
+        except Exception:
             return
-        log_event(
-            log_path,
-            "telegram.out",
-            {
-                "user_id": chat_id,
-                "route": "chat",
-                "reply_prefix": _text_prefix(message),
-                "trace_id": trace_id,
-                "error_kind": exc.__class__.__name__,
-            },
-        )
 
 
 def _command_payload(text: str, command: str) -> str:

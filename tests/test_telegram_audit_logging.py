@@ -446,6 +446,89 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertEqual("health ok", reply_text)
             self.assertEqual([("/health", chat_id)], orchestrator.calls)
 
+    def test_health_route_bad_request_retries_plain_and_logs_once(self) -> None:
+        class BadRequest(Exception):
+            pass
+
+        class _FlakyMessage(_FakeMessage):
+            def __init__(self, text: str) -> None:
+                super().__init__(text)
+                self.calls: list[dict[str, object]] = []
+                self._attempt = 0
+
+            async def reply_text(self, text: str, parse_mode: str | None = None, **kwargs: object) -> None:
+                self.calls.append({"text": text, "parse_mode": parse_mode, **kwargs})
+                self._attempt += 1
+                if self._attempt == 1:
+                    raise BadRequest("can't parse entities")
+                self.replies.append({"text": text, "parse_mode": parse_mode})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            log_path = f"{tmpdir}/agent.log"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="health ok")
+            db = _FakeDB()
+            chat_id = "8800112233"
+            update = _FakeUpdate(int(chat_id), "how is the bot health")
+            update.effective_message = _FlakyMessage("how is the bot health")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": log_path,
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with self.assertLogs("telegram_adapter.bot", level="ERROR") as logs:
+                asyncio.run(_handle_message(update, context))
+
+            self.assertEqual([("/health", chat_id)], orchestrator.calls)
+            self.assertEqual(2, len(update.effective_message.calls))
+            self.assertIsNone(update.effective_message.calls[0].get("parse_mode"))
+            self.assertIsNone(update.effective_message.calls[1].get("parse_mode"))
+            self.assertEqual("health ok", str(update.effective_message.replies[-1]["text"]))
+
+            joined_logs = "\n".join(logs.output)
+            self.assertIn("can't parse entities", joined_logs)
+
+            with open(log_path, "r", encoding="utf-8") as handle:
+                rows = [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+            out_rows = [row for row in rows if str(row.get("type")) == "telegram.out"]
+            self.assertEqual(1, len(out_rows))
+
+    def test_reply_text_is_truncated_to_safe_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            long_text = "x" * 5000
+            orchestrator = _FakeOrchestrator(reply_text=long_text)
+            db = _FakeDB()
+            chat_id = "9911223344"
+            update = _FakeUpdate(int(chat_id), "show me task summary")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertLessEqual(len(reply_text), 3900)
+            self.assertTrue(reply_text.endswith("… (truncated)"))
+
     def test_brief_alias_routes_to_brief_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"
