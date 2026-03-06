@@ -14,7 +14,7 @@ class TestSetupWizard(unittest.TestCase):
         ready_payload = {
             "ready": False,
             "phase": "ready",
-            "telegram": {"configured": False, "state": "disabled_missing_token"},
+            "telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token"},
             "runtime_status": {"runtime_mode": "BOOTSTRAP_REQUIRED", "failure_code": "telegram_token_missing"},
         }
         result = build_setup_result(
@@ -56,7 +56,7 @@ class TestSetupWizard(unittest.TestCase):
             ready_payload={
                 "ready": False,
                 "phase": "degraded",
-                "telegram": {"configured": False, "state": "disabled_missing_token"},
+                "telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token"},
                 "runtime_status": status,
             },
             llm_status={},
@@ -69,6 +69,27 @@ class TestSetupWizard(unittest.TestCase):
         self.assertEqual("Run: python -m agent.secrets set telegram:bot_token", setup_result.next_action)
         self.assertEqual("Run: python -m agent.secrets set telegram:bot_token", str(status.get("next_action")))
         self.assertEqual(setup_result.next_action, doctor_check.next_action)
+
+    def test_ready_when_telegram_disabled_optional(self) -> None:
+        result = build_setup_result(
+            ready_payload={
+                "ready": True,
+                "phase": "ready",
+                "telegram": {"enabled": False, "configured": False, "state": "disabled_optional"},
+                "runtime_status": {"runtime_mode": "READY", "failure_code": None},
+            },
+            llm_status={
+                "default_provider": "ollama",
+                "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                "active_provider_health": {"status": "ok"},
+                "active_model_health": {"status": "ok"},
+            },
+            api_reachable=True,
+            dry_run=True,
+            trace_id="setup-test-optional",
+        )
+        self.assertEqual("READY", result.onboarding_state)
+        self.assertEqual([], result.suggestions)
 
 
 if __name__ == "__main__":

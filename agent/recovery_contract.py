@@ -34,6 +34,19 @@ def _as_map(value: Any) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
 
+def _telegram_enabled(ready_payload: Mapping[str, Any]) -> bool:
+    telegram = _as_map(ready_payload.get("telegram"))
+    raw = telegram.get("enabled")
+    if isinstance(raw, bool):
+        return raw
+    normalized = _norm(raw)
+    if normalized in {"0", "false", "off", "no"}:
+        return False
+    if normalized in {"1", "true", "on", "yes"}:
+        return True
+    return True
+
+
 def _health_status(payload: Mapping[str, Any], key: str) -> str:
     row = _as_map(payload.get(key))
     return _norm(row.get("status"))
@@ -63,14 +76,16 @@ def detect_recovery_mode(
         return RECOVERY_TOKEN_INVALID
 
     telegram = _as_map(ready.get("telegram"))
+    telegram_enabled = _telegram_enabled(ready)
     telegram_state = _norm(telegram.get("state"))
     telegram_configured = telegram.get("configured")
-    if telegram_state == "crash_loop":
-        return RECOVERY_TELEGRAM_DOWN
-    if telegram_configured is True and telegram_state == "stopped":
-        return RECOVERY_TELEGRAM_DOWN
-    if telegram_state == "disabled_missing_token":
-        return RECOVERY_TOKEN_INVALID
+    if telegram_enabled:
+        if telegram_state == "crash_loop":
+            return RECOVERY_TELEGRAM_DOWN
+        if telegram_configured is True and telegram_state == "stopped":
+            return RECOVERY_TELEGRAM_DOWN
+        if telegram_state == "disabled_missing_token":
+            return RECOVERY_TOKEN_INVALID
 
     status_source = status if status else ready
     provider_state = _health_status(status_source, "active_provider_health")

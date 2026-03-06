@@ -59,6 +59,16 @@ def _telegram_lock_path() -> Path:
     return root / "telegram_poll.default.lock"
 
 
+def _truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _telegram_enabled(config: Config | None) -> bool:
+    if config is not None and isinstance(getattr(config, "telegram_enabled", None), bool):
+        return bool(getattr(config, "telegram_enabled"))
+    return _truthy(os.getenv("TELEGRAM_ENABLED", "0"))
+
+
 def _check_required_dirs() -> StartupCheck:
     missing = [str(path) for path in _required_dirs() if not path.is_dir()]
     if not missing:
@@ -224,6 +234,24 @@ def _check_telegram_token(token: str | None) -> StartupCheck:
     )
 
 
+def _check_telegram_enabled(enabled: bool) -> StartupCheck:
+    if bool(enabled):
+        return StartupCheck(
+            "telegram.enabled",
+            "PASS",
+            None,
+            "telegram adapter enabled",
+            None,
+        )
+    return StartupCheck(
+        "telegram.enabled",
+        "PASS",
+        None,
+        "telegram adapter disabled (optional)",
+        None,
+    )
+
+
 def run_startup_checks(
     *,
     service: str,
@@ -290,7 +318,10 @@ def run_startup_checks(
             )
         )
     if normalized_service == "telegram":
-        checks.append(_check_telegram_token(token))
+        telegram_enabled = _telegram_enabled(loaded_config)
+        checks.append(_check_telegram_enabled(telegram_enabled))
+        if telegram_enabled:
+            checks.append(_check_telegram_token(token))
 
     status = "PASS"
     failure_code: str | None = None

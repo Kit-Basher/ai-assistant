@@ -93,6 +93,7 @@ Recovery contract (single best next action per mode):
 3. Verify: `python -m agent status`
 4. Diagnose if needed: `python -m agent doctor`
 5. Optional Telegram transport:
+   - enable adapter: `export TELEGRAM_ENABLED=1` (or set in service env)
    - set token: `python -m agent.secrets set telegram:bot_token`
    - restart telegram service: `systemctl --user restart personal-agent-telegram.service`
    - send Telegram message: `help`
@@ -459,6 +460,7 @@ Telegram token source:
 - Backward-compatible fallback: `TELEGRAM_BOT_TOKEN`
 
 Common optional:
+- `TELEGRAM_ENABLED` (default `0`; set `1` to enable Telegram transport adapter)
 - `AGENT_TIMEZONE` (default `America/Regina`)
 - `AGENT_DB_PATH` (default `memory/agent.db`)
 - `AGENT_LOG_PATH` (default `logs/agent.jsonl`)

@@ -24,7 +24,7 @@ class TestOnboardingContract(unittest.TestCase):
         ready_payload = {
             "ready": False,
             "phase": "ready",
-            "telegram": {"configured": False, "state": "disabled_missing_token"},
+            "telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token"},
             "runtime_status": {"runtime_mode": "BOOTSTRAP_REQUIRED", "failure_code": "telegram_token_missing"},
         }
         self.assertEqual(ONBOARDING_TOKEN_MISSING, detect_onboarding_state(ready_payload=ready_payload))
@@ -47,7 +47,7 @@ class TestOnboardingContract(unittest.TestCase):
         ready_payload = {
             "ready": False,
             "phase": "starting",
-            "telegram": {"configured": True, "state": "stopped"},
+            "telegram": {"enabled": True, "configured": True, "state": "stopped"},
             "runtime_status": {"runtime_mode": "DEGRADED", "failure_code": "startup_check_failed"},
         }
         self.assertEqual(ONBOARDING_SERVICES_DOWN, detect_onboarding_state(ready_payload=ready_payload))
@@ -60,7 +60,7 @@ class TestOnboardingContract(unittest.TestCase):
         ready_payload = {
             "ready": True,
             "phase": "ready",
-            "telegram": {"configured": True, "state": "running"},
+            "telegram": {"enabled": True, "configured": True, "state": "running"},
             "runtime_status": {"runtime_mode": "READY", "failure_code": None},
         }
         status = {
@@ -79,7 +79,7 @@ class TestOnboardingContract(unittest.TestCase):
         ready_payload = {
             "ready": False,
             "phase": "ready",
-            "telegram": {"configured": True, "state": "running"},
+            "telegram": {"enabled": True, "configured": True, "state": "running"},
             "runtime_status": {"runtime_mode": "DEGRADED", "failure_code": None},
         }
         status = {
@@ -94,6 +94,24 @@ class TestOnboardingContract(unittest.TestCase):
         )
         self.assertIn("python -m agent doctor", onboarding_next_action(ONBOARDING_DEGRADED))
         self.assertEqual(3, len(onboarding_steps(ONBOARDING_DEGRADED)))
+
+    def test_detect_ready_when_telegram_disabled_optional(self) -> None:
+        ready_payload = {
+            "ready": True,
+            "phase": "ready",
+            "telegram": {"enabled": False, "configured": False, "state": "disabled_optional"},
+            "runtime_status": {"runtime_mode": "READY", "failure_code": None},
+        }
+        status = {
+            "default_provider": "ollama",
+            "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+            "active_provider_health": {"status": "ok"},
+            "active_model_health": {"status": "ok"},
+        }
+        self.assertEqual(
+            ONBOARDING_READY,
+            detect_onboarding_state(ready_payload=ready_payload, llm_status=status),
+        )
 
 
 if __name__ == "__main__":

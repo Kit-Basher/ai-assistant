@@ -961,7 +961,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertNotIn("bot_token", json.dumps(tested, ensure_ascii=True))
 
     def test_start_embedded_telegram_sets_running_state_and_prints_events(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
         started = threading.Event()
 
         class _FakeUpdater:

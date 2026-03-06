@@ -16,6 +16,7 @@ class TestTelegramTokenLoading(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self._env_backup = dict(os.environ)
         os.environ["AGENT_SECRET_STORE_PATH"] = os.path.join(self.tmpdir.name, "secrets.enc.json")
+        os.environ["TELEGRAM_ENABLED"] = "1"
 
     def tearDown(self) -> None:
         os.environ.clear()
@@ -54,6 +55,15 @@ class TestTelegramTokenLoading(unittest.TestCase):
         polling_mock.assert_not_called()
         joined = "\n".join(logs.output)
         self.assertIn("already active", joined)
+
+    def test_main_exits_cleanly_when_telegram_disabled(self) -> None:
+        os.environ["TELEGRAM_ENABLED"] = "0"
+        with patch("telegram_adapter.bot.run_polling_with_backoff") as polling_mock:
+            with self.assertLogs("telegram_adapter.bot", level="INFO") as logs:
+                main()
+        polling_mock.assert_not_called()
+        joined = "\n".join(logs.output)
+        self.assertIn("telegram.disabled", joined)
 
     def test_run_polling_with_backoff_handles_conflict_and_retries(self) -> None:
         token = "1234567:abcdefghijklmnopqrstuvwxyz_123456"

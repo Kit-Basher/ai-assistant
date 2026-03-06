@@ -1304,6 +1304,16 @@ class AgentRuntime:
     ) -> bool:
         self._refresh_telegram_config_cache()
         print(f"telegram.embedded: start called pid={self.pid}", flush=True)
+        if not bool(getattr(self.config, "telegram_enabled", False)):
+            print(
+                "telegram.disabled {\"mode\": \"embedded\", \"reason\": \"config_disabled\", \"token_source\": \"config\"}",
+                flush=True,
+            )
+            print(
+                "telegram.embedded: start result=false token_source=config",
+                flush=True,
+            )
+            return False
         if self._telegram_runner is not None:
             existing_source = "none"
             try:
@@ -2650,6 +2660,9 @@ class AgentRuntime:
                 token = env_token
                 token_source = "env"
         self._telegram_configured_cached = bool(token)
+        if not bool(getattr(self.config, "telegram_enabled", False)):
+            self._telegram_token_source_cached = "config_disabled"
+            return
         self._telegram_token_source_cached = token_source
 
     def telegram_status(self) -> dict[str, Any]:
@@ -2658,11 +2671,15 @@ class AgentRuntime:
             if self._telegram_runner is not None and hasattr(self._telegram_runner, "status")
             else {}
         )
+        telegram_enabled = bool(getattr(self.config, "telegram_enabled", False))
         state = str(runner_status.get("state") or "").strip() or "stopped"
-        if not self._telegram_configured_cached and state == "stopped":
+        if not telegram_enabled:
+            state = "disabled_optional"
+        elif not self._telegram_configured_cached and state == "stopped":
             state = "disabled_missing_token"
         return {
             "ok": True,
+            "enabled": telegram_enabled,
             "configured": bool(self._telegram_configured_cached),
             "token_source": str(self._telegram_token_source_cached or "none"),
             "state": state,
@@ -2677,6 +2694,7 @@ class AgentRuntime:
     def ready_status(self) -> dict[str, Any]:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
+        telegram_enabled = bool(telegram.get("enabled", False))
         hf_status = self._model_watch_hf_status_snapshot()
         phase = str(self.startup_phase or "starting").strip().lower() or "starting"
         warmup_remaining = self._warmup_remaining_snapshot()
@@ -2684,7 +2702,10 @@ class AgentRuntime:
             # Runtime can be instantiated directly in tests/tools without going through run_server().
             # Treat that mode as immediately ready.
             phase = "ready"
-        telegram_ready = telegram_state in {"running", "disabled_missing_token"}
+        telegram_ready = bool(
+            (not telegram_enabled)
+            or telegram_state in {"running", "disabled_missing_token", "disabled_optional"}
+        )
         ready = bool(phase == "ready" and telegram_ready)
         defaults = self.get_defaults()
         providers_doc = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
@@ -2744,6 +2765,7 @@ class AgentRuntime:
             "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
             "runtime_status": normalized_status,
             "telegram": {
+                "enabled": telegram_enabled,
                 "configured": bool(telegram.get("configured", False)),
                 "state": telegram_state,
             },
@@ -2815,6 +2837,7 @@ class AgentRuntime:
                 "uptime_seconds": uptime_seconds,
             },
             "telegram": {
+                "enabled": telegram_enabled,
                 "configured": bool(telegram.get("configured", False)),
                 "token_source": str(telegram.get("token_source") or "none"),
                 "state": telegram_state,
@@ -2895,6 +2918,8 @@ class AgentRuntime:
         return rows
 
     def _resolve_telegram_target(self) -> tuple[str | None, str | None]:
+        if not bool(getattr(self.config, "telegram_enabled", False)):
+            return None, None
         token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()
         if not token:
             token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()

@@ -10,7 +10,7 @@ from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import load_config
 
 
-def _config(registry_path: str, db_path: str):
+def _config(registry_path: str, db_path: str, *, telegram_enabled: bool = False):
     cfg = load_config(require_telegram_token=False)
     return replace(
         cfg,
@@ -18,6 +18,7 @@ def _config(registry_path: str, db_path: str):
         log_path=os.path.join(os.path.dirname(db_path), "agent.log"),
         llm_registry_path=registry_path,
         llm_automation_enabled=False,
+        telegram_enabled=telegram_enabled,
     )
 
 
@@ -72,7 +73,7 @@ class TestReadyEndpoint(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
-    def test_ready_missing_token_reports_disabled_missing_token_and_ready_true(self) -> None:
+    def test_ready_telegram_disabled_optional_reports_ready(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._telegram_runner = None
         runtime._telegram_configured_cached = False
@@ -85,7 +86,8 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["ready"])
         self.assertIn(payload["runtime_mode"], {"READY", "BOOTSTRAP_REQUIRED"})
-        self.assertEqual("disabled_missing_token", payload["telegram"]["state"])
+        self.assertFalse(bool(payload["telegram"]["enabled"]))
+        self.assertEqual("disabled_optional", payload["telegram"]["state"])
         if payload["runtime_mode"] == "READY":
             self.assertIsNone(payload.get("next_action"))
         else:
@@ -100,8 +102,22 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual([], payload["telegram"]["recent_messages"])
         self.assertTrue(str(payload.get("message") or "").strip())
 
+    def test_ready_missing_token_enabled_reports_disabled_missing_token(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
+        runtime._telegram_runner = None
+        runtime._telegram_configured_cached = False
+        runtime._telegram_token_source_cached = "none"
+
+        handler = _HandlerForTest(runtime, "/ready")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(bool(payload["telegram"]["enabled"]))
+        self.assertEqual("disabled_missing_token", payload["telegram"]["state"])
+
     def test_ready_reports_not_ready_when_telegram_crash_loop(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
         runtime._telegram_runner = _FakeRunner(
             {
                 "state": "crash_loop",
@@ -128,7 +144,7 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual("crash_loop", payload["telegram"]["state"])
 
     def test_ready_reports_ready_when_telegram_running(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
         runtime._telegram_runner = _FakeRunner(
             {
                 "state": "running",
@@ -150,13 +166,14 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual(200, handler.status_code)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["ready"])
+        self.assertTrue(bool(payload["telegram"]["enabled"]))
         self.assertEqual("running", payload["telegram"]["state"])
         self.assertGreaterEqual(int(payload["api"]["uptime_seconds"]), 0)
         self.assertIn("version", payload["api"])
         self.assertIn("pid", payload["api"])
 
     def test_ready_includes_recent_telegram_messages_redacted(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
         runtime._telegram_runner = _FakeRunner(
             {
                 "state": "running",

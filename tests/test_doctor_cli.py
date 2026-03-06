@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from agent.doctor import (
     DoctorCheck,
+    _doctor_checks,
     _check_llm_availability,
     _check_secret_store_path,
     _check_telegram_dropin,
@@ -101,6 +102,32 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertIsInstance(parsed, dict)
         self.assertIn("trace_id", parsed)
         self.assertIn("checks", parsed)
+
+    def test_doctor_checks_skip_telegram_failures_when_optional_disabled(self) -> None:
+        ok = DoctorCheck("ok", "OK", "ok")
+
+        def _systemd_stub(unit: str, check_id: str) -> DoctorCheck:
+            _ = unit
+            return DoctorCheck(check_id=check_id, status="OK", detail_short="ok")
+
+        with (
+            patch("agent.doctor._telegram_enabled_for_doctor", return_value=False),
+            patch("agent.doctor._check_python_runtime", return_value=ok),
+            patch("agent.doctor._check_repo_readable", return_value=ok),
+            patch("agent.doctor._check_secret_store_path", return_value=ok),
+            patch("agent.doctor._check_required_dirs", return_value=ok),
+            patch("agent.doctor._check_write_mode_safe", return_value=ok),
+            patch("agent.doctor._check_systemd_service", side_effect=_systemd_stub),
+            patch("agent.doctor._check_llm_availability", return_value=ok),
+            patch("agent.doctor._check_logging_to_stdout", return_value=ok),
+        ):
+            checks = _doctor_checks(repo_root=Path("."), online=False, api_base_url="http://127.0.0.1:8765")
+        rows = {row.check_id: row for row in checks}
+        self.assertEqual("OK", rows["telegram.dropin"].status)
+        self.assertIn("optional", rows["telegram.dropin"].detail_short)
+        self.assertEqual("OK", rows["systemd.telegram_service"].status)
+        self.assertEqual("OK", rows["process.telegram_pollers"].status)
+        self.assertEqual("OK", rows["telegram.token"].status)
 
 
 if __name__ == "__main__":

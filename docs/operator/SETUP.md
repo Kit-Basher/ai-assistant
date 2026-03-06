@@ -14,6 +14,7 @@ Canonical first-run command:
 2. Follow exactly one `Next action`.
 3. Re-run `python -m agent status` until runtime is stable.
 4. Use native UI as primary setup/recovery surface; Telegram mirrors runtime setup state when enabled.
+5. Telegram is optional and off by default (`TELEGRAM_ENABLED=0`).
 
 ## Setup Complete
 
@@ -45,9 +46,11 @@ Setup is complete when onboarding state is `READY` and:
 ## Short Recovery Paths
 
 - token missing:
+  - (only when Telegram is enabled)
   - `python -m agent.secrets set telegram:bot_token`
   - `systemctl --user restart personal-agent-telegram.service`
 - telegram down:
+  - (only when Telegram is enabled)
   - `systemctl --user restart personal-agent-telegram.service`
 - api down:
   - `systemctl --user restart personal-agent-api.service`

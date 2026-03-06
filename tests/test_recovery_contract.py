@@ -24,7 +24,7 @@ class TestRecoveryContract(unittest.TestCase):
     def test_telegram_down(self) -> None:
         ready_payload = {
             "ready": False,
-            "telegram": {"configured": True, "state": "stopped"},
+            "telegram": {"enabled": True, "configured": True, "state": "stopped"},
             "runtime_status": {"runtime_mode": "DEGRADED"},
         }
         mode = detect_recovery_mode(ready_payload=ready_payload, api_reachable=True)
@@ -32,10 +32,25 @@ class TestRecoveryContract(unittest.TestCase):
         self.assertIn("personal-agent-telegram.service", recovery_next_action(mode))
 
     def test_token_invalid(self) -> None:
-        ready_payload = {"telegram": {"configured": False, "state": "disabled_missing_token"}}
+        ready_payload = {"telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token"}}
         mode = detect_recovery_mode(ready_payload=ready_payload)
         self.assertEqual(RECOVERY_TOKEN_INVALID, mode)
         self.assertIn("telegram:bot_token", recovery_next_action(mode))
+
+    def test_telegram_disabled_optional_does_not_trigger_telegram_recovery(self) -> None:
+        ready_payload = {
+            "ready": True,
+            "telegram": {"enabled": False, "configured": False, "state": "disabled_optional"},
+            "runtime_status": {"runtime_mode": "READY"},
+        }
+        llm_status = {
+            "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+            "active_provider_health": {"status": "ok"},
+            "active_model_health": {"status": "ok"},
+        }
+        mode = detect_recovery_mode(ready_payload=ready_payload, llm_status=llm_status)
+        self.assertNotEqual(RECOVERY_TELEGRAM_DOWN, mode)
+        self.assertNotEqual(RECOVERY_TOKEN_INVALID, mode)
 
     def test_lock_conflict(self) -> None:
         mode = detect_recovery_mode(failure_code="lock_conflict")

@@ -21,6 +21,7 @@ from skills.observe_now.handler import observe_now
 from agent.audit_log import redact
 from agent.golden_path import next_step_for_failure
 from agent.secret_store import SecretStore
+from agent.config import load_config
 
 
 @dataclass(frozen=True)
@@ -420,6 +421,29 @@ def _effective_secret_store_path() -> str:
     return str(Path.home() / ".local" / "share" / "personal-agent" / "secrets.enc.json")
 
 
+def _is_truthy(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _telegram_enabled_for_doctor() -> bool:
+    try:
+        cfg = load_config(require_telegram_token=False)
+        raw = getattr(cfg, "telegram_enabled", None)
+        if isinstance(raw, bool):
+            return raw
+    except Exception:
+        pass
+    return _is_truthy(os.getenv("TELEGRAM_ENABLED", "0"))
+
+
+def _telegram_optional_check(check_id: str) -> DoctorCheck:
+    return DoctorCheck(
+        check_id=check_id,
+        status="OK",
+        detail_short="telegram adapter disabled (optional)",
+    )
+
+
 def _token_preview(token: str | None) -> str:
     value = str(token or "").strip()
     if not value:
@@ -690,20 +714,35 @@ def _doctor_checks(
     online: bool,
     api_base_url: str,
 ) -> list[DoctorCheck]:
+    telegram_enabled = _telegram_enabled_for_doctor()
     checks = [
         _check_python_runtime(),
         _check_repo_readable(repo_root),
         _check_secret_store_path(),
         _check_required_dirs(),
-        _check_telegram_dropin(),
         _check_write_mode_safe(),
         _check_systemd_service("personal-agent-api.service", "systemd.api_service"),
-        _check_systemd_service("personal-agent-telegram.service", "systemd.telegram_service"),
-        _check_telegram_poller_singleton(),
         _check_llm_availability(api_base_url),
-        _check_telegram_token(online=online),
         _check_logging_to_stdout(),
     ]
+    if telegram_enabled:
+        checks.extend(
+            [
+                _check_telegram_dropin(),
+                _check_systemd_service("personal-agent-telegram.service", "systemd.telegram_service"),
+                _check_telegram_poller_singleton(),
+                _check_telegram_token(online=online),
+            ]
+        )
+    else:
+        checks.extend(
+            [
+                _telegram_optional_check("telegram.dropin"),
+                _telegram_optional_check("systemd.telegram_service"),
+                _telegram_optional_check("process.telegram_pollers"),
+                _telegram_optional_check("telegram.token"),
+            ]
+        )
     return checks
 
 

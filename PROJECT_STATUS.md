@@ -149,7 +149,7 @@ Single operator entrypoint:
 
 ## Runtime Note
 - Default runtime model is one main service (`personal-agent-api.service`).
-- Telegram is optional and treated as a transport adapter surface (embedded today by default when token is configured).
+- Telegram is optional and treated as a transport adapter surface (disabled by default; set `TELEGRAM_ENABLED=1` to enable).
 - Readiness check after restart:
   1. `systemctl --user restart personal-agent-api.service`
   2. `python tools/wait_ready.py`

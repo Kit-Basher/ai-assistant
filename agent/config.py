@@ -25,6 +25,7 @@ class Config:
     llm_timeout_seconds: int
     enable_writes: bool = False
     enable_scheduled_snapshots: bool = False
+    telegram_enabled: bool = False
     llm_provider: str = "none"
     enable_llm_presentation: bool = False
     openai_base_url: str | None = None
@@ -157,8 +158,15 @@ def load_observe_config() -> ObserveConfig:
 
 
 def load_config(*, require_telegram_token: bool = True) -> Config:
+    telegram_enabled = os.getenv("TELEGRAM_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    if require_telegram_token and not telegram_bot_token:
+    if require_telegram_token and telegram_enabled and not telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     if not telegram_bot_token:
         telegram_bot_token = "local-api"
@@ -709,6 +717,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         llm_timeout_seconds=llm_timeout_seconds,
         enable_writes=enable_writes,
         enable_scheduled_snapshots=enable_scheduled_snapshots,
+        telegram_enabled=telegram_enabled,
         llm_provider=llm_provider,
         enable_llm_presentation=enable_llm_presentation,
         openai_base_url=openai_base_url,

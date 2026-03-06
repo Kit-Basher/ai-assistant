@@ -30,6 +30,20 @@ def _norm(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _telegram_enabled(ready_payload: Mapping[str, Any] | None = None) -> bool:
+    payload = ready_payload if isinstance(ready_payload, Mapping) else {}
+    telegram = payload.get("telegram") if isinstance(payload.get("telegram"), Mapping) else {}
+    raw = telegram.get("enabled") if isinstance(telegram, Mapping) else None
+    if isinstance(raw, bool):
+        return raw
+    normalized = str(raw or "").strip().lower()
+    if normalized in {"0", "false", "off", "no"}:
+        return False
+    if normalized in {"1", "true", "on", "yes"}:
+        return True
+    return str(os.getenv("TELEGRAM_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def _trace_id() -> str:
     return f"setup-{int(time.time())}-{os.getpid()}"
 
@@ -128,7 +142,12 @@ def _state_why(
     return "Setup has not been completed yet."
 
 
-def _safe_suggestions(*, onboarding_state: str, recovery_mode: str) -> list[str]:
+def _safe_suggestions(
+    *,
+    onboarding_state: str,
+    recovery_mode: str,
+    telegram_enabled: bool,
+) -> list[str]:
     if onboarding_state == "TOKEN_MISSING":
         return [
             "python -m agent.secrets set telegram:bot_token",
@@ -136,11 +155,13 @@ def _safe_suggestions(*, onboarding_state: str, recovery_mode: str) -> list[str]
             "python -m agent status",
         ]
     if onboarding_state == "SERVICES_DOWN":
-        return [
+        suggestions = [
             "systemctl --user restart personal-agent-api.service",
-            "systemctl --user restart personal-agent-telegram.service",
-            "python -m agent status",
         ]
+        if telegram_enabled:
+            suggestions.append("systemctl --user restart personal-agent-telegram.service")
+        suggestions.append("python -m agent status")
+        return suggestions
     if onboarding_state == "LLM_MISSING":
         return [
             "python -m agent setup --dry-run",
@@ -178,6 +199,7 @@ def build_setup_result(
     dry_run: bool = False,
     trace_id: str | None = None,
 ) -> SetupWizardResult:
+    telegram_enabled = _telegram_enabled(ready_payload)
     onboarding_state = detect_onboarding_state(
         ready_payload=ready_payload,
         llm_status=llm_status,
@@ -206,7 +228,11 @@ def build_setup_result(
         transport_error=transport_error,
     )
     steps = onboarding_steps(onboarding_state)
-    suggestions = _safe_suggestions(onboarding_state=onboarding_state, recovery_mode=recovery_mode)
+    suggestions = _safe_suggestions(
+        onboarding_state=onboarding_state,
+        recovery_mode=recovery_mode,
+        telegram_enabled=telegram_enabled,
+    )
     if onboarding_state == ONBOARDING_READY:
         suggestions = []
     return SetupWizardResult(

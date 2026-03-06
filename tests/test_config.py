@@ -6,6 +6,43 @@ from agent.config import load_config
 
 
 class TestConfig(unittest.TestCase):
+    def test_telegram_enabled_default_false(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "token", "LLM_PROVIDER": "none"},
+            clear=False,
+        ):
+            os.environ.pop("TELEGRAM_ENABLED", None)
+            config = load_config()
+        self.assertFalse(config.telegram_enabled)
+
+    def test_telegram_enabled_env_true(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "token", "LLM_PROVIDER": "none", "TELEGRAM_ENABLED": "1"},
+            clear=False,
+        ):
+            config = load_config()
+        self.assertTrue(config.telegram_enabled)
+
+    def test_require_telegram_token_only_when_enabled(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"LLM_PROVIDER": "none", "TELEGRAM_ENABLED": "0"},
+            clear=False,
+        ):
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+            config = load_config()
+        self.assertFalse(config.telegram_enabled)
+        with patch.dict(
+            os.environ,
+            {"LLM_PROVIDER": "none", "TELEGRAM_ENABLED": "1"},
+            clear=False,
+        ):
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+            with self.assertRaises(RuntimeError):
+                load_config()
+
     def test_enable_writes_default_false(self) -> None:
         with patch.dict(
             os.environ,

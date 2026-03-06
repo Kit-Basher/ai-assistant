@@ -35,6 +35,7 @@ If implementation or other docs conflict with this file, this file wins.
 ## 4) Process Model
 - Default install runs one main service.
 - Optional adapters may run separately only as thin transport shells.
+- Telegram is opt-in (`TELEGRAM_ENABLED=1`), and disabled by default.
 - Business logic must not be duplicated across processes.
 - Split-brain behavior is not allowed.
 

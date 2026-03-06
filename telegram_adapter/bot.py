@@ -3360,8 +3360,23 @@ def run_polling_with_backoff(
 
 
 def main() -> None:
+    loaded = load_config(require_telegram_token=False)
+    if not bool(getattr(loaded, "telegram_enabled", False)):
+        _LOGGER.info(
+            "telegram.disabled %s",
+            json.dumps(
+                {
+                    "mode": "adapter",
+                    "reason": "config_disabled",
+                    "env": "TELEGRAM_ENABLED",
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+        return
     token, token_source = resolve_telegram_bot_token_with_source()
-    startup_report = run_startup_checks(service="telegram", token=token)
+    startup_report = run_startup_checks(service="telegram", config=loaded, token=token)
     for row in (startup_report.get("checks") if isinstance(startup_report.get("checks"), list) else []):
         if not isinstance(row, dict):
             continue
@@ -3397,9 +3412,8 @@ def main() -> None:
         raise SystemExit(1)
 
     if not token:
-        app = build_app(token=None)
-        app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
-        return
+        _LOGGER.error("telegram.startup.token_missing")
+        raise SystemExit(1)
     poll_lock = acquire_telegram_poll_lock(token)
     if poll_lock is None:
         warning_payload = {
