@@ -14,9 +14,8 @@
 - Startup checks fail with `failure_code=telegram_token_missing`.
 - Fix token:
   - `python -m agent.secrets set telegram:bot_token`
-  - `systemctl --user restart personal-agent-api.service`
+  - `systemctl --user restart personal-agent-telegram.service`
 
 ## When Operator Is Confused
 - Run exactly one command first: `python -m agent doctor`
 - Follow the single `Next action` line.
-

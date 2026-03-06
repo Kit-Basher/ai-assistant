@@ -44,7 +44,7 @@ Unified CLI:
 
 ## First 5 Minutes
 1. Set Telegram token: `python -m agent.secrets set telegram:bot_token`
-2. Restart service: `systemctl --user restart personal-agent-api.service`
+2. Restart Telegram service: `systemctl --user restart personal-agent-telegram.service`
 3. Verify: `python -m agent status`
 4. Diagnose if needed: `python -m agent doctor`
 5. Send Telegram message: `help`

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -59,6 +60,37 @@ class TestAgentCLI(unittest.TestCase):
         output = io.StringIO()
         with patch("agent.cli._resolve_git_commit", return_value="abc1234"), redirect_stdout(output):
             code = cli.main(["version"])
+        self.assertEqual(0, code)
+        text = output.getvalue().strip()
+        self.assertIn("version=", text)
+        self.assertIn("commit=abc1234", text)
+
+    def test_main_uses_sys_argv_for_doctor_when_argv_none(self) -> None:
+        with patch.object(sys, "argv", ["python -m agent", "doctor", "--json"]):
+            with patch("agent.cli.doctor_main", return_value=0) as doctor_main:
+                code = cli.main(None)
+        self.assertEqual(0, code)
+        doctor_main.assert_called_once_with(["--json"])
+
+    def test_main_uses_sys_argv_for_status_when_argv_none(self) -> None:
+        payload = {
+            "ok": True,
+            "ready": True,
+            "message": "Ready.",
+            "telegram": {"state": "running"},
+        }
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["python -m agent", "status"]):
+            with patch("agent.cli._http_json", return_value=(True, payload)), redirect_stdout(output):
+                code = cli.main(None)
+        self.assertEqual(0, code)
+        self.assertIn("Agent is ready.", output.getvalue())
+
+    def test_main_uses_sys_argv_for_version_when_argv_none(self) -> None:
+        output = io.StringIO()
+        with patch.object(sys, "argv", ["python -m agent", "version"]):
+            with patch("agent.cli._resolve_git_commit", return_value="abc1234"), redirect_stdout(output):
+                code = cli.main(None)
         self.assertEqual(0, code)
         text = output.getvalue().strip()
         self.assertIn("version=", text)

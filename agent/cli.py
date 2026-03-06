@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -286,7 +287,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    incoming = list(argv or [])
+    if argv is None:
+        incoming = list(sys.argv[1:])
+    else:
+        incoming = list(argv)
     if incoming and str(incoming[0]).strip().lower() == "doctor":
         return int(doctor_main(incoming[1:]))
 
