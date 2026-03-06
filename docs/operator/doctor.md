@@ -25,12 +25,14 @@ Canonical local diagnostics entrypoint:
 ## Telegram
 
 - Telegram command/text `doctor` runs the same checks (without fixes) and returns a short summary with trace id.
+- Telegram command/text `setup` runs deterministic onboarding/recovery guidance (`python -m agent setup` equivalent, read-only).
 
 ## Output Semantics
 
 - `PASS`: system is healthy; no operator action needed.
 - `WARN`: degraded but running; follow the single `Next action` line.
 - `FAIL`: startup/runtime blocking issue; follow the single `Next action` line immediately.
+- Canonical first-run/recovery command remains: `python -m agent setup`.
 - Runtime mode mapping used by user-facing surfaces:
   - `READY` ~= `PASS`
   - `BOOTSTRAP_REQUIRED` ~= setup-needed `WARN`

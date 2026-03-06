@@ -92,6 +92,11 @@ class TestReadyEndpoint(unittest.TestCase):
             self.assertTrue(str(payload.get("next_action") or "").strip())
         self.assertIn("llm", payload)
         self.assertIn("known", payload["llm"])
+        self.assertIn("onboarding", payload)
+        self.assertIn("state", payload["onboarding"])
+        self.assertIn("next_action", payload["onboarding"])
+        self.assertIn("recovery", payload)
+        self.assertIn("mode", payload["recovery"])
         self.assertEqual([], payload["telegram"]["recent_messages"])
         self.assertTrue(str(payload.get("message") or "").strip())
 

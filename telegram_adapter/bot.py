@@ -31,7 +31,7 @@ from agent.config import Config, load_config
 from agent.doctor import run_doctor_report
 from agent.error_response_ux import deterministic_error_message
 from agent.fallback_ladder import run_with_fallback
-from agent.golden_path import bootstrap_guidance, bootstrap_needed
+from agent.golden_path import bootstrap_needed
 from agent.llm_router import LLMRouter
 from agent.llm_client import build_llm_broker
 from agent.logging_utils import log_event
@@ -48,6 +48,11 @@ from agent.daily_brief import should_send_daily_brief
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog
 from agent.identity import get_public_identity
+from agent.onboarding_contract import ONBOARDING_READY
+from agent.setup_wizard import (
+    build_setup_result,
+    render_telegram_setup_text,
+)
 from agent.secret_store import SecretStore
 from agent.startup_checks import run_startup_checks
 from agent.permissions import PermissionStore
@@ -377,8 +382,25 @@ def _deterministic_text_command(text: str) -> str | None:
     return None
 
 
-def _deterministic_operator_reply(text: str) -> tuple[str | None, str | None]:
+def _deterministic_operator_reply(
+    text: str,
+    *,
+    runtime: Any | None = None,
+) -> tuple[str | None, str | None]:
     normalized = _normalize_user_text(text)
+    if _contains_any(
+        normalized,
+        (
+            "setup",
+            "get started",
+            "fix setup",
+            "why isnt this working",
+            "why isn't this working",
+            "why isn’t this working",
+            "what do i do next",
+        ),
+    ):
+        return _setup_help_text(runtime=runtime), "setup"
     if _contains_any(
         normalized,
         (
@@ -763,35 +785,59 @@ def _doctor_summary_text() -> str:
     )
 
 
+def _setup_result_from_runtime(runtime: Any | None) -> Any | None:
+    if runtime is None:
+        return None
+    ready_payload: dict[str, Any] = {}
+    llm_status: dict[str, Any] = {}
+    if hasattr(runtime, "ready_status"):
+        try:
+            payload = runtime.ready_status()  # type: ignore[attr-defined]
+            if isinstance(payload, dict):
+                ready_payload = payload
+        except Exception:
+            ready_payload = {}
+    if hasattr(runtime, "llm_status"):
+        try:
+            payload = runtime.llm_status()  # type: ignore[attr-defined]
+            if isinstance(payload, dict):
+                llm_status = payload
+        except Exception:
+            llm_status = {}
+    try:
+        return build_setup_result(
+            ready_payload=ready_payload,
+            llm_status=llm_status,
+            api_reachable=True,
+            dry_run=True,
+        )
+    except Exception:
+        return None
+
+
+def _telegram_help_text(*, runtime: Any | None) -> str:
+    setup_result = _setup_result_from_runtime(runtime)
+    if setup_result is None:
+        return _TELEGRAM_HELP_TEXT
+    if str(setup_result.onboarding_state or "").strip().upper() != ONBOARDING_READY:
+        return render_telegram_setup_text(setup_result)
+    return _TELEGRAM_HELP_TEXT
+
+
 def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str | None, str | None]:
     normalized = _normalize_user_text(text)
     if normalized in {"/help", "help", "what can you do", "commands"}:
-        return _TELEGRAM_HELP_TEXT, "help"
+        return _telegram_help_text(runtime=bot_data.get("runtime")), "help"
     return None, None
 
 
 def _setup_help_text(*, runtime: Any | None) -> str:
-    status = _llm_status_payload(runtime)
-    provider = str(status.get("default_provider") or "").strip() or None
-    model = (
-        str(status.get("resolved_default_model") or "").strip()
-        or str(status.get("default_model") or "").strip()
-        or None
-    )
-    runtime_status = normalize_user_facing_status(
-        ready=bool(
-            str(((status.get("active_provider_health") or {}).get("status")) if isinstance(status.get("active_provider_health"), dict) else "").strip().lower() == "ok"
-            and str(((status.get("active_model_health") or {}).get("status")) if isinstance(status.get("active_model_health"), dict) else "").strip().lower() == "ok"
-        ),
-        bootstrap_required=bootstrap_needed(llm_status=status),
-        failure_code=("no_chat_model" if not model else None),
-        provider=provider,
-        model=model,
-        local_providers={"ollama"},
-    )
-    if str(runtime_status.get("runtime_mode") or "").strip().upper() == "BOOTSTRAP_REQUIRED":
-        return bootstrap_guidance()
-    return _MODEL_PROVIDER_HELP_TEXT
+    setup_result = _setup_result_from_runtime(runtime)
+    if setup_result is None:
+        return _MODEL_PROVIDER_HELP_TEXT
+    if str(setup_result.onboarding_state or "").strip().upper() != ONBOARDING_READY:
+        return render_telegram_setup_text(setup_result)
+    return "Setup is complete.\n" + _MODEL_PROVIDER_HELP_TEXT
 
 
 def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
@@ -2049,7 +2095,10 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        operator_reply, operator_route = _deterministic_operator_reply(text)
+        operator_reply, operator_route = _deterministic_operator_reply(
+            text,
+            runtime=bot_data.get("runtime"),
+        )
         if operator_reply is not None and operator_route is not None:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2646,7 +2695,8 @@ async def _handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         route="help",
         outcome="handled",
     )
-    await update.effective_message.reply_text(_TELEGRAM_HELP_TEXT)
+    runtime = context.application.bot_data.get("runtime")
+    await update.effective_message.reply_text(_telegram_help_text(runtime=runtime))
 
 
 async def _handle_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

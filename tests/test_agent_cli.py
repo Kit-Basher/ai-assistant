@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent import cli
+from agent.setup_wizard import SetupWizardResult
 
 
 class TestAgentCLI(unittest.TestCase):
@@ -105,6 +106,82 @@ class TestAgentCLI(unittest.TestCase):
         text = output.getvalue().strip()
         self.assertIn("version=", text)
         self.assertIn("commit=abc1234", text)
+
+    def test_setup_subcommand_prints_readable_output(self) -> None:
+        report = SetupWizardResult(
+            trace_id="setup-1",
+            generated_at="2026-03-06T00:00:00+00:00",
+            onboarding_state="TOKEN_MISSING",
+            recovery_mode="TOKEN_INVALID",
+            summary="Telegram bot token is missing.",
+            why="Telegram token is missing from secret store or environment.",
+            next_action="Run: python -m agent.secrets set telegram:bot_token",
+            steps=[
+                "Run: python -m agent.secrets set telegram:bot_token",
+                "Run: systemctl --user restart personal-agent-telegram.service",
+                "Run: python -m agent status",
+            ],
+            suggestions=[
+                "python -m agent.secrets set telegram:bot_token",
+                "systemctl --user restart personal-agent-telegram.service",
+            ],
+            dry_run=False,
+            api_reachable=True,
+        )
+        output = io.StringIO()
+        with patch("agent.cli.run_setup_wizard", return_value=report), redirect_stdout(output):
+            code = cli.main(["setup"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("1) State: TOKEN_MISSING", text)
+        self.assertIn("3) Next action:", text)
+        self.assertIn("trace_id: setup-1", text)
+
+    def test_setup_subcommand_json_output(self) -> None:
+        report = SetupWizardResult(
+            trace_id="setup-2",
+            generated_at="2026-03-06T00:00:00+00:00",
+            onboarding_state="READY",
+            recovery_mode="UNKNOWN_FAILURE",
+            summary="Setup complete. The agent is ready.",
+            why="All required services and chat model checks are healthy.",
+            next_action="No action needed.",
+            steps=["Use Telegram naturally."],
+            suggestions=[],
+            dry_run=False,
+            api_reachable=True,
+        )
+        output = io.StringIO()
+        with patch("agent.cli.run_setup_wizard", return_value=report), redirect_stdout(output):
+            code = cli.main(["setup", "--json"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn('"onboarding_state": "READY"', text)
+        self.assertIn('"trace_id": "setup-2"', text)
+
+    def test_setup_subcommand_dry_run_flag_is_passed(self) -> None:
+        report = SetupWizardResult(
+            trace_id="setup-3",
+            generated_at="2026-03-06T00:00:00+00:00",
+            onboarding_state="NOT_STARTED",
+            recovery_mode="UNKNOWN_FAILURE",
+            summary="Setup has not started.",
+            why="Setup has not been completed yet.",
+            next_action="Run: python -m agent setup",
+            steps=["Run: python -m agent setup"],
+            suggestions=["python -m agent setup --dry-run"],
+            dry_run=True,
+            api_reachable=False,
+        )
+        output = io.StringIO()
+        with patch("agent.cli.run_setup_wizard", return_value=report) as run_setup_wizard:
+            with redirect_stdout(output):
+                code = cli.main(["setup", "--dry-run"])
+        self.assertEqual(0, code)
+        run_setup_wizard.assert_called_once()
+        kwargs = run_setup_wizard.call_args.kwargs
+        self.assertTrue(bool(kwargs.get("dry_run")))
+        self.assertIn("Dry-run: no changes were applied.", output.getvalue())
 
 
 if __name__ == "__main__":

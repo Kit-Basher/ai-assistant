@@ -6,6 +6,23 @@
 - `DEGRADED`: short degraded status + one next action.
 - `FAILED`: deterministic error block (trace + component + next_action).
 
+## Setup Modes
+- Onboarding states:
+  - `NOT_STARTED`
+  - `TOKEN_MISSING`
+  - `LLM_MISSING`
+  - `SERVICES_DOWN`
+  - `READY`
+  - `DEGRADED`
+- Recovery modes:
+  - `TELEGRAM_DOWN`
+  - `API_DOWN`
+  - `TOKEN_INVALID`
+  - `LLM_UNAVAILABLE`
+  - `LOCK_CONFLICT`
+  - `DEGRADED_READ_ONLY`
+  - `UNKNOWN_FAILURE`
+
 ## Tool Execution Path
 - LLM-driven actions use one contract (`agent/tool_contract.py`) and one executor (`agent/tool_executor.py`).
 - Read-only checks stay available in degraded/bootstrap when possible.
@@ -18,9 +35,10 @@
 
 ## When Everything Works
 1. Restart service: `systemctl --user restart personal-agent-api.service`
-2. Verify: `python -m agent status`
-3. Talk to Telegram naturally.
-4. Use `doctor/status/health/brief` when needed.
+2. Verify setup: `python -m agent setup --dry-run`
+3. Verify runtime: `python -m agent status`
+4. Talk to Telegram naturally.
+5. Use `doctor/status/health/brief` when needed.
 
 ## When LLM Is Down
 - Telegram/CLI should show deterministic setup or recovery guidance.
@@ -33,5 +51,6 @@
   - `systemctl --user restart personal-agent-telegram.service`
 
 ## When Operator Is Confused
-- Run exactly one command first: `python -m agent doctor`
+- Run exactly one command first: `python -m agent setup`
+- If still blocked, run: `python -m agent doctor`
 - Follow the single `Next action` line.

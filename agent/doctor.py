@@ -632,7 +632,7 @@ def _check_llm_availability(api_base: str) -> DoctorCheck:
         check_id="llm.availability",
         status="FAIL",
         detail_short=detail,
-        next_action="Run: curl -sS -X POST http://127.0.0.1:8765/llm/fixit -H 'content-type: application/json' --data '{}'",
+        next_action="Run: python -m agent setup",
     )
 
 
@@ -644,7 +644,7 @@ def _check_telegram_token(online: bool) -> DoctorCheck:
             check_id="telegram.token",
             status="WARN",
             detail_short="telegram token missing",
-            next_action="Set telegram token in secret store key telegram:bot_token.",
+            next_action="Run: python -m agent.secrets set telegram:bot_token",
         )
     detail = f"token={_token_preview(token)} source={'secret_store' if store.get_secret('telegram:bot_token') else 'env'}"
     if not online:

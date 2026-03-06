@@ -137,6 +137,12 @@ from agent.modelops.recommend import (
     recommendation_to_dict,
     save_seen_model_ids,
 )
+from agent.onboarding_contract import (
+    detect_onboarding_state,
+    onboarding_next_action,
+    onboarding_steps,
+    onboarding_summary,
+)
 from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
     WizardChoice,
@@ -168,6 +174,11 @@ from agent.memory_v2.types import MemoryLevel, MemoryQuery
 from agent.packs.manifest import PackManifestError, compute_permissions_hash, load_manifest, normalize_permissions
 from agent.packs.policy import is_iface_allowed
 from agent.packs.store import PackStore
+from agent.recovery_contract import (
+    detect_recovery_mode,
+    recovery_next_action,
+    recovery_summary,
+)
 from agent.orchestrator import classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
@@ -2706,12 +2717,78 @@ class AgentRuntime:
             local_providers=local_providers,
             reason=str(normalized_status.get("failure_code") or "ok"),
         )
+        health_status_hint = "ok" if bool(normalized_status.get("ready", False)) else "unknown"
+        failure_code = str(normalized_status.get("failure_code") or "").strip().lower() or None
+        if failure_code == "provider_unhealthy":
+            provider_status_hint = "down"
+            model_status_hint = "unknown"
+        elif failure_code == "model_unhealthy":
+            provider_status_hint = "ok"
+            model_status_hint = "down"
+        elif failure_code == "no_chat_model":
+            provider_status_hint = "unknown"
+            model_status_hint = "down"
+        else:
+            provider_status_hint = health_status_hint
+            model_status_hint = health_status_hint
+        setup_context_ready_payload: dict[str, Any] = {
+            "ok": True,
+            "ready": bool(ready),
+            "phase": phase,
+            "failure_code": str(self._startup_last_error or "").strip() or None,
+            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
+            "runtime_status": normalized_status,
+            "telegram": {
+                "configured": bool(telegram.get("configured", False)),
+                "state": telegram_state,
+            },
+        }
+        setup_context_llm_status: dict[str, Any] = {
+            "default_provider": provider,
+            "resolved_default_model": model,
+            "default_model": model,
+            "active_provider_health": {"status": provider_status_hint},
+            "active_model_health": {"status": model_status_hint},
+        }
+        onboarding_state = detect_onboarding_state(
+            ready_payload=setup_context_ready_payload,
+            llm_status=setup_context_llm_status,
+        )
+        recovery_mode = detect_recovery_mode(
+            ready_payload=setup_context_ready_payload,
+            llm_status=setup_context_llm_status,
+            failure_code=failure_code,
+            api_reachable=True,
+        )
+        onboarding_next = onboarding_next_action(
+            onboarding_state,
+            ready_payload=setup_context_ready_payload,
+        )
+        if str(onboarding_state).strip().upper() == "DEGRADED":
+            onboarding_next = recovery_next_action(recovery_mode)
+        onboarding_payload = {
+            "state": onboarding_state,
+            "summary": onboarding_summary(
+                onboarding_state,
+                ready_payload=setup_context_ready_payload,
+                llm_status=setup_context_llm_status,
+            ),
+            "next_action": onboarding_next,
+            "steps": onboarding_steps(onboarding_state),
+        }
+        recovery_payload = {
+            "mode": recovery_mode,
+            "summary": recovery_summary(recovery_mode),
+            "next_action": recovery_next_action(recovery_mode),
+        }
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
         recent_messages = self._ready_recent_telegram_messages(limit=5)
         if phase == "degraded":
             message = "Startup warmup degraded. Check logs and retry."
         elif phase in {"starting", "listening", "warming"}:
             message = "Starting up... retrying. Try /ready again in a moment."
+        elif str(onboarding_state).strip().upper() != "READY":
+            message = f"{onboarding_payload['summary']} Next: {onboarding_payload['next_action']}"
         else:
             message = str(normalized_status.get("summary") or "").strip() or "Agent is ready."
         return {
@@ -2721,6 +2798,8 @@ class AgentRuntime:
             "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
             "next_action": normalized_status.get("next_action"),
             "runtime_status": normalized_status,
+            "onboarding": onboarding_payload,
+            "recovery": recovery_payload,
             "warmup_remaining": list(warmup_remaining),
             "last_error": str(self._startup_last_error or "") or None,
             "api": {

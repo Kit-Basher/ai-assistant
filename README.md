@@ -20,10 +20,12 @@ Use docs in this order when context conflicts:
 3. Start API service:
    - `systemctl --user restart personal-agent-api.service`
 4. Verify runtime:
+   - `python -m agent setup --dry-run`
    - `python -m agent status`
    - `python -m agent doctor`
 
 Unified CLI:
+- `python -m agent setup`
 - `python -m agent doctor`
 - `python -m agent status`
 - `python -m agent health`
@@ -44,6 +46,23 @@ Runtime contract (all surfaces use the same mode names):
 - `DEGRADED`: partial operation, read-only checks still work.
 - `FAILED`: deterministic error block with trace id + one next step.
 
+Onboarding contract (deterministic first-run states):
+- `NOT_STARTED`
+- `TOKEN_MISSING`
+- `LLM_MISSING`
+- `SERVICES_DOWN`
+- `READY`
+- `DEGRADED`
+
+Recovery contract (single best next action per mode):
+- `TELEGRAM_DOWN`
+- `API_DOWN`
+- `TOKEN_INVALID`
+- `LLM_UNAVAILABLE`
+- `LOCK_CONFLICT`
+- `DEGRADED_READ_ONLY`
+- `UNKNOWN_FAILURE`
+
 ## Deterministic Tool Contract
 - LLM-originated actions use one canonical request shape (`agent/tool_contract.py`):
   - `tool`, `args`, `reason`, `read_only`, `confidence`
@@ -58,19 +77,21 @@ Runtime contract (all surfaces use the same mode names):
 - Use `python -m agent memory` (or Telegram: `what are we doing?`) for a short, truthful continuity summary.
 
 ## If You Only Learn 3 Commands
+- `python -m agent setup`
 - `python -m agent status`
 - `python -m agent doctor`
-- `python -m agent logs`
 
 ## First 5 Minutes
 1. Set Telegram token: `python -m agent.secrets set telegram:bot_token`
-2. Restart Telegram service: `systemctl --user restart personal-agent-telegram.service`
-3. Verify: `python -m agent status`
-4. Diagnose if needed: `python -m agent doctor`
-5. Send Telegram message: `help`
+2. Run setup guide: `python -m agent setup`
+3. Restart Telegram service: `systemctl --user restart personal-agent-telegram.service`
+4. Verify: `python -m agent status`
+5. Diagnose if needed: `python -m agent doctor`
+6. Send Telegram message: `help`
 
 ## Troubleshooting
 - First step for any issue: `python -m agent doctor`
+- Canonical first-run and recovery guide: `python -m agent setup`
 - Detailed machine-readable output: `python -m agent doctor --json`
 - Safe local remediation only: `python -m agent doctor --fix`
 

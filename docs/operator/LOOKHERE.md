@@ -20,6 +20,7 @@ User service:
 ## Quick Diagnostics
 
 - Core health:
+  - `python -m agent setup`
   - `python -m agent health`
   - `python -m agent version`
   - `python -m agent status`
@@ -40,6 +41,11 @@ Runtime mode contract (all surfaces):
 - `BOOTSTRAP_REQUIRED`: setup path.
 - `DEGRADED`: partial operation with one next action.
 - `FAILED`: deterministic error block with trace id.
+
+Onboarding/recovery contract:
+- first-run command: `python -m agent setup`
+- onboarding states: `NOT_STARTED`, `TOKEN_MISSING`, `LLM_MISSING`, `SERVICES_DOWN`, `READY`, `DEGRADED`
+- recovery modes: `TELEGRAM_DOWN`, `API_DOWN`, `TOKEN_INVALID`, `LLM_UNAVAILABLE`, `LOCK_CONFLICT`, `DEGRADED_READ_ONLY`, `UNKNOWN_FAILURE`
 
 Tool execution contract:
 - LLM tool requests are validated via `agent/tool_contract.py`.

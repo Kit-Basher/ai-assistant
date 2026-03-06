@@ -24,6 +24,10 @@ This file captures practical guarantees that should remain stable unless intenti
   - `DEGRADED`
   - `FAILED`
 - One deterministic next action for degraded/failed user-facing states.
+- Deterministic onboarding + recovery contracts:
+  - onboarding states (`NOT_STARTED`, `TOKEN_MISSING`, `LLM_MISSING`, `SERVICES_DOWN`, `READY`, `DEGRADED`)
+  - recovery modes (`TELEGRAM_DOWN`, `API_DOWN`, `TOKEN_INVALID`, `LLM_UNAVAILABLE`, `LOCK_CONFLICT`, `DEGRADED_READ_ONLY`, `UNKNOWN_FAILURE`)
+- Canonical first-run operator path is `python -m agent setup` (read-only guidance by default).
 - One deterministic LLM tool-use schema (`agent/tool_contract.py`) for agent actions.
 - One execution gate (`agent/tool_executor.py`) and one permission decision helper (`agent/permission_contract.py`) for tool execution semantics.
 - Stable structured tool logs:

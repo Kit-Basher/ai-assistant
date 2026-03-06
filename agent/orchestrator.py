@@ -38,8 +38,9 @@ from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
-from agent.golden_path import bootstrap_guidance
 from agent.identity import get_public_identity
+from agent.onboarding_contract import onboarding_next_action, onboarding_summary
+from agent.recovery_contract import recovery_next_action, recovery_summary
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import deterministic_error_message
 from agent.tool_contract import normalize_tool_request
@@ -315,7 +316,13 @@ class Orchestrator:
 
     @staticmethod
     def _bootstrap_no_chat_text() -> str:
-        return bootstrap_guidance()
+        state = "LLM_MISSING"
+        return (
+            f"{onboarding_summary(state)}\n"
+            "1) Start Ollama locally at http://127.0.0.1:11434.\n"
+            "2) Install a local chat model (for example qwen2.5:3b-instruct).\n"
+            f"Next: {onboarding_next_action(state)}"
+        )
 
     def _bootstrap_no_chat_response(self) -> OrchestratorResponse:
         return OrchestratorResponse(self._bootstrap_no_chat_text())
@@ -334,16 +341,8 @@ class Orchestrator:
                     )
             except Exception:
                 pass
-        status = normalize_user_facing_status(
-            ready=False,
-            bootstrap_required=False,
-            failure_code="llm_runtime_error",
-            phase="degraded",
-            provider=None,
-            model=None,
-            local_providers={"ollama"},
-        )
-        return OrchestratorResponse(str(status.get("summary") or "Agent is starting or degraded."))
+        mode = "LLM_UNAVAILABLE"
+        return OrchestratorResponse(f"{recovery_summary(mode)}\nNext: {recovery_next_action(mode)}")
 
     @staticmethod
     def _trace_id(prefix: str) -> str:

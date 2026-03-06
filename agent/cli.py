@@ -18,6 +18,7 @@ from agent.golden_path import (
     next_step_for_failure,
 )
 from agent.runtime_contract import normalize_user_facing_status
+from agent.setup_wizard import render_setup_text, run_setup_wizard
 
 
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
@@ -240,6 +241,18 @@ def _cmd_memory(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_setup(args: argparse.Namespace) -> int:
+    result = run_setup_wizard(
+        api_base_url=str(args.api_base_url),
+        dry_run=bool(args.dry_run),
+    )
+    if bool(args.json):
+        print(json.dumps(result.to_dict(), ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+        return 0
+    print(render_setup_text(result), flush=True)
+    return 0
+
+
 def _resolve_log_path(explicit: str | None) -> Path:
     if explicit:
         return Path(str(explicit)).expanduser()
@@ -313,6 +326,11 @@ def build_parser() -> argparse.ArgumentParser:
     memory_parser = sub.add_parser("memory", help="Show continuity summary")
     memory_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
 
+    setup_parser = sub.add_parser("setup", help="Show deterministic setup guidance")
+    setup_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
+    setup_parser.add_argument("--json", action="store_true", help="emit JSON output")
+    setup_parser.add_argument("--dry-run", action="store_true", help="no mutations (default behavior)")
+
     health_parser = sub.add_parser("health", help="Show LLM/runtime health snapshot")
     health_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
 
@@ -350,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_brief(args)
     if command == "memory":
         return _cmd_memory(args)
+    if command == "setup":
+        return _cmd_setup(args)
     if command == "health":
         return _cmd_health(args)
     if command == "logs":

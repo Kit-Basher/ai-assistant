@@ -10,6 +10,8 @@
 ## Verify
 - Service logs:
   - `journalctl --user -u personal-agent-telegram.service -n 100 --no-pager`
+- Setup guidance:
+  - `python -m agent setup`
 - Healthy startup log markers:
   - `telegram.started`
   - `telegram.out`

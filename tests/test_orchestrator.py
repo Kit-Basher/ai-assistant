@@ -316,7 +316,7 @@ class TestOrchestrator(unittest.TestCase):
         )
         with patch.object(orchestrator, "_handle_message_impl") as run_mock:
             response = orchestrator._llm_chat("user1", "tell me a joke")
-        self.assertIn("Agent is starting or degraded.", response.text)
+        self.assertIn("Chat LLM is unavailable.", response.text)
         self.assertIn("Next:", response.text)
         self.assertNotIn("Try /brief", response.text)
         run_mock.assert_not_called()

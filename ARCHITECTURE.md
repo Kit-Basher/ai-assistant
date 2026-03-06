@@ -16,6 +16,10 @@ Both runtimes depend on shared core modules (`agent/orchestrator.py`, skills, me
 - User-facing transports (Telegram/CLI) should surface runtime facts and avoid speculative state.
 - Operational checks/fixes are centralized under `python -m agent doctor`.
 - Runtime-mode contract is centralized in `agent/runtime_contract.py`.
+- Onboarding and recovery state contracts are centralized in:
+  - `agent/onboarding_contract.py`
+  - `agent/recovery_contract.py`
+  - `agent/setup_wizard.py`
 
 ## Core Request Flow
 
@@ -47,6 +51,16 @@ Service startup
   - `component`
   - `failure_code`
   - `next_action`
+
+## Onboarding + Recovery
+
+- Canonical first-run command: `python -m agent setup`.
+- `agent/setup_wizard.py` consumes already-fetched runtime state and returns:
+  - onboarding state
+  - recovery mode
+  - one exact next action
+  - safe suggestions (read-only by default)
+- Telegram `setup/help/why isn’t this working` and API `/ready` consume the same contract fields to avoid conflicting advice.
 
 ## Unified Error UX
 

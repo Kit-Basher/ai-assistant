@@ -16,6 +16,7 @@ Documentation hierarchy:
 
 ## Operator CLI
 Single operator entrypoint:
+- `python -m agent setup`
 - `python -m agent doctor`
 - `python -m agent status`
 - `python -m agent health`
@@ -25,9 +26,10 @@ Single operator entrypoint:
 ## Current Product Shape
 - Golden path:
   1. Start `personal-agent-api.service`
-  2. Verify `python -m agent status`
-  3. Use Telegram in plain English
-  4. Use `doctor/status/health/brief` deterministically when needed
+  2. Run `python -m agent setup --dry-run`
+  3. Verify `python -m agent status`
+  4. Use Telegram in plain English
+  5. Use `doctor/status/health/brief` deterministically when needed
 - Startup safety:
   - API + Telegram startup checks run via `agent/startup_checks.py`
   - FAIL exits non-zero with one next action
@@ -36,6 +38,29 @@ Single operator entrypoint:
   - identity is centralized in `agent/identity.py`
   - fallback guidance for no-chat-model is centralized in `agent/golden_path.py`
   - runtime mode contract is centralized in `agent/runtime_contract.py`
+  - onboarding/recovery contracts are centralized in:
+    - `agent/onboarding_contract.py`
+    - `agent/recovery_contract.py`
+    - `agent/setup_wizard.py`
+
+## Onboarding + Recovery Contract
+- Onboarding states:
+  - `NOT_STARTED`
+  - `TOKEN_MISSING`
+  - `LLM_MISSING`
+  - `SERVICES_DOWN`
+  - `READY`
+  - `DEGRADED`
+- Recovery modes:
+  - `TELEGRAM_DOWN`
+  - `API_DOWN`
+  - `TOKEN_INVALID`
+  - `LLM_UNAVAILABLE`
+  - `LOCK_CONFLICT`
+  - `DEGRADED_READ_ONLY`
+  - `UNKNOWN_FAILURE`
+- Canonical first-run command:
+  - `python -m agent setup`
 
 ## Runtime Contract
 - Shared mode names across CLI, Telegram, API, and orchestrator:
