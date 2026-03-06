@@ -3,34 +3,34 @@
 ## Source Priority
 
 - Current branch reality: `PROJECT_STATUS.md`
-- Mission/behavior contract: `CANONICAL_HANDOFF_V3.md`
+- Mission/behavior contract: `docs/design/CANONICAL_HANDOFF_V3.md`
 - Setup/API/UI details: `README.md`
 
 ## Runtime Modes
 
-- Telegram bot runtime: `.venv/bin/python -m telegram_adapter`
-- Local API/UI runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
+- Canonical runtime: `personal-agent-api.service` (API + embedded Telegram)
+- Manual debug runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
 
 ## Service Control
 
-System service install:
-- `sudo systemctl status personal-agent.service`
-- `sudo systemctl restart personal-agent.service`
-
-User service install:
+User service:
 - `systemctl --user status personal-agent-api.service`
 - `systemctl --user restart personal-agent-api.service`
-
-If unsure which mode is installed, check both and use the one that exists.
 
 ## Quick Diagnostics
 
 - Core health:
-  - `curl -s http://127.0.0.1:8765/health`
-  - `curl -s http://127.0.0.1:8765/version`
+  - `python -m agent health`
+  - `python -m agent version`
+  - `python -m agent status`
+  - `python -m agent brief`
+- Logs:
+  - `python -m agent logs`
 - Doctor checks:
-  - `. .venv/bin/activate && python scripts/doctor.py`
-  - strict mode (fail when units missing): `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1 .venv/bin/python scripts/doctor.py`
+  - `.venv/bin/python -m agent doctor`
+  - JSON: `.venv/bin/python -m agent doctor --json`
+  - safe local fixes: `.venv/bin/python -m agent doctor --fix`
+  - strict mode (legacy timer checks): `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1 .venv/bin/python scripts/doctor.py`
 - Test sweep:
   - `. .venv/bin/activate && pytest -q`
 
@@ -42,19 +42,14 @@ If unsure which mode is installed, check both and use the one that exists.
   - system scope: `sudo systemctl status <timer>`
   - user scope: `systemctl --user status <timer>`
 
-## Telegram Commands (High-Use)
+## Telegram Commands (Golden Path)
 
-- `/brief`
-- `/today`
-- `/task_add <title>`
-- `/done <id>`
-- `/open_loops [all|due|important]`
-- `/daily_brief_status`
-- `/health`
-- `/status`
-- `/ask <prompt>`
-- `/ask_opinion <prompt>`
-- `/scout`
+- `help`
+- `status`
+- `health`
+- `brief`
+- `doctor`
+- `setup`
 
 ## Logs
 

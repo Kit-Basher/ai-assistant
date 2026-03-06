@@ -114,8 +114,29 @@ def friendly_error_message(
     )
 
 
+def deterministic_error_message(
+    *,
+    title: str,
+    trace_id: str,
+    component: str,
+    failure_code: str | None = None,
+    next_action: str,
+) -> str:
+    lines = [
+        str(title or "Operation failed").strip(),
+        f"trace_id: {str(trace_id or 'unknown').strip() or 'unknown'}",
+        f"component: {str(component or 'unknown').strip() or 'unknown'}",
+    ]
+    code = str(failure_code or "").strip()
+    if code:
+        lines.append(f"failure_code: {code}")
+    lines.append(f"next_action: {str(next_action or 'run agent doctor').strip() or 'run agent doctor'}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "bad_request_next_question",
+    "deterministic_error_message",
     "friendly_error_message",
     "upstream_down_message",
 ]

@@ -89,7 +89,7 @@ def probe_ollama_connectivity(
 
     try:
         http_get_json(
-            join_base(native_base, "/api/tags"),
+            url=join_base(native_base, "/api/tags"),
             timeout_seconds=float(timeout_seconds),
             headers=headers,
         )
@@ -107,7 +107,7 @@ def probe_ollama_connectivity(
 
     try:
         http_get_json(
-            join_base(openai_base, "/models"),
+            url=join_base(openai_base, "/models"),
             timeout_seconds=float(timeout_seconds),
             headers=headers,
         )

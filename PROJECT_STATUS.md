@@ -8,7 +8,37 @@ Tests: `561 passed in 9.39s (pytest -q)`
 ## Canonical
 This file is the authoritative current-state document for this branch.
 If any other doc disagrees with this file, trust this file.
-Archived docs under `docs/archive/` are historical context only.
+Documentation hierarchy:
+- root: `README.md`, `ARCHITECTURE.md`, `PROJECT_STATUS.md`, `STABILITY.md`
+- operator docs: `docs/operator/*`
+- design docs: `docs/design/*`
+- history docs: `docs/history/*` and `docs/archive/*`
+
+## Operator CLI
+Single operator entrypoint:
+- `python -m agent doctor`
+- `python -m agent status`
+- `python -m agent health`
+- `python -m agent brief`
+
+## Current Product Shape
+- Golden path:
+  1. Start `personal-agent-api.service`
+  2. Verify `python -m agent status`
+  3. Use Telegram in plain English
+  4. Use `doctor/status/health/brief` deterministically when needed
+- Startup safety:
+  - API + Telegram startup checks run via `agent/startup_checks.py`
+  - FAIL exits non-zero with one next action
+  - WARN logs continue
+- User-facing truth:
+  - identity is centralized in `agent/identity.py`
+  - fallback guidance for no-chat-model is centralized in `agent/golden_path.py`
+
+## Remaining Rough Edges
+- Root-level docs are now canonicalized, but some historical wording remains inside archived files.
+- Some legacy fallback strings can still appear in older persisted notifications until they roll out.
+- API surface remains broad; operator golden path should prefer the unified CLI over direct endpoint usage.
 
 ## A) API Contract
 - Top-level user endpoints (`/chat`, `/ask`, `/done`) are wrapped to avoid uncaught exceptions and always return JSON.
@@ -42,6 +72,10 @@ Archived docs under `docs/archive/` are historical context only.
 - Autopilot/notifications:
   - `/llm/autopilot/*`
   - `/llm/notifications/*`
+- Model watch (deterministic + consent-gated):
+  - Provider catalog diff proposals can route through fix-it (`issue_code=model_watch.proposal`).
+  - Optional HF watch (`AGENT_MODEL_WATCH_HF_ENABLED=1`) scans allowlisted HF repos/orgs only, persists diff state, and can produce `local_download` proposals.
+  - HF local acquisition is always confirmation-gated: no download/install runs before explicit `confirm=true`.
 
 ## Runtime Note
 - Telegram bot polling now runs inside `personal-agent-api.service` when a Telegram token is configured; no separate `python -m telegram_adapter` process is required.
@@ -81,6 +115,7 @@ To refresh endpoint list:
 - /model_scout/status
 - /model_scout/suggestions
 - /model_watch/latest
+- /model_watch/hf/status
 - /models
 - /permissions
 - /providers
@@ -119,6 +154,7 @@ To refresh endpoint list:
 - /model_scout/suggestions/{part2}/dismiss
 - /model_scout/suggestions/{part2}/mark_installed
 - /model_watch/refresh
+- /model_watch/hf/scan
 - /model_watch/run
 - /modelops/execute
 - /modelops/plan

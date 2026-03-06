@@ -93,6 +93,9 @@ class TestOrchestrator(unittest.TestCase):
         kwargs = call.get("kwargs") if isinstance(call, dict) else {}
         self.assertEqual("chat", (kwargs or {}).get("purpose"))
         self.assertNotIn("/brief", response.text.lower())
+        messages = call.get("messages") if isinstance(call, dict) else []
+        system_text = str((messages or [{}])[0].get("content") if messages else "")
+        self.assertIn("Never say you were created by Anthropic/OpenAI", system_text)
 
     def test_no_llm_available_returns_bootstrap_chat_setup(self) -> None:
         llm = _FakeChatLLM(enabled=False)
@@ -225,6 +228,7 @@ class TestOrchestrator(unittest.TestCase):
         with patch.object(orchestrator, "_handle_message_impl") as run_mock:
             response = orchestrator._llm_chat("user1", "tell me a joke")
         self.assertIn("LLM is unavailable right now", response.text)
+        self.assertNotIn("Try /brief", response.text)
         run_mock.assert_not_called()
         self.assertEqual(1, llm.chat_calls)
 

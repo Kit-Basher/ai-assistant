@@ -28,7 +28,10 @@ except ModuleNotFoundError:  # pragma: no cover - testing without telegram insta
     filters = object()  # type: ignore
 
 from agent.config import Config, load_config
+from agent.doctor import run_doctor_report
+from agent.error_response_ux import deterministic_error_message
 from agent.fallback_ladder import run_with_fallback
+from agent.golden_path import bootstrap_guidance, bootstrap_needed, user_safe_summary
 from agent.llm_router import LLMRouter
 from agent.llm_client import build_llm_broker
 from agent.logging_utils import log_event
@@ -44,7 +47,9 @@ from agent.cards import render_cards_markdown, validate_cards_payload
 from agent.daily_brief import should_send_daily_brief
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog
+from agent.identity import get_public_identity
 from agent.secret_store import SecretStore
+from agent.startup_checks import run_startup_checks
 from agent.permissions import PermissionStore
 from agent.ux.clarify_suggest import (
     build_clarify_message,
@@ -68,16 +73,16 @@ _LOGGER = logging.getLogger(__name__)
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 _TELEGRAM_FALLBACK_TEXT = "I hit an internal error, but I’m still running. Try one of these:"
 _TELEGRAM_HELP_TEXT = (
-    "Try one of these:\n"
-    "1) /brief\n"
-    "2) what model are we using?\n"
-    "3) check for new models\n"
-    "Commands: /brief, /model, /ask, /ask_opinion, /task_add, /done, /health, /scout, /help"
+    "Available commands:\n\n"
+    "doctor – run system diagnostics\n"
+    "status – agent status\n"
+    "health – runtime health\n"
+    "brief – system summary"
 )
 _TELEGRAM_UNKNOWN_FALLBACK_TEXT = (
-    "I can help with system updates, tasks, and troubleshooting.\n"
-    "Examples: /brief or \"anything new on my PC?\"\n"
-    "For more options, send /help."
+    "I can help with diagnostics, health, status, and summaries.\n"
+    "Examples: say \"status\" or \"doctor\".\n"
+    "For commands, send help."
 )
 _MODEL_PROVIDER_INTENTS = {
     "model_watch.run_now",
@@ -88,8 +93,11 @@ _MODEL_PROVIDER_INTENTS = {
     "none",
 }
 _MODEL_PROVIDER_HELP_TEXT = (
-    "I can help with model/provider setup.\n"
-    "Try: \"what model are we using\", \"check models\", \"setup ollama\", or \"setup openrouter\"."
+    "Setup commands:\n"
+    "- setup ollama\n"
+    "- setup openrouter\n"
+    "- what model are we using\n"
+    "- check models"
 )
 _NO_ACTIVE_CHOICE_TEXT = "No active choice right now. Ask me to check models or set up a provider."
 _WIZARD_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind", "quit"}
@@ -295,6 +303,8 @@ def classify_model_provider_intent(text: str) -> str:
             "llm help",
             "help with model",
             "help with provider",
+            "setup",
+            "set up",
         ),
     ):
         return "provider.help"
@@ -305,6 +315,8 @@ def _deterministic_text_command(text: str) -> str | None:
     normalized = _normalize_user_text(text)
     if not normalized:
         return None
+    if normalized in {"doctor", "fix", "diagnose", "diagnostics", "run doctor"}:
+        return "/doctor"
     if _contains_any(
         normalized,
         (
@@ -312,6 +324,7 @@ def _deterministic_text_command(text: str) -> str | None:
             "bot health",
             "health check",
             "system health",
+            "how are you running",
             "running ok",
             "show me the stats",
         ),
@@ -332,13 +345,43 @@ def _deterministic_text_command(text: str) -> str | None:
         normalized,
         (
             "status",
+            "state",
             "uptime",
             "agent status",
             "bot status",
         ),
     ):
         return "/status"
+    if _contains_any(
+        normalized,
+        (
+            "doctor",
+            "run doctor",
+            "diagnose",
+            "diagnostics",
+        ),
+    ):
+        return "/doctor"
     return None
+
+
+def _deterministic_operator_reply(text: str) -> tuple[str | None, str | None]:
+    normalized = _normalize_user_text(text)
+    if _contains_any(
+        normalized,
+        (
+            "rotate token",
+            "rotate telegram token",
+            "telegram token rotate",
+        ),
+    ):
+        return (
+            "Rotate token:\n"
+            "1) python -m agent.secrets set telegram:bot_token\n"
+            "2) systemctl --user restart personal-agent-telegram.service",
+            "setup",
+        )
+    return None, None
 
 
 def _truncate_telegram_text(text: str, *, max_len: int = 3900) -> tuple[str, bool]:
@@ -359,10 +402,13 @@ def _plain_text_retry_variant(text: str) -> str:
 
 
 def _is_bad_request_error(exc: Exception) -> bool:
-    if exc.__class__.__name__ == "BadRequest":
+    class_name = exc.__class__.__name__.lower()
+    if class_name == "badrequest" or class_name.endswith("badrequest"):
         return True
     lowered = str(exc or "").lower()
-    return "bad request" in lowered
+    if "bad request" in lowered:
+        return True
+    return "can't parse entities" in lowered
 
 
 async def _send_reply(
@@ -642,17 +688,57 @@ def _runtime_status_text(bot_data: dict[str, Any]) -> str:
             started_ts = pytime.time()
         uptime_seconds = max(0, int(pytime.time() - started_ts))
 
+    llm_status = _llm_status_payload(runtime)
+    provider = str(llm_status.get("default_provider") or "").strip() or None
+    model = (
+        str(llm_status.get("resolved_default_model") or "").strip()
+        or str(llm_status.get("default_model") or "").strip()
+        or None
+    )
+    ready = (
+        str(((llm_status.get("active_provider_health") or {}).get("status") if isinstance(llm_status.get("active_provider_health"), dict) else "")).strip().lower() == "ok"
+        and str(((llm_status.get("active_model_health") or {}).get("status") if isinstance(llm_status.get("active_model_health"), dict) else "")).strip().lower() == "ok"
+    )
+    summary = user_safe_summary(
+        ready=bool(ready),
+        provider=provider,
+        model=model,
+        bootstrap=bootstrap_needed(llm_status=llm_status),
+        failure_code="llm_unavailable" if not ready else None,
+    )
+
     return (
         f"✅ Agent is running (v{version}, commit {commit_short}, uptime {uptime_seconds}s).\n"
-        "Try /brief or ask 'anything new on my PC?'"
+        f"{summary}"
+    )
+
+
+def _doctor_summary_text() -> str:
+    report = run_doctor_report(online=False, fix=False)
+    pass_count = sum(1 for item in report.checks if item.status == "OK")
+    warn_count = sum(1 for item in report.checks if item.status == "WARN")
+    fail_count = sum(1 for item in report.checks if item.status == "FAIL")
+    next_action = report.next_action or "none"
+    return (
+        f"Doctor: {report.summary_status} (trace {report.trace_id})\\n"
+        f"PASS {pass_count} · WARN {warn_count} · FAIL {fail_count}\\n"
+        f"Next: {next_action}\\n"
+        "Run: python -m agent doctor --json for details."
     )
 
 
 def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str | None, str | None]:
     normalized = _normalize_user_text(text)
-    if normalized in {"/help", "help"}:
+    if normalized in {"/help", "help", "what can you do", "commands"}:
         return _TELEGRAM_HELP_TEXT, "help"
     return None, None
+
+
+def _setup_help_text(*, runtime: Any | None) -> str:
+    status = _llm_status_payload(runtime)
+    if bootstrap_needed(llm_status=status):
+        return bootstrap_guidance()
+    return _MODEL_PROVIDER_HELP_TEXT
 
 
 def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
@@ -699,6 +785,13 @@ def _llm_status_payload(runtime: Any | None) -> dict[str, Any]:
 
 
 def _model_status_report(*, runtime: Any | None) -> str:
+    if runtime is not None and hasattr(runtime, "public_llm_identity_string"):
+        try:
+            identity_line = str(runtime.public_llm_identity_string()).strip()
+        except Exception:
+            identity_line = ""
+    else:
+        identity_line = ""
     if runtime is not None and hasattr(runtime, "model_status"):
         try:
             payload = runtime.model_status()  # type: ignore[attr-defined]
@@ -724,9 +817,18 @@ def _model_status_report(*, runtime: Any | None) -> str:
                 )
             ) or "none"
             model_watch_line = str(watch.get("summary_line") or "Model Watch: no summary available.").strip()
+            identity = str(payload.get("identity") or "").strip() or identity_line
+            if not identity:
+                identity_payload = get_public_identity(
+                    provider=default_provider if default_provider != "unknown" else None,
+                    model=resolved_model if resolved_model != "unknown" else None,
+                    local_providers={"ollama"},
+                )
+                identity = str(identity_payload.get("summary") or "").strip()
+            current_line = identity or f"Current provider/model: {default_provider} / {resolved_model}"
             return "\n".join(
                 [
-                    f"Current provider/model: {default_provider} / {resolved_model}",
+                    current_line,
                     f"Configured providers: {provider_line}",
                     model_watch_line,
                 ]
@@ -763,9 +865,18 @@ def _model_status_report(*, runtime: Any | None) -> str:
             elif str(latest.get("reason") or "").strip():
                 model_watch_line = f"Model Watch: {str(latest.get('reason') or '').strip()}."
 
+    if identity_line:
+        current_line = identity_line
+    else:
+        identity_payload = get_public_identity(
+            provider=default_provider if default_provider != "unknown" else None,
+            model=resolved_model if resolved_model != "unknown" else None,
+            local_providers={"ollama"},
+        )
+        current_line = str(identity_payload.get("summary") or f"Current provider/model: {default_provider} / {resolved_model}")
     return "\n".join(
         [
-            f"Current provider/model: {default_provider} / {resolved_model}",
+            current_line,
             f"Configured providers: {provider_line}",
             model_watch_line,
         ]
@@ -1219,7 +1330,7 @@ def _handle_model_provider_intent(
     if intent == "provider.status":
         return _model_status_report(runtime=runtime), "status"
     if intent == "provider.help":
-        return _MODEL_PROVIDER_HELP_TEXT, "help"
+        return _setup_help_text(runtime=runtime), "help"
     if intent == "model_watch.run_now":
         return _model_watch_run_summary(runtime=runtime), "chat"
     if intent == "provider.setup.openrouter":
@@ -1235,7 +1346,12 @@ def _handle_model_provider_intent(
 
 def _is_unknown_orchestrator_reply(text: str) -> bool:
     normalized = _normalize_user_text(text)
-    return normalized.startswith("i didn’t understand that") or normalized.startswith("i didn't understand that")
+    return (
+        normalized.startswith("i didn’t understand that")
+        or normalized.startswith("i didn't understand that")
+        or normalized.startswith("i’m not sure what you need yet")
+        or normalized.startswith("i'm not sure what you need yet")
+    )
 
 
 def _trace_id_from_update(update: Update, *, fallback_prefix: str = "tg") -> str:
@@ -1855,6 +1971,35 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
+        operator_reply, operator_route = _deterministic_operator_reply(text)
+        if operator_reply is not None and operator_route is not None:
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route=operator_route,
+                outcome="handled",
+            )
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route=operator_route,
+                text=str(operator_reply),
+                trace_id=trace_id,
+            )
+            log_event(
+                log_path,
+                "telegram_message",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": operator_route,
+                    "trace_id": trace_id,
+                },
+            )
+            return
+
         smalltalk_reply, smalltalk_route = _smalltalk_preroute_reply(text, bot_data)
         if smalltalk_reply is not None and smalltalk_route is not None:
             _safe_append_telegram_message_audit(
@@ -1885,6 +2030,33 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         deterministic_command = _deterministic_text_command(text)
+        if deterministic_command == "/doctor":
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route="doctor",
+                outcome="handled",
+            )
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="doctor",
+                text=_doctor_summary_text(),
+                trace_id=trace_id,
+            )
+            log_event(
+                log_path,
+                "telegram_message",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": "doctor",
+                    "trace_id": trace_id,
+                },
+            )
+            return
         if deterministic_command is None:
             ambiguity = classify_ambiguity(text)
         else:
@@ -2028,7 +2200,12 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 log_path=log_path,
             )
             fallback_message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
-            fallback_with_trace = f"{fallback_message} (trace {_short_trace_token(trace_id)})"
+            fallback_with_trace = deterministic_error_message(
+                title=f"❌ {fallback_message}",
+                trace_id=trace_id,
+                component="telegram_adapter",
+                next_action="run `agent doctor`",
+            )
             await _send_reply(
                 message=update.effective_message,
                 log_path=log_path,
@@ -2093,7 +2270,12 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             trace_id=trace_id,
             log_path=log_path,
         )
-        message = _safe_reply_text(str(envelope.get("message") or _TELEGRAM_FALLBACK_TEXT))
+        message = deterministic_error_message(
+            title=f"❌ {_safe_reply_text(str(envelope.get('message') or _TELEGRAM_FALLBACK_TEXT))}",
+            trace_id=trace_id,
+            component="telegram_adapter",
+            next_action="run `agent doctor`",
+        )
         try:
             await _send_reply(
                 message=update.effective_message,
@@ -2166,6 +2348,27 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     _log_command_route(log_path=log_path, chat_id=chat_id, command="/status")
     reply_text = _runtime_status_text(context.application.bot_data)
     await update.effective_message.reply_text(_safe_reply_text(reply_text))
+
+
+async def _handle_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or update.effective_message is None:
+        return
+    chat_id = str(update.effective_chat.id)
+    log_path: str = context.application.bot_data["log_path"]
+    _log_command_route(log_path=log_path, chat_id=chat_id, command="/doctor")
+    trace_id = _trace_id_from_update(update)
+    try:
+        reply_text = _doctor_summary_text()
+    except Exception:
+        reply_text = "Doctor failed. Run: python -m agent doctor --json"
+    await _send_reply(
+        message=update.effective_message,
+        log_path=log_path,
+        chat_id=chat_id,
+        route="doctor",
+        text=reply_text,
+        trace_id=trace_id,
+    )
 
 
 async def _handle_runtime_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2786,6 +2989,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("remind", _handle_remind))
     app.add_handler(CommandHandler("start", _handle_status))
     app.add_handler(CommandHandler("status", _handle_status))
+    app.add_handler(CommandHandler("doctor", _handle_doctor))
     app.add_handler(CommandHandler("runtime_status", _handle_runtime_status))
     app.add_handler(CommandHandler("disk_grow", _handle_disk_grow))
     app.add_handler(CommandHandler("audit", _handle_audit))
@@ -2966,6 +3170,41 @@ def run_polling_with_backoff(
 
 def main() -> None:
     token, token_source = resolve_telegram_bot_token_with_source()
+    startup_report = run_startup_checks(service="telegram", token=token)
+    for row in (startup_report.get("checks") if isinstance(startup_report.get("checks"), list) else []):
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().upper()
+        if status not in {"WARN", "FAIL"}:
+            continue
+        log_fn = _LOGGER.error if status == "FAIL" else _LOGGER.warning
+        log_fn(
+            "telegram.startup.check %s",
+            json.dumps(
+                {
+                    "trace_id": startup_report.get("trace_id"),
+                    "component": startup_report.get("component"),
+                    "check_id": row.get("check_id"),
+                    "status": status,
+                    "failure_code": row.get("failure_code"),
+                    "next_action": row.get("next_action"),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
+    if str(startup_report.get("status") or "").strip().upper() == "FAIL":
+        _LOGGER.error(
+            deterministic_error_message(
+                title="❌ Startup checks failed",
+                trace_id=str(startup_report.get("trace_id") or "startup-telegram-unknown"),
+                component=str(startup_report.get("component") or "telegram.startup"),
+                failure_code=str(startup_report.get("failure_code") or "startup_check_failed"),
+                next_action=str(startup_report.get("next_action") or "Run: python -m agent doctor"),
+            )
+        )
+        raise SystemExit(1)
+
     if not token:
         app = build_app(token=None)
         app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)

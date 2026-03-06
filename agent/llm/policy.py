@@ -119,7 +119,7 @@ def load_routing_policy(config: Config, registry: Registry) -> RoutingPolicy:
         circuit_breaker_cooldown_seconds=max(1, int(config.llm_circuit_breaker_cooldown_seconds)),
         default_timeout_seconds=max(1, int(config.llm_timeout_seconds)),
         default_provider=registry.defaults.default_provider,
-        default_model=registry.defaults.default_model,
+        default_model=registry.defaults.chat_model or registry.defaults.default_model,
         allow_remote_fallback=bool(registry.defaults.allow_remote_fallback and config.allow_cloud),
         fallback_chain=fallback_chain,
     )

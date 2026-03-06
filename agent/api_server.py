@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from typing import Any, Callable
 import urllib.error
 import urllib.parse
@@ -24,8 +25,14 @@ import urllib.request
 
 from agent.config import Config, load_config
 from agent.error_kind import classify_error_kind
-from agent.error_response_ux import bad_request_next_question, friendly_error_message
+from agent.error_response_ux import (
+    bad_request_next_question,
+    deterministic_error_message,
+    friendly_error_message,
+)
 from agent.fallback_ladder import run_with_fallback
+from agent.identity import get_public_identity
+from agent.startup_checks import run_startup_checks
 from agent.intent.assessment import (
     IntentAssessment,
     IntentCandidate,
@@ -82,6 +89,7 @@ from agent.llm.catalog import (
     fetch_provider_catalog,
 )
 from agent.llm.cleanup import apply_registry_cleanup_plan, build_registry_cleanup_plan
+from agent.llm.default_model_guard import validate_default_model
 from agent.llm.health import HealthProbeSettings, HealthStateStore, LLMHealthMonitor
 from agent.llm.hygiene import apply_hygiene_plan, build_hygiene_plan
 from agent.llm.notifications import (
@@ -189,6 +197,12 @@ _MODEL_SCOUT_IFACES = (
     "model_scout.dismiss",
     "model_scout.mark_installed",
 )
+_HEALTH_STATUSES = {"ok", "degraded", "down", "unknown", "not_applicable"}
+_OLLAMA_PULL_ALLOWLIST = (
+    "qwen2.5:3b-instruct",
+    "qwen2.5:7b-instruct",
+)
+_OLLAMA_PULL_ALLOWLIST_SET = set(_OLLAMA_PULL_ALLOWLIST)
 
 
 def _is_truthy(value: str | None) -> bool:
@@ -1785,6 +1799,295 @@ class AgentRuntime:
             }
         return result
 
+    def _ensure_fresh_ollama_probe_state(
+        self,
+        ttl_seconds: int = 30,
+        *,
+        timeout_seconds: float = 2.0,
+    ) -> dict[str, Any]:
+        cached = self._ollama_probe_state if isinstance(self._ollama_probe_state, dict) else {}
+        if self._probe_provider_cfg("ollama") is None:
+            return dict(cached)
+        last_checked = cached.get("last_checked_at")
+        now = int(time.time())
+        if isinstance(last_checked, int) and now - last_checked <= int(ttl_seconds):
+            return dict(cached)
+        try:
+            self._probe_llm_provider("ollama", float(timeout_seconds))
+        except Exception:
+            return dict(self._ollama_probe_state) if isinstance(self._ollama_probe_state, dict) else {}
+        return dict(self._ollama_probe_state) if isinstance(self._ollama_probe_state, dict) else {}
+
+    def _effective_provider_health(
+        self,
+        provider_id: str,
+        snapshot_row_health: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        health_payload = dict(snapshot_row_health) if isinstance(snapshot_row_health, dict) else {}
+        provider_key = str(provider_id or "").strip().lower()
+        if provider_key != "ollama":
+            return health_payload
+
+        probe_state = self._ensure_fresh_ollama_probe_state(ttl_seconds=30, timeout_seconds=2.0)
+        if bool(probe_state.get("native_ok", False)):
+            now_epoch = int(time.time())
+            return {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_status_code": None,
+                "failure_streak": 0,
+                "cooldown_until": None,
+                "down_since": None,
+                "last_checked_at": now_epoch,
+                "last_ts": float(now_epoch),
+            }
+
+        if health_payload:
+            return health_payload
+
+        fallback_checked = probe_state.get("last_checked_at")
+        checked_at = int(fallback_checked) if isinstance(fallback_checked, int) else int(time.time())
+        last_status_code = int(probe_state.get("last_status_code")) if isinstance(probe_state.get("last_status_code"), int) else None
+        last_error_kind = str(probe_state.get("last_error_kind") or "").strip().lower() or None
+        return {
+            "status": "down" if last_error_kind else "unknown",
+            "last_error_kind": last_error_kind,
+            "status_code": last_status_code,
+            "last_status_code": last_status_code,
+            "failure_streak": 0,
+            "cooldown_until": None,
+            "down_since": None,
+            "last_checked_at": checked_at,
+            "last_ts": float(checked_at),
+        }
+
+    def _maybe_probe_ollama_on_demand(
+        self,
+        *,
+        timeout_seconds: float = 2.0,
+        max_age_seconds: int = 30,
+    ) -> None:
+        self._ensure_fresh_ollama_probe_state(
+            ttl_seconds=int(max_age_seconds),
+            timeout_seconds=float(timeout_seconds),
+        )
+
+    @staticmethod
+    def _health_epoch(value: Any) -> int | None:
+        try:
+            parsed = int(float(value))
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _health_float(value: Any) -> float | None:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
+    def _health_iso(epoch: int | None) -> str | None:
+        if epoch is None or int(epoch) <= 0:
+            return None
+        try:
+            return datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat()
+        except (OSError, OverflowError, ValueError):
+            return None
+
+    @staticmethod
+    def _health_status(value: Any) -> str:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in _HEALTH_STATUSES else "unknown"
+
+    def _normalize_health_record(
+        self,
+        raw: dict[str, Any] | None,
+        *,
+        status_hint: str | None = None,
+        now_epoch: int | None = None,
+    ) -> dict[str, Any]:
+        payload = dict(raw) if isinstance(raw, dict) else {}
+        now_value = int(now_epoch) if isinstance(now_epoch, int) and now_epoch > 0 else int(time.time())
+        status = self._health_status(payload.get("status") if payload else status_hint)
+        last_checked_at = self._health_epoch(payload.get("last_checked_at"))
+        last_ts = self._health_float(payload.get("last_ts"))
+        if last_checked_at is None:
+            inferred_checked = self._health_epoch(last_ts)
+            if inferred_checked is not None:
+                last_checked_at = inferred_checked
+        # Down/degraded/ok records must always carry a check timestamp to avoid
+        # ambiguous "down + null timestamps" payloads in user-facing status.
+        if status in {"ok", "degraded", "down"} and last_checked_at is None:
+            last_checked_at = now_value
+        if last_ts is None and last_checked_at is not None:
+            last_ts = float(last_checked_at)
+        status_code = self._health_epoch(payload.get("status_code"))
+        last_status_code = self._health_epoch(payload.get("last_status_code"))
+        if last_status_code is None:
+            last_status_code = status_code
+        cooldown_until = self._health_epoch(payload.get("cooldown_until"))
+        down_since = self._health_epoch(payload.get("down_since"))
+        if status == "down" and down_since is None and last_checked_at is not None:
+            down_since = last_checked_at
+        last_error_kind = str(payload.get("last_error_kind") or "").strip().lower() or None
+        try:
+            successes = max(0, int(payload.get("successes") or 0))
+        except (TypeError, ValueError):
+            successes = 0
+        try:
+            failures = max(0, int(payload.get("failures") or 0))
+        except (TypeError, ValueError):
+            failures = 0
+        try:
+            failure_streak = max(0, int(payload.get("failure_streak") or 0))
+        except (TypeError, ValueError):
+            failure_streak = 0
+        if status == "ok":
+            last_error_kind = None
+            status_code = None
+            last_status_code = None
+            cooldown_until = None
+            down_since = None
+            failure_streak = 0
+        return {
+            "status": status,
+            "last_checked_at": last_checked_at,
+            "last_checked_at_iso": self._health_iso(last_checked_at),
+            "last_error_kind": last_error_kind,
+            "status_code": status_code,
+            "last_status_code": last_status_code,
+            "cooldown_until": cooldown_until,
+            "cooldown_until_iso": self._health_iso(cooldown_until),
+            "down_since": down_since,
+            "down_since_iso": self._health_iso(down_since),
+            "successes": successes,
+            "failures": failures,
+            "failure_streak": failure_streak,
+            "last_ts": last_ts,
+            "last_ts_iso": self._health_iso(self._health_epoch(last_ts)),
+        }
+
+    def _normalize_llm_status_rows(
+        self,
+        *,
+        provider_rows: list[dict[str, Any]],
+        model_rows: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        now_epoch = int(time.time())
+        normalized_providers: list[dict[str, Any]] = []
+        disabled_provider_ids: set[str] = set()
+        disabled_provider_status: dict[str, tuple[int | None, int | None]] = {}
+        for row in provider_rows:
+            if not isinstance(row, dict):
+                continue
+            cloned = dict(row)
+            provider_id = str(cloned.get("id") or "").strip().lower()
+            if not provider_id:
+                continue
+            health_raw = cloned.get("health") if isinstance(cloned.get("health"), dict) else {}
+            if provider_id == "ollama":
+                health_raw = self._effective_provider_health(provider_id, health_raw if isinstance(health_raw, dict) else {})
+            provider_health_error = (
+                str((health_raw or {}).get("last_error_kind") or "").strip().lower()
+                if isinstance(health_raw, dict)
+                else ""
+            )
+            provider_is_disabled = (not bool(cloned.get("enabled", True))) or provider_health_error == "provider_disabled"
+            if provider_is_disabled:
+                disabled_payload = dict(health_raw) if isinstance(health_raw, dict) else {}
+                provider_status_code = (
+                    int(disabled_payload.get("status_code"))
+                    if isinstance(disabled_payload.get("status_code"), int)
+                    else None
+                )
+                provider_last_status_code = (
+                    int(disabled_payload.get("last_status_code"))
+                    if isinstance(disabled_payload.get("last_status_code"), int)
+                    else provider_status_code
+                )
+                disabled_payload.update(
+                    {
+                        "status": "down",
+                        "last_error_kind": "provider_disabled",
+                        "status_code": provider_status_code,
+                        "last_status_code": provider_last_status_code,
+                        "last_checked_at": now_epoch,
+                        "last_ts": float(now_epoch),
+                    }
+                )
+                health_raw = disabled_payload
+            normalized_health = self._normalize_health_record(
+                health_raw if isinstance(health_raw, dict) else {},
+                now_epoch=now_epoch,
+            )
+            if provider_is_disabled:
+                disabled_provider_ids.add(provider_id)
+                provider_status_code = (
+                    int(normalized_health.get("status_code"))
+                    if isinstance(normalized_health.get("status_code"), int)
+                    else None
+                )
+                provider_last_status_code = (
+                    int(normalized_health.get("last_status_code"))
+                    if isinstance(normalized_health.get("last_status_code"), int)
+                    else provider_status_code
+                )
+                disabled_provider_status[provider_id] = (provider_status_code, provider_last_status_code)
+            cloned["health"] = normalized_health
+            normalized_providers.append(cloned)
+
+        normalized_models: list[dict[str, Any]] = []
+        for row in model_rows:
+            if not isinstance(row, dict):
+                continue
+            cloned = dict(row)
+            model_id = str(cloned.get("id") or "").strip()
+            if not model_id:
+                continue
+            provider_id = str(cloned.get("provider") or "").strip().lower()
+            if not provider_id and ":" in model_id:
+                provider_id = model_id.split(":", 1)[0].strip().lower()
+            health_raw = cloned.get("health") if isinstance(cloned.get("health"), dict) else {}
+            if provider_id in disabled_provider_ids:
+                cloned["routable"] = False
+                disabled_payload = dict(health_raw) if isinstance(health_raw, dict) else {}
+                provider_status_code, provider_last_status_code = disabled_provider_status.get(provider_id, (None, None))
+                existing_status_code = (
+                    int(disabled_payload.get("status_code"))
+                    if isinstance(disabled_payload.get("status_code"), int)
+                    else None
+                )
+                existing_last_status_code = (
+                    int(disabled_payload.get("last_status_code"))
+                    if isinstance(disabled_payload.get("last_status_code"), int)
+                    else existing_status_code
+                )
+                disabled_payload.update(
+                    {
+                        "status": "down",
+                        "last_error_kind": "provider_disabled",
+                        "status_code": provider_status_code if provider_status_code is not None else existing_status_code,
+                        "last_status_code": (
+                            provider_last_status_code
+                            if provider_last_status_code is not None
+                            else existing_last_status_code
+                        ),
+                        "last_checked_at": now_epoch,
+                        "last_ts": float(now_epoch),
+                    }
+                )
+                health_raw = disabled_payload
+            cloned["health"] = self._normalize_health_record(
+                health_raw if isinstance(health_raw, dict) else {},
+                now_epoch=now_epoch,
+            )
+            normalized_models.append(cloned)
+        return normalized_providers, normalized_models
+
     def _probe_llm_model(self, provider_id: str, model_id: str, timeout_seconds: float) -> dict[str, Any]:
         built = self._probe_provider_cfg(provider_id)
         if built is None:
@@ -1860,6 +2163,7 @@ class AgentRuntime:
 
     def _save_registry_document(self, document: dict[str, Any]) -> None:
         with self._registry_lock:
+            self._normalize_defaults_for_persistence(document)
             try:
                 self.registry_store.write_document(document)
             except OSError as exc:
@@ -1883,11 +2187,17 @@ class AgentRuntime:
         self,
         plan_apply_fn: Any,
     ) -> tuple[bool, dict[str, Any]]:
+        def _wrapped_plan_apply(current: dict[str, Any]) -> dict[str, Any]:
+            updated = plan_apply_fn(current)
+            document = updated if isinstance(updated, dict) else {}
+            self._normalize_defaults_for_persistence(document)
+            return document
+
         with self._registry_lock:
             result = apply_with_rollback(
                 registry_path=self.registry_store.path,
                 snapshot_store=self._registry_snapshot_store,
-                plan_apply_fn=plan_apply_fn,
+                plan_apply_fn=_wrapped_plan_apply,
             )
             self._reload_router()
             snapshot_id_after: str | None = None
@@ -2128,13 +2438,126 @@ class AgentRuntime:
         defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
         if not isinstance(defaults, dict):
             defaults = {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
         defaults.setdefault("routing_mode", "auto")
         defaults.setdefault("default_provider", None)
+        defaults.setdefault("chat_model", None)
+        defaults.setdefault("embed_model", None)
         defaults.setdefault("default_model", None)
+        defaults.setdefault("last_chat_model", None)
         defaults.setdefault("allow_remote_fallback", True)
         defaults.setdefault("fallback_chain", [])
+        chat_model = str(defaults.get("chat_model") or "").strip() or None
+        legacy_default_model = str(defaults.get("default_model") or "").strip() or None
+        if chat_model is None and legacy_default_model:
+            chat_model = legacy_default_model
+        if chat_model:
+            defaults["chat_model"] = chat_model
+            defaults["default_model"] = chat_model
+        else:
+            defaults["chat_model"] = None
+            defaults["default_model"] = None
+
+        last_chat_model = str(defaults.get("last_chat_model") or "").strip() or None
+        defaults["last_chat_model"] = last_chat_model
+
+        embed_model = str(defaults.get("embed_model") or "").strip() or None
+        if embed_model is None:
+            embed_model = self._best_local_embedding_model(models)
+        defaults["embed_model"] = embed_model
         document["defaults"] = defaults
         return defaults
+
+    @staticmethod
+    def _best_local_embedding_model(models: dict[str, Any]) -> str | None:
+        candidates: list[str] = []
+        for model_id, payload in sorted(models.items()):
+            if not isinstance(payload, dict):
+                continue
+            provider = str(payload.get("provider") or "").strip().lower()
+            if provider != "ollama":
+                continue
+            valid_default, validated_model, _validation_error = validate_default_model(
+                str(model_id),
+                models,
+                purpose="embedding",
+            )
+            if not valid_default or not validated_model:
+                continue
+            candidates.append(validated_model)
+        if not candidates:
+            return None
+        preferred = [item for item in candidates if "nomic-embed-text" in item]
+        if preferred:
+            return sorted(preferred)[0]
+        return sorted(candidates)[0]
+
+    def _normalize_defaults_for_persistence(self, document: dict[str, Any]) -> None:
+        defaults = self._ensure_defaults(document)
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
+        provider_for_model = str(defaults.get("default_provider") or "").strip().lower() or None
+
+        raw_chat_model = (
+            str(defaults.get("chat_model") or "").strip()
+            or str(defaults.get("default_model") or "").strip()
+            or None
+        )
+        canonical_chat_model = None
+        if raw_chat_model is not None:
+            canonical_chat_model = self._normalize_default_model_id(
+                raw_chat_model,
+                provider_for_model=provider_for_model,
+                models=models,
+                provider_ids=provider_ids,
+            )
+        if canonical_chat_model is None and raw_chat_model is None:
+            defaults["chat_model"] = None
+            defaults["default_model"] = None
+        else:
+            valid_chat, validated_chat, _chat_error = validate_default_model(
+                canonical_chat_model,
+                models,
+                purpose="chat",
+            )
+            if valid_chat:
+                defaults["chat_model"] = validated_chat
+                defaults["default_model"] = validated_chat
+            else:
+                defaults["chat_model"] = None
+                defaults["default_model"] = None
+
+        raw_last_chat_model = str(defaults.get("last_chat_model") or "").strip() or None
+        canonical_last_chat_model = None
+        if raw_last_chat_model is not None:
+            canonical_last_chat_model = self._normalize_default_model_id(
+                raw_last_chat_model,
+                provider_for_model=provider_for_model,
+                models=models,
+                provider_ids=provider_ids,
+            )
+        defaults["last_chat_model"] = canonical_last_chat_model or raw_last_chat_model
+
+        raw_embed_model = str(defaults.get("embed_model") or "").strip() or None
+        canonical_embed_model = None
+        if raw_embed_model is not None:
+            canonical_embed_model = self._normalize_default_model_id(
+                raw_embed_model,
+                provider_for_model=provider_for_model,
+                models=models,
+                provider_ids=provider_ids,
+            )
+        valid_embed, validated_embed, _embed_error = validate_default_model(
+            canonical_embed_model,
+            models,
+            purpose="embedding",
+        )
+        if valid_embed:
+            defaults["embed_model"] = validated_embed
+        else:
+            defaults["embed_model"] = self._best_local_embedding_model(models)
+        document["defaults"] = defaults
 
     def health(self) -> dict[str, Any]:
         snapshot = self._router.doctor_snapshot()
@@ -3050,14 +3473,222 @@ class AgentRuntime:
         self._log_request(f"/providers/{provider_key}/test", True, response)
         return True, response
 
+    @staticmethod
+    def _normalize_ollama_pull_model(model_value: str | None) -> str:
+        normalized = str(model_value or "").strip().lower()
+        if normalized.startswith("ollama:"):
+            normalized = normalized.split(":", 1)[1].strip()
+        return normalized
+
+    def _ollama_tags_models(self, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        ollama_provider = providers.get("ollama") if isinstance(providers.get("ollama"), dict) else {}
+        raw_base = str(
+            ollama_provider.get("base_url")
+            or self.config.ollama_base_url
+            or self.config.ollama_host
+            or ""
+        ).strip()
+        if not raw_base:
+            return {
+                "ok": False,
+                "error_kind": "ollama_unavailable",
+                "status_code": None,
+                "message": "Ollama base URL is not configured.",
+                "models": [],
+            }
+        native_base = str(normalize_ollama_base_urls(raw_base).get("native_base") or "").strip().rstrip("/")
+        if not native_base:
+            return {
+                "ok": False,
+                "error_kind": "ollama_unavailable",
+                "status_code": None,
+                "message": "Ollama base URL is invalid.",
+                "models": [],
+            }
+        headers = self._provider_request_headers(ollama_provider) if isinstance(ollama_provider, dict) else {}
+        try:
+            parsed = self._http_get_json(
+                f"{native_base}/api/tags",
+                timeout_seconds=float(timeout_seconds),
+                headers=headers,
+            )
+        except urllib.error.HTTPError as exc:
+            status_code = int(getattr(exc, "code", 0) or 0) or None
+            return {
+                "ok": False,
+                "error_kind": "bad_status_code",
+                "status_code": status_code,
+                "message": "Unable to query Ollama /api/tags.",
+                "models": [],
+            }
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error_kind": "timeout",
+                "status_code": None,
+                "message": "Timed out while querying Ollama.",
+                "models": [],
+            }
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError, urllib.error.URLError):
+            return {
+                "ok": False,
+                "error_kind": "ollama_unavailable",
+                "status_code": None,
+                "message": "Unable to reach Ollama.",
+                "models": [],
+            }
+        rows = parsed.get("models") if isinstance(parsed.get("models"), list) else []
+        models = sorted(
+            {
+                str(row.get("name") or row.get("model") or "").strip()
+                for row in rows
+                if isinstance(row, dict) and str(row.get("name") or row.get("model") or "").strip()
+            }
+        )
+        return {
+            "ok": True,
+            "error_kind": None,
+            "status_code": None,
+            "message": "ok",
+            "models": models,
+        }
+
+    def pull_ollama_model(self, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+        body = payload if isinstance(payload, dict) else {}
+        normalized_model = self._normalize_ollama_pull_model(body.get("model"))
+        if not normalized_model:
+            return False, {
+                "ok": False,
+                "error": "bad_request",
+                "error_kind": "bad_request",
+                "status_code": 400,
+                "message": "model is required",
+            }
+        if normalized_model not in _OLLAMA_PULL_ALLOWLIST_SET:
+            return False, {
+                "ok": False,
+                "error": "model_not_allowed",
+                "error_kind": "model_not_allowed",
+                "status_code": 400,
+                "model": normalized_model,
+                "allowlist": list(_OLLAMA_PULL_ALLOWLIST),
+                "message": "Requested model is not in the local allowlist.",
+            }
+
+        start = time.monotonic()
+        probe_before = self._ollama_tags_models(timeout_seconds=2.0)
+        before_models = (
+            {str(item).strip() for item in probe_before.get("models", []) if str(item).strip()}
+            if bool(probe_before.get("ok"))
+            else set()
+        )
+        already_present = normalized_model in before_models
+
+        if not already_present:
+            pull_timeout_seconds = float(body.get("timeout_seconds") or 1800.0)
+            try:
+                pull_result = self.modelops_executor.safe_runner.run(
+                    ["ollama", "pull", normalized_model],
+                    timeout_seconds=pull_timeout_seconds,
+                )
+            except FileNotFoundError:
+                return False, {
+                    "ok": False,
+                    "error": "ollama_unavailable",
+                    "error_kind": "ollama_unavailable",
+                    "status_code": None,
+                    "model": normalized_model,
+                    "message": "Ollama CLI is not available on this host.",
+                }
+            except Exception as exc:
+                return False, {
+                    "ok": False,
+                    "error": "ollama_unavailable",
+                    "error_kind": "ollama_unavailable",
+                    "status_code": None,
+                    "model": normalized_model,
+                    "message": f"Unable to pull model with Ollama ({exc.__class__.__name__}).",
+                }
+            if not pull_result.ok:
+                error_kind = "timeout" if bool(pull_result.timed_out) else "ollama_unavailable"
+                message = (
+                    "Timed out while pulling model from Ollama."
+                    if error_kind == "timeout"
+                    else "Ollama failed to pull the requested model."
+                )
+                return False, {
+                    "ok": False,
+                    "error": error_kind,
+                    "error_kind": error_kind,
+                    "status_code": None,
+                    "model": normalized_model,
+                    "message": message,
+                }
+
+        refresh_ok, _refresh_body = self.refresh_models({"provider": "ollama"})
+        duration_ms = int((time.monotonic() - start) * 1000)
+        canonical_model = f"ollama:{normalized_model}"
+        message = (
+            f"Model {normalized_model} is already installed."
+            if already_present
+            else f"Pulled {normalized_model} and refreshed local model catalog."
+        )
+        if not refresh_ok:
+            message = (
+                f"{message} Catalog refresh did not complete; provider test will validate availability."
+            )
+        response = {
+            "ok": True,
+            "model": normalized_model,
+            "canonical_model": canonical_model,
+            "already_present": bool(already_present),
+            "duration_ms": duration_ms,
+            "message": message,
+        }
+        self._log_request("/providers/ollama/pull", True, response)
+        return True, response
+
     def get_defaults(self) -> dict[str, Any]:
-        defaults = self._ensure_defaults(self.registry_document)
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults = self._ensure_defaults(document)
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
+        raw_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
+        resolved_default_model = self._resolved_chat_default_model(
+            defaults=defaults,
+            models=models,
+            provider_ids=provider_ids,
+        )
         return {
             "routing_mode": defaults.get("routing_mode") or self._router.policy.mode,
             "default_provider": defaults.get("default_provider"),
-            "default_model": defaults.get("default_model"),
+            "chat_model": raw_chat_model,
+            "embed_model": str(defaults.get("embed_model") or "").strip() or None,
+            "last_chat_model": str(defaults.get("last_chat_model") or "").strip() or None,
+            "default_model": raw_chat_model,
+            "resolved_default_model": resolved_default_model,
             "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
         }
+
+    def _resolved_chat_default_model(
+        self,
+        *,
+        defaults: dict[str, Any],
+        models: dict[str, Any],
+        provider_ids: set[str],
+    ) -> str | None:
+        chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
+        if not chat_model:
+            return None
+        provider_for_model = str(defaults.get("default_provider") or "").strip().lower() or None
+        return self._normalize_default_model_id(
+            chat_model,
+            provider_for_model=provider_for_model,
+            models=models,
+            provider_ids=provider_ids,
+        )
 
     def update_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         valid_modes = {
@@ -3069,6 +3700,7 @@ class AgentRuntime:
 
         document = self.registry_document
         defaults = self._ensure_defaults(document)
+        previous_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
@@ -3086,9 +3718,11 @@ class AgentRuntime:
                 return False, {"ok": False, "error": "default_provider not found"}
             defaults["default_provider"] = provider
 
-        if "default_model" in payload:
-            model = str(payload.get("default_model") or "").strip() or None
+        chat_model_key = "chat_model" if "chat_model" in payload else ("default_model" if "default_model" in payload else None)
+        if chat_model_key is not None:
+            model = str(payload.get(chat_model_key) or "").strip() or None
             if model is None:
+                defaults["chat_model"] = None
                 defaults["default_model"] = None
             else:
                 provider_for_model = defaults.get("default_provider")
@@ -3101,28 +3735,147 @@ class AgentRuntime:
                 )
                 if canonical_model is None:
                     return False, {"ok": False, "error": "default_model not found"}
-                defaults["default_model"] = canonical_model
+                valid_default, validated_model, validation_error = validate_default_model(
+                    canonical_model,
+                    models,
+                    purpose="chat",
+                )
+                if not valid_default:
+                    legacy_error = (
+                        {"ok": False, "error": "default_model_not_chat_capable", "error_kind": "chat_model_not_chat_capable"}
+                        if chat_model_key == "default_model"
+                        else {"ok": False, "error": "chat_model_not_chat_capable", "error_kind": "chat_model_not_chat_capable"}
+                    )
+                    details = (
+                        dict(validation_error.get("details"))
+                        if isinstance(validation_error, dict) and isinstance(validation_error.get("details"), dict)
+                        else None
+                    )
+                    if details is not None:
+                        legacy_error["details"] = details
+                    return False, legacy_error
+                defaults["chat_model"] = validated_model
+                defaults["default_model"] = validated_model
+        if "embed_model" in payload:
+            model = str(payload.get("embed_model") or "").strip() or None
+            if model is None:
+                defaults["embed_model"] = None
+            else:
+                provider_for_model = defaults.get("default_provider")
+                provider_for_model = str(provider_for_model).strip().lower() if provider_for_model else None
+                canonical_model = self._normalize_default_model_id(
+                    model,
+                    provider_for_model=provider_for_model,
+                    models=models,
+                    provider_ids=provider_ids,
+                )
+                if canonical_model is None:
+                    return False, {"ok": False, "error": "embed_model not found"}
+                valid_default, validated_model, validation_error = validate_default_model(
+                    canonical_model,
+                    models,
+                    purpose="embedding",
+                )
+                if not valid_default:
+                    error_payload = {
+                        "ok": False,
+                        "error": "embed_model_not_embedding_capable",
+                        "error_kind": "embed_model_not_embedding_capable",
+                    }
+                    details = (
+                        dict(validation_error.get("details"))
+                        if isinstance(validation_error, dict) and isinstance(validation_error.get("details"), dict)
+                        else None
+                    )
+                    if details is not None:
+                        error_payload["details"] = details
+                    return False, error_payload
+                defaults["embed_model"] = validated_model
         elif (
             "default_provider" in payload
-            and defaults.get("default_model")
+            and defaults.get("chat_model")
             and str(defaults.get("default_provider") or "").strip()
         ):
-            model_id = str(defaults.get("default_model") or "").strip()
+            model_id = str(defaults.get("chat_model") or "").strip()
             if model_id and model_id in models:
                 existing_provider = str((models.get(model_id) or {}).get("provider") or "").strip().lower()
                 selected_provider = str(defaults.get("default_provider") or "").strip().lower()
                 if existing_provider and selected_provider and existing_provider != selected_provider:
+                    defaults["chat_model"] = None
                     defaults["default_model"] = None
 
         if "allow_remote_fallback" in payload:
             defaults["allow_remote_fallback"] = bool(payload.get("allow_remote_fallback"))
 
+        defaults["default_model"] = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
+        current_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
+        if current_chat_model != previous_chat_model:
+            defaults["last_chat_model"] = previous_chat_model
+        elif defaults.get("last_chat_model") in {"", "none"}:
+            defaults["last_chat_model"] = None
+        if defaults.get("embed_model") in {"", "none"}:
+            defaults["embed_model"] = None
         document["defaults"] = defaults
         saved, error = self._persist_registry_document(document)
         if not saved:
             assert error is not None
             return False, error
         return True, {"ok": True, **self.get_defaults()}
+
+    def rollback_defaults(self) -> tuple[bool, dict[str, Any]]:
+        document = self.registry_document
+        defaults = self._ensure_defaults(document)
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
+
+        rollback_target = str(defaults.get("last_chat_model") or "").strip() or None
+        if not rollback_target:
+            return False, {
+                "ok": False,
+                "error": "no_rollback_available",
+                "error_kind": "no_rollback_available",
+                "message": "No previous chat model is available to roll back to.",
+            }
+
+        provider_for_model = str(defaults.get("default_provider") or "").strip().lower() or None
+        canonical_target = self._normalize_default_model_id(
+            rollback_target,
+            provider_for_model=provider_for_model,
+            models=models,
+            provider_ids=provider_ids,
+        )
+        valid_target, validated_target, validation_error = validate_default_model(
+            canonical_target,
+            models,
+            purpose="chat",
+        )
+        if not valid_target or not validated_target:
+            response = {
+                "ok": False,
+                "error": "rollback_target_invalid",
+                "error_kind": "rollback_target_invalid",
+                "message": "Rollback target is not available as a chat-capable model.",
+            }
+            details = (
+                dict(validation_error.get("details"))
+                if isinstance(validation_error, dict) and isinstance(validation_error.get("details"), dict)
+                else None
+            )
+            if details is not None:
+                response["details"] = details
+            return False, response
+
+        previous_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
+        ok, body = self.update_defaults({"chat_model": validated_target})
+        if not ok:
+            response = body if isinstance(body, dict) else {"ok": False, "error": "rollback_failed"}
+            response.setdefault("error_kind", str(response.get("error") or "rollback_failed"))
+            return False, response
+        body = body if isinstance(body, dict) else {}
+        body["rolled_back_from"] = previous_chat_model
+        body["rolled_back_to"] = str(body.get("chat_model") or validated_target)
+        return True, body
 
     @staticmethod
     def _normalize_default_model_id(
@@ -3837,6 +4590,7 @@ class AgentRuntime:
 
     def chat(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         request_started_epoch = int(time.time())
+        trace_id = str(payload.get("trace_id") or "").strip() or f"chat-{request_started_epoch}"
         messages = self._normalize_messages(payload)
         if not messages:
             return False, {"ok": False, "error": "messages must be a non-empty list"}
@@ -3844,7 +4598,12 @@ class AgentRuntime:
         defaults = self.get_defaults()
         explicit_model_override = bool(str(payload.get("model") or "").strip())
         explicit_provider_override = bool(str(payload.get("provider") or "").strip())
-        model_override = str(payload.get("model") or "").strip() or defaults.get("default_model")
+        model_override = (
+            str(payload.get("model") or "").strip()
+            or str(defaults.get("chat_model") or "").strip()
+            or str(defaults.get("default_model") or "").strip()
+            or None
+        )
         provider_override = str(payload.get("provider") or "").strip().lower() or defaults.get("default_provider")
         allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
         explicit_require_tools = "require_tools" in payload
@@ -3856,6 +4615,34 @@ class AgentRuntime:
         routed_messages = [*memory_prefix_messages, *messages]
 
         last_user_text = self._last_user_message_text(messages)
+        selection_logged = False
+        selection_reason = (
+            "explicit_override"
+            if explicit_model_override or explicit_provider_override
+            else "default_policy"
+        )
+
+        def _log_selection_once(
+            *,
+            provider: str | None,
+            model: str | None,
+            reason: str,
+            fallback_used: bool = False,
+        ) -> None:
+            nonlocal selection_logged
+            if selection_logged:
+                return
+            self._safe_log_event(
+                "llm.selection",
+                {
+                    "trace_id": trace_id,
+                    "selected_provider": str(provider or "").strip().lower() or None,
+                    "selected_model": str(model or "").strip() or None,
+                    "selection_reason": str(reason or "").strip().lower() or "default_policy",
+                    "fallback_used": bool(fallback_used),
+                },
+            )
+            selection_logged = True
 
         # Default policy: keep current default unless policy allowlist/cap disallows it.
         baseline_policy = self._value_policy("default")
@@ -3877,11 +4664,13 @@ class AgentRuntime:
             model_override = str(selected_default.model_id)
             provider_override = str(selected_default.provider)
             default_score = selected_default
+            selection_reason = "policy_replaced_default"
         elif default_score is None and default_allowed and (not explicit_model_override):
             selected_default = default_allowed[0]
             model_override = str(selected_default.model_id)
             provider_override = str(selected_default.provider)
             default_score = selected_default
+            selection_reason = "policy_selected_default"
 
         escalation_reasons = detect_premium_escalation_triggers(user_text=last_user_text, payload=payload)
         premium_selected = None
@@ -3934,6 +4723,12 @@ class AgentRuntime:
                         premium_cost=float(top_no_cap.expected_cost_per_1m),
                         premium_cap=float(premium_policy.cost_cap_per_1m),
                     )
+                    _log_selection_once(
+                        provider=str(provider_override or ""),
+                        model=str(model_override or ""),
+                        reason="premium_over_cap_confirmation_required",
+                        fallback_used=False,
+                    )
                     response = {
                         "ok": True,
                         "assistant": {"role": "assistant", "content": prompt},
@@ -3962,6 +4757,7 @@ class AgentRuntime:
             if premium_selected is not None:
                 model_override = str(premium_selected.model_id)
                 provider_override = str(premium_selected.provider)
+                selection_reason = "premium_escalation"
                 if self._premium_override_once:
                     self._premium_override_once = False
 
@@ -3972,6 +4768,12 @@ class AgentRuntime:
                     local_observations = self._collect_authoritative_observations(domains)
                 except Exception as exc:
                     text = self._authoritative_tool_failure_text(domains, exc)
+                    _log_selection_once(
+                        provider="tool_gate",
+                        model=None,
+                        reason="authoritative_tool_failure",
+                        fallback_used=True,
+                    )
                     response = {
                         "ok": True,
                         "assistant": {"role": "assistant", "content": text},
@@ -4014,6 +4816,16 @@ class AgentRuntime:
             require_vision=bool(payload.get("require_vision")),
             min_context_tokens=int(payload.get("min_context_tokens") or 0) or None,
             timeout_seconds=float(payload.get("timeout_seconds") or 0) or None,
+            metadata={
+                "trace_id": trace_id,
+                "selection_reason": selection_reason,
+            },
+        )
+        _log_selection_once(
+            provider=str(result.get("provider") or provider_override or ""),
+            model=str(result.get("model") or model_override or ""),
+            reason=selection_reason if bool(result.get("ok")) else "routing_failure",
+            fallback_used=bool(result.get("fallback_used")),
         )
 
         response = {
@@ -4025,13 +4837,15 @@ class AgentRuntime:
             "meta": {
                 "provider": result.get("provider"),
                 "model": result.get("model"),
+                "route": "chat",
+                "source_surface": str(payload.get("source_surface") or "api"),
                 "fallback_used": bool(result.get("fallback_used")),
                 "attempts": result.get("attempts") or [],
                 "duration_ms": int(result.get("duration_ms") or 0),
                 "error": result.get("error_class"),
                 "autopilot": self._chat_autopilot_meta(request_started_epoch),
                 "selection_policy": {
-                    "default_model": str(defaults.get("default_model") or ""),
+                    "default_model": str(defaults.get("chat_model") or defaults.get("default_model") or ""),
                     "selected_model": str(model_override or ""),
                     "selected_provider": str(provider_override or ""),
                     "escalation_reasons": list(escalation_reasons),
@@ -4881,11 +5695,32 @@ class AgentRuntime:
     ) -> dict[str, Any]:
         summary = health_summary if isinstance(health_summary, dict) else self._health_monitor.summary(self.registry_document)
         snapshot = router_snapshot if isinstance(router_snapshot, dict) else self._router.doctor_snapshot()
-        return build_drift_report(
+        drift = build_drift_report(
             self.registry_document,
             summary,
             router_snapshot=snapshot,
         )
+        details = drift.get("details") if isinstance(drift.get("details"), dict) else {}
+        default_provider = str(details.get("default_provider") or "").strip().lower()
+        if default_provider == "ollama":
+            provider_rows = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
+            ollama_row = next(
+                (
+                    row
+                    for row in provider_rows
+                    if isinstance(row, dict) and str(row.get("id") or "").strip().lower() == "ollama"
+                ),
+                None,
+            )
+            snapshot_health = (
+                ollama_row.get("health")
+                if isinstance(ollama_row, dict) and isinstance(ollama_row.get("health"), dict)
+                else {}
+            )
+            effective = self._effective_provider_health("ollama", snapshot_health)
+            details["provider_health_status"] = str(effective.get("status") or "unknown").strip().lower() or "unknown"
+            drift["details"] = details
+        return drift
 
     def _autopilot_notify_state_snapshot(self) -> dict[str, Any]:
         document = self.registry_document if isinstance(self.registry_document, dict) else {}
@@ -6606,11 +7441,20 @@ class AgentRuntime:
         health = health_payload.get("health") if isinstance(health_payload.get("health"), dict) else {}
         snapshot = self._router.doctor_snapshot()
         defaults = self.get_defaults()
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults_raw = self._ensure_defaults(document)
+        models_document = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers_document = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers_document.keys()}
         drift = health.get("drift") if isinstance(health.get("drift"), dict) else {}
         drift_details = drift.get("details") if isinstance(drift.get("details"), dict) else {}
         resolved_default_model = (
             str(drift_details.get("resolved_default_model") or "").strip()
-            or str(defaults.get("default_model") or "").strip()
+            or self._resolved_chat_default_model(
+                defaults=defaults_raw,
+                models=models_document,
+                provider_ids=provider_ids,
+            )
             or None
         )
         default_provider = (
@@ -6621,8 +7465,31 @@ class AgentRuntime:
                 else None
             )
         )
-        providers = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
-        models = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
+        providers_raw = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
+        models_raw = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
+        providers, models = self._normalize_llm_status_rows(
+            provider_rows=[dict(row) for row in providers_raw if isinstance(row, dict)],
+            model_rows=[dict(row) for row in models_raw if isinstance(row, dict)],
+        )
+        allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
+        local_provider_lookup = {
+            str(row.get("id") or "").strip().lower(): bool(row.get("local", False))
+            for row in providers
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        hidden_models_by_provider: dict[str, int] = {}
+        total_models_count = len(models)
+        visible_models = models
+        if not allow_remote_fallback:
+            visible_models = []
+            for row in models:
+                provider_id = str(row.get("provider") or "").strip().lower()
+                is_local_provider = bool(local_provider_lookup.get(provider_id, provider_id == "ollama"))
+                if is_local_provider:
+                    visible_models.append(row)
+                else:
+                    hidden_models_by_provider[provider_id] = int(hidden_models_by_provider.get(provider_id, 0)) + 1
+        visible_models_count = len(visible_models)
         provider_lookup = {
             str(row.get("id") or "").strip().lower(): row
             for row in providers
@@ -6630,7 +7497,7 @@ class AgentRuntime:
         }
         model_lookup = {
             str(row.get("id") or "").strip(): row
-            for row in models
+            for row in visible_models
             if isinstance(row, dict) and str(row.get("id") or "").strip()
         }
         active_provider_row = provider_lookup.get(default_provider or "") if default_provider else None
@@ -6640,24 +7507,53 @@ class AgentRuntime:
             if isinstance(active_provider_row, dict) and isinstance(active_provider_row.get("health"), dict)
             else {}
         )
+        active_provider_health = self._normalize_health_record(
+            active_provider_health if isinstance(active_provider_health, dict) else {},
+            now_epoch=int(time.time()),
+        )
         active_model_health = (
             active_model_row.get("health")
             if isinstance(active_model_row, dict) and isinstance(active_model_row.get("health"), dict)
             else {}
         )
+        active_model_health = self._normalize_health_record(
+            active_model_health if isinstance(active_model_health, dict) else {},
+            now_epoch=int(time.time()),
+        )
         safe_mode = self._safe_mode_health_payload()
+        visible_counts = {
+            "total": visible_models_count,
+            "ok": 0,
+            "degraded": 0,
+            "down": 0,
+            "unknown": 0,
+            "not_applicable": 0,
+        }
+        for row in visible_models:
+            health_row = row.get("health") if isinstance(row.get("health"), dict) else {}
+            status_key = str((health_row or {}).get("status") or "unknown").strip().lower() or "unknown"
+            if status_key not in visible_counts:
+                status_key = "unknown"
+            visible_counts[status_key] = int(visible_counts.get(status_key, 0)) + 1
         return {
             "ok": True,
             "default_provider": default_provider,
+            "chat_model": str(defaults.get("chat_model") or "").strip() or None,
+            "embed_model": str(defaults.get("embed_model") or "").strip() or None,
+            "last_chat_model": str(defaults.get("last_chat_model") or "").strip() or None,
             "default_model": defaults.get("default_model"),
             "resolved_default_model": resolved_default_model,
             "routing_mode": defaults.get("routing_mode"),
-            "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
+            "allow_remote_fallback": allow_remote_fallback,
             "safe_mode": safe_mode,
             "active_provider_health": active_provider_health,
             "active_model_health": active_model_health,
             "providers": providers,
-            "models": models,
+            "models": visible_models,
+            "hidden_models_by_provider": dict(sorted(hidden_models_by_provider.items())),
+            "total_models_count": total_models_count,
+            "visible_models_count": visible_models_count,
+            "visible_counts": visible_counts,
         }
 
     def llm_status(self) -> dict[str, Any]:
@@ -6665,6 +7561,34 @@ class AgentRuntime:
         status = self._llm_status_payload(health_summary=health_summary)
         status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
         return status
+
+    def public_llm_identity_string(self) -> str:
+        try:
+            status = self.llm_status()
+        except Exception:
+            identity = get_public_identity(provider=None, model=None, local_providers={"ollama"})
+            return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
+        if not isinstance(status, dict):
+            identity = get_public_identity(provider=None, model=None, local_providers={"ollama"})
+            return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
+        provider = str(status.get("default_provider") or "").strip().lower()
+        model = (
+            str(status.get("resolved_default_model") or "").strip()
+            or str(status.get("default_model") or "").strip()
+        )
+        local_providers = {
+            str((row or {}).get("id") or "").strip().lower()
+            for row in (status.get("providers") if isinstance(status.get("providers"), list) else [])
+            if isinstance(row, dict) and bool(row.get("local", False))
+        }
+        if not local_providers:
+            local_providers = {"ollama"}
+        identity = get_public_identity(
+            provider=provider if provider and provider != "unknown" else None,
+            model=model if model and model != "unknown" else None,
+            local_providers=local_providers,
+        )
+        return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
 
     @staticmethod
     def _value_policy_summary(policy: ValuePolicy) -> dict[str, Any]:
@@ -6806,6 +7730,7 @@ class AgentRuntime:
         }
 
     def model_status(self) -> dict[str, Any]:
+        self._ensure_fresh_ollama_probe_state(ttl_seconds=30, timeout_seconds=2.0)
         status = self.llm_status()
         current_model = (
             str(status.get("resolved_default_model") or "").strip()
@@ -6832,11 +7757,8 @@ class AgentRuntime:
             or str(self.config.ollama_base_url or self.config.ollama_host or "").strip()
         )
         ollama_bases = normalize_ollama_base_urls(configured_ollama_base)
-        cached_ollama_probe = (
-            dict(self._ollama_probe_state)
-            if isinstance(self._ollama_probe_state, dict)
-            else {}
-        )
+        cached_ollama_probe = self._ensure_fresh_ollama_probe_state(ttl_seconds=30, timeout_seconds=2.0)
+        native_ok_value = bool(cached_ollama_probe.get("native_ok", False))
         local_up: list[str] = []
         local_down: list[str] = []
         local_unknown: list[str] = []
@@ -6858,15 +7780,24 @@ class AgentRuntime:
             if not provider_id:
                 continue
             configured_provider_ids.append(provider_id)
-            health = row.get("health") if isinstance(row.get("health"), dict) else {}
+            snapshot_health = row.get("health") if isinstance(row.get("health"), dict) else {}
+            health = self._effective_provider_health(provider_id, snapshot_health)
             health_status = str(health.get("status") or "unknown").strip().lower()
             if bool(row.get("local", False)):
-                if health_status == "ok":
-                    local_up.append(provider_id)
-                elif health_status == "down":
-                    local_down.append(provider_id)
+                if provider_id == "ollama":
+                    if health_status == "ok":
+                        local_up.append(provider_id)
+                    elif health_status == "down":
+                        local_down.append(provider_id)
+                    else:
+                        local_unknown.append(provider_id)
                 else:
-                    local_unknown.append(provider_id)
+                    if health_status == "ok":
+                        local_up.append(provider_id)
+                    elif health_status == "down":
+                        local_down.append(provider_id)
+                    else:
+                        local_unknown.append(provider_id)
             if provider_id == "ollama":
                 ollama_provider_status = health_status or "unknown"
                 ollama_provider_error_kind = str(health.get("last_error_kind") or "").strip().lower() or None
@@ -6893,11 +7824,8 @@ class AgentRuntime:
                 }
 
         llm_available = self.llm_availability_state()
-        native_ok_value = bool(cached_ollama_probe.get("native_ok", False))
         if ollama_provider_status == "ok":
             native_ok_value = True
-        elif ollama_provider_status == "down":
-            native_ok_value = False
         openai_compat_ok_value = bool(cached_ollama_probe.get("openai_compat_ok", False))
         ollama_last_error = (
             ollama_provider_error_kind
@@ -6916,6 +7844,7 @@ class AgentRuntime:
         model_watch_summary = self._latest_model_watch_summary()
         return {
             "ok": True,
+            "identity": self.public_llm_identity_string(),
             "current": {
                 "provider": current_provider,
                 "model_id": current_model,
@@ -7014,14 +7943,7 @@ class AgentRuntime:
         }
 
     def _llm_status_summary_line(self) -> str:
-        status = self.llm_status()
-        provider = str(status.get("default_provider") or "unknown").strip() or "unknown"
-        model = (
-            str(status.get("resolved_default_model") or "").strip()
-            or str(status.get("default_model") or "").strip()
-            or "unknown"
-        )
-        return f"Current provider/model: {provider} / {model}"
+        return self.public_llm_identity_string()
 
     def _ready_summary_line(self) -> str:
         ready = self.ready_payload()
@@ -7204,6 +8126,34 @@ class AgentRuntime:
                 )
                 continue
 
+            if action == "defaults.rollback":
+                ok, body = self.rollback_defaults()
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "rollback_failed"),
+                            "error_kind": str((body or {}).get("error_kind") or (body or {}).get("error") or ""),
+                            "message": str((body or {}).get("message") or ""),
+                        }
+                    )
+                    continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "rolled_back_from": (body or {}).get("rolled_back_from"),
+                        "rolled_back_to": (body or {}).get("rolled_back_to"),
+                        "defaults": {
+                            "chat_model": (body or {}).get("chat_model"),
+                            "last_chat_model": (body or {}).get("last_chat_model"),
+                            "resolved_default_model": (body or {}).get("resolved_default_model"),
+                        },
+                    }
+                )
+                continue
+
             if action == "autopilot.unpause":
                 ok, body = self.llm_autopilot_unpause({"confirm": True, "actor": actor})
                 if not ok:
@@ -7223,7 +8173,14 @@ class AgentRuntime:
                 if not provider_id:
                     failed.append({"id": str(row.get("id") or ""), "action": action, "error": "provider_required"})
                     continue
-                ok, body = self.test_provider(provider_id, {})
+                provider_test_payload: dict[str, Any] = {}
+                model_override = str(params.get("model") or "").strip()
+                if model_override:
+                    provider_test_payload["model"] = model_override
+                timeout_override = params.get("timeout_seconds")
+                if timeout_override is not None:
+                    provider_test_payload["timeout_seconds"] = timeout_override
+                ok, body = self.test_provider(provider_id, provider_test_payload)
                 provider_tests[provider_id] = self._summarize_provider_test_result(
                     provider_id=provider_id,
                     ok=ok,
@@ -7243,6 +8200,35 @@ class AgentRuntime:
                     )
                     continue
                 executed.append({"id": str(row.get("id") or ""), "action": action, "provider": provider_id})
+                continue
+
+            if action == "ollama.pull_model":
+                model_name = str(params.get("model") or "").strip()
+                if not model_name:
+                    failed.append({"id": str(row.get("id") or ""), "action": action, "error": "model_required"})
+                    continue
+                ok, body = self.pull_ollama_model({"model": model_name})
+                if not ok:
+                    failed.append(
+                        {
+                            "id": str(row.get("id") or ""),
+                            "action": action,
+                            "error": str((body or {}).get("error") or "ollama_pull_failed"),
+                            "error_kind": str((body or {}).get("error_kind") or (body or {}).get("error") or ""),
+                            "status_code": (body or {}).get("status_code"),
+                            "message": str((body or {}).get("message") or ""),
+                            "model": model_name,
+                        }
+                    )
+                    continue
+                executed.append(
+                    {
+                        "id": str(row.get("id") or ""),
+                        "action": action,
+                        "model": str((body or {}).get("model") or model_name),
+                        "already_present": bool((body or {}).get("already_present", False)),
+                    }
+                )
                 continue
 
             if action == "health.run":
@@ -7736,6 +8722,18 @@ class AgentRuntime:
                 plan_rows=[row for row in pending_plan if isinstance(row, dict)],
                 actor=actor,
             )
+            install_target_model: str | None = None
+            rollback_target_model: str | None = None
+            for row in [item for item in pending_plan if isinstance(item, dict)]:
+                action_name = str(row.get("action") or "").strip()
+                if action_name == "ollama.pull_model":
+                    model_value = self._normalize_ollama_pull_model(str((row.get("params") or {}).get("model") or ""))
+                    if model_value:
+                        install_target_model = model_value
+                if action_name == "defaults.rollback":
+                    rollback_value = str((row.get("params") or {}).get("target_chat_model") or "").strip()
+                    if rollback_value:
+                        rollback_target_model = rollback_value
             provider_tests = exec_payload.get("provider_tests") if isinstance(exec_payload.get("provider_tests"), dict) else {}
             openrouter_test = (
                 provider_tests.get("openrouter")
@@ -7775,21 +8773,88 @@ class AgentRuntime:
                         "trace_id": f"fixit-{now_epoch}",
                     }
             _save_idle_state(last_test=openrouter_test if isinstance(openrouter_test, dict) else None)
-            message = "Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."
-            return ok_exec, {
+            failed_steps = exec_payload.get("failed_steps") if isinstance(exec_payload.get("failed_steps"), list) else []
+            ollama_pull_failure = next(
+                (
+                    row for row in failed_steps
+                    if isinstance(row, dict) and str(row.get("action") or "").strip() == "ollama.pull_model"
+                ),
+                None,
+            )
+            rollback_step = next(
+                (
+                    row for row in (
+                        exec_payload.get("executed_steps")
+                        if isinstance(exec_payload.get("executed_steps"), list)
+                        else []
+                    )
+                    if isinstance(row, dict) and str(row.get("action") or "").strip() == "defaults.rollback"
+                ),
+                None,
+            )
+            defaults_after = self.get_defaults() if install_target_model and ok_exec else {}
+            if ok_exec and install_target_model:
+                chosen_model = str(defaults_after.get("chat_model") or f"ollama:{install_target_model}")
+                message = f"Installed and configured {chosen_model} for chat."
+                next_question = None
+                error_kind = None
+                errors_payload: list[str] = []
+            elif ok_exec and isinstance(rollback_step, dict):
+                rolled_back_to = str(
+                    rollback_step.get("rolled_back_to")
+                    or rollback_target_model
+                    or self.get_defaults().get("chat_model")
+                    or ""
+                ).strip()
+                rolled_back_from = str(rollback_step.get("rolled_back_from") or "").strip() or None
+                message = (
+                    f"✅ Rolled back chat model to {rolled_back_to} (was {rolled_back_from})"
+                    if rolled_back_from
+                    else f"✅ Rolled back chat model to {rolled_back_to}"
+                )
+                next_question = None
+                error_kind = None
+                errors_payload = []
+            elif isinstance(ollama_pull_failure, dict):
+                failure_kind = str(
+                    ollama_pull_failure.get("error_kind") or ollama_pull_failure.get("error") or ""
+                ).strip().lower()
+                if failure_kind in {"ollama_unavailable", "timeout"}:
+                    message = "Ollama is unreachable right now. Start Ollama, then run fix-it again."
+                    next_question = "After Ollama is running, should I retry local model install?"
+                    error_kind = "upstream_down"
+                    errors_payload = [failure_kind or "ollama_unavailable"]
+                else:
+                    message = "Applied partial fixes; some steps still need attention."
+                    next_question = "Do you want the detailed failed steps?"
+                    error_kind = "upstream_down"
+                    errors_payload = ["execution_partial_failure"]
+            else:
+                message = "Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."
+                next_question = None if ok_exec else "Do you want the detailed failed steps?"
+                error_kind = None if ok_exec else "upstream_down"
+                errors_payload = [] if ok_exec else ["execution_partial_failure"]
+            response_payload = {
                 "ok": ok_exec,
                 "intent": "llm_fixit",
                 "confidence": 1.0 if ok_exec else 0.0,
                 "did_work": bool(exec_payload.get("executed_steps")),
-                "error_kind": None if ok_exec else "upstream_down",
+                "error_kind": error_kind,
                 "message": message,
-                "next_question": None if ok_exec else "Do you want the detailed failed steps?",
+                "next_question": next_question,
                 "actions": [],
-                "errors": [] if ok_exec else ["execution_partial_failure"],
+                "errors": errors_payload,
                 "issue_code": str(wizard_state.get("issue_code") or decision.issue_code),
                 "result": exec_payload,
                 "trace_id": f"fixit-{now_epoch}",
             }
+            if ok_exec and install_target_model:
+                response_payload["chat_model"] = defaults_after.get("chat_model")
+                response_payload["resolved_default_model"] = defaults_after.get("resolved_default_model")
+            if ok_exec and isinstance(rollback_step, dict):
+                response_payload["chat_model"] = rollback_step.get("rolled_back_to") or self.get_defaults().get("chat_model")
+                response_payload["last_chat_model"] = rollback_step.get("rolled_back_from") or self.get_defaults().get("last_chat_model")
+            return ok_exec, response_payload
 
         answer = str(payload.get("answer") or "").strip()
         if answer:
@@ -8045,6 +9110,24 @@ class AgentRuntime:
                     "issue_code": issue_code_for_choice,
                     "trace_id": f"fixit-{now_epoch}",
                 }
+            if selected == "rollback_chat_model":
+                rollback_target = str(status_payload.get("last_chat_model") or "").strip() or None
+                if not rollback_target:
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 0.0,
+                        "did_work": False,
+                        "error_kind": "needs_clarification",
+                        "message": "No rollback available yet.",
+                        "next_question": "Choose another option or run fix-it again.",
+                        "actions": [],
+                        "errors": ["needs_clarification"],
+                        "status": "needs_clarification",
+                        "issue_code": issue_code_for_choice,
+                        "choices": choices_json,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
             plan = wizard_build_plan_for_choice(
                 issue_code=issue_code_for_choice,
                 choice_id=selected,
@@ -8078,12 +9161,58 @@ class AgentRuntime:
                 }
                 for item in plan
             ]
+            install_step = next(
+                (
+                    row for row in plan_json
+                    if str(row.get("action") or "").strip() == "ollama.pull_model"
+                ),
+                None,
+            )
+            rollback_step = next(
+                (
+                    row for row in plan_json
+                    if str(row.get("action") or "").strip() == "defaults.rollback"
+                ),
+                None,
+            )
+            install_model_name = self._normalize_ollama_pull_model(
+                str(
+                    (
+                        install_step.get("params")
+                        if isinstance(install_step, dict) and isinstance(install_step.get("params"), dict)
+                        else {}
+                    ).get("model")
+                    or ""
+                )
+            )
+            rollback_target = str(
+                (
+                    rollback_step.get("params")
+                    if isinstance(rollback_step, dict) and isinstance(rollback_step.get("params"), dict)
+                    else {}
+                ).get("target_chat_model")
+                or ""
+            ).strip() or None
+            if rollback_target:
+                confirm_question = f"I can roll back to {rollback_target}. Reply YES to apply, or NO to cancel."
+            elif install_model_name:
+                confirm_question = f"I can download {install_model_name}. Reply YES to apply, or NO to cancel."
+            else:
+                confirm_question = "I prepared a safe fix plan. Reply YES to apply, or NO to cancel."
             state_to_save = {
                 "active": True,
                 "issue_hash": issue_hash,
                 "issue_code": issue_code_for_choice,
                 "step": "awaiting_confirm",
-                "question": "Apply this fix-it plan now?",
+                "question": (
+                    f"Roll back chat model to {rollback_target} now?"
+                    if rollback_target
+                    else (
+                    f"Apply local model install for {install_model_name} now?"
+                    if install_model_name
+                    else "Apply this fix-it plan now?"
+                    )
+                ),
                 "choices": choices_json,
                 "pending_plan": plan_json,
                 "pending_confirm_token": confirm_token,
@@ -8102,8 +9231,16 @@ class AgentRuntime:
                 "confidence": 0.0,
                 "did_work": False,
                 "error_kind": "needs_clarification",
-                "message": "I prepared a safe fix plan. Reply YES to apply, or NO to cancel.",
-                "next_question": "Apply this fix-it plan now? Reply YES or NO.",
+                "message": confirm_question,
+                "next_question": (
+                    f"Roll back chat model to {rollback_target}? Reply YES or NO."
+                    if rollback_target
+                    else (
+                    f"Apply local model install for {install_model_name}? Reply YES or NO."
+                    if install_model_name
+                    else "Apply this fix-it plan now? Reply YES or NO."
+                    )
+                ),
                 "actions": [],
                 "errors": ["needs_clarification"],
                 "status": "needs_confirmation",
@@ -12719,13 +13856,55 @@ class APIServerHandler(BaseHTTPRequestHandler):
             "envelope": envelope,
         }
 
-    def _handle_internal_error(self, method: str, exc: Exception) -> None:
-        print(
-            f"api_server internal_error method={method} path={getattr(self, 'path', '')} "
-            f"error={exc.__class__.__name__}",
-            file=sys.stderr,
-            flush=True,
+    def _send_method_not_allowed(
+        self,
+        *,
+        method: str,
+        path: str,
+        allowed_methods: list[str],
+    ) -> None:
+        trace_id = self._request_trace_id()
+        normalized_allowed = sorted(
+            {
+                str(item or "").strip().upper()
+                for item in allowed_methods
+                if str(item or "").strip()
+            }
         )
+        allowed_label = ", ".join(normalized_allowed) if normalized_allowed else "the documented method"
+        status, payload = self._error_envelope_payload(
+            intent=f"http.{str(method or '').strip().lower() or 'post'}",
+            message=f"Method {str(method or '').strip().upper() or 'POST'} is not supported for {path}. Use {allowed_label}.",
+            trace_id=trace_id,
+            error_code="method_not_allowed",
+            error_kind="bad_request",
+            status=405,
+        )
+        payload = dict(payload)
+        payload["allowed_methods"] = normalized_allowed
+        envelope_payload = payload.get("envelope") if isinstance(payload.get("envelope"), dict) else {}
+        envelope_dict = dict(envelope_payload)
+        envelope_dict["allowed_methods"] = normalized_allowed
+        payload["envelope"] = envelope_dict
+        self._send_json(status, payload)
+
+    def _handle_internal_error(self, method: str, exc: Exception) -> None:
+        error_path = str(getattr(self, "path", "") or "")
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)).strip()
+        log_payload = {
+            "event": "api_server.internal_error",
+            "method": str(method or "").strip().upper(),
+            "path": error_path,
+            "error": exc.__class__.__name__,
+            "message": str(exc),
+            "traceback": tb,
+        }
+        print(json.dumps(log_payload, ensure_ascii=True, sort_keys=True), file=sys.stderr, flush=True)
+        if hasattr(self, "runtime") and hasattr(self.runtime, "_safe_log_event"):
+            try:
+                self.runtime._safe_log_event("api_server.internal_error", log_payload)  # type: ignore[attr-defined]
+            except Exception:
+                pass
         try:
             trace_id = self._request_trace_id()
             status, payload = self._error_envelope_payload(
@@ -12745,6 +13924,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
         clean_path = parsed.path or "/"
         parts = [part for part in clean_path.split("/") if part]
         return clean_path, parts
+
+    def _request_client_host(self) -> str:
+        try:
+            host = str((self.client_address or ("", 0))[0]).strip()
+        except Exception:
+            host = ""
+        return host
+
+    def _request_is_loopback(self) -> bool:
+        host = self._request_client_host()
+        if not host:
+            return True
+        return bool(self.runtime._host_is_loopback(host))
 
     def do_OPTIONS(self) -> None:  # noqa: N802
         try:
@@ -12945,6 +14137,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
         try:
             path, parts = self._path_parts()
             original_path = path
+            if path in {"/model", "/llm/model"}:
+                self._send_method_not_allowed(method="POST", path=path, allowed_methods=["GET"])
+                return
             payload = self._read_json()
             intent_assessment: IntentAssessment | None = None
             memory_debug_payload: dict[str, Any] | None = None
@@ -13215,7 +14410,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
                 def _run_chat() -> dict[str, Any]:
                     nonlocal chat_result
-                    chat_result = self.runtime.chat(payload)
+                    payload_with_trace = dict(payload)
+                    payload_with_trace.setdefault("trace_id", trace_id)
+                    payload_with_trace.setdefault("source_surface", "api")
+                    chat_result = self.runtime.chat(payload_with_trace)
                     ok_local, body_local = chat_result
                     assistant = (
                         body_local.get("assistant")
@@ -13388,6 +14586,22 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
             if path == "/models/refresh":
                 ok, body = self.runtime.refresh_models(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if path == "/defaults/rollback":
+                if not self._request_is_loopback():
+                    self._send_json(
+                        403,
+                        {
+                            "ok": False,
+                            "error": "forbidden",
+                            "error_kind": "forbidden",
+                            "message": "This endpoint is restricted to loopback requests.",
+                        },
+                    )
+                    return
+                ok, body = self.runtime.rollback_defaults()
                 self._send_json(200 if ok else 400, body)
                 return
 
@@ -13748,6 +14962,22 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
 
+            if len(parts) == 3 and parts[0] == "providers" and parts[1] == "ollama" and parts[2] == "pull":
+                if not self._request_is_loopback():
+                    self._send_json(
+                        403,
+                        {
+                            "ok": False,
+                            "error": "forbidden",
+                            "error_kind": "forbidden",
+                            "message": "This endpoint is restricted to loopback requests.",
+                        },
+                    )
+                    return
+                ok, body = self.runtime.pull_ollama_model(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+
             if len(parts) == 4 and parts[0] == "providers" and parts[2] == "models" and parts[3] == "refresh":
                 provider_id = parts[1]
                 ok, body = self.runtime.refresh_models({"provider": provider_id, **payload})
@@ -13845,10 +15075,68 @@ def run_server(host: str, port: int) -> None:
     server_started = time.monotonic()
     _startup_stdout_event("server.start.begin", host=host, port=int(port))
     runtime = build_runtime(defer_bootstrap_warmup=True)
+    resolved_git_commit = str(runtime.git_commit or "").strip() or runtime._read_git_commit() or "unknown"
+    _startup_stdout_event(
+        "server.start.code_identity",
+        module_path=str(Path(__file__).resolve()),
+        git_commit=resolved_git_commit,
+    )
     _startup_stdout_event(
         "server.start.runtime_built",
         elapsed_ms=int((time.monotonic() - server_started) * 1000),
     )
+    runtime_config = getattr(runtime, "config", None)
+    startup_report = (
+        run_startup_checks(service="api", config=runtime_config)
+        if runtime_config is not None
+        else {
+            "trace_id": "startup-api-skipped",
+            "component": "api.startup",
+            "status": "PASS",
+            "checks": [],
+            "failure_code": None,
+            "next_action": None,
+        }
+    )
+    _startup_stdout_event(
+        "server.start.startup_checks",
+        status=str(startup_report.get("status") or "UNKNOWN"),
+        trace_id=str(startup_report.get("trace_id") or ""),
+    )
+    for row in (startup_report.get("checks") if isinstance(startup_report.get("checks"), list) else []):
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "").strip().upper()
+        if status not in {"WARN", "FAIL"}:
+            continue
+        _startup_stdout_event(
+            "server.start.startup_check",
+            check_id=str(row.get("check_id") or ""),
+            status=status,
+            failure_code=str(row.get("failure_code") or ""),
+            next_action=str(row.get("next_action") or ""),
+        )
+    if str(startup_report.get("status") or "").strip().upper() == "FAIL":
+        _startup_stdout_event(
+            "server.start.startup_failed",
+            trace_id=str(startup_report.get("trace_id") or ""),
+            component=str(startup_report.get("component") or "api.startup"),
+            failure_code=str(startup_report.get("failure_code") or "startup_check_failed"),
+            next_action=str(startup_report.get("next_action") or ""),
+        )
+        print(
+            deterministic_error_message(
+                title="❌ Startup checks failed",
+                trace_id=str(startup_report.get("trace_id") or "startup-api-unknown"),
+                component=str(startup_report.get("component") or "api.startup"),
+                failure_code=str(startup_report.get("failure_code") or "startup_check_failed"),
+                next_action=str(startup_report.get("next_action") or "Run: python -m agent doctor"),
+            ),
+            file=sys.stderr,
+            flush=True,
+        )
+        runtime.close()
+        raise SystemExit(1)
     runtime.set_listening(host, port)
     _startup_stdout_event("server.start.route_wiring.start")
 

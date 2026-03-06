@@ -65,6 +65,9 @@ class DefaultsConfig:
     default_provider: str | None
     default_model: str | None
     allow_remote_fallback: bool
+    chat_model: str | None = None
+    embed_model: str | None = None
+    last_chat_model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,7 +136,10 @@ class Registry:
             "defaults": {
                 "routing_mode": self.defaults.routing_mode,
                 "default_provider": self.defaults.default_provider,
-                "default_model": self.defaults.default_model,
+                "chat_model": self.defaults.chat_model,
+                "embed_model": self.defaults.embed_model,
+                "last_chat_model": self.defaults.last_chat_model,
+                "default_model": self.defaults.chat_model or self.defaults.default_model,
                 "allow_remote_fallback": self.defaults.allow_remote_fallback,
                 "fallback_chain": list(self.fallback_chain),
             },
@@ -258,6 +264,9 @@ def _default_registry_document() -> dict[str, Any]:
         "defaults": {
             "routing_mode": "prefer_local_lowest_cost_capable",
             "default_provider": None,
+            "chat_model": None,
+            "embed_model": None,
+            "last_chat_model": None,
             "default_model": None,
             "allow_remote_fallback": True,
             "fallback_chain": [
@@ -364,6 +373,9 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
     migrated["defaults"] = {
         "routing_mode": str(routing_v1.get("mode") or "auto").strip().lower() or "auto",
         "default_provider": None,
+        "chat_model": None,
+        "embed_model": None,
+        "last_chat_model": None,
         "default_model": None,
         "allow_remote_fallback": True,
         "fallback_chain": list(routing_v1.get("fallback_chain") or []),
@@ -549,10 +561,19 @@ def _parse_registry(data: dict[str, Any], path: str | None) -> Registry:
         )
 
     defaults_raw = data.get("defaults") if isinstance(data.get("defaults"), dict) else {}
+    chat_model = str(defaults_raw.get("chat_model") or "").strip() or None
+    legacy_default_model = str(defaults_raw.get("default_model") or "").strip() or None
+    if chat_model is None:
+        chat_model = legacy_default_model
+    embed_model = str(defaults_raw.get("embed_model") or "").strip() or None
+    last_chat_model = str(defaults_raw.get("last_chat_model") or "").strip() or None
     defaults = DefaultsConfig(
         routing_mode=str(defaults_raw.get("routing_mode") or "auto").strip().lower() or "auto",
         default_provider=str(defaults_raw.get("default_provider") or "").strip().lower() or None,
-        default_model=str(defaults_raw.get("default_model") or "").strip() or None,
+        chat_model=chat_model,
+        embed_model=embed_model,
+        last_chat_model=last_chat_model,
+        default_model=chat_model or legacy_default_model,
         allow_remote_fallback=bool(defaults_raw.get("allow_remote_fallback", True)),
     )
 

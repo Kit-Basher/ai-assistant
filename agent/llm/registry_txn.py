@@ -8,6 +8,7 @@ from pathlib import Path
 import tempfile
 from typing import Any, Callable
 
+from agent.llm.capabilities import is_embedding_model_name
 from agent.llm.registry import load_registry_document
 
 
@@ -73,15 +74,39 @@ def verify_registry_invariants(document: dict[str, Any]) -> tuple[bool, str | No
             return False, "model_provider_unknown"
 
     default_provider = str(defaults.get("default_provider") or "").strip().lower() or None
-    default_model = str(defaults.get("default_model") or "").strip() or None
+    chat_model = str(defaults.get("chat_model") or "").strip() or None
+    legacy_default_model = str(defaults.get("default_model") or "").strip() or None
+    default_model = chat_model or legacy_default_model
+    embed_model = str(defaults.get("embed_model") or "").strip() or None
     if default_provider and default_provider not in providers:
         return False, "default_provider_unknown"
+    if chat_model and chat_model not in models:
+        return False, "chat_model_unknown"
     if default_model and default_model not in models:
         return False, "default_model_unknown"
+    if embed_model and embed_model not in models:
+        return False, "embed_model_unknown"
     if default_model and default_provider:
         model_provider = str((models.get(default_model) or {}).get("provider") or "").strip().lower()
         if model_provider and model_provider != default_provider:
             return False, "default_model_provider_mismatch"
+    if default_model:
+        model_caps = {
+            str(item).strip().lower()
+            for item in ((models.get(default_model) or {}).get("capabilities") or [])
+            if str(item).strip()
+        }
+        if "chat" not in model_caps:
+            return False, "chat_model_not_chat_capable"
+    if embed_model:
+        embed_caps = {
+            str(item).strip().lower()
+            for item in ((models.get(embed_model) or {}).get("capabilities") or [])
+            if str(item).strip()
+        }
+        embed_name = str((models.get(embed_model) or {}).get("model") or embed_model)
+        if "embedding" not in embed_caps and "embeddings" not in embed_caps and not is_embedding_model_name(embed_name):
+            return False, "embed_model_not_embedding_capable"
     if "allow_remote_fallback" in defaults and not isinstance(defaults.get("allow_remote_fallback"), bool):
         return False, "allow_remote_fallback_not_bool"
     return True, None

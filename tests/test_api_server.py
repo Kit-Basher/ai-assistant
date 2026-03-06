@@ -414,14 +414,102 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("prefer_local_lowest_cost_capable", updated["routing_mode"])
         self.assertEqual("ollama", updated["default_provider"])
         self.assertEqual("ollama:llama3", updated["default_model"])
+        self.assertEqual("ollama:llama3", updated["chat_model"])
+        self.assertIn("resolved_default_model", updated)
         self.assertFalse(updated["allow_remote_fallback"])
 
         current = runtime.get_defaults()
         self.assertEqual("prefer_local_lowest_cost_capable", current["routing_mode"])
         self.assertEqual("ollama", current["default_provider"])
         self.assertEqual("ollama:llama3", current["default_model"])
+        self.assertEqual("ollama:llama3", current["chat_model"])
+        self.assertEqual("ollama:llama3", current["resolved_default_model"])
         self.assertFalse(current["allow_remote_fallback"])
         self.assertEqual("prefer_local_lowest_cost_capable", runtime._router.policy.mode)
+
+    def test_defaults_sets_last_chat_model_on_successful_chat_model_change(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "quality_rank": 3,
+            "cost_rank": 1,
+            "default_for": ["chat"],
+            "pricing": {
+                "input_per_million_tokens": None,
+                "output_per_million_tokens": None,
+            },
+            "max_context_tokens": 32768,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        runtime.update_defaults({"chat_model": "ollama:llama3"})
+
+        ok, updated = runtime.update_defaults({"chat_model": "ollama:qwen2.5:3b-instruct"})
+        self.assertTrue(ok)
+        self.assertEqual("ollama:qwen2.5:3b-instruct", updated["chat_model"])
+        self.assertEqual("ollama:llama3", updated["last_chat_model"])
+
+    def test_defaults_rollback_swaps_chat_and_last_chat_model(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "quality_rank": 3,
+            "cost_rank": 1,
+            "default_for": ["chat"],
+            "pricing": {
+                "input_per_million_tokens": None,
+                "output_per_million_tokens": None,
+            },
+            "max_context_tokens": 32768,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        runtime.update_defaults({"chat_model": "ollama:llama3"})
+        runtime.update_defaults({"chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        ok, body = runtime.rollback_defaults()
+        self.assertTrue(ok)
+        self.assertEqual("ollama:llama3", body["chat_model"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", body["last_chat_model"])
+
+        ok_second, body_second = runtime.rollback_defaults()
+        self.assertTrue(ok_second)
+        self.assertEqual("ollama:qwen2.5:3b-instruct", body_second["chat_model"])
+        self.assertEqual("ollama:llama3", body_second["last_chat_model"])
+
+    def test_defaults_rollback_errors_when_target_missing_or_invalid(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.registry_document.setdefault("defaults", {})
+        runtime.registry_document["defaults"]["last_chat_model"] = None
+        runtime._save_registry_document(runtime.registry_document)
+
+        ok_missing, body_missing = runtime.rollback_defaults()
+        self.assertFalse(ok_missing)
+        self.assertEqual("no_rollback_available", body_missing["error"])
+        self.assertEqual("no_rollback_available", body_missing["error_kind"])
+
+        document = runtime.registry_document
+        defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
+        defaults["last_chat_model"] = "ollama:missing-chat-model"
+        document["defaults"] = defaults
+        runtime._save_registry_document(document)
+
+        ok_invalid, body_invalid = runtime.rollback_defaults()
+        self.assertFalse(ok_invalid)
+        self.assertEqual("rollback_target_invalid", body_invalid["error"])
+        self.assertEqual("rollback_target_invalid", body_invalid["error_kind"])
 
     def test_defaults_accepts_provider_scoped_model_name_and_returns_canonical(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -458,6 +546,90 @@ class TestAPIServerRuntime(unittest.TestCase):
         current = runtime.get_defaults()
         self.assertEqual("ollama", current["default_provider"])
         self.assertEqual("ollama:qwen2.5:3b-instruct", current["default_model"])
+
+    def test_defaults_migrates_legacy_default_model_to_chat_model(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
+        defaults.pop("chat_model", None)
+        defaults["default_model"] = "ollama:llama3"
+        defaults["default_provider"] = "ollama"
+        document["defaults"] = defaults
+        runtime.registry_document = document
+
+        current = runtime.get_defaults()
+        self.assertEqual("ollama:llama3", current["chat_model"])
+        self.assertEqual("ollama:llama3", current["default_model"])
+        self.assertEqual("ollama:llama3", current["resolved_default_model"])
+
+    def test_chat_uses_chat_model_not_embed_model(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "quality_rank": 3,
+            "cost_rank": 1,
+            "default_for": ["chat"],
+            "pricing": {
+                "input_per_million_tokens": None,
+                "output_per_million_tokens": None,
+            },
+            "max_context_tokens": 32768,
+        }
+        models["ollama:nomic-embed-text:latest"] = {
+            "provider": "ollama",
+            "model": "nomic-embed-text:latest",
+            "capabilities": ["embedding"],
+            "enabled": True,
+            "available": True,
+            "quality_rank": 1,
+            "cost_rank": 1,
+            "default_for": ["embedding"],
+            "pricing": {
+                "input_per_million_tokens": None,
+                "output_per_million_tokens": None,
+            },
+            "max_context_tokens": 8192,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        ok_defaults, _defaults = runtime.update_defaults(
+            {
+                "default_provider": "ollama",
+                "chat_model": "ollama:qwen2.5:3b-instruct",
+                "embed_model": "ollama:nomic-embed-text:latest",
+            }
+        )
+        self.assertTrue(ok_defaults)
+
+        captured: dict[str, object] = {}
+
+        def _fake_chat(messages, **kwargs):  # type: ignore[no-untyped-def]
+            _ = messages
+            captured.update(kwargs)
+            return {
+                "ok": True,
+                "text": "ok",
+                "provider": "ollama",
+                "model": str(kwargs.get("model_override") or ""),
+                "fallback_used": False,
+                "attempts": [],
+                "duration_ms": 1,
+                "error_class": None,
+            }
+
+        with patch.object(runtime._router, "chat", side_effect=_fake_chat):  # type: ignore[attr-defined]
+            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
+
+        self.assertTrue(ok_chat)
+        self.assertTrue(body["ok"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", str(captured.get("model_override") or ""))
 
     def test_defaults_treats_known_provider_prefix_as_full_id(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -573,6 +745,162 @@ class TestAPIServerRuntime(unittest.TestCase):
         first_model = models_payload["models"][0]
         self.assertIn("health", first_model)
         self.assertIn("status", first_model["health"])
+
+    def test_health_normalization_marks_disabled_provider_and_models_with_timestamps(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        snapshot = {
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "enabled": False,
+                    "local": False,
+                    "health": {"status": "down"},
+                }
+            ],
+            "models": [
+                {
+                    "id": "openrouter:openai/gpt-4o-mini",
+                    "provider": "openrouter",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "health": {"status": "down"},
+                }
+            ],
+        }
+        with patch.object(runtime._router, "doctor_snapshot", return_value=snapshot), patch.object(
+            runtime,
+            "llm_health_summary",
+            return_value={"ok": True, "health": {"drift": {"details": {}}}},
+        ):
+            payload = runtime.llm_status()
+
+        providers = payload.get("providers") if isinstance(payload.get("providers"), list) else []
+        models = payload.get("models") if isinstance(payload.get("models"), list) else []
+        provider_row = providers[0] if providers else {}
+        model_row = models[0] if models else {}
+        provider_health = provider_row.get("health") if isinstance(provider_row.get("health"), dict) else {}
+        model_health = model_row.get("health") if isinstance(model_row.get("health"), dict) else {}
+
+        self.assertEqual("down", provider_health.get("status"))
+        self.assertEqual("provider_disabled", provider_health.get("last_error_kind"))
+        self.assertIsInstance(provider_health.get("last_checked_at"), int)
+        self.assertTrue(str(provider_health.get("last_checked_at_iso") or "").strip())
+
+        self.assertFalse(bool(model_row.get("routable", True)))
+        self.assertEqual("down", model_health.get("status"))
+        self.assertEqual("provider_disabled", model_health.get("last_error_kind"))
+        self.assertIsInstance(model_health.get("last_checked_at"), int)
+        self.assertTrue(str(model_health.get("last_checked_at_iso") or "").strip())
+
+    def test_provider_disabled_health_stamps_all_provider_models_even_when_enabled_flag_true(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        now_epoch = int(time.time())
+        snapshot = {
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "enabled": True,
+                    "local": False,
+                    "health": {
+                        "status": "down",
+                        "last_error_kind": "provider_disabled",
+                        "status_code": 404,
+                        "last_checked_at": now_epoch,
+                    },
+                }
+            ],
+            "models": [
+                {
+                    "id": "openrouter:openai/gpt-4o-mini",
+                    "provider": "openrouter",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "health": {
+                        "status": "down",
+                        "last_checked_at": None,
+                        "last_error_kind": None,
+                        "status_code": None,
+                        "last_status_code": None,
+                    },
+                },
+                {
+                    "id": "openrouter:anthropic/claude-3.5-sonnet",
+                    "provider": "openrouter",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "health": {
+                        "status": "down",
+                        "last_checked_at": None,
+                        "last_error_kind": None,
+                        "status_code": None,
+                        "last_status_code": None,
+                    },
+                },
+            ],
+        }
+        with patch.object(runtime._router, "doctor_snapshot", return_value=snapshot), patch.object(
+            runtime,
+            "llm_health_summary",
+            return_value={"ok": True, "health": {"drift": {"details": {}}}},
+        ):
+            payload = runtime.llm_status()
+
+        models = payload.get("models") if isinstance(payload.get("models"), list) else []
+        openrouter_rows = [
+            row for row in models if isinstance(row, dict) and str(row.get("provider") or "").strip().lower() == "openrouter"
+        ]
+        self.assertEqual(2, len(openrouter_rows))
+        self.assertTrue(all(not bool(row.get("routable", True)) for row in openrouter_rows))
+        self.assertTrue(
+            all(
+                str(((row.get("health") if isinstance(row.get("health"), dict) else {}).get("last_error_kind") or "")).strip().lower()
+                == "provider_disabled"
+                for row in openrouter_rows
+            )
+        )
+        self.assertTrue(
+            all(
+                isinstance((row.get("health") if isinstance(row.get("health"), dict) else {}).get("last_checked_at"), int)
+                for row in openrouter_rows
+            )
+        )
+        null_checked_for_provider_disabled = sum(
+            1
+            for row in openrouter_rows
+            if (row.get("health") if isinstance(row.get("health"), dict) else {}).get("last_checked_at") is None
+        )
+        self.assertEqual(0, null_checked_for_provider_disabled)
+
+    def test_normalize_health_record_fills_missing_fields_for_down_status(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        normalized = runtime._normalize_health_record(  # type: ignore[attr-defined]
+            {
+                "status": "down",
+                "last_checked_at": None,
+                "last_ts": None,
+                "status_code": None,
+                "last_status_code": None,
+                "last_error_kind": None,
+                "cooldown_until": None,
+                "down_since": None,
+                "successes": None,
+                "failures": None,
+                "failure_streak": None,
+            },
+            now_epoch=1_700_000_000,
+        )
+        self.assertEqual("down", normalized.get("status"))
+        self.assertEqual(1_700_000_000, normalized.get("last_checked_at"))
+        self.assertEqual(1_700_000_000, normalized.get("down_since"))
+        self.assertEqual(1_700_000_000.0, normalized.get("last_ts"))
+        self.assertEqual(0, normalized.get("successes"))
+        self.assertEqual(0, normalized.get("failures"))
+        self.assertEqual(0, normalized.get("failure_streak"))
+        self.assertIn("last_checked_at_iso", normalized)
+        self.assertIn("down_since_iso", normalized)
 
     def test_telegram_secret_and_test_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

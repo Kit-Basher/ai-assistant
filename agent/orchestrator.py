@@ -37,6 +37,7 @@ from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
+from agent.golden_path import bootstrap_guidance
 from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
@@ -280,12 +281,7 @@ class Orchestrator:
 
     @staticmethod
     def _bootstrap_no_chat_text() -> str:
-        return (
-            "No chat model available right now.\n"
-            "1) Start Ollama locally at http://127.0.0.1:11434.\n"
-            "2) Install a local chat model (for example qwen2.5:3b-instruct).\n"
-            "3) Run /model to confirm chat setup."
-        )
+        return bootstrap_guidance()
 
     def _bootstrap_no_chat_response(self) -> OrchestratorResponse:
         return OrchestratorResponse(self._bootstrap_no_chat_text())
@@ -297,20 +293,62 @@ class Orchestrator:
                 return self._handle_message_impl(heuristic_command, user_id)
             except Exception:
                 pass
-        return OrchestratorResponse("LLM is unavailable right now. Try /brief or /status or /health.")
+        return OrchestratorResponse("LLM is unavailable right now. Next: run `agent doctor`.")
+
+    def _log_llm_selection(
+        self,
+        *,
+        trace_id: str,
+        provider: str | None,
+        model: str | None,
+        reason: str,
+        fallback_used: bool,
+    ) -> None:
+        try:
+            log_event(
+                self.log_path,
+                "llm.selection",
+                {
+                    "trace_id": trace_id,
+                    "selected_provider": str(provider or "").strip().lower() or None,
+                    "selected_model": str(model or "").strip() or None,
+                    "reason": str(reason or "").strip().lower() or "unknown",
+                    "fallback_used": bool(fallback_used),
+                    "source_surface": "orchestrator",
+                },
+            )
+        except Exception:
+            return
 
     def _llm_chat(self, user_id: str, text: str) -> OrchestratorResponse:
-        _ = user_id
+        trace_id = f"orch-{uuid.uuid4().hex[:10]}"
         heuristic_command = self._heuristic_llm_command(text)
         if heuristic_command:
             try:
-                return self._handle_message_impl(heuristic_command, user_id)
+                response = self._handle_message_impl(heuristic_command, user_id)
+                self._log_llm_selection(
+                    trace_id=trace_id,
+                    provider=None,
+                    model=None,
+                    reason="heuristic_command",
+                    fallback_used=True,
+                )
+                return response
             except Exception:
                 pass
         if not self._llm_chat_available():
+            self._log_llm_selection(
+                trace_id=trace_id,
+                provider=None,
+                model=None,
+                reason="llm_unavailable",
+                fallback_used=True,
+            )
             return self._bootstrap_no_chat_response()
         system_prompt = (
             "You are Personal Agent, a local-first assistant.\n"
+            "Identity rule: you run inside the user's Personal Agent runtime.\n"
+            "Never say you were created by Anthropic/OpenAI or any external vendor.\n"
             "Be the default chat UI. Keep replies concise and practical.\n"
             "Ask one clarifying question when needed.\n"
             "Never claim you ran checks/actions unless they actually ran.\n"
@@ -340,6 +378,13 @@ class Orchestrator:
                 except TypeError:
                     result = self.llm_client.chat(messages)
         except Exception:
+            self._log_llm_selection(
+                trace_id=trace_id,
+                provider=None,
+                model=None,
+                reason="llm_chat_exception",
+                fallback_used=True,
+            )
             return self._llm_error_fallback_response(user_id, text)
 
         if isinstance(result, dict):
@@ -348,13 +393,38 @@ class Orchestrator:
                 directive_command = self._parse_llm_run_directive(llm_text)
                 if directive_command:
                     try:
-                        return self._handle_message_impl(directive_command, user_id)
+                        response = self._handle_message_impl(directive_command, user_id)
+                        self._log_llm_selection(
+                            trace_id=trace_id,
+                            provider=str(result.get("provider") or "").strip() or None,
+                            model=str(result.get("model") or "").strip() or None,
+                            reason="run_directive",
+                            fallback_used=True,
+                        )
+                        return response
                     except Exception:
+                        self._log_llm_selection(
+                            trace_id=trace_id,
+                            provider=None,
+                            model=None,
+                            reason="run_directive_failed",
+                            fallback_used=True,
+                        )
                         return self._llm_error_fallback_response(user_id, text)
+                self._log_llm_selection(
+                    trace_id=trace_id,
+                    provider=str(result.get("provider") or "").strip() or None,
+                    model=str(result.get("model") or "").strip() or None,
+                    reason="llm_chat",
+                    fallback_used=False,
+                )
                 return OrchestratorResponse(
                     llm_text,
                     {
                         "llm_chat": {
+                            "trace_id": trace_id,
+                            "route": "chat",
+                            "source_surface": "orchestrator",
                             "provider": str(result.get("provider") or "").strip() or None,
                             "model": str(result.get("model") or "").strip() or None,
                         }
@@ -366,11 +436,43 @@ class Orchestrator:
                 directive_command = self._parse_llm_run_directive(llm_text)
                 if directive_command:
                     try:
-                        return self._handle_message_impl(directive_command, user_id)
+                        response = self._handle_message_impl(directive_command, user_id)
+                        self._log_llm_selection(
+                            trace_id=trace_id,
+                            provider=None,
+                            model=None,
+                            reason="run_directive",
+                            fallback_used=True,
+                        )
+                        return response
                     except Exception:
+                        self._log_llm_selection(
+                            trace_id=trace_id,
+                            provider=None,
+                            model=None,
+                            reason="run_directive_failed",
+                            fallback_used=True,
+                        )
                         return self._llm_error_fallback_response(user_id, text)
-                return OrchestratorResponse(llm_text, {"llm_chat": {}})
+                self._log_llm_selection(
+                    trace_id=trace_id,
+                    provider=None,
+                    model=None,
+                    reason="llm_chat",
+                    fallback_used=False,
+                )
+                return OrchestratorResponse(
+                    llm_text,
+                    {"llm_chat": {"trace_id": trace_id, "route": "chat", "source_surface": "orchestrator"}},
+                )
 
+        self._log_llm_selection(
+            trace_id=trace_id,
+            provider=None,
+            model=None,
+            reason="llm_empty_response",
+            fallback_used=True,
+        )
         return self._llm_error_fallback_response(user_id, text)
 
     @staticmethod
@@ -3973,11 +4075,11 @@ class Orchestrator:
                 self._last_offer_topic[user_id] = "brief_offer"
                 if not self._llm_chat_available():
                     return self._bootstrap_no_chat_response()
-                return OrchestratorResponse('Hey 🙂 Want a quick /brief, or ask “anything new on my PC?”')
+                return OrchestratorResponse("Hi. I’m ready to help. Tell me what you want to do.")
 
             if not self._llm_chat_available():
                 return self._bootstrap_no_chat_response()
-            return OrchestratorResponse("I didn’t understand that. Try /brief, or ask “anything new on my PC?”")
+            return OrchestratorResponse("I’m not sure what you need yet. Send 'help' for commands.")
         finally:
             self._runner = None
 

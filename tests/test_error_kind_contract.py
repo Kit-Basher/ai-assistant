@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr
 import io
 import json
 import os
@@ -73,6 +74,19 @@ class _HandlerForPostTest(APIServerHandler):
 
     def _read_json(self) -> dict[str, object]:  # type: ignore[override]
         return dict(self._payload)
+
+    def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+        self.status_code = status
+        self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+
+class _HandlerForGetTest(APIServerHandler):
+    def __init__(self, runtime_obj: AgentRuntime, path: str) -> None:
+        self.runtime = runtime_obj
+        self.path = path
+        self.headers = {"Content-Length": "0"}
+        self.status_code = 0
+        self.response_payload: dict[str, object] = {}
 
     def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
         self.status_code = status
@@ -173,6 +187,194 @@ class TestErrorKindContract(unittest.TestCase):
         self.assertEqual(False, handler.response_payload.get("ok"))
         self.assertEqual("internal_error", handler.response_payload.get("error_kind"))
         self.assertIn(INTERNAL_ERROR_SUPPORT_HINT, str(handler.response_payload.get("message") or ""))
+
+    def test_chat_assertion_error_returns_structured_error_and_logs_traceback(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        stderr = io.StringIO()
+        handler = _HandlerForPostTest(
+            runtime,
+            "/chat",
+            {"messages": [{"role": "user", "content": "hello"}]},
+        )
+        with patch.object(handler, "_path_parts", side_effect=AssertionError("boom-assert")), redirect_stderr(stderr):
+            handler.do_POST()
+
+        self.assertEqual(500, handler.status_code)
+        self.assertEqual(False, handler.response_payload.get("ok"))
+        self.assertEqual("internal_error", handler.response_payload.get("error_kind"))
+        self.assertTrue(str(handler.response_payload.get("message") or "").strip())
+        envelope = handler.response_payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        self.assertEqual("internal_error", str((envelope or {}).get("error_kind") or ""))
+
+        records = []
+        for line in stderr.getvalue().splitlines():
+            text = str(line or "").strip()
+            if not text:
+                continue
+            try:
+                record = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if str(record.get("event") or "") == "api_server.internal_error":
+                records.append(record)
+        self.assertTrue(records)
+        internal_error_record = records[-1]
+        self.assertEqual("AssertionError", str(internal_error_record.get("error") or ""))
+        self.assertIn("traceback", internal_error_record)
+        self.assertIn("AssertionError: boom-assert", str(internal_error_record.get("traceback") or ""))
+
+    def test_post_model_returns_structured_method_not_allowed_envelope(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        handler = _HandlerForPostTest(runtime, "/model", {})
+        handler.do_POST()
+
+        self.assertEqual(405, handler.status_code)
+        self.assertEqual(False, handler.response_payload.get("ok"))
+        self.assertEqual("method_not_allowed", handler.response_payload.get("error"))
+        self.assertTrue(str(handler.response_payload.get("error_kind") or "").strip())
+        self.assertTrue(str(handler.response_payload.get("message") or "").strip())
+        self.assertEqual(["GET"], handler.response_payload.get("allowed_methods"))
+        envelope = handler.response_payload.get("envelope")
+        self.assertTrue(isinstance(envelope, dict))
+        self.assertEqual(
+            str(handler.response_payload.get("error_kind") or ""),
+            str((envelope or {}).get("error_kind") or ""),
+        )
+
+    def test_put_defaults_rejects_embedding_only_default_model(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:nomic-embed-text:latest"] = {
+            "provider": "ollama",
+            "model": "nomic-embed-text:latest",
+            "capabilities": ["embedding"],
+            "enabled": True,
+            "available": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        handler = _HandlerForPostTest(
+            runtime,
+            "/defaults",
+            {
+                "default_provider": "ollama",
+                "default_model": "ollama:nomic-embed-text:latest",
+            },
+        )
+        handler.do_PUT()
+
+        self.assertEqual(400, handler.status_code)
+        self.assertEqual(False, handler.response_payload.get("ok"))
+        self.assertEqual("default_model_not_chat_capable", handler.response_payload.get("error"))
+        details = handler.response_payload.get("details")
+        self.assertTrue(isinstance(details, dict))
+        capabilities = (details or {}).get("capabilities")
+        self.assertIn("embedding", capabilities if isinstance(capabilities, list) else [])
+
+    def test_put_defaults_accepts_chat_capable_provider_scoped_model_name(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        handler = _HandlerForPostTest(
+            runtime,
+            "/defaults",
+            {
+                "default_provider": "ollama",
+                "default_model": "qwen2.5:3b-instruct",
+            },
+        )
+        handler.do_PUT()
+
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(True, handler.response_payload.get("ok"))
+        self.assertEqual("ollama:qwen2.5:3b-instruct", handler.response_payload.get("default_model"))
+
+    def test_put_defaults_rejects_chat_model_that_is_embedding_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:nomic-embed-text:latest"] = {
+            "provider": "ollama",
+            "model": "nomic-embed-text:latest",
+            "capabilities": ["embedding"],
+            "enabled": True,
+            "available": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        handler = _HandlerForPostTest(
+            runtime,
+            "/defaults",
+            {
+                "default_provider": "ollama",
+                "chat_model": "ollama:nomic-embed-text:latest",
+            },
+        )
+        handler.do_PUT()
+
+        self.assertEqual(400, handler.status_code)
+        self.assertEqual(False, handler.response_payload.get("ok"))
+        self.assertEqual("chat_model_not_chat_capable", handler.response_payload.get("error"))
+        self.assertEqual("chat_model_not_chat_capable", handler.response_payload.get("error_kind"))
+
+    def test_put_defaults_rejects_embed_model_that_is_chat_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        handler = _HandlerForPostTest(
+            runtime,
+            "/defaults",
+            {
+                "default_provider": "ollama",
+                "embed_model": "ollama:qwen2.5:3b-instruct",
+            },
+        )
+        handler.do_PUT()
+
+        self.assertEqual(400, handler.status_code)
+        self.assertEqual(False, handler.response_payload.get("ok"))
+        self.assertEqual("embed_model_not_embedding_capable", handler.response_payload.get("error"))
+        self.assertEqual("embed_model_not_embedding_capable", handler.response_payload.get("error_kind"))
+
+    def test_get_defaults_returns_purpose_aware_shape(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        handler = _HandlerForGetTest(runtime, "/defaults")
+        handler.do_GET()
+
+        self.assertEqual(200, handler.status_code)
+        payload = handler.response_payload
+        self.assertIn("routing_mode", payload)
+        self.assertIn("default_provider", payload)
+        self.assertIn("chat_model", payload)
+        self.assertIn("embed_model", payload)
+        self.assertIn("last_chat_model", payload)
+        self.assertIn("default_model", payload)
+        self.assertIn("resolved_default_model", payload)
+        self.assertEqual(payload.get("default_model"), payload.get("chat_model"))
 
     def test_classify_upstream_down_from_health_and_attempt_reason(self) -> None:
         kind = classify_error_kind(

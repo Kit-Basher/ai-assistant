@@ -635,10 +635,13 @@ class LLMRouter:
                     "error_class": None,
                 }
                 if self._log_path:
+                    metadata = request.metadata if isinstance(request.metadata, dict) else {}
                     log_event(
                         self._log_path,
                         "llm_routing_decision",
                         {
+                            "trace_id": str(metadata.get("trace_id") or "").strip() or None,
+                            "selection_reason": str(metadata.get("selection_reason") or "").strip() or None,
                             "purpose": purpose,
                             "task_type": task_type or purpose,
                             "required_capabilities": sorted(self.policy.required_capabilities(request)),
@@ -669,10 +672,13 @@ class LLMRouter:
         error_message = last_error.message if last_error else "No compatible model available."
 
         if self._log_path:
+            metadata = request.metadata if isinstance(request.metadata, dict) else {}
             log_event(
                 self._log_path,
                 "llm_routing_decision",
                 {
+                    "trace_id": str(metadata.get("trace_id") or "").strip() or None,
+                    "selection_reason": str(metadata.get("selection_reason") or "").strip() or None,
                     "purpose": purpose,
                     "task_type": task_type or purpose,
                     "required_capabilities": sorted(self.policy.required_capabilities(request)),

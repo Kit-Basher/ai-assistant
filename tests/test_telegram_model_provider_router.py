@@ -149,6 +149,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
         self.assertEqual("provider.setup.openrouter", classify_model_provider_intent("setup openrouter"))
         self.assertEqual("provider.setup.openrouter", classify_model_provider_intent("repair openrouter"))
         self.assertEqual("provider.setup.openrouter", classify_model_provider_intent("openrouter unavailable"))
+        self.assertEqual("provider.help", classify_model_provider_intent("setup"))
         self.assertEqual("none", classify_model_provider_intent("write me a poem"))
 
     def test_prerouter_model_status_text(self) -> None:
@@ -200,6 +201,65 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertEqual(1, runtime.model_watch_calls)
             reply = str(update.effective_message.replies[-1]["text"] or "")
             self.assertIn("No new better models in configured providers.", reply)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_rotate_token_text_routes_to_setup_response(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "rotate token")
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("python -m agent.secrets set telegram:bot_token", reply)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_setup_text_uses_bootstrap_guidance_when_chat_not_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            runtime._status_payload = {
+                "ok": True,
+                "default_provider": "ollama",
+                "default_model": None,
+                "resolved_default_model": None,
+                "allow_remote_fallback": False,
+                "active_provider_health": {"status": "down"},
+                "active_model_health": {"status": "down"},
+                "providers": [{"id": "ollama", "enabled": True, "health": {"status": "down"}}],
+                "models": [],
+            }
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "setup")
+            asyncio.run(_handle_message(update, context))
+
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("No chat model available right now.", reply)
+            self.assertIn("Start Ollama", reply)
             self.assertEqual([], orchestrator.calls)
 
     def test_setup_openrouter_numeric_and_key_paste(self) -> None:

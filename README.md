@@ -4,25 +4,55 @@ Local-first personal assistant with SQLite memory, deterministic routing, and sy
 
 ## Documentation Order (Source of Truth)
 Use docs in this order when context conflicts:
-1. `CANONICAL_HANDOFF_V3.md` - mission, behavioral rules, long-horizon direction.
-2. `PROJECT_STATUS.md` - current branch reality, active work, test health.
-3. `LOOKHERE.md` - day-to-day operator runbook.
-4. `README.md` - setup and command surface overview.
+1. `README.md`
+2. `ARCHITECTURE.md`
+3. `PROJECT_STATUS.md`
+4. `docs/operator/*`
+5. `docs/design/*`
+6. `docs/history/*`
 
-Historical snapshots (not current truth):
-- `docs/archive/CANONICAL_TRACKING.md`
-- `docs/archive/FINAL_CHECK.md`
-- `docs/archive/RELEASE_NOTES.md`
-
-## Quick Start (Local)
+## Getting Started In 60 Seconds
 1. Create venv:
    - `python3 -m venv .venv`
    - `. .venv/bin/activate`
 2. Install deps:
    - `pip install -r requirements.txt`
-3. Run bot:
-   - `.venv/bin/python -m telegram_adapter`
-   - Token source: `telegram:bot_token` in secret store (preferred) or `TELEGRAM_BOT_TOKEN` env var (fallback)
+3. Start API service:
+   - `systemctl --user restart personal-agent-api.service`
+4. Verify runtime:
+   - `python -m agent status`
+   - `python -m agent doctor`
+
+Unified CLI:
+- `python -m agent doctor`
+- `python -m agent status`
+- `python -m agent health`
+- `python -m agent brief`
+- `python -m agent logs`
+- `python -m agent version`
+
+## Golden Path
+1. Start/restart the API service.
+2. Verify with `python -m agent status`.
+3. Talk to Telegram in plain English.
+4. If anything looks wrong, run `python -m agent doctor` and follow the single `Next action`.
+
+## If You Only Learn 3 Commands
+- `python -m agent status`
+- `python -m agent doctor`
+- `python -m agent logs`
+
+## First 5 Minutes
+1. Set Telegram token: `python -m agent.secrets set telegram:bot_token`
+2. Restart service: `systemctl --user restart personal-agent-api.service`
+3. Verify: `python -m agent status`
+4. Diagnose if needed: `python -m agent doctor`
+5. Send Telegram message: `help`
+
+## Troubleshooting
+- First step for any issue: `python -m agent doctor`
+- Detailed machine-readable output: `python -m agent doctor --json`
+- Safe local remediation only: `python -m agent doctor --fix`
 
 ## Local API + Web UI
 Run local HTTP API (no Telegram token required):
@@ -385,6 +415,7 @@ Common optional:
 - `AGENT_LOG_PATH` (default `logs/agent.jsonl`)
 - `AGENT_SKILLS_PATH` (default `skills/`)
 - `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS` (`1` makes `scripts/doctor.py` fail when required systemd units are missing; default skips these checks when units are not installed)
+  - Doctor guide: `docs/operator/doctor.md` (`python -m agent doctor`, `--json`, `--fix`)
 - `PERCEPTION_ENABLED` (default `1`)
 - `PERCEPTION_ROOTS` (comma-separated allowlist roots for perception top-dir sizing; default `/home,/data/projects`)
 - `PERCEPTION_INTERVAL_SECONDS` (default `5`; reserved for future background scheduling)

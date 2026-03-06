@@ -13,6 +13,8 @@ def _status_payload(
     openrouter_status: str = "ok",
     openrouter_failure_streak: int = 0,
     any_routable: bool = True,
+    allow_remote_fallback: bool = True,
+    last_chat_model: str | None = None,
 ) -> dict[str, object]:
     providers = [
         {
@@ -70,6 +72,8 @@ def _status_payload(
         "default_provider": "ollama",
         "default_model": "ollama:llama3",
         "resolved_default_model": "ollama:llama3",
+        "last_chat_model": last_chat_model,
+        "allow_remote_fallback": bool(allow_remote_fallback),
         "safe_mode": {
             "paused": bool(safe_mode_paused),
             "reason": "flip_flop_default_model" if safe_mode_paused else "not_paused",
@@ -102,6 +106,18 @@ class TestLLMFixitWizardRules(unittest.TestCase):
         self.assertEqual("openrouter_down", decision.issue_code)
         self.assertEqual("local_only", decision.choices[0].id)
         self.assertTrue(decision.choices[0].recommended)
+
+    def test_remote_warnings_suppressed_when_remote_fallback_disabled_and_local_is_healthy(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(
+                openrouter_status="down",
+                openrouter_failure_streak=20,
+                allow_remote_fallback=False,
+            ),
+        )
+        self.assertEqual("ok", decision.status)
+        self.assertEqual("ok", decision.issue_code)
+        self.assertEqual([], decision.choices)
 
     def test_openrouter_down_without_key_offers_add_key(self) -> None:
         decision = evaluate_wizard_decision(
@@ -172,6 +188,39 @@ class TestLLMFixitWizardRules(unittest.TestCase):
         self.assertEqual("unpause_autopilot", decision.choices[0].id)
         self.assertTrue(decision.choices[0].recommended)
         self.assertIn("paused", decision.message)
+
+    def test_no_routable_model_offers_install_small_and_medium(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(any_routable=False, allow_remote_fallback=False),
+        )
+        self.assertEqual("no_routable_model", decision.issue_code)
+        self.assertEqual("install_local_small", decision.choices[0].id)
+        self.assertTrue(decision.choices[0].recommended)
+        self.assertEqual("install_local_medium", decision.choices[1].id)
+        self.assertEqual("details", decision.choices[2].id)
+
+    def test_no_routable_model_with_last_chat_model_offers_undo(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(
+                any_routable=False,
+                allow_remote_fallback=False,
+                last_chat_model="ollama:qwen2.5:3b-instruct",
+            ),
+        )
+        self.assertEqual("no_routable_model", decision.issue_code)
+        self.assertEqual("rollback_chat_model", decision.choices[2].id)
+
+    def test_no_routable_model_without_last_chat_model_hides_undo(self) -> None:
+        decision = evaluate_wizard_decision(
+            _status_payload(
+                any_routable=False,
+                allow_remote_fallback=False,
+                last_chat_model=None,
+            ),
+        )
+        choice_ids = [choice.id for choice in decision.choices]
+        self.assertNotIn("rollback_chat_model", choice_ids)
+        self.assertIn("details", choice_ids)
 
 
 if __name__ == "__main__":

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import tempfile
+import time
 from typing import Any
+import urllib.request
 
 
 _SIZE_RE = re.compile(r"([0-9]+(?:\.[0-9]+)?)\s*[bB]")
 _BATCH_STATUSES = frozenset({"new", "notified", "acked", "dismissed", "deferred"})
+_BUZZ_SOURCES: dict[str, dict[str, Any]] = {
+    "openrouter_models": {"url": "https://openrouter.ai/api/v1/models", "official": True},
+    "huggingface_trending": {"url": "https://huggingface.co/api/trending?type=model", "official": False},
+    "ollama_catalog": {"url": "http://127.0.0.1:11434/api/tags", "official": True},
+}
 
 
 @dataclass(frozen=True)
@@ -20,6 +28,15 @@ class ModelWatchConfig:
     require_license: frozenset[str]
     score_threshold: int = 2
     recent_days: int = 30
+
+
+@dataclass(frozen=True)
+class CatalogDelta:
+    provider_model_count: int
+    new_models: tuple[dict[str, Any], ...]
+    changed_models: tuple[dict[str, Any], ...]
+    providers_considered: tuple[str, ...]
+    last_run_ts: int
 
 
 def default_model_watch_config_document() -> dict[str, Any]:
@@ -121,6 +138,98 @@ class ModelWatchStore:
             except OSError:
                 pass
         return normalized
+
+
+def default_provider_catalog_state_document() -> dict[str, Any]:
+    return {
+        "providers": {},
+        "last_run_ts": None,
+    }
+
+
+def _normalize_provider_catalog_state(state: dict[str, Any]) -> dict[str, Any]:
+    raw = state if isinstance(state, dict) else {}
+    providers_raw = raw.get("providers") if isinstance(raw.get("providers"), dict) else {}
+    providers: dict[str, dict[str, Any]] = {}
+    for provider_id, payload in sorted(providers_raw.items()):
+        normalized_provider = str(provider_id or "").strip().lower()
+        if not normalized_provider:
+            continue
+        provider_payload = payload if isinstance(payload, dict) else {}
+        seen_raw = provider_payload.get("last_seen_models") if isinstance(provider_payload.get("last_seen_models"), dict) else {}
+        seen: dict[str, dict[str, Any]] = {}
+        for model_id, seen_payload in sorted(seen_raw.items()):
+            normalized_model_id = str(model_id or "").strip()
+            if not normalized_model_id:
+                continue
+            row = seen_payload if isinstance(seen_payload, dict) else {}
+            first_seen_ts = _safe_int(row.get("first_seen_ts"))
+            last_seen_ts = _safe_int(row.get("last_seen_ts"))
+            meta_hash = str(row.get("meta_hash") or "").strip().lower()
+            if first_seen_ts is None or last_seen_ts is None or not meta_hash:
+                continue
+            seen[normalized_model_id] = {
+                "first_seen_ts": int(first_seen_ts),
+                "last_seen_ts": int(last_seen_ts),
+                "meta_hash": meta_hash,
+            }
+        providers[normalized_provider] = {"last_seen_models": seen}
+    last_run_ts = _safe_int(raw.get("last_run_ts"))
+    return {
+        "providers": providers,
+        "last_run_ts": int(last_run_ts) if last_run_ts is not None else None,
+    }
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> dict[str, Any]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        except OSError:
+            pass
+    return payload
+
+
+def provider_catalog_state_path_for_runtime(runtime: Any) -> Path:
+    runtime_path = str(getattr(runtime, "_provider_catalog_state_path", "") or "").strip()
+    if runtime_path:
+        return Path(runtime_path).expanduser().resolve()
+    explicit = str(getattr(getattr(runtime, "config", None), "provider_catalog_state_path", "") or "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    env_path = os.getenv("AGENT_PROVIDER_CATALOG_STATE_PATH", "").strip()
+    if env_path:
+        return Path(env_path).expanduser().resolve()
+    watch_state_path = str(getattr(getattr(runtime, "_model_watch_store", None), "path", "") or "").strip()
+    if watch_state_path:
+        return (Path(watch_state_path).expanduser().resolve().parent / "provider_catalog_state.json").resolve()
+    return (Path.home() / ".local" / "share" / "personal-agent" / "provider_catalog_state.json").resolve()
+
+
+def _load_provider_catalog_state(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return default_provider_catalog_state_document()
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return default_provider_catalog_state_document()
+    if not isinstance(parsed, dict):
+        return default_provider_catalog_state_document()
+    return _normalize_provider_catalog_state(parsed)
+
+
+def _save_provider_catalog_state(path: Path, state: dict[str, Any]) -> dict[str, Any]:
+    normalized = _normalize_provider_catalog_state(state)
+    return _write_json_atomic(path, normalized)
 
 
 def _safe_int(value: Any) -> int | None:
@@ -470,15 +579,298 @@ def evaluate_model_watch_candidates(
     )
 
 
+def _model_meta_hash(model_id: str, row: dict[str, Any]) -> str:
+    payload = {
+        "id": str(model_id or "").strip(),
+        "provider": str(row.get("provider") or "").strip().lower(),
+        "model": str(row.get("model") or "").strip(),
+        "enabled": bool(row.get("enabled", False)),
+        "available": bool(row.get("available", False)),
+        "routable": bool(row.get("routable", False)),
+        "capabilities": sorted(
+            {
+                str(item).strip().lower()
+                for item in (row.get("capabilities") if isinstance(row.get("capabilities"), list) else [])
+                if str(item).strip()
+            }
+        ),
+        "max_context_tokens": _safe_int(row.get("max_context_tokens")),
+        "pricing": {
+            "input_per_million_tokens": _safe_float(
+                (row.get("pricing") if isinstance(row.get("pricing"), dict) else {}).get("input_per_million_tokens")
+            ),
+            "output_per_million_tokens": _safe_float(
+                (row.get("pricing") if isinstance(row.get("pricing"), dict) else {}).get("output_per_million_tokens")
+            ),
+        },
+    }
+    canonical = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _catalog_model_summary(model_id: str, row: dict[str, Any]) -> dict[str, Any]:
+    provider = str(row.get("provider") or "").strip().lower()
+    model_name = str(row.get("model") or "").strip()
+    capabilities = sorted(
+        {
+            str(item).strip().lower()
+            for item in (row.get("capabilities") if isinstance(row.get("capabilities"), list) else [])
+            if str(item).strip()
+        }
+    )
+    return {
+        "model_id": str(model_id or "").strip(),
+        "provider": provider,
+        "model": model_name,
+        "enabled": bool(row.get("enabled", False)),
+        "available": bool(row.get("available", False)),
+        "routable": bool(row.get("routable", False)),
+        "capabilities": capabilities,
+        "max_context_tokens": _safe_int(row.get("max_context_tokens")),
+        "pricing": {
+            "input_per_million_tokens": _safe_float(
+                (row.get("pricing") if isinstance(row.get("pricing"), dict) else {}).get("input_per_million_tokens")
+            ),
+            "output_per_million_tokens": _safe_float(
+                (row.get("pricing") if isinstance(row.get("pricing"), dict) else {}).get("output_per_million_tokens")
+            ),
+        },
+    }
+
+
+def scan_provider_catalogs(runtime: Any) -> CatalogDelta:
+    now_epoch = int(time.time())
+    path = provider_catalog_state_path_for_runtime(runtime)
+    state = _load_provider_catalog_state(path)
+    providers_state = state.get("providers") if isinstance(state.get("providers"), dict) else {}
+    registry_document = (
+        runtime.registry_document if isinstance(getattr(runtime, "registry_document", None), dict) else {}
+    )
+    registry_models = (
+        registry_document.get("models") if isinstance(registry_document.get("models"), dict) else {}
+    )
+
+    new_models: list[dict[str, Any]] = []
+    changed_models: list[dict[str, Any]] = []
+    providers_considered: set[str] = set()
+
+    for model_id in sorted(registry_models.keys()):
+        row = registry_models.get(model_id) if isinstance(registry_models.get(model_id), dict) else {}
+        if not isinstance(row, dict):
+            continue
+        provider = str(row.get("provider") or "").strip().lower()
+        if not provider:
+            provider = str(model_id).split(":", 1)[0].strip().lower() if ":" in str(model_id) else ""
+        if not provider:
+            continue
+        providers_considered.add(provider)
+        provider_bucket = (
+            providers_state.get(provider) if isinstance(providers_state.get(provider), dict) else {}
+        )
+        last_seen_models = (
+            provider_bucket.get("last_seen_models")
+            if isinstance(provider_bucket.get("last_seen_models"), dict)
+            else {}
+        )
+        normalized_model_id = str(model_id or "").strip()
+        meta_hash = _model_meta_hash(normalized_model_id, row)
+        previous_row = last_seen_models.get(normalized_model_id) if isinstance(last_seen_models.get(normalized_model_id), dict) else None
+        summary = _catalog_model_summary(normalized_model_id, row)
+        summary["meta_hash"] = meta_hash
+        if previous_row is None:
+            new_models.append(summary)
+            first_seen = now_epoch
+        else:
+            first_seen = int(_safe_int(previous_row.get("first_seen_ts")) or now_epoch)
+            previous_hash = str(previous_row.get("meta_hash") or "").strip().lower()
+            if previous_hash != meta_hash:
+                changed_row = dict(summary)
+                changed_row["previous_meta_hash"] = previous_hash
+                changed_models.append(changed_row)
+        next_last_seen = dict(last_seen_models)
+        next_last_seen[normalized_model_id] = {
+            "first_seen_ts": int(first_seen),
+            "last_seen_ts": int(now_epoch),
+            "meta_hash": meta_hash,
+        }
+        providers_state[provider] = {"last_seen_models": next_last_seen}
+
+    next_state = {
+        "providers": providers_state,
+        "last_run_ts": int(now_epoch),
+    }
+    _save_provider_catalog_state(path, next_state)
+
+    ordered_new = sorted(new_models, key=lambda item: (str(item.get("provider") or ""), str(item.get("model_id") or "")))
+    ordered_changed = sorted(
+        changed_models,
+        key=lambda item: (str(item.get("provider") or ""), str(item.get("model_id") or "")),
+    )
+    return CatalogDelta(
+        provider_model_count=len(
+            [model_id for model_id, row in registry_models.items() if isinstance(row, dict) and str(model_id).strip()]
+        ),
+        new_models=tuple(ordered_new),
+        changed_models=tuple(ordered_changed),
+        providers_considered=tuple(sorted(providers_considered)),
+        last_run_ts=now_epoch,
+    )
+
+
+def _http_get_json(url: str, *, timeout_seconds: float = 20.0) -> Any:
+    request = urllib.request.Request(url, method="GET", headers={"Accept": "application/json"})
+    with urllib.request.urlopen(request, timeout=float(timeout_seconds)) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    return json.loads(raw or "null")
+
+
+def _extract_buzz_names(source_id: str, payload: Any) -> list[str]:
+    names: list[str] = []
+    if source_id == "openrouter_models":
+        rows = payload.get("data") if isinstance(payload, dict) else None
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            if model_id:
+                names.append(model_id)
+    elif source_id == "huggingface_trending":
+        rows = payload if isinstance(payload, list) else (payload.get("models") if isinstance(payload, dict) else [])
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            repo_data = row.get("repoData") if isinstance(row.get("repoData"), dict) else {}
+            model_id = str(repo_data.get("id") or row.get("id") or "").strip()
+            if model_id:
+                names.append(model_id)
+    elif source_id == "ollama_catalog":
+        rows = payload.get("models") if isinstance(payload, dict) else []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("name") or row.get("model") or "").strip()
+            if model_id:
+                names.append(model_id)
+    return sorted({name for name in names if name})
+
+
+def buzz_scan(
+    *,
+    fetch_json: Any | None = None,
+    sources_allowlist: tuple[str, ...] | list[str] | None = None,
+) -> list[dict[str, Any]]:
+    fetch = fetch_json or (lambda url: _http_get_json(url, timeout_seconds=20.0))
+    requested_sources = (
+        tuple(sources_allowlist)
+        if isinstance(sources_allowlist, (tuple, list))
+        else tuple(sorted(_BUZZ_SOURCES.keys()))
+    )
+    source_ids = [
+        source_id
+        for source_id in sorted({str(item).strip().lower() for item in requested_sources if str(item).strip()})
+        if source_id in _BUZZ_SOURCES
+    ]
+    mentions: dict[str, dict[str, Any]] = {}
+    for source_id in source_ids:
+        source_meta = _BUZZ_SOURCES.get(source_id, {})
+        url = str(source_meta.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            payload = fetch(url)
+        except Exception:
+            continue
+        for name in _extract_buzz_names(source_id, payload):
+            key = name.lower()
+            row = mentions.get(key) if isinstance(mentions.get(key), dict) else {
+                "name": name,
+                "possible_ids": set(),
+                "sources": set(),
+                "official_sources": set(),
+            }
+            row["sources"].add(source_id)
+            if bool(source_meta.get("official", False)):
+                row["official_sources"].add(source_id)
+            row["possible_ids"].add(name)
+            if source_id == "openrouter_models":
+                row["possible_ids"].add(f"openrouter:{name}")
+            if source_id == "ollama_catalog":
+                row["possible_ids"].add(f"ollama:{name}")
+            mentions[key] = row
+
+    leads: list[dict[str, Any]] = []
+    for key in sorted(mentions.keys()):
+        row = mentions[key]
+        sources = sorted({str(item) for item in row.get("sources", set())})
+        official_sources = sorted({str(item) for item in row.get("official_sources", set())})
+        promising = bool(official_sources) or len(sources) >= 2
+        if not promising:
+            continue
+        if official_sources and len(sources) >= 2:
+            confidence = 0.9
+        elif official_sources:
+            confidence = 0.8
+        else:
+            confidence = 0.6
+        leads.append(
+            {
+                "name": str(row.get("name") or key),
+                "possible_ids": sorted({str(item) for item in row.get("possible_ids", set()) if str(item)}),
+                "sources": sources,
+                "confidence": round(float(confidence), 2),
+            }
+        )
+    leads.sort(key=lambda item: (-float(item.get("confidence") or 0.0), str(item.get("name") or "")))
+    return leads
+
+
+def map_buzz_leads_to_catalog(
+    *,
+    leads: list[dict[str, Any]],
+    runtime: Any,
+) -> list[dict[str, Any]]:
+    registry_document = runtime.registry_document if isinstance(getattr(runtime, "registry_document", None), dict) else {}
+    models = registry_document.get("models") if isinstance(registry_document.get("models"), dict) else {}
+    providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
+    model_ids = {str(model_id).strip() for model_id in models.keys() if str(model_id).strip()}
+    provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys() if str(provider_id).strip()}
+    output: list[dict[str, Any]] = []
+    for row in sorted([item for item in leads if isinstance(item, dict)], key=lambda item: str(item.get("name") or "")):
+        possible_ids = [str(item).strip() for item in (row.get("possible_ids") if isinstance(row.get("possible_ids"), list) else []) if str(item).strip()]
+        mapped_ids = sorted({item for item in possible_ids if item in model_ids})
+        mentioned_providers = sorted(
+            {
+                item.split(":", 1)[0].strip().lower()
+                for item in possible_ids
+                if ":" in item and item.split(":", 1)[0].strip().lower() in provider_ids
+            }
+        )
+        output.append(
+            {
+                **row,
+                "mapped_model_ids": mapped_ids,
+                "mentioned_providers": mentioned_providers,
+                "available": bool(mapped_ids),
+            }
+        )
+    return output
+
+
 __all__ = [
+    "CatalogDelta",
     "ModelWatchConfig",
     "ModelWatchStore",
+    "buzz_scan",
     "default_model_watch_config_document",
+    "default_provider_catalog_state_document",
     "evaluate_model_watch_candidates",
     "latest_model_watch_batch",
     "load_model_watch_config",
+    "map_buzz_leads_to_catalog",
     "model_watch_last_run_at",
     "normalize_model_watch_state",
+    "provider_catalog_state_path_for_runtime",
+    "scan_provider_catalogs",
     "set_model_watch_batch_status",
     "set_model_watch_last_run_at",
     "summarize_model_watch_batch",

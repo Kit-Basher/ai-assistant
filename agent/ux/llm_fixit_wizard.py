@@ -12,6 +12,8 @@ from typing import Any
 
 _WIZARD_SCHEMA_VERSION = 1
 _FAILURE_STREAK_THRESHOLDS = (3, 10, 50)
+_LOCAL_INSTALL_RECOMMENDED_MODEL = "qwen2.5:3b-instruct"
+_LOCAL_INSTALL_MEDIUM_MODEL = "qwen2.5:7b-instruct"
 _OPENROUTER_NETWORK_ERROR_KINDS = {
     "provider_unavailable",
     "server_error",
@@ -82,6 +84,8 @@ class LLMFixitWizardStore:
             "confirm_token": None,  # legacy compatibility
             "last_prompt_ts": None,
             "openrouter_last_test": None,
+            "proposal_type": None,
+            "proposal_details": None,
         }
 
     def _normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +180,9 @@ class LLMFixitWizardStore:
                 "human_reason": str(openrouter_last_test_raw.get("human_reason") or "").strip() or None,
             }
         state["openrouter_last_test"] = openrouter_last_test
+        proposal_type = str(raw.get("proposal_type") or "").strip().lower()
+        state["proposal_type"] = proposal_type or None
+        state["proposal_details"] = str(raw.get("proposal_details") or "").strip() or None
 
         if not bool(state["active"]):
             state["step"] = "idle"
@@ -187,6 +194,8 @@ class LLMFixitWizardStore:
             state["pending_expires_ts"] = None
             state["pending_issue_code"] = None
             state["confirm_token"] = None
+            state["proposal_type"] = None
+            state["proposal_details"] = None
         return state
 
     def load(self) -> dict[str, Any]:
@@ -267,7 +276,25 @@ def _resolved_default_model(status_payload: dict[str, Any]) -> str | None:
     resolved = str(status_payload.get("resolved_default_model") or "").strip()
     if resolved:
         return resolved
-    return str(status_payload.get("default_model") or "").strip() or None
+    return (
+        str(status_payload.get("chat_model") or "").strip()
+        or str(status_payload.get("default_model") or "").strip()
+        or None
+    )
+
+
+def _resolved_embed_model(status_payload: dict[str, Any]) -> str | None:
+    return str(status_payload.get("embed_model") or "").strip() or None
+
+
+def _rollback_chat_model_target(status_payload: dict[str, Any]) -> str | None:
+    target = str(status_payload.get("last_chat_model") or "").strip() or None
+    if not target:
+        return None
+    current = _resolved_default_model(status_payload)
+    if current and target == current:
+        return None
+    return target
 
 
 
@@ -287,6 +314,13 @@ def _best_local_model(status_payload: dict[str, Any]) -> str | None:
     for model_id, row in sorted(_model_rows(status_payload).items()):
         provider = str(row.get("provider") or "").strip().lower()
         if provider != "ollama":
+            continue
+        capabilities = {
+            str(item).strip().lower()
+            for item in (row.get("capabilities") if isinstance(row.get("capabilities"), list) else [])
+            if str(item).strip()
+        }
+        if "chat" not in capabilities:
             continue
         health = row.get("health") if isinstance(row.get("health"), dict) else {}
         health_status = str(health.get("status") or "unknown").strip().lower()
@@ -319,6 +353,37 @@ def _any_routable_model(status_payload: dict[str, Any]) -> bool:
 
 
 
+def _default_local_chat_model_healthy(status_payload: dict[str, Any]) -> bool:
+    providers = _provider_rows(status_payload)
+    models = _model_rows(status_payload)
+    default_provider = _resolved_default_provider(status_payload)
+    default_model = _resolved_default_model(status_payload)
+    if not default_provider or not default_model:
+        return False
+    provider = providers.get(default_provider) if isinstance(providers.get(default_provider), dict) else {}
+    model = models.get(default_model) if isinstance(models.get(default_model), dict) else {}
+    if not provider or not model:
+        return False
+    if not bool(provider.get("local", False)):
+        return False
+    if _provider_health_status(provider) != "ok":
+        return False
+    capabilities = {
+        str(item).strip().lower()
+        for item in (model.get("capabilities") if isinstance(model.get("capabilities"), list) else [])
+        if str(item).strip()
+    }
+    if "chat" not in capabilities:
+        return False
+    model_health = model.get("health") if isinstance(model.get("health"), dict) else {}
+    return (
+        bool(model.get("enabled", False))
+        and bool(model.get("available", False))
+        and bool(model.get("routable", False))
+        and str(model_health.get("status") or "unknown").strip().lower() == "ok"
+    )
+
+
 def _error_kind(row: dict[str, Any]) -> str:
     health = row.get("health") if isinstance(row.get("health"), dict) else {}
     return str(health.get("last_error_kind") or "").strip().lower()
@@ -344,10 +409,14 @@ def _detect_issue_code(status_payload: dict[str, Any]) -> tuple[str, dict[str, A
     safe_mode = status_payload.get("safe_mode") if isinstance(status_payload.get("safe_mode"), dict) else {}
     default_provider = _resolved_default_provider(status_payload)
     default_model = _resolved_default_model(status_payload)
+    allow_remote_fallback = bool(status_payload.get("allow_remote_fallback", True))
+    local_default_healthy = _default_local_chat_model_healthy(status_payload)
 
     debug: dict[str, Any] = {
         "default_provider": default_provider,
         "default_model": default_model,
+        "allow_remote_fallback": bool(allow_remote_fallback),
+        "local_default_healthy": bool(local_default_healthy),
         "safe_mode_paused": bool(safe_mode.get("paused", False)),
     }
 
@@ -355,29 +424,34 @@ def _detect_issue_code(status_payload: dict[str, Any]) -> tuple[str, dict[str, A
         debug["reason"] = str(safe_mode.get("reason") or "paused")
         return "safe_mode_paused", debug
 
-    openai = providers.get("openai") if isinstance(providers.get("openai"), dict) else {}
-    openai_error_kind = _error_kind(openai)
-    openai_status = _status_code(openai)
-    if openai and (openai_error_kind in {"http_401", "auth_error", "unauthorized"} or openai_status == 401):
-        debug["provider"] = "openai"
-        debug["provider_error_kind"] = openai_error_kind
-        debug["provider_status_code"] = openai_status
-        return "openai_unauthorized", debug
+    if not allow_remote_fallback and local_default_healthy:
+        debug["reason"] = "remote_fallback_disabled_local_default_healthy"
+        return "ok", debug
 
-    openrouter = providers.get("openrouter") if isinstance(providers.get("openrouter"), dict) else {}
-    openrouter_status = _provider_health_status(openrouter)
-    openrouter_health = openrouter.get("health") if isinstance(openrouter.get("health"), dict) else {}
-    openrouter_cooldown = _safe_int(openrouter_health.get("cooldown_until"), 0)
-    openrouter_streak = max(0, _safe_int(openrouter_health.get("failure_streak"), 0))
-    now_epoch = int(time.time())
-    if openrouter and (
-        openrouter_status == "down"
-        or (openrouter_cooldown > now_epoch and openrouter_streak >= 10)
-    ):
-        debug["provider"] = "openrouter"
-        debug["provider_status"] = openrouter_status
-        debug["provider_failure_streak"] = openrouter_streak
-        return "openrouter_down", debug
+    if allow_remote_fallback:
+        openai = providers.get("openai") if isinstance(providers.get("openai"), dict) else {}
+        openai_error_kind = _error_kind(openai)
+        openai_status = _status_code(openai)
+        if openai and (openai_error_kind in {"http_401", "auth_error", "unauthorized"} or openai_status == 401):
+            debug["provider"] = "openai"
+            debug["provider_error_kind"] = openai_error_kind
+            debug["provider_status_code"] = openai_status
+            return "openai_unauthorized", debug
+
+        openrouter = providers.get("openrouter") if isinstance(providers.get("openrouter"), dict) else {}
+        openrouter_status = _provider_health_status(openrouter)
+        openrouter_health = openrouter.get("health") if isinstance(openrouter.get("health"), dict) else {}
+        openrouter_cooldown = _safe_int(openrouter_health.get("cooldown_until"), 0)
+        openrouter_streak = max(0, _safe_int(openrouter_health.get("failure_streak"), 0))
+        now_epoch = int(time.time())
+        if openrouter and (
+            openrouter_status == "down"
+            or (openrouter_cooldown > now_epoch and openrouter_streak >= 10)
+        ):
+            debug["provider"] = "openrouter"
+            debug["provider_status"] = openrouter_status
+            debug["provider_failure_streak"] = openrouter_streak
+            return "openrouter_down", debug
 
     if not _any_routable_model(status_payload):
         debug["routable_models"] = 0
@@ -426,8 +500,8 @@ def _choices_for_issue(issue_code: str) -> list[WizardChoice]:
         ]
     if issue_code == "no_routable_model":
         return [
-            WizardChoice(id="fix_ollama", label="Fix local Ollama", recommended=True),
-            WizardChoice(id="use_remote_fallback", label="Use remote fallback", recommended=False),
+            WizardChoice(id="install_local_small", label="Install small local chat model", recommended=True),
+            WizardChoice(id="install_local_medium", label="Install medium local chat model", recommended=False),
             WizardChoice(id="details", label="Show details", recommended=False),
         ]
     if issue_code == "provider_inconsistent":
@@ -441,7 +515,7 @@ def _choices_for_issue(issue_code: str) -> list[WizardChoice]:
 
 
 def _message_for_issue(issue_code: str, status_payload: dict[str, Any], debug: dict[str, Any]) -> str:
-    _ = status_payload
+    _ = debug
     if issue_code == "openai_unauthorized":
         return "OpenAI authentication failed, so remote OpenAI calls are blocked right now."
     if issue_code == "openrouter_down":
@@ -450,9 +524,40 @@ def _message_for_issue(issue_code: str, status_payload: dict[str, Any], debug: d
         reason = str(debug.get("reason") or "paused")
         return f"Autopilot safe mode is paused ({reason}), so automatic fix actions are blocked."
     if issue_code == "no_routable_model":
-        return "No enabled and routable model is available right now."
+        return "No healthy local chat model is available right now."
     if issue_code == "provider_inconsistent":
         return "Default provider health and default model health disagree, so routing status is inconsistent."
+    if issue_code == "ok":
+        providers = _provider_rows(status_payload)
+        models = _model_rows(status_payload)
+        chat_model = _resolved_default_model(status_payload)
+        embed_model = _resolved_embed_model(status_payload)
+
+        chat_status = "not configured"
+        if chat_model and isinstance(models.get(chat_model), dict):
+            row = models.get(chat_model) or {}
+            health = row.get("health") if isinstance(row.get("health"), dict) else {}
+            status = str(health.get("status") or "unknown").strip().lower() or "unknown"
+            chat_status = status
+
+        embed_status = "not configured"
+        if embed_model and isinstance(models.get(embed_model), dict):
+            row = models.get(embed_model) or {}
+            health = row.get("health") if isinstance(row.get("health"), dict) else {}
+            status = str(health.get("status") or "unknown").strip().lower() or "unknown"
+            embed_status = status
+
+        provider_label = _resolved_default_provider(status_payload) or "unknown"
+        chat_label = chat_model or "not configured"
+        embed_label = embed_model or "not configured"
+        _ = providers
+        return "\n".join(
+            [
+                f"Using provider: {provider_label}",
+                f"Chat model: {chat_label} ({chat_status})",
+                f"Embedding model: {embed_label} ({embed_status})",
+            ]
+        )
     return "LLM setup looks healthy."
 
 
@@ -578,6 +683,19 @@ def evaluate_wizard_decision(
         if issue_code == "openrouter_down" and openrouter_category is not None
         else _choices_for_issue(issue_code)
     )
+    rollback_target = _rollback_chat_model_target(status_payload)
+    if issue_code == "no_routable_model" and rollback_target:
+        debug["rollback_target"] = rollback_target
+        choices = list(choices)
+        rollback_choice = WizardChoice(
+            id="rollback_chat_model",
+            label="Undo last chat model change",
+            recommended=False,
+        )
+        if len(choices) >= 3:
+            choices[2] = rollback_choice
+        else:
+            choices.append(rollback_choice)
     return WizardDecision(
         status="needs_user_choice",
         issue_code=issue_code,
@@ -655,6 +773,48 @@ def _local_only_actions(status_payload: dict[str, Any], issue_code: str) -> list
     return actions
 
 
+def _install_local_model_actions(
+    *,
+    status_payload: dict[str, Any],
+    model_name: str,
+) -> list[DeterministicAction]:
+    actions: list[DeterministicAction] = []
+    normalized_model = str(model_name or "").strip().lower()
+    if not normalized_model:
+        return actions
+    canonical_model = f"ollama:{normalized_model}"
+    allow_remote_fallback = bool(status_payload.get("allow_remote_fallback", True))
+    _append_action(
+        actions,
+        kind="safe_action",
+        action="ollama.pull_model",
+        reason=f"Install local Ollama model {normalized_model}.",
+        params={"model": normalized_model},
+        safe=True,
+    )
+    _append_action(
+        actions,
+        kind="safe_action",
+        action="defaults.set",
+        reason=f"Set {canonical_model} as default local chat model.",
+        params={
+            "default_provider": "ollama",
+            "chat_model": canonical_model,
+            "allow_remote_fallback": allow_remote_fallback,
+        },
+        safe=True,
+    )
+    _append_action(
+        actions,
+        kind="safe_action",
+        action="provider.test",
+        reason=f"Verify Ollama connectivity with {normalized_model}.",
+        params={"provider": "ollama", "model": canonical_model},
+        safe=True,
+    )
+    return actions
+
+
 
 def build_plan_for_choice(
     *,
@@ -673,6 +833,42 @@ def build_plan_for_choice(
         return _local_only_actions(status_payload, issue_code)
 
     actions: list[DeterministicAction] = []
+    if choice == "install_local_small":
+        return _install_local_model_actions(
+            status_payload=status_payload,
+            model_name=_LOCAL_INSTALL_RECOMMENDED_MODEL,
+        )
+
+    if choice == "install_local_medium":
+        return _install_local_model_actions(
+            status_payload=status_payload,
+            model_name=_LOCAL_INSTALL_MEDIUM_MODEL,
+        )
+
+    if choice == "rollback_chat_model":
+        rollback_target = _rollback_chat_model_target(status_payload)
+        if not rollback_target:
+            return actions
+        _append_action(
+            actions,
+            kind="safe_action",
+            action="defaults.rollback",
+            reason="Undo the last chat model change.",
+            params={"target_chat_model": rollback_target},
+            safe=True,
+        )
+        provider = rollback_target.split(":", 1)[0].strip().lower() if ":" in rollback_target else ""
+        if provider:
+            _append_action(
+                actions,
+                kind="safe_action",
+                action="provider.test",
+                reason=f"Verify provider health after rollback to {rollback_target}.",
+                params={"provider": provider, "model": rollback_target},
+                safe=True,
+            )
+        return actions
+
     if choice == "repair_openrouter":
         _append_action(
             actions,
@@ -770,13 +966,11 @@ def build_plan_for_choice(
                 safe=False,
             )
         else:
-            _append_action(
-                actions,
-                kind="user_action",
-                action="ollama.install_local_model",
-                reason="No routable local model is currently available.",
-                params={"hint": "Install one Ollama chat model, then rerun Fix-it."},
-                safe=False,
+            actions.extend(
+                _install_local_model_actions(
+                    status_payload=status_payload,
+                    model_name=_LOCAL_INSTALL_RECOMMENDED_MODEL,
+                )
             )
         return actions
 

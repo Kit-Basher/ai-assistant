@@ -56,11 +56,141 @@ def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
     return base.__class__(**{**base.__dict__, **overrides})
 
 
+def _status_payload_no_local_chat(
+    *,
+    allow_remote_fallback: bool = False,
+    chat_model: str = "ollama:llama3",
+    last_chat_model: str | None = None,
+) -> dict[str, object]:
+    return {
+        "ok": True,
+        "default_provider": "ollama",
+        "chat_model": chat_model,
+        "default_model": chat_model,
+        "resolved_default_model": chat_model,
+        "last_chat_model": last_chat_model,
+        "allow_remote_fallback": bool(allow_remote_fallback),
+        "safe_mode": {
+            "paused": False,
+            "reason": "not_paused",
+            "next_retry": None,
+            "cooldown_until": None,
+            "last_transition_at": None,
+        },
+        "providers": [
+            {
+                "id": "ollama",
+                "local": True,
+                "enabled": True,
+                "health": {
+                    "status": "ok",
+                    "last_error_kind": None,
+                    "status_code": None,
+                    "failure_streak": 0,
+                    "cooldown_until": None,
+                },
+            },
+            {
+                "id": "openrouter",
+                "local": False,
+                "enabled": True,
+                "health": {
+                    "status": "down",
+                    "last_error_kind": "provider_unavailable",
+                    "status_code": 502,
+                    "failure_streak": 12,
+                    "cooldown_until": None,
+                },
+            },
+        ],
+        "models": [
+            {
+                "id": "ollama:llama3",
+                "provider": "ollama",
+                "enabled": True,
+                "available": True,
+                "routable": False,
+                "capabilities": ["chat"],
+                "health": {
+                    "status": "down",
+                    "last_error_kind": "provider_unavailable",
+                    "status_code": 502,
+                    "failure_streak": 12,
+                    "cooldown_until": None,
+                },
+            }
+        ],
+    }
+
+
+def _doctor_snapshot_local_and_remote() -> dict[str, object]:
+    return {
+        "providers": [
+            {
+                "id": "ollama",
+                "local": True,
+                "enabled": True,
+                "health": {
+                    "status": "ok",
+                    "last_checked_at": 1_700_000_000,
+                },
+            },
+            {
+                "id": "openrouter",
+                "local": False,
+                "enabled": True,
+                "health": {
+                    "status": "unknown",
+                    "last_checked_at": None,
+                },
+            },
+        ],
+        "models": [
+            {
+                "id": "ollama:llama3",
+                "provider": "ollama",
+                "enabled": True,
+                "available": True,
+                "routable": True,
+                "capabilities": ["chat"],
+                "health": {
+                    "status": "ok",
+                },
+            },
+            {
+                "id": "openrouter:model-a",
+                "provider": "openrouter",
+                "enabled": True,
+                "available": False,
+                "routable": False,
+                "capabilities": ["chat"],
+                "health": {
+                    "status": "unknown",
+                    "last_checked_at": None,
+                },
+            },
+            {
+                "id": "openrouter:model-b",
+                "provider": "openrouter",
+                "enabled": True,
+                "available": False,
+                "routable": False,
+                "capabilities": ["chat"],
+                "health": {
+                    "status": "unknown",
+                    "last_checked_at": None,
+                },
+            },
+        ],
+    }
+
+
 class _HandlerForTest(APIServerHandler):
     def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
         self.runtime = runtime_obj
         self.path = path
         self.headers = {}
+        self.client_address = ("127.0.0.1", 12345)
         self.status_code = 0
         self.content_type = ""
         self.body = b""
@@ -306,6 +436,83 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertEqual(401, state_last_test.get("status_code"))
         self.assertEqual("auth_error", state_last_test.get("error_kind"))
 
+    def test_fixit_local_only_apply_converges_and_does_not_loop(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._health_monitor.state["providers"] = {
+            "openrouter": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            },
+            "ollama": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+        }
+        runtime._health_monitor.state["models"] = {
+            "ollama:llama3": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+            "openrouter:openai/gpt-4o-mini": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            },
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+
+        first = _HandlerForTest(runtime, "/llm/fixit", {})
+        first.do_POST()
+        first_payload = json.loads(first.body.decode("utf-8"))
+        self.assertEqual(200, first.status_code)
+        self.assertEqual("needs_user_choice", first_payload["status"])
+        self.assertEqual("openrouter_down", first_payload["issue_code"])
+
+        second = _HandlerForTest(runtime, "/llm/fixit", {"answer": "1"})
+        second.do_POST()
+        second_payload = json.loads(second.body.decode("utf-8"))
+        self.assertEqual(200, second.status_code)
+        self.assertEqual("needs_confirmation", second_payload["status"])
+
+        third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
+        third.do_POST()
+        third_payload = json.loads(third.body.decode("utf-8"))
+        self.assertEqual(200, third.status_code)
+        self.assertTrue(third_payload["ok"])
+        self.assertTrue(third_payload["did_work"])
+        self.assertFalse(bool(runtime.get_defaults()["allow_remote_fallback"]))
+
+        fourth = _HandlerForTest(runtime, "/llm/fixit", {})
+        fourth.do_POST()
+        fourth_payload = json.loads(fourth.body.decode("utf-8"))
+        self.assertEqual(200, fourth.status_code)
+        self.assertEqual("ok", fourth_payload["status"])
+        self.assertEqual("ok", fourth_payload["issue_code"])
+
     def test_fixit_accepts_openrouter_api_key_payload(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.set_listening("127.0.0.1", 8765)
@@ -349,6 +556,261 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             runtime.secret_store.get_secret("provider:openrouter:api_key"),
         )
 
+    def test_ollama_pull_endpoint_happy_path_and_allowlist(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        with patch.object(
+            runtime,
+            "_ollama_tags_models",
+            return_value={"ok": True, "models": []},
+        ), patch.object(
+            runtime.modelops_executor.safe_runner,
+            "run",
+            return_value=type(
+                "_Result",
+                (),
+                {"ok": True, "timed_out": False, "returncode": 0, "stdout": "", "stderr": "", "truncated": False},
+            )(),
+        ) as pull_mock, patch.object(
+            runtime,
+            "refresh_models",
+            return_value=(True, {"ok": True}),
+        ):
+            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
+            handler.do_POST()
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual("qwen2.5:3b-instruct", payload["model"])
+        self.assertFalse(bool(payload["already_present"]))
+        pull_mock.assert_called_once()
+        self.assertEqual(
+            ["ollama", "pull", "qwen2.5:3b-instruct"],
+            list(pull_mock.call_args.args[0]),
+        )
+
+        disallowed = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "llama3:8b"})
+        disallowed.do_POST()
+        self.assertEqual(400, disallowed.status_code)
+        disallowed_payload = json.loads(disallowed.body.decode("utf-8"))
+        self.assertFalse(disallowed_payload["ok"])
+        self.assertEqual("model_not_allowed", disallowed_payload["error_kind"])
+
+        non_loopback = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
+        non_loopback.client_address = ("192.168.1.2", 4567)
+        non_loopback.do_POST()
+        self.assertEqual(403, non_loopback.status_code)
+        non_loopback_payload = json.loads(non_loopback.body.decode("utf-8"))
+        self.assertEqual("forbidden", non_loopback_payload["error_kind"])
+
+    def test_ollama_pull_endpoint_idempotent_and_timeout(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+
+        with patch.object(
+            runtime,
+            "_ollama_tags_models",
+            return_value={"ok": True, "models": ["qwen2.5:3b-instruct"]},
+        ), patch.object(
+            runtime.modelops_executor.safe_runner,
+            "run",
+        ) as pull_mock, patch.object(
+            runtime,
+            "refresh_models",
+            return_value=(True, {"ok": True}),
+        ):
+            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "ollama:qwen2.5:3b-instruct"})
+            handler.do_POST()
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(bool(payload["already_present"]))
+        pull_mock.assert_not_called()
+
+        with patch.object(
+            runtime,
+            "_ollama_tags_models",
+            return_value={"ok": True, "models": []},
+        ), patch.object(
+            runtime.modelops_executor.safe_runner,
+            "run",
+            return_value=type(
+                "_TimeoutResult",
+                (),
+                {"ok": False, "timed_out": True, "returncode": 124, "stdout": "", "stderr": "", "truncated": False},
+            )(),
+        ):
+            timeout_handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
+            timeout_handler.do_POST()
+        self.assertEqual(400, timeout_handler.status_code)
+        timeout_payload = json.loads(timeout_handler.body.decode("utf-8"))
+        self.assertFalse(timeout_payload["ok"])
+        self.assertEqual("timeout", timeout_payload["error_kind"])
+
+    def test_fixit_offers_install_local_models_and_applies_install_plan(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.update_defaults({"allow_remote_fallback": False})
+
+        with patch.object(runtime, "llm_status", return_value=_status_payload_no_local_chat(allow_remote_fallback=False)):
+            first = _HandlerForTest(runtime, "/llm/fixit", {})
+            first.do_POST()
+        self.assertEqual(200, first.status_code)
+        first_payload = json.loads(first.body.decode("utf-8"))
+        self.assertEqual("needs_user_choice", first_payload["status"])
+        self.assertEqual("no_routable_model", first_payload["issue_code"])
+        choice_ids = [str(row.get("id") or "") for row in first_payload.get("choices", [])]
+        self.assertEqual(
+            ["install_local_small", "install_local_medium", "details"],
+            choice_ids,
+        )
+
+        with patch.object(runtime, "llm_status", return_value=_status_payload_no_local_chat(allow_remote_fallback=False)):
+            second = _HandlerForTest(runtime, "/llm/fixit", {"answer": "1"})
+            second.do_POST()
+        self.assertEqual(200, second.status_code)
+        second_payload = json.loads(second.body.decode("utf-8"))
+        self.assertEqual("needs_confirmation", second_payload["status"])
+        self.assertIn("qwen2.5:3b-instruct", second_payload["message"])
+
+        runtime.registry_document.setdefault("models", {})
+        runtime.registry_document["models"]["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "quality_rank": 2,
+            "cost_rank": 0,
+            "default_for": ["chat"],
+            "enabled": True,
+            "available": True,
+            "pricing": {"input_per_million_tokens": None, "output_per_million_tokens": None},
+            "max_context_tokens": None,
+        }
+
+        with patch.object(runtime, "llm_status", return_value=_status_payload_no_local_chat(allow_remote_fallback=False)), patch.object(
+            runtime,
+            "pull_ollama_model",
+            return_value=(
+                True,
+                {
+                    "ok": True,
+                    "model": "qwen2.5:3b-instruct",
+                    "canonical_model": "ollama:qwen2.5:3b-instruct",
+                    "already_present": True,
+                    "duration_ms": 1,
+                    "message": "already installed",
+                },
+            ),
+        ) as pull_mock, patch.object(
+            runtime,
+            "test_provider",
+            return_value=(True, {"ok": True, "provider": "ollama", "model": "qwen2.5:3b-instruct"}),
+        ) as test_provider_mock:
+            third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
+            third.do_POST()
+
+        self.assertEqual(200, third.status_code)
+        third_payload = json.loads(third.body.decode("utf-8"))
+        self.assertTrue(third_payload["ok"])
+        self.assertIn("Installed and configured", third_payload["message"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", third_payload["chat_model"])
+        pull_mock.assert_called_once()
+        test_provider_mock.assert_called_once()
+        called_payload = test_provider_mock.call_args.args[1]
+        self.assertEqual("ollama:qwen2.5:3b-instruct", called_payload.get("model"))
+        self.assertNotIn("OpenRouter", first_payload["message"])
+
+    def test_defaults_rollback_endpoint_swaps_chat_and_last_chat_model(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.registry_document.setdefault("models", {})
+        runtime.registry_document["models"]["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "quality_rank": 2,
+            "cost_rank": 0,
+            "default_for": ["chat"],
+            "enabled": True,
+            "available": True,
+            "pricing": {"input_per_million_tokens": None, "output_per_million_tokens": None},
+            "max_context_tokens": None,
+        }
+        runtime._save_registry_document(runtime.registry_document)
+        runtime.update_defaults({"chat_model": "ollama:llama3"})
+        runtime.update_defaults({"chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        handler = _HandlerForTest(runtime, "/defaults/rollback", {})
+        handler.do_POST()
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual("ollama:llama3", payload["chat_model"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", payload["last_chat_model"])
+
+    def test_fixit_undo_last_chat_model_choice_executes_rollback(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.registry_document.setdefault("models", {})
+        runtime.registry_document["models"]["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "quality_rank": 2,
+            "cost_rank": 0,
+            "default_for": ["chat"],
+            "enabled": True,
+            "available": True,
+            "pricing": {"input_per_million_tokens": None, "output_per_million_tokens": None},
+            "max_context_tokens": None,
+        }
+        runtime._save_registry_document(runtime.registry_document)
+        runtime.update_defaults({"chat_model": "ollama:llama3"})
+        runtime.update_defaults({"chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        with patch.object(
+            runtime,
+            "llm_status",
+            return_value=_status_payload_no_local_chat(
+                allow_remote_fallback=False,
+                chat_model="ollama:qwen2.5:3b-instruct",
+                last_chat_model="ollama:llama3",
+            ),
+        ):
+            first = _HandlerForTest(runtime, "/llm/fixit", {})
+            first.do_POST()
+        first_payload = json.loads(first.body.decode("utf-8"))
+        self.assertEqual("needs_user_choice", first_payload["status"])
+        self.assertEqual("rollback_chat_model", first_payload["choices"][2]["id"])
+
+        with patch.object(
+            runtime,
+            "llm_status",
+            return_value=_status_payload_no_local_chat(
+                allow_remote_fallback=False,
+                chat_model="ollama:qwen2.5:3b-instruct",
+                last_chat_model="ollama:llama3",
+            ),
+        ):
+            second = _HandlerForTest(runtime, "/llm/fixit", {"answer": "3"})
+            second.do_POST()
+        second_payload = json.loads(second.body.decode("utf-8"))
+        self.assertEqual("needs_confirmation", second_payload["status"])
+        self.assertIn("roll back to ollama:llama3", second_payload["message"].lower())
+
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(True, {"ok": True, "provider": "ollama", "model": "ollama:llama3"}),
+        ):
+            third = _HandlerForTest(runtime, "/llm/fixit", {"confirm": True})
+            third.do_POST()
+        third_payload = json.loads(third.body.decode("utf-8"))
+        self.assertEqual(200, third.status_code)
+        self.assertTrue(third_payload["ok"])
+        self.assertIn("Rolled back chat model", third_payload["message"])
+        self.assertEqual("ollama:llama3", third_payload["chat_model"])
+
     def test_llm_status_endpoint_returns_defaults_and_health(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.set_listening("127.0.0.1", 8765)
@@ -362,6 +824,94 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertIn("active_provider_health", payload)
         self.assertIn("active_model_health", payload)
         self.assertIn("safe_mode", payload)
+
+    def test_llm_status_filters_remote_models_when_local_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.update_defaults({"allow_remote_fallback": False})
+        snapshot = _doctor_snapshot_local_and_remote()
+        with patch.object(runtime, "llm_health_summary", return_value={"ok": True, "health": {"drift": {"details": {}}}}), patch.object(
+            runtime._router,
+            "doctor_snapshot",
+            return_value=snapshot,
+        ):
+            handler = _HandlerForTest(runtime, "/llm/status")
+            handler.do_GET()
+
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertFalse(bool(payload["allow_remote_fallback"]))
+        providers = {str(row.get("provider") or "").strip().lower() for row in payload.get("models", []) if isinstance(row, dict)}
+        self.assertEqual({"ollama"}, providers)
+        self.assertEqual(2, int((payload.get("hidden_models_by_provider") or {}).get("openrouter") or 0))
+        self.assertEqual(3, int(payload.get("total_models_count") or 0))
+        self.assertEqual(1, int(payload.get("visible_models_count") or 0))
+        self.assertEqual(1, int((payload.get("visible_counts") or {}).get("total") or 0))
+
+    def test_llm_status_keeps_remote_models_when_remote_fallback_enabled(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.update_defaults({"allow_remote_fallback": True})
+        snapshot = _doctor_snapshot_local_and_remote()
+        with patch.object(runtime, "llm_health_summary", return_value={"ok": True, "health": {"drift": {"details": {}}}}), patch.object(
+            runtime._router,
+            "doctor_snapshot",
+            return_value=snapshot,
+        ):
+            handler = _HandlerForTest(runtime, "/llm/status")
+            handler.do_GET()
+
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertTrue(bool(payload["allow_remote_fallback"]))
+        providers = [str(row.get("provider") or "").strip().lower() for row in payload.get("models", []) if isinstance(row, dict)]
+        self.assertIn("openrouter", providers)
+        self.assertEqual({}, payload.get("hidden_models_by_provider"))
+        self.assertEqual(3, int(payload.get("total_models_count") or 0))
+        self.assertEqual(3, int(payload.get("visible_models_count") or 0))
+
+    def test_fixit_rollback_choice_without_target_returns_clear_message(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._llm_fixit_store.save(
+            {
+                "active": True,
+                "issue_hash": "issue-no-rollback",
+                "issue_code": "no_routable_model",
+                "step": "awaiting_choice",
+                "question": "Which option should I take?",
+                "choices": [
+                    {"id": "install_local_small", "label": "Install small local model", "recommended": True},
+                    {"id": "install_local_medium", "label": "Install medium local model", "recommended": False},
+                    {"id": "rollback_chat_model", "label": "Undo last chat model change", "recommended": False},
+                ],
+                "pending_plan": [],
+                "pending_confirm_token": None,
+                "pending_created_ts": None,
+                "pending_expires_ts": None,
+                "pending_issue_code": None,
+                "last_prompt_ts": 1_700_000_001,
+                "openrouter_last_test": None,
+            }
+        )
+        with patch.object(
+            runtime,
+            "llm_status",
+            return_value=_status_payload_no_local_chat(
+                allow_remote_fallback=False,
+                chat_model="ollama:qwen2.5:3b-instruct",
+                last_chat_model=None,
+            ),
+        ):
+            handler = _HandlerForTest(runtime, "/llm/fixit", {"answer": "3"})
+            handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual("needs_clarification", payload["status"])
+        self.assertEqual("No rollback available yet.", payload["message"])
 
 
 if __name__ == "__main__":

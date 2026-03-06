@@ -6,8 +6,10 @@ import json
 import logging
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.audit_log import AuditLog
+from agent.doctor import DoctorCheck, DoctorReport
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
 from telegram_adapter.bot import _handle_brief_alias, _handle_message, _handle_status
 
@@ -75,6 +77,105 @@ def _read_audit_rows(path: str) -> list[dict[str, object]]:
 
 
 class TestTelegramAuditLogging(unittest.TestCase):
+    def test_help_phrase_returns_command_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            update = _FakeUpdate(42, "what can you do")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Available commands:", reply_text)
+            self.assertIn("doctor – run system diagnostics", reply_text)
+            self.assertIn("status – agent status", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_fix_phrase_routes_to_doctor_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            update = _FakeUpdate(42, "fix")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+            fake_report = DoctorReport(
+                trace_id="doctor-1700000000-999",
+                generated_at="2026-03-05T00:00:00+00:00",
+                summary_status="WARN",
+                checks=[DoctorCheck("x", "WARN", "warn detail", next_action="do one thing")],
+                next_action="do one thing",
+                fixes_applied=[],
+                support_bundle_path=None,
+            )
+            with patch("telegram_adapter.bot.run_doctor_report", return_value=fake_report):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Doctor: WARN", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_doctor_text_routes_to_doctor_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            chat_id = "11992233"
+            update = _FakeUpdate(int(chat_id), "doctor")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+            fake_report = DoctorReport(
+                trace_id="doctor-1700000000-999",
+                generated_at="2026-03-05T00:00:00+00:00",
+                summary_status="WARN",
+                checks=[DoctorCheck("x", "WARN", "warn detail", next_action="do one thing")],
+                next_action="do one thing",
+                fixes_applied=[],
+                support_bundle_path=None,
+            )
+            with patch("telegram_adapter.bot.run_doctor_report", return_value=fake_report):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Doctor: WARN", reply_text)
+            self.assertIn("trace doctor-1700000000-999", reply_text)
+            self.assertIn("agent doctor --json", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
     def test_received_then_handled_fixit_choice_routes_second_option(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"
@@ -372,9 +473,11 @@ class TestTelegramAuditLogging(unittest.TestCase):
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Try one of these:", reply_text)
-            self.assertIn("/help", reply_text)
-            self.assertIn("/brief", reply_text)
+            self.assertIn("Available commands:", reply_text)
+            self.assertIn("doctor – run system diagnostics", reply_text)
+            self.assertIn("status – agent status", reply_text)
+            self.assertIn("health – runtime health", reply_text)
+            self.assertIn("brief – system summary", reply_text)
             self.assertEqual([], orchestrator.calls)
 
             rows = _read_audit_rows(audit_path)
@@ -587,7 +690,9 @@ def test_orchestrator_exception_logs_traceback_and_returns_fallback(caplog):  # 
         assert update.effective_message.replies
         reply_text = str(update.effective_message.replies[-1]["text"] or "")
         assert "I hit an internal error" in reply_text
-        assert "(trace " in reply_text
+        assert "trace_id:" in reply_text
+        assert "component: telegram_adapter" in reply_text
+        assert "next_action: run `agent doctor`" in reply_text
 
         logged = "\n".join(record.getMessage() for record in caplog.records)
         assert "boom" in logged

@@ -13,12 +13,18 @@ This file captures practical guarantees that should remain stable unless intenti
   - local/dev default: missing units are skipped
   - enforce mode: `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1`
 - Schema/version compatibility is validated by doctor checks (`VERSION` vs `schema_meta`).
+- Deterministic doctor output ordering and stable JSON/text field names.
+- No silent token leakage in logs/doctor/CLI output (redaction by default).
+- One canonical help text per user surface (Telegram and CLI paths).
+- Truthful identity responses via centralized identity helper.
+- Telegram safe-send fallback: truncate, retry plain text on BadRequest, and emit `telegram.out` after successful delivery.
 
 ## Compatibility Expectations
 
 - Existing API endpoints should remain backward-compatible unless versioned or explicitly documented.
 - Existing Telegram command names should remain stable unless migration notes are added.
 - DB schema changes should be additive/migrated and covered by tests.
+- Operator workflows should remain discoverable through `python -m agent` subcommands.
 
 ## Explicit Non-Goals
 

@@ -4,6 +4,8 @@ import copy
 import time
 from typing import Any
 
+from agent.llm.default_model_guard import validate_default_model
+
 
 def build_hygiene_plan(
     registry_document: dict[str, Any],
@@ -153,16 +155,33 @@ def _normalize_default_model(defaults: dict[str, Any], models: dict[str, Any], c
         else:
             return
 
+    valid_default, validated_model, _validation_error = validate_default_model(
+        candidate,
+        models,
+        purpose="chat",
+    )
+    if not valid_default or validated_model is None:
+        changes.append(
+            {
+                "kind": "defaults",
+                "field": "default_model",
+                "before": default_model,
+                "after": default_model,
+                "reason": "default_model_not_chat_capable",
+            }
+        )
+        return
+
     changes.append(
         {
             "kind": "defaults",
             "field": "default_model",
             "before": default_model,
-            "after": candidate,
+            "after": validated_model,
             "reason": "fully_qualified_default_model",
         }
     )
-    defaults["default_model"] = candidate
+    defaults["default_model"] = validated_model
 
 
 def _mark_stale_down_models(
