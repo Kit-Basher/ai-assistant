@@ -30,6 +30,11 @@ Canonical local diagnostics entrypoint:
 - `PASS`: system is healthy; no operator action needed.
 - `WARN`: degraded but running; follow the single `Next action` line.
 - `FAIL`: startup/runtime blocking issue; follow the single `Next action` line immediately.
+- Runtime mode mapping used by user-facing surfaces:
+  - `READY` ~= `PASS`
+  - `BOOTSTRAP_REQUIRED` ~= setup-needed `WARN`
+  - `DEGRADED` ~= partial-operation `WARN`
+  - `FAILED` ~= blocking `FAIL`
 
 Example:
 

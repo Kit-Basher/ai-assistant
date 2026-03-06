@@ -200,6 +200,39 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("Regular answer /brief /status /help", response.text)
         run_mock.assert_not_called()
 
+    def test_llm_chat_sanitizes_untrusted_vendor_identity_claim(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="I am created by Anthropic.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        with patch.object(orchestrator, "_handle_message_impl") as run_mock:
+            response = orchestrator._llm_chat("user1", "hello")
+        self.assertIn("Personal Agent", response.text)
+        self.assertNotIn("created by Anthropic", response.text)
+        run_mock.assert_not_called()
+
+    def test_llm_chat_keeps_vendor_identity_when_provider_matches(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="placeholder")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        llm.chat = lambda *_args, **_kwargs: {  # type: ignore[assignment]
+            "ok": True,
+            "text": "I am created by Anthropic.",
+            "provider": "anthropic",
+            "model": "claude-3.5-sonnet",
+        }
+        response = orchestrator._llm_chat("user1", "hello")
+        self.assertIn("created by Anthropic", response.text)
+
     def test_llm_chat_exception_with_stats_uses_health_fallback(self) -> None:
         llm = _RaisingChatLLM(enabled=True)
         orchestrator = Orchestrator(
@@ -227,7 +260,8 @@ class TestOrchestrator(unittest.TestCase):
         )
         with patch.object(orchestrator, "_handle_message_impl") as run_mock:
             response = orchestrator._llm_chat("user1", "tell me a joke")
-        self.assertIn("LLM is unavailable right now", response.text)
+        self.assertIn("Agent is starting or degraded.", response.text)
+        self.assertIn("Next:", response.text)
         self.assertNotIn("Try /brief", response.text)
         run_mock.assert_not_called()
         self.assertEqual(1, llm.chat_calls)

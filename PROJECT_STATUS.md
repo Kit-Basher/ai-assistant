@@ -1,9 +1,9 @@
 # PROJECT_STATUS.md
 
 Branch: `brief-v0.2-clean`  
-HEAD: `3ea9f5f`  
-Date (UTC): `2026-02-27`  
-Tests: `561 passed in 9.39s (pytest -q)`
+HEAD: `see git rev-parse --short HEAD`  
+Date (UTC): `2026-03-06`  
+Tests: `770 passed in 15.67s (pytest -q)`
 
 ## Canonical
 This file is the authoritative current-state document for this branch.
@@ -34,6 +34,21 @@ Single operator entrypoint:
 - User-facing truth:
   - identity is centralized in `agent/identity.py`
   - fallback guidance for no-chat-model is centralized in `agent/golden_path.py`
+  - runtime mode contract is centralized in `agent/runtime_contract.py`
+
+## Runtime Contract
+- Shared mode names across CLI, Telegram, API, and orchestrator:
+  - `READY`
+  - `BOOTSTRAP_REQUIRED`
+  - `DEGRADED`
+  - `FAILED`
+- Shared helpers:
+  - `get_runtime_mode(...)`
+  - `get_effective_llm_identity(...)`
+  - `get_effective_next_action(...)`
+  - `normalize_user_facing_status(...)`
+- Truthfulness rule:
+  - user-facing provider/model identity can explicitly be `unknown` when certainty is missing.
 
 ## Remaining Rough Edges
 - Root-level docs are now canonicalized, but some historical wording remains inside archived files.

@@ -1,5 +1,11 @@
 # Golden Path
 
+## Runtime Modes
+- `READY`: normal operation.
+- `BOOTSTRAP_REQUIRED`: setup guidance only.
+- `DEGRADED`: short degraded status + one next action.
+- `FAILED`: deterministic error block (trace + component + next_action).
+
 ## When Everything Works
 1. Restart service: `systemctl --user restart personal-agent-api.service`
 2. Verify: `python -m agent status`

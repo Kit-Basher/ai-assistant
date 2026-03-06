@@ -32,7 +32,7 @@ class TestGoldenPath(unittest.TestCase):
         ready = user_safe_summary(ready=True, provider="ollama", model="qwen2.5:3b-instruct")
         self.assertIn("Agent is ready.", ready)
         degraded = user_safe_summary(ready=False, failure_code="llm_unavailable")
-        self.assertIn("Agent is starting or degraded.", degraded)
+        self.assertIn("Setup needed.", degraded)
         setup = user_safe_summary(ready=False, bootstrap=True, failure_code="no_chat_model")
         self.assertIn("Setup needed.", setup)
 
@@ -44,4 +44,3 @@ class TestGoldenPath(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

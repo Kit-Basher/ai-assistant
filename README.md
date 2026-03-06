@@ -37,6 +37,12 @@ Unified CLI:
 3. Talk to Telegram in plain English.
 4. If anything looks wrong, run `python -m agent doctor` and follow the single `Next action`.
 
+Runtime contract (all surfaces use the same mode names):
+- `READY`: normal operation.
+- `BOOTSTRAP_REQUIRED`: setup guidance only.
+- `DEGRADED`: partial operation, read-only checks still work.
+- `FAILED`: deterministic error block with trace id + one next step.
+
 ## If You Only Learn 3 Commands
 - `python -m agent status`
 - `python -m agent doctor`

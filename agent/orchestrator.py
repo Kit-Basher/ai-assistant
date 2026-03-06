@@ -38,6 +38,8 @@ from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
 from agent.golden_path import bootstrap_guidance
+from agent.identity import get_public_identity
+from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
@@ -166,6 +168,11 @@ _AUTHORITATIVE_DOMAIN_TO_TOOL = {
 }
 _LLM_RUN_DIRECTIVE_RE = re.compile(r"\[\[RUN:(/[a-z_]+)\]\]", re.IGNORECASE)
 _LLM_RUN_DIRECTIVE_ALLOWLIST = {"/brief", "/status", "/health"}
+_VENDOR_IDENTITY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("anthropic", ("created by anthropic", "i am anthropic", "i'm anthropic")),
+    ("openai", ("created by openai", "i am openai", "i'm openai", "as an openai")),
+    ("google", ("created by google", "i am google", "i'm google")),
+)
 
 
 def _normalize_authoritative_text(text: str) -> str:
@@ -293,7 +300,16 @@ class Orchestrator:
                 return self._handle_message_impl(heuristic_command, user_id)
             except Exception:
                 pass
-        return OrchestratorResponse("LLM is unavailable right now. Next: run `agent doctor`.")
+        status = normalize_user_facing_status(
+            ready=False,
+            bootstrap_required=False,
+            failure_code="llm_runtime_error",
+            phase="degraded",
+            provider=None,
+            model=None,
+            local_providers={"ollama"},
+        )
+        return OrchestratorResponse(str(status.get("summary") or "Agent is starting or degraded."))
 
     def _log_llm_selection(
         self,
@@ -304,17 +320,35 @@ class Orchestrator:
         reason: str,
         fallback_used: bool,
     ) -> None:
+        identity = get_effective_llm_identity(
+            provider=provider,
+            model=model,
+            local_providers={"ollama"},
+            reason=reason,
+        )
+        runtime_status = normalize_user_facing_status(
+            ready=bool(identity.get("known", False) and not fallback_used),
+            bootstrap_required=False,
+            failure_code=(None if not fallback_used else "llm_runtime_error"),
+            phase=None if not fallback_used else "degraded",
+            provider=provider,
+            model=model,
+            local_providers={"ollama"},
+        )
         try:
             log_event(
                 self.log_path,
                 "llm.selection",
                 {
                     "trace_id": trace_id,
+                    "surface": "orchestrator",
+                    "route": "chat",
+                    "runtime_mode": str(runtime_status.get("runtime_mode") or "DEGRADED"),
                     "selected_provider": str(provider or "").strip().lower() or None,
                     "selected_model": str(model or "").strip() or None,
+                    "known": bool(identity.get("known", False)),
                     "reason": str(reason or "").strip().lower() or "unknown",
                     "fallback_used": bool(fallback_used),
-                    "source_surface": "orchestrator",
                 },
             )
         except Exception:
@@ -390,6 +424,11 @@ class Orchestrator:
         if isinstance(result, dict):
             llm_text = str(result.get("text") or "").strip()
             if llm_text:
+                llm_text = self._sanitize_vendor_identity_claim(
+                    llm_text,
+                    provider=str(result.get("provider") or "").strip() or None,
+                    model=str(result.get("model") or "").strip() or None,
+                )
                 directive_command = self._parse_llm_run_directive(llm_text)
                 if directive_command:
                     try:
@@ -433,6 +472,11 @@ class Orchestrator:
         elif isinstance(result, str):
             llm_text = result.strip()
             if llm_text:
+                llm_text = self._sanitize_vendor_identity_claim(
+                    llm_text,
+                    provider=None,
+                    model=None,
+                )
                 directive_command = self._parse_llm_run_directive(llm_text)
                 if directive_command:
                     try:
@@ -474,6 +518,37 @@ class Orchestrator:
             fallback_used=True,
         )
         return self._llm_error_fallback_response(user_id, text)
+
+    @staticmethod
+    def _vendor_claimed_in_text(text: str) -> str | None:
+        lowered = str(text or "").strip().lower()
+        if not lowered:
+            return None
+        for vendor, patterns in _VENDOR_IDENTITY_PATTERNS:
+            if any(pattern in lowered for pattern in patterns):
+                return vendor
+        return None
+
+    def _sanitize_vendor_identity_claim(
+        self,
+        llm_text: str,
+        *,
+        provider: str | None,
+        model: str | None,
+    ) -> str:
+        claimed_vendor = self._vendor_claimed_in_text(llm_text)
+        if not claimed_vendor:
+            return llm_text
+        provider_id = str(provider or "").strip().lower()
+        model_id = str(model or "").strip().lower()
+        if claimed_vendor in provider_id or claimed_vendor in model_id:
+            return llm_text
+        identity = get_public_identity(
+            provider=provider,
+            model=model,
+            local_providers={"ollama"},
+        )
+        return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
 
     @staticmethod
     def _parse_llm_run_directive(llm_text: str) -> str | None:

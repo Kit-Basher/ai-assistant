@@ -84,7 +84,14 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual(200, handler.status_code)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["ready"])
+        self.assertIn(payload["runtime_mode"], {"READY", "BOOTSTRAP_REQUIRED"})
         self.assertEqual("disabled_missing_token", payload["telegram"]["state"])
+        if payload["runtime_mode"] == "READY":
+            self.assertIsNone(payload.get("next_action"))
+        else:
+            self.assertTrue(str(payload.get("next_action") or "").strip())
+        self.assertIn("llm", payload)
+        self.assertIn("known", payload["llm"])
         self.assertEqual([], payload["telegram"]["recent_messages"])
         self.assertTrue(str(payload.get("message") or "").strip())
 
@@ -111,6 +118,8 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual(200, handler.status_code)
         self.assertTrue(payload["ok"])
         self.assertFalse(payload["ready"])
+        self.assertEqual("DEGRADED", payload["runtime_mode"])
+        self.assertTrue(str(payload.get("next_action") or "").strip())
         self.assertEqual("crash_loop", payload["telegram"]["state"])
 
     def test_ready_reports_ready_when_telegram_running(self) -> None:

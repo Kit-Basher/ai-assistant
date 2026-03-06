@@ -69,6 +69,10 @@ from agent.model_watch_hf import (
     scan_hf_watch,
 )
 from agent.response_envelope import failure, ok_result, validate_envelope
+from agent.runtime_contract import (
+    get_effective_llm_identity,
+    normalize_user_facing_status,
+)
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
@@ -2666,22 +2670,57 @@ class AgentRuntime:
             phase = "ready"
         telegram_ready = telegram_state in {"running", "disabled_missing_token"}
         ready = bool(phase == "ready" and telegram_ready)
+        defaults = self.get_defaults()
+        providers_doc = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        local_providers = {
+            str(provider_id).strip().lower()
+            for provider_id, row in providers_doc.items()
+            if isinstance(row, dict) and bool(row.get("local", False))
+        } or {"ollama"}
+        provider = (
+            str(defaults.get("default_provider") or "").strip().lower()
+            or (
+                str(defaults.get("resolved_default_model") or "").split(":", 1)[0].strip().lower()
+                if str(defaults.get("resolved_default_model") or "").strip() and ":" in str(defaults.get("resolved_default_model") or "")
+                else None
+            )
+        )
+        model = (
+            str(defaults.get("resolved_default_model") or "").strip()
+            or str(defaults.get("default_model") or "").strip()
+            or None
+        )
+        bootstrap_required = bool(ready and not model)
+        normalized_status = normalize_user_facing_status(
+            ready=ready,
+            bootstrap_required=bootstrap_required,
+            failure_code=str(self._startup_last_error or "").strip() or None,
+            phase=phase,
+            provider=provider,
+            model=model,
+            local_providers=local_providers,
+        )
+        identity = get_effective_llm_identity(
+            provider=provider,
+            model=model,
+            local_providers=local_providers,
+            reason=str(normalized_status.get("failure_code") or "ok"),
+        )
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
         recent_messages = self._ready_recent_telegram_messages(limit=5)
         if phase == "degraded":
             message = "Startup warmup degraded. Check logs and retry."
         elif phase in {"starting", "listening", "warming"}:
             message = "Starting up... retrying. Try /ready again in a moment."
-        elif ready and telegram_state == "running":
-            message = "Agent is ready. Telegram is running."
-        elif ready and telegram_state == "disabled_missing_token":
-            message = "Agent is ready. Telegram is disabled (missing token)."
         else:
-            message = "Starting up... retrying. Try /ready again in a moment."
+            message = str(normalized_status.get("summary") or "").strip() or "Agent is ready."
         return {
             "ok": True,
             "ready": bool(ready),
             "phase": phase,
+            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
+            "next_action": normalized_status.get("next_action"),
+            "runtime_status": normalized_status,
             "warmup_remaining": list(warmup_remaining),
             "last_error": str(self._startup_last_error or "") or None,
             "api": {
@@ -2706,6 +2745,13 @@ class AgentRuntime:
             },
             "model_watch": {
                 "hf": hf_status,
+            },
+            "llm": {
+                "provider": identity.get("provider"),
+                "model": identity.get("model"),
+                "local_remote": identity.get("local_remote"),
+                "known": bool(identity.get("known", False)),
+                "reason": identity.get("reason"),
             },
             "message": message,
         }
@@ -4632,12 +4678,27 @@ class AgentRuntime:
             nonlocal selection_logged
             if selection_logged:
                 return
+            identity = get_effective_llm_identity(
+                provider=provider,
+                model=model,
+                local_providers={"ollama"},
+                reason=reason,
+            )
+            runtime_mode = "READY"
+            if not bool(identity.get("known", False)):
+                runtime_mode = "DEGRADED"
+            if bool(fallback_used):
+                runtime_mode = "DEGRADED"
             self._safe_log_event(
                 "llm.selection",
                 {
                     "trace_id": trace_id,
+                    "surface": str(payload.get("source_surface") or "api"),
+                    "route": "chat",
+                    "runtime_mode": runtime_mode,
                     "selected_provider": str(provider or "").strip().lower() or None,
                     "selected_model": str(model or "").strip() or None,
+                    "known": bool(identity.get("known", False)),
                     "selection_reason": str(reason or "").strip().lower() or "default_policy",
                     "fallback_used": bool(fallback_used),
                 },
@@ -7535,6 +7596,27 @@ class AgentRuntime:
             if status_key not in visible_counts:
                 status_key = "unknown"
             visible_counts[status_key] = int(visible_counts.get(status_key, 0)) + 1
+        availability_reason = None
+        if str(active_provider_health.get("status") or "").strip().lower() != "ok":
+            availability_reason = "provider_unhealthy"
+        elif str(active_model_health.get("status") or "").strip().lower() != "ok":
+            availability_reason = "model_unhealthy"
+        elif not resolved_default_model:
+            availability_reason = "no_chat_model"
+        local_providers = {
+            str((row or {}).get("id") or "").strip().lower()
+            for row in providers
+            if isinstance(row, dict) and bool(row.get("local", False))
+        } or {"ollama"}
+        runtime_status = normalize_user_facing_status(
+            ready=(availability_reason is None),
+            bootstrap_required=bool(not resolved_default_model),
+            failure_code=availability_reason,
+            phase=None,
+            provider=default_provider,
+            model=resolved_default_model,
+            local_providers=local_providers,
+        )
         return {
             "ok": True,
             "default_provider": default_provider,
@@ -7554,6 +7636,9 @@ class AgentRuntime:
             "total_models_count": total_models_count,
             "visible_models_count": visible_models_count,
             "visible_counts": visible_counts,
+            "runtime_mode": str(runtime_status.get("runtime_mode") or "DEGRADED"),
+            "next_action": runtime_status.get("next_action"),
+            "runtime_status": runtime_status,
         }
 
     def llm_status(self) -> dict[str, Any]:

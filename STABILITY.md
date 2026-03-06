@@ -18,6 +18,12 @@ This file captures practical guarantees that should remain stable unless intenti
 - One canonical help text per user surface (Telegram and CLI paths).
 - Truthful identity responses via centralized identity helper.
 - Telegram safe-send fallback: truncate, retry plain text on BadRequest, and emit `telegram.out` after successful delivery.
+- Unified runtime contract across user surfaces (`agent/runtime_contract.py`) with stable mode names:
+  - `READY`
+  - `BOOTSTRAP_REQUIRED`
+  - `DEGRADED`
+  - `FAILED`
+- One deterministic next action for degraded/failed user-facing states.
 
 ## Compatibility Expectations
 

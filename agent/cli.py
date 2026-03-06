@@ -15,10 +15,9 @@ from agent.doctor import main as doctor_main
 from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import (
     bootstrap_needed,
-    is_runtime_ready,
     next_step_for_failure,
-    user_safe_summary,
 )
+from agent.runtime_contract import normalize_user_facing_status
 
 
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
@@ -98,33 +97,43 @@ def _cmd_status(args: argparse.Namespace) -> int:
     payload = payload_or_error
     telegram = payload.get("telegram") if isinstance(payload.get("telegram"), dict) else {}
     telegram_state = str(telegram.get("state") or "unknown").strip().lower() or "unknown"
-    ready = is_runtime_ready(ready_payload=payload)
-    message = str(payload.get("message") or "").strip() or ("ready" if ready else "starting")
-    provider = (
-        str((payload.get("llm") or {}).get("provider") or "").strip()
-        if isinstance(payload.get("llm"), dict)
-        else None
-    )
-    model = (
-        str((payload.get("llm") or {}).get("model") or "").strip()
-        if isinstance(payload.get("llm"), dict)
-        else None
-    )
-    bootstrap = bootstrap_needed(
-        llm_available=bool(payload.get("llm_available", True)) if "llm_available" in payload else None,
-        availability_reason=str(payload.get("llm_reason") or "").strip() or None,
-    )
-    summary = user_safe_summary(
-        ready=ready,
-        provider=provider,
-        model=model,
-        bootstrap=bootstrap,
-        failure_code=str(payload.get("failure_code") or "").strip() or None,
-    )
+    runtime_status = payload.get("runtime_status") if isinstance(payload.get("runtime_status"), dict) else {}
+    if runtime_status:
+        summary = str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
+        runtime_mode = str(runtime_status.get("runtime_mode") or "DEGRADED").strip().upper() or "DEGRADED"
+    else:
+        ready = bool(payload.get("ready", False))
+        message_reason = str(payload.get("llm_reason") or payload.get("failure_code") or "").strip() or None
+        provider = (
+            str((payload.get("llm") or {}).get("provider") or "").strip()
+            if isinstance(payload.get("llm"), dict)
+            else None
+        )
+        model = (
+            str((payload.get("llm") or {}).get("model") or "").strip()
+            if isinstance(payload.get("llm"), dict)
+            else None
+        )
+        bootstrap = bootstrap_needed(
+            llm_available=bool(payload.get("llm_available", True)) if "llm_available" in payload else None,
+            availability_reason=str(payload.get("llm_reason") or "").strip() or None,
+        )
+        normalized_status = normalize_user_facing_status(
+            ready=ready,
+            bootstrap_required=bootstrap,
+            failure_code=message_reason,
+            phase=str(payload.get("phase") or "").strip().lower() or None,
+            provider=provider,
+            model=model,
+        )
+        summary = str(normalized_status.get("summary") or "").strip() or "Agent is starting or degraded."
+        runtime_mode = str(normalized_status.get("runtime_mode") or "DEGRADED").strip().upper() or "DEGRADED"
+    message = str(payload.get("message") or "").strip() or ("ready" if payload.get("ready") else "starting")
     print(
         "\n".join(
             [
                 summary,
+                f"runtime_mode: {runtime_mode}",
                 f"telegram: {telegram_state}",
                 f"message: {message}",
             ]

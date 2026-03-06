@@ -902,6 +902,17 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("last_checked_at_iso", normalized)
         self.assertIn("down_since_iso", normalized)
 
+    def test_llm_status_includes_runtime_contract_fields(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        payload = runtime.llm_status()
+        self.assertIn("runtime_mode", payload)
+        self.assertIn(payload["runtime_mode"], {"READY", "BOOTSTRAP_REQUIRED", "DEGRADED", "FAILED"})
+        self.assertIn("runtime_status", payload)
+        runtime_status = payload.get("runtime_status") if isinstance(payload.get("runtime_status"), dict) else {}
+        self.assertEqual(payload["runtime_mode"], runtime_status.get("runtime_mode"))
+        self.assertIn("summary", runtime_status)
+        self.assertIn("next_action", runtime_status)
+
     def test_telegram_secret_and_test_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 

@@ -2,6 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from agent.runtime_contract import (
+    RUNTIME_MODE_DEGRADED,
+    get_effective_next_action,
+    normalize_user_facing_status,
+)
+
 
 _DEFAULT_BOOTSTRAP_GUIDANCE = (
     "No chat model available right now.\n"
@@ -75,18 +81,13 @@ def bootstrap_needed(
 
 
 def next_step_for_failure(failure_code: str | None) -> str:
-    code = str(failure_code or "").strip().lower()
-    if code in {"telegram_token_missing", "missing_token"}:
-        return "Run: python -m agent.secrets set telegram:bot_token"
-    if code in {"llm_unavailable", "provider_unhealthy", "router_unavailable", "llm_status_unavailable"}:
-        return "Run: python -m agent doctor"
-    if code in {"registry_unreadable", "registry_invalid_json"}:
-        return "Check LLM_REGISTRY_PATH and run: python -m agent doctor"
-    if code in {"lock_unavailable", "lock_path_unavailable"}:
-        return "Stop duplicate Telegram processes and restart the service"
-    if code in {"config_load_failed", "config_invalid"}:
-        return "Review config and run: python -m agent doctor"
-    return "Run: python -m agent doctor"
+    return str(
+        get_effective_next_action(
+            runtime_mode=RUNTIME_MODE_DEGRADED,
+            failure_code=failure_code,
+        )
+        or "Run: python -m agent doctor"
+    )
 
 
 def bootstrap_guidance() -> str:
@@ -101,19 +102,14 @@ def user_safe_summary(
     bootstrap: bool = False,
     failure_code: str | None = None,
 ) -> str:
-    provider_id = str(provider or "").strip().lower() or "unknown"
-    model_id = str(model or "").strip() or "unknown"
-    if bootstrap:
-        return (
-            "Setup needed. No chat model is ready yet.\n"
-            f"Next: {next_step_for_failure(failure_code or 'no_chat_model')}"
-        )
-    if ready:
-        return f"Agent is ready. Using {provider_id} / {model_id}."
-    return (
-        "Agent is starting or degraded.\n"
-        f"Next: {next_step_for_failure(failure_code or 'llm_unavailable')}"
+    normalized = normalize_user_facing_status(
+        ready=bool(ready),
+        bootstrap_required=bool(bootstrap),
+        failure_code=failure_code,
+        provider=provider,
+        model=model,
     )
+    return str(normalized.get("summary") or "").strip()
 
 
 __all__ = [
@@ -123,4 +119,3 @@ __all__ = [
     "next_step_for_failure",
     "user_safe_summary",
 ]
-

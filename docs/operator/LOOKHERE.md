@@ -34,6 +34,12 @@ User service:
 - Test sweep:
   - `. .venv/bin/activate && pytest -q`
 
+Runtime mode contract (all surfaces):
+- `READY`: normal operation.
+- `BOOTSTRAP_REQUIRED`: setup path.
+- `DEGRADED`: partial operation with one next action.
+- `FAILED`: deterministic error block with trace id.
+
 ## Timers
 
 - Observe: `personal-agent-observe.service` + `personal-agent-observe.timer`

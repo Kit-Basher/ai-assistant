@@ -15,6 +15,7 @@ Both runtimes depend on shared core modules (`agent/orchestrator.py`, skills, me
 - Core agent + LLM runtime state is authoritative (`agent/api_server.py`, `agent/llm/*`).
 - User-facing transports (Telegram/CLI) should surface runtime facts and avoid speculative state.
 - Operational checks/fixes are centralized under `python -m agent doctor`.
+- Runtime-mode contract is centralized in `agent/runtime_contract.py`.
 
 ## Core Request Flow
 
@@ -52,6 +53,11 @@ Service startup
 - Deterministic error blocks use `agent/error_response_ux.py::deterministic_error_message`.
 - User-facing failures provide exactly one next action.
 - Telegram send path retries safely on parse errors and logs a definitive `telegram.out` on success.
+- Runtime mode mapping is shared across API/CLI/Telegram/Orchestrator:
+  - `READY`
+  - `BOOTSTRAP_REQUIRED`
+  - `DEGRADED`
+  - `FAILED`
 
 ## Surface Routing
 

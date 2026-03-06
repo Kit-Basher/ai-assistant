@@ -31,7 +31,7 @@ from agent.config import Config, load_config
 from agent.doctor import run_doctor_report
 from agent.error_response_ux import deterministic_error_message
 from agent.fallback_ladder import run_with_fallback
-from agent.golden_path import bootstrap_guidance, bootstrap_needed, user_safe_summary
+from agent.golden_path import bootstrap_guidance, bootstrap_needed
 from agent.llm_router import LLMRouter
 from agent.llm_client import build_llm_broker
 from agent.logging_utils import log_event
@@ -51,6 +51,7 @@ from agent.identity import get_public_identity
 from agent.secret_store import SecretStore
 from agent.startup_checks import run_startup_checks
 from agent.permissions import PermissionStore
+from agent.runtime_contract import normalize_user_facing_status
 from agent.ux.clarify_suggest import (
     build_clarify_message,
     build_suggest_message,
@@ -695,17 +696,41 @@ def _runtime_status_text(bot_data: dict[str, Any]) -> str:
         or str(llm_status.get("default_model") or "").strip()
         or None
     )
-    ready = (
-        str(((llm_status.get("active_provider_health") or {}).get("status") if isinstance(llm_status.get("active_provider_health"), dict) else "")).strip().lower() == "ok"
-        and str(((llm_status.get("active_model_health") or {}).get("status") if isinstance(llm_status.get("active_model_health"), dict) else "")).strip().lower() == "ok"
+    provider_state = (
+        str(
+            ((llm_status.get("active_provider_health") or {}).get("status"))
+            if isinstance(llm_status.get("active_provider_health"), dict)
+            else ""
+        )
+        .strip()
+        .lower()
     )
-    summary = user_safe_summary(
-        ready=bool(ready),
+    model_state = (
+        str(
+            ((llm_status.get("active_model_health") or {}).get("status"))
+            if isinstance(llm_status.get("active_model_health"), dict)
+            else ""
+        )
+        .strip()
+        .lower()
+    )
+    ready = bool(provider_state == "ok" and model_state == "ok")
+    failure_code = None
+    if not model:
+        failure_code = "no_chat_model"
+    elif provider_state != "ok":
+        failure_code = "provider_unhealthy"
+    elif model_state != "ok":
+        failure_code = "model_unhealthy"
+    runtime_status = normalize_user_facing_status(
+        ready=ready,
+        bootstrap_required=bootstrap_needed(llm_status=llm_status),
+        failure_code=failure_code,
         provider=provider,
         model=model,
-        bootstrap=bootstrap_needed(llm_status=llm_status),
-        failure_code="llm_unavailable" if not ready else None,
+        local_providers={"ollama"},
     )
+    summary = str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
 
     return (
         f"✅ Agent is running (v{version}, commit {commit_short}, uptime {uptime_seconds}s).\n"
@@ -736,7 +761,24 @@ def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str 
 
 def _setup_help_text(*, runtime: Any | None) -> str:
     status = _llm_status_payload(runtime)
-    if bootstrap_needed(llm_status=status):
+    provider = str(status.get("default_provider") or "").strip() or None
+    model = (
+        str(status.get("resolved_default_model") or "").strip()
+        or str(status.get("default_model") or "").strip()
+        or None
+    )
+    runtime_status = normalize_user_facing_status(
+        ready=bool(
+            str(((status.get("active_provider_health") or {}).get("status")) if isinstance(status.get("active_provider_health"), dict) else "").strip().lower() == "ok"
+            and str(((status.get("active_model_health") or {}).get("status")) if isinstance(status.get("active_model_health"), dict) else "").strip().lower() == "ok"
+        ),
+        bootstrap_required=bootstrap_needed(llm_status=status),
+        failure_code=("no_chat_model" if not model else None),
+        provider=provider,
+        model=model,
+        local_providers={"ollama"},
+    )
+    if str(runtime_status.get("runtime_mode") or "").strip().upper() == "BOOTSTRAP_REQUIRED":
         return bootstrap_guidance()
     return _MODEL_PROVIDER_HELP_TEXT
 
@@ -782,6 +824,31 @@ def _llm_status_payload(runtime: Any | None) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _log_runtime_contract_event(
+    *,
+    log_path: str | None,
+    trace_id: str,
+    route: str,
+    runtime_mode: str,
+    provider: str | None,
+    model: str | None,
+    fallback_used: bool,
+) -> None:
+    log_event(
+        log_path,
+        "runtime.contract",
+        {
+            "trace_id": trace_id,
+            "surface": "telegram",
+            "route": str(route or "").strip().lower() or "chat",
+            "runtime_mode": str(runtime_mode or "").strip().upper() or "DEGRADED",
+            "provider": str(provider or "").strip().lower() or None,
+            "model": str(model or "").strip() or None,
+            "fallback_used": bool(fallback_used),
+        },
+    )
 
 
 def _model_status_report(*, runtime: Any | None) -> str:
@@ -2214,6 +2281,15 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 text=fallback_with_trace,
                 trace_id=trace_id,
             )
+            _log_runtime_contract_event(
+                log_path=log_path,
+                trace_id=trace_id,
+                route="chat",
+                runtime_mode="FAILED",
+                provider=None,
+                model=None,
+                fallback_used=True,
+            )
             return
         reply_text = response.text.strip() if response and response.text else ""
         parse_mode = None
@@ -2236,6 +2312,53 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             text=reply_text,
             trace_id=trace_id,
             parse_mode=parse_mode,
+        )
+        runtime = bot_data.get("runtime")
+        status = _llm_status_payload(runtime)
+        provider = str(status.get("default_provider") or "").strip().lower() or None
+        model = (
+            str(status.get("resolved_default_model") or "").strip()
+            or str(status.get("default_model") or "").strip()
+            or None
+        )
+        provider_state = (
+            str(
+                ((status.get("active_provider_health") or {}).get("status"))
+                if isinstance(status.get("active_provider_health"), dict)
+                else ""
+            )
+            .strip()
+            .lower()
+        )
+        model_state = (
+            str(
+                ((status.get("active_model_health") or {}).get("status"))
+                if isinstance(status.get("active_model_health"), dict)
+                else ""
+            )
+            .strip()
+            .lower()
+        )
+        runtime_status = normalize_user_facing_status(
+            ready=bool(provider_state == "ok" and model_state == "ok"),
+            bootstrap_required=bootstrap_needed(llm_status=status),
+            failure_code=(
+                "no_chat_model"
+                if not model
+                else ("provider_unhealthy" if provider_state != "ok" else ("model_unhealthy" if model_state != "ok" else None))
+            ),
+            provider=provider,
+            model=model,
+            local_providers={"ollama"},
+        )
+        _log_runtime_contract_event(
+            log_path=log_path,
+            trace_id=trace_id,
+            route=route,
+            runtime_mode=str(runtime_status.get("runtime_mode") or "DEGRADED"),
+            provider=provider,
+            model=model,
+            fallback_used=(route != "chat"),
         )
         _safe_append_telegram_message_audit(
             audit_log=audit_log,
