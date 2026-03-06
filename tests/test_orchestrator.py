@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from agent.knowledge_cache import facts_hash
 from agent.orchestrator import Orchestrator, OrchestratorResponse
+from agent.tool_contract import normalize_tool_request
 from memory.db import MemoryDB
 
 
@@ -232,6 +233,61 @@ class TestOrchestrator(unittest.TestCase):
         }
         response = orchestrator._llm_chat("user1", "hello")
         self.assertIn("created by Anthropic", response.text)
+
+    def test_llm_chat_json_tool_request_executes_internal_status(self) -> None:
+        llm = _FakeChatLLM(
+            enabled=True,
+            text='{"tool":"status","args":{},"reason":"status_check","read_only":true,"confidence":0.9}',
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        expected = OrchestratorResponse("STATUS_OUTPUT")
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._llm_chat("user1", "show me status")
+        self.assertEqual("STATUS_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/status", "user1")
+
+    def test_llm_chat_unsupported_tool_request_returns_deterministic_refusal(self) -> None:
+        llm = _FakeChatLLM(
+            enabled=True,
+            text='{"tool":"shutdown_everything","args":{},"reason":"bad","read_only":false,"confidence":1.0}',
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        response = orchestrator._llm_chat("user1", "please do something unsupported")
+        self.assertIn("failure_code: tool_unsupported", response.text)
+        self.assertIn("component: orchestrator.tool_executor", response.text)
+        self.assertIn("next_action:", response.text)
+
+    def test_execute_tool_request_allows_read_only_in_degraded(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+        )
+        expected = OrchestratorResponse("STATUS_OUTPUT")
+        request = normalize_tool_request({"tool": "status", "args": {}, "reason": "degraded_check"})
+        with patch.object(orchestrator, "_handle_message_impl", return_value=expected) as run_mock:
+            response = orchestrator._execute_tool_request(
+                tool_request=request,
+                user_id="user1",
+                surface="orchestrator",
+                runtime_mode="DEGRADED",
+            )
+        self.assertEqual("STATUS_OUTPUT", response.text)
+        run_mock.assert_called_once_with("/status", "user1")
 
     def test_llm_chat_exception_with_stats_uses_health_fallback(self) -> None:
         llm = _RaisingChatLLM(enabled=True)

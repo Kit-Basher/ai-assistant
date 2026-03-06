@@ -43,6 +43,13 @@ Runtime contract (all surfaces use the same mode names):
 - `DEGRADED`: partial operation, read-only checks still work.
 - `FAILED`: deterministic error block with trace id + one next step.
 
+## Deterministic Tool Contract
+- LLM-originated actions use one canonical request shape (`agent/tool_contract.py`):
+  - `tool`, `args`, `reason`, `read_only`, `confidence`
+- Execution goes through one gate (`agent/tool_executor.py`) with one permission decision path (`agent/permission_contract.py`).
+- Read-only tools can run in degraded/bootstrap modes when possible.
+- Write tools are blocked unless explicitly allowed by policy (`enable_writes` and safe-mode checks).
+
 ## If You Only Learn 3 Commands
 - `python -m agent status`
 - `python -m agent doctor`

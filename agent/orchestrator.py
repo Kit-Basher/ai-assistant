@@ -15,6 +15,7 @@ from datetime import datetime, timezone, timedelta
 from agent.intent_router import route_message
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
+from agent.doctor import run_doctor_report
 from agent.runner import Runner
 from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
@@ -40,6 +41,9 @@ from agent.friction import compute_next_action, compute_options, compute_plan, c
 from agent.golden_path import bootstrap_guidance
 from agent.identity import get_public_identity
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
+from agent.error_response_ux import deterministic_error_message
+from agent.tool_contract import normalize_tool_request
+from agent.tool_executor import ToolExecutor
 from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
@@ -271,6 +275,20 @@ class Orchestrator:
         self._epistemic_monitor = EpistemicMonitor(db)
         self._epistemic_history: dict[tuple[str, str], list[MessageTurn]] = {}
         self._epistemic_thread_state: dict[str, dict[str, str | None]] = {}
+        self._tool_executor = ToolExecutor(
+            handlers={
+                "brief": self._tool_handler_brief,
+                "status": self._tool_handler_status,
+                "health": self._tool_handler_health,
+                "doctor": self._tool_handler_doctor,
+                "observe_now": self._tool_handler_observe_now,
+            },
+            emit_log=self._emit_tool_log,
+            component="orchestrator.tool_executor",
+        )
+
+    def _emit_tool_log(self, event: str, payload: dict[str, Any]) -> None:
+        log_event(self.log_path, event, payload)
 
     def _llm_chat_available(self) -> bool:
         client = self.llm_client
@@ -297,7 +315,14 @@ class Orchestrator:
         heuristic_command = self._heuristic_llm_command(text)
         if heuristic_command:
             try:
-                return self._handle_message_impl(heuristic_command, user_id)
+                tool_request = self._command_to_tool_request(heuristic_command, reason="heuristic_command")
+                if tool_request is not None:
+                    return self._execute_tool_request(
+                        tool_request=tool_request,
+                        user_id=user_id,
+                        surface="llm",
+                        runtime_mode="DEGRADED",
+                    )
             except Exception:
                 pass
         status = normalize_user_facing_status(
@@ -310,6 +335,148 @@ class Orchestrator:
             local_providers={"ollama"},
         )
         return OrchestratorResponse(str(status.get("summary") or "Agent is starting or degraded."))
+
+    def _tool_runtime_mode(self) -> str:
+        return "READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"
+
+    @staticmethod
+    def _command_to_tool_request(command: str, *, reason: str) -> dict[str, Any] | None:
+        normalized = str(command or "").strip().lower()
+        command_map = {
+            "/brief": "brief",
+            "/status": "status",
+            "/health": "health",
+            "/doctor": "doctor",
+            "/observe_now": "observe_now",
+        }
+        tool_name = command_map.get(normalized)
+        if not tool_name:
+            return None
+        return normalize_tool_request(
+            {
+                "tool": tool_name,
+                "args": {},
+                "reason": str(reason or "").strip().lower() or "llm_tool_request",
+                "confidence": 1.0,
+            }
+        )
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any] | None:
+        value = str(text or "").strip()
+        if not value:
+            return None
+        candidate = value
+        if value.startswith("```"):
+            lines = [line for line in value.splitlines() if line.strip()]
+            if len(lines) >= 2:
+                candidate = "\n".join(line for line in lines[1:] if line.strip() != "```").strip()
+        try:
+            parsed = json.loads(candidate)
+        except Exception:
+            return None
+        if not isinstance(parsed, dict):
+            return None
+        return parsed
+
+    def _parse_llm_tool_request(self, llm_text: str) -> dict[str, Any] | None:
+        parsed = self._extract_json_object(llm_text)
+        if not isinstance(parsed, dict):
+            return None
+        if "tool" not in parsed:
+            return None
+        return normalize_tool_request(parsed)
+
+    def _execute_tool_request(
+        self,
+        *,
+        tool_request: dict[str, Any],
+        user_id: str,
+        surface: str,
+        runtime_mode: str | None = None,
+    ) -> OrchestratorResponse:
+        mode = str(runtime_mode or "").strip().upper() or self._tool_runtime_mode()
+        result = self._tool_executor.execute(
+            request=tool_request,
+            user_id=user_id,
+            surface=surface,
+            runtime_mode=mode,
+            enable_writes=bool(self.enable_writes),
+            safe_mode=False,
+        )
+        if bool(result.get("ok", False)):
+            return OrchestratorResponse(
+                str(result.get("user_text") or "Done.").strip() or "Done.",
+                {
+                    "tool_result": {
+                        "tool": result.get("tool"),
+                        "trace_id": result.get("trace_id"),
+                        "component": result.get("component"),
+                        "data": result.get("data") if isinstance(result.get("data"), dict) else {},
+                    }
+                },
+            )
+        text = deterministic_error_message(
+            title=f"❌ {str(result.get('user_text') or 'Tool request failed.').strip()}",
+            trace_id=str(result.get("trace_id") or ""),
+            component=str(result.get("component") or "orchestrator.tool_executor"),
+            next_action=str(result.get("next_action") or "Run: python -m agent doctor"),
+            failure_code=str(result.get("error_code") or "tool_request_failed"),
+        )
+        return OrchestratorResponse(text)
+
+    def _status_response(self, user_id: str) -> OrchestratorResponse:
+        writes_flag = "on" if self.enable_writes else "off"
+        actions = ["apt_cache", "journald_vacuum", "home_cache"]
+        last_report = self.db.activity_log_latest("disk_report") or "none"
+        audit_entries = self.db.audit_log_list_recent(user_id, limit=5)
+        lines = [
+            f"ENABLE_WRITES: {writes_flag}",
+            "Write actions: " + ", ".join(actions),
+            "Sudo: no",
+            f"Last disk_report: {last_report}",
+        ]
+        if audit_entries:
+            lines.append("Recent audits:")
+            for entry in audit_entries:
+                lines.append(f"- {entry['id']} {entry['status']}")
+        return OrchestratorResponse("\n".join(lines))
+
+    def _tool_handler_brief(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
+        _ = request
+        response = self._handle_message_impl("/brief", user_id)
+        return {"ok": True, "user_text": response.text, "data": response.data if isinstance(response.data, dict) else {}}
+
+    def _tool_handler_status(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
+        _ = request
+        response = self._handle_message_impl("/status", user_id)
+        return {"ok": True, "user_text": response.text, "data": response.data if isinstance(response.data, dict) else {}}
+
+    def _tool_handler_health(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
+        _ = request
+        response = self._handle_message_impl("/health", user_id)
+        return {"ok": True, "user_text": response.text, "data": response.data if isinstance(response.data, dict) else {}}
+
+    def _tool_handler_doctor(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
+        _ = request
+        _ = user_id
+        report = run_doctor_report(online=False, fix=False)
+        pass_count = sum(1 for item in report.checks if item.status == "OK")
+        warn_count = sum(1 for item in report.checks if item.status == "WARN")
+        fail_count = sum(1 for item in report.checks if item.status == "FAIL")
+        next_action = report.next_action or "none"
+        text = (
+            f"Doctor: {report.summary_status} (trace {report.trace_id})\n"
+            f"PASS {pass_count} · WARN {warn_count} · FAIL {fail_count}\n"
+            f"Next: {next_action}\n"
+            "Run: python -m agent doctor --json for details."
+        )
+        return {"ok": True, "user_text": text, "data": {"trace_id": report.trace_id, "summary_status": report.summary_status}}
+
+    def _tool_handler_observe_now(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
+        _ = request
+        response = self._handle_message_impl("/observe_now", user_id)
+        return {"ok": True, "user_text": response.text, "data": response.data if isinstance(response.data, dict) else {}}
 
     def _log_llm_selection(
         self,
@@ -359,7 +526,15 @@ class Orchestrator:
         heuristic_command = self._heuristic_llm_command(text)
         if heuristic_command:
             try:
-                response = self._handle_message_impl(heuristic_command, user_id)
+                tool_request = self._command_to_tool_request(heuristic_command, reason="heuristic_command")
+                if tool_request is None:
+                    raise RuntimeError("heuristic_tool_missing")
+                response = self._execute_tool_request(
+                    tool_request=tool_request,
+                    user_id=user_id,
+                    surface="llm",
+                    runtime_mode="READY",
+                )
                 self._log_llm_selection(
                     trace_id=trace_id,
                     provider=None,
@@ -429,10 +604,37 @@ class Orchestrator:
                     provider=str(result.get("provider") or "").strip() or None,
                     model=str(result.get("model") or "").strip() or None,
                 )
+                tool_request = self._parse_llm_tool_request(llm_text)
+                if tool_request is not None:
+                    response = self._execute_tool_request(
+                        tool_request=tool_request,
+                        user_id=user_id,
+                        surface="llm",
+                        runtime_mode="READY",
+                    )
+                    self._log_llm_selection(
+                        trace_id=trace_id,
+                        provider=str(result.get("provider") or "").strip() or None,
+                        model=str(result.get("model") or "").strip() or None,
+                        reason="tool_request",
+                        fallback_used=True,
+                    )
+                    return response
                 directive_command = self._parse_llm_run_directive(llm_text)
                 if directive_command:
                     try:
-                        response = self._handle_message_impl(directive_command, user_id)
+                        tool_request = self._command_to_tool_request(
+                            directive_command,
+                            reason="run_directive",
+                        )
+                        if tool_request is None:
+                            raise RuntimeError("directive_tool_missing")
+                        response = self._execute_tool_request(
+                            tool_request=tool_request,
+                            user_id=user_id,
+                            surface="llm",
+                            runtime_mode="READY",
+                        )
                         self._log_llm_selection(
                             trace_id=trace_id,
                             provider=str(result.get("provider") or "").strip() or None,
@@ -477,10 +679,37 @@ class Orchestrator:
                     provider=None,
                     model=None,
                 )
+                tool_request = self._parse_llm_tool_request(llm_text)
+                if tool_request is not None:
+                    response = self._execute_tool_request(
+                        tool_request=tool_request,
+                        user_id=user_id,
+                        surface="llm",
+                        runtime_mode="READY",
+                    )
+                    self._log_llm_selection(
+                        trace_id=trace_id,
+                        provider=None,
+                        model=None,
+                        reason="tool_request",
+                        fallback_used=True,
+                    )
+                    return response
                 directive_command = self._parse_llm_run_directive(llm_text)
                 if directive_command:
                     try:
-                        response = self._handle_message_impl(directive_command, user_id)
+                        tool_request = self._command_to_tool_request(
+                            directive_command,
+                            reason="run_directive",
+                        )
+                        if tool_request is None:
+                            raise RuntimeError("directive_tool_missing")
+                        response = self._execute_tool_request(
+                            tool_request=tool_request,
+                            user_id=user_id,
+                            surface="llm",
+                            runtime_mode="READY",
+                        )
                         self._log_llm_selection(
                             trace_id=trace_id,
                             provider=None,

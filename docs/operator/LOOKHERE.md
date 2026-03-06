@@ -40,6 +40,12 @@ Runtime mode contract (all surfaces):
 - `DEGRADED`: partial operation with one next action.
 - `FAILED`: deterministic error block with trace id.
 
+Tool execution contract:
+- LLM tool requests are validated via `agent/tool_contract.py`.
+- Execution and permission gating are centralized in:
+  - `agent/tool_executor.py`
+  - `agent/permission_contract.py`
+
 ## Timers
 
 - Observe: `personal-agent-observe.service` + `personal-agent-observe.timer`

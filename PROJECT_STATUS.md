@@ -50,6 +50,18 @@ Single operator entrypoint:
 - Truthfulness rule:
   - user-facing provider/model identity can explicitly be `unknown` when certainty is missing.
 
+## Tool Execution Contract
+- Canonical LLM tool request schema: `agent/tool_contract.py`
+  - fields: `tool`, `args`, `reason`, `read_only`, `confidence`
+  - strict allowlist of supported tools
+- Single execution gate: `agent/tool_executor.py`
+  - request validation
+  - permission decision
+  - deterministic execution envelope
+- Single permission decision helper: `agent/permission_contract.py`
+  - read-only/write gating semantics are centralized
+  - block reasons + next actions are deterministic and reused
+
 ## Remaining Rough Edges
 - Root-level docs are now canonicalized, but some historical wording remains inside archived files.
 - Some legacy fallback strings can still appear in older persisted notifications until they roll out.

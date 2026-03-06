@@ -59,6 +59,16 @@ Service startup
   - `DEGRADED`
   - `FAILED`
 
+## LLM Tool-Use Contract
+
+- Canonical LLM tool request schema is centralized in `agent/tool_contract.py`.
+- A single execution gate in `agent/tool_executor.py` validates, authorizes, executes, and returns deterministic results.
+- Permission decisions are centralized in `agent/permission_contract.py`:
+  - one allow/deny decision format
+  - one reason string set
+  - one next-action policy for blocked actions
+- Orchestrator LLM tool requests, directive shims, and deterministic heuristic tool paths share this execution gate.
+
 ## Surface Routing
 
 - CLI (`python -m agent`): operator workflows (`doctor/status/health/brief/logs/version`).

@@ -24,6 +24,13 @@ This file captures practical guarantees that should remain stable unless intenti
   - `DEGRADED`
   - `FAILED`
 - One deterministic next action for degraded/failed user-facing states.
+- One deterministic LLM tool-use schema (`agent/tool_contract.py`) for agent actions.
+- One execution gate (`agent/tool_executor.py`) and one permission decision helper (`agent/permission_contract.py`) for tool execution semantics.
+- Stable structured tool logs:
+  - `tool.request`
+  - `tool.decision`
+  - `tool.execute`
+  - `tool.result`
 
 ## Compatibility Expectations
 

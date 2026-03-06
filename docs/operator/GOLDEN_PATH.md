@@ -6,6 +6,11 @@
 - `DEGRADED`: short degraded status + one next action.
 - `FAILED`: deterministic error block (trace + component + next_action).
 
+## Tool Execution Path
+- LLM-driven actions use one contract (`agent/tool_contract.py`) and one executor (`agent/tool_executor.py`).
+- Read-only checks stay available in degraded/bootstrap when possible.
+- Write actions remain policy-gated and may be blocked with one explicit next step.
+
 ## When Everything Works
 1. Restart service: `systemctl --user restart personal-agent-api.service`
 2. Verify: `python -m agent status`
