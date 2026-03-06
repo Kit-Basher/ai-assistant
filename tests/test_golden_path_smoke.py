@@ -82,6 +82,31 @@ class TestGoldenPathSmoke(unittest.TestCase):
             self.assertEqual(0, cli.main(["version"]))
 
     def test_telegram_routing_smoke(self) -> None:
+        class _Runtime:
+            version = "0.2.0"
+            git_commit = "abc123def456"
+
+            def ready_status(self) -> dict[str, object]:
+                return {
+                    "ok": True,
+                    "ready": True,
+                    "runtime_mode": "READY",
+                    "runtime_status": {
+                        "runtime_mode": "READY",
+                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                    },
+                    "telegram": {"state": "running"},
+                }
+
+            def llm_status(self) -> dict[str, object]:
+                return {
+                    "default_provider": "ollama",
+                    "default_model": "ollama:qwen2.5:3b-instruct",
+                    "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                    "active_provider_health": {"status": "ok"},
+                    "active_model_health": {"status": "ok"},
+                }
+
         with tempfile.TemporaryDirectory() as tmpdir:
             orchestrator = _FakeOrchestrator(reply_text="LLM_CHAT_REPLY")
             context = _FakeContext(
@@ -92,6 +117,7 @@ class TestGoldenPathSmoke(unittest.TestCase):
                     "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
                     "llm_fixit_store": SimpleNamespace(load=lambda: {"active": False}, save=lambda _x: _x, clear=lambda: None),
                     "audit_log": None,
+                    "runtime": _Runtime(),
                 }
             )
 
@@ -119,7 +145,9 @@ class TestGoldenPathSmoke(unittest.TestCase):
 
             status = _FakeUpdate(42, "show me the status")
             asyncio.run(_handle_message(status, context))
-            self.assertIn(("/status", "42"), orchestrator.calls)
+            status_text = str(status.effective_message.replies[-1]["text"] or "")
+            self.assertIn("runtime_mode: READY", status_text)
+            self.assertNotIn("ENABLE_WRITES", status_text)
 
             health = _FakeUpdate(42, "how is the bot health")
             asyncio.run(_handle_message(health, context))
@@ -168,4 +196,3 @@ class TestGoldenPathSmoke(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

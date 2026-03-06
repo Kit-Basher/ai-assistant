@@ -77,6 +77,37 @@ def _read_audit_rows(path: str) -> list[dict[str, object]]:
 
 
 class TestTelegramAuditLogging(unittest.TestCase):
+    @staticmethod
+    def _ready_runtime() -> object:
+        class _Runtime:
+            version = "0.2.0"
+            git_commit = "abc123def456"
+            started_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+            def ready_status(self) -> dict[str, object]:
+                return {
+                    "ok": True,
+                    "ready": True,
+                    "runtime_mode": "READY",
+                    "runtime_status": {
+                        "runtime_mode": "READY",
+                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "next_action": None,
+                    },
+                    "telegram": {"state": "running"},
+                }
+
+            def llm_status(self) -> dict[str, object]:
+                return {
+                    "default_provider": "ollama",
+                    "default_model": "ollama:qwen2.5:3b-instruct",
+                    "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                    "active_provider_health": {"status": "ok"},
+                    "active_model_health": {"status": "ok"},
+                }
+
+        return _Runtime()
+
     def test_help_phrase_returns_command_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"
@@ -93,6 +124,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                     "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
                     "llm_fixit_store": wizard_store,
                     "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
                 }
             )
 
@@ -470,6 +502,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                     "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
                     "llm_fixit_store": wizard_store,
                     "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
                 }
             )
 
@@ -517,7 +550,8 @@ class TestTelegramAuditLogging(unittest.TestCase):
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Setup status is unavailable right now.", reply_text)
+            self.assertIn("Setup state:", reply_text)
+            self.assertIn("Next:", reply_text)
             self.assertNotIn("Reply 1, 2, or 3.", reply_text)
             self.assertEqual([], orchestrator.calls)
 
@@ -572,6 +606,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                     "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
                     "llm_fixit_store": wizard_store,
                     "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
                 }
             )
 
@@ -579,10 +614,65 @@ class TestTelegramAuditLogging(unittest.TestCase):
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertEqual("status ok", reply_text)
+            self.assertIn("runtime_mode: READY", reply_text)
+            self.assertIn("telegram: running", reply_text)
             self.assertNotIn("Reply 1, 2, or 3.", reply_text)
             self.assertNotIn("LLM unavailable right now.", reply_text)
-            self.assertEqual([("/status", chat_id)], orchestrator.calls)
+            self.assertNotIn("ENABLE_WRITES", reply_text)
+            self.assertNotIn("Last disk_report", reply_text)
+            self.assertNotIn("Recent audits", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_health_bad_request_retry_preserves_readable_labels_and_paths(self) -> None:
+        class BadRequest(Exception):
+            pass
+
+        class _FlakyMessage(_FakeMessage):
+            def __init__(self, text: str) -> None:
+                super().__init__(text)
+                self._attempt = 0
+
+            async def reply_text(self, text: str, parse_mode: str | None = None, **kwargs: object) -> None:
+                _ = kwargs
+                self._attempt += 1
+                if self._attempt == 1:
+                    raise BadRequest("can't parse entities")
+                self.replies.append({"text": text, "parse_mode": parse_mode})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            health_text = (
+                "now_utc: 2026-03-06T12:00:00Z\n"
+                "uptime_sec: 42\n"
+                "schema_version: 3\n"
+                "db_path: /home/c/personal-agent/memory/agent.db"
+            )
+            orchestrator = _FakeOrchestrator(reply_text=health_text)
+            db = _FakeDB()
+            chat_id = "700001234"
+            update = _FakeUpdate(int(chat_id), "health")
+            update.effective_message = _FlakyMessage("health")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("now_utc", reply_text)
+            self.assertIn("uptime_sec", reply_text)
+            self.assertIn("schema_version", reply_text)
+            self.assertIn("/home/c/personal-agent/memory/agent.db", reply_text)
 
     def test_health_route_bad_request_retries_plain_and_logs_once(self) -> None:
         class BadRequest(Exception):

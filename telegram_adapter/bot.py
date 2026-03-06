@@ -52,6 +52,7 @@ from agent.onboarding_contract import ONBOARDING_READY
 from agent.setup_wizard import (
     build_setup_result,
     render_telegram_setup_text,
+    run_setup_wizard,
 )
 from agent.secret_store import SecretStore
 from agent.startup_checks import run_startup_checks
@@ -313,6 +314,10 @@ def _deterministic_text_command(text: str) -> str | None:
     normalized = _normalize_user_text(text)
     if not normalized:
         return None
+    if normalized in {"memory", "/memory"}:
+        return "/memory"
+    if normalized in {"brief", "breif", "/brief", "/breif"}:
+        return "/brief"
     if _contains_any(
         normalized,
         (
@@ -379,6 +384,7 @@ def _deterministic_operator_reply(
     text: str,
     *,
     runtime: Any | None = None,
+    trace_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     normalized = _normalize_user_text(text)
     if _contains_any(
@@ -393,7 +399,7 @@ def _deterministic_operator_reply(
             "what do i do next",
         ),
     ):
-        return _setup_help_text(runtime=runtime), "setup"
+        return _setup_help_text(runtime=runtime, trace_id=trace_id), "setup"
     if _contains_any(
         normalized,
         (
@@ -423,8 +429,15 @@ def _truncate_telegram_text(text: str, *, max_len: int = 3900) -> tuple[str, boo
 
 def _plain_text_retry_variant(text: str) -> str:
     value = str(text or "")
-    plain = re.sub(r"[*_`\[\]\(\)~>#+\-=|{}.!]", "", value)
-    plain = plain.replace("\r", " ").replace("\x00", " ").strip()
+    value = value.replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
+    chars: list[str] = []
+    for ch in value:
+        code = ord(ch)
+        if ch in {"\n", "\t"} or code >= 32:
+            chars.append(ch)
+        else:
+            chars.append(" ")
+    plain = "".join(chars).strip()
     return plain or "Message unavailable."
 
 
@@ -475,7 +488,10 @@ async def _send_reply(
                     sort_keys=True,
                 ),
             )
-            retry_text, retry_truncated = _truncate_telegram_text(_plain_text_retry_variant(primary_text))
+            lowered_error = str(exc or "").lower()
+            plain_retry = bool(parse_mode is not None) or "parse entities" in lowered_error
+            retry_base = _plain_text_retry_variant(primary_text) if plain_retry else primary_text
+            retry_text, retry_truncated = _truncate_telegram_text(retry_base)
             retry_kwargs = dict(kwargs)
             retry_kwargs["parse_mode"] = None
             retry_kwargs["disable_web_page_preview"] = True
@@ -715,6 +731,17 @@ def _runtime_status_text(bot_data: dict[str, Any]) -> str:
             started_ts = pytime.time()
         uptime_seconds = max(0, int(pytime.time() - started_ts))
 
+    ready_payload: dict[str, Any] = {}
+    if runtime is not None and hasattr(runtime, "ready_status"):
+        try:
+            payload = runtime.ready_status()  # type: ignore[attr-defined]
+            if isinstance(payload, dict):
+                ready_payload = payload
+        except Exception:
+            ready_payload = {}
+    if not isinstance(ready_payload, dict):
+        ready_payload = {}
+
     llm_status = _llm_status_payload(runtime)
     provider = str(llm_status.get("default_provider") or "").strip() or None
     model = (
@@ -748,19 +775,34 @@ def _runtime_status_text(bot_data: dict[str, Any]) -> str:
         failure_code = "provider_unhealthy"
     elif model_state != "ok":
         failure_code = "model_unhealthy"
-    runtime_status = normalize_user_facing_status(
-        ready=ready,
-        bootstrap_required=bootstrap_needed(llm_status=llm_status),
-        failure_code=failure_code,
-        provider=provider,
-        model=model,
-        local_providers={"ollama"},
+    runtime_status = (
+        ready_payload.get("runtime_status")
+        if isinstance(ready_payload.get("runtime_status"), dict)
+        else {}
     )
+    if not runtime_status:
+        runtime_status = normalize_user_facing_status(
+            ready=ready,
+            bootstrap_required=bootstrap_needed(llm_status=llm_status),
+            failure_code=failure_code,
+            provider=provider,
+            model=model,
+            local_providers={"ollama"},
+        )
     summary = str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
+    runtime_mode = str(runtime_status.get("runtime_mode") or "DEGRADED").strip().upper() or "DEGRADED"
+    telegram_state = (
+        str(((ready_payload.get("telegram") or {}).get("state")) if isinstance(ready_payload.get("telegram"), dict) else "")
+        .strip()
+        .lower()
+        or "unknown"
+    )
 
     return (
         f"✅ Agent is running (v{version}, commit {commit_short}, uptime {uptime_seconds}s).\n"
-        f"{summary}"
+        f"{summary}\n"
+        f"runtime_mode: {runtime_mode}\n"
+        f"telegram: {telegram_state}"
     )
 
 
@@ -779,33 +821,41 @@ def _doctor_summary_text() -> str:
 
 
 def _setup_result_from_runtime(runtime: Any | None) -> Any | None:
-    if runtime is None:
-        return None
     ready_payload: dict[str, Any] = {}
     llm_status: dict[str, Any] = {}
-    if hasattr(runtime, "ready_status"):
+    if runtime is not None:
+        if hasattr(runtime, "ready_status"):
+            try:
+                payload = runtime.ready_status()  # type: ignore[attr-defined]
+                if isinstance(payload, dict):
+                    ready_payload = payload
+            except Exception:
+                ready_payload = {}
+        if hasattr(runtime, "llm_status"):
+            try:
+                payload = runtime.llm_status()  # type: ignore[attr-defined]
+                if isinstance(payload, dict):
+                    llm_status = payload
+            except Exception:
+                llm_status = {}
+    if runtime is not None:
         try:
-            payload = runtime.ready_status()  # type: ignore[attr-defined]
-            if isinstance(payload, dict):
-                ready_payload = payload
+            return build_setup_result(
+                ready_payload=ready_payload,
+                llm_status=llm_status,
+                api_reachable=True,
+                dry_run=True,
+            )
         except Exception:
-            ready_payload = {}
-    if hasattr(runtime, "llm_status"):
-        try:
-            payload = runtime.llm_status()  # type: ignore[attr-defined]
-            if isinstance(payload, dict):
-                llm_status = payload
-        except Exception:
-            llm_status = {}
+            pass
     try:
-        return build_setup_result(
-            ready_payload=ready_payload,
-            llm_status=llm_status,
-            api_reachable=True,
-            dry_run=True,
-        )
+        return run_setup_wizard(dry_run=True)
     except Exception:
         return None
+
+
+def _setup_trace_id() -> str:
+    return f"tg-setup-{int(pytime.time())}-{os.getpid()}"
 
 
 def _telegram_help_text(*, runtime: Any | None) -> str:
@@ -824,10 +874,15 @@ def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str 
     return None, None
 
 
-def _setup_help_text(*, runtime: Any | None) -> str:
+def _setup_help_text(*, runtime: Any | None, trace_id: str | None = None) -> str:
     setup_result = _setup_result_from_runtime(runtime)
     if setup_result is None:
-        return "Setup status is unavailable right now. Run: python -m agent setup --dry-run"
+        return deterministic_error_message(
+            title="❌ Setup status is unavailable",
+            trace_id=str(trace_id or _setup_trace_id()),
+            component="telegram.setup",
+            next_action="run `python -m agent setup --dry-run`",
+        )
     return render_telegram_setup_text(setup_result)
 
 
@@ -1893,6 +1948,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         operator_reply, operator_route = _deterministic_operator_reply(
             text,
             runtime=bot_data.get("runtime"),
+            trace_id=trace_id,
         )
         smalltalk_reply, smalltalk_route = _smalltalk_preroute_reply(text, bot_data)
         has_canonical_text_route = any(
@@ -2121,6 +2177,64 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 {
                     "chat_id_redacted": _redact_chat_id(chat_id),
                     "route": "doctor",
+                    "trace_id": trace_id,
+                },
+            )
+            return
+        if deterministic_command == "/status":
+            status_text = _runtime_status_text(bot_data)
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route="status",
+                outcome="handled",
+            )
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route="status",
+                text=status_text,
+                trace_id=trace_id,
+            )
+            log_event(
+                log_path,
+                "telegram_message",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": "status",
+                    "trace_id": trace_id,
+                },
+            )
+            return
+        if deterministic_command in {"/health", "/brief", "/memory"}:
+            route = deterministic_command.lstrip("/")
+            response = orchestrator.handle_message(deterministic_command, user_id=chat_id)
+            reply_text = _safe_reply_text(response.text if response else "")
+            _safe_append_telegram_message_audit(
+                audit_log=audit_log,
+                action="telegram.message.handled",
+                chat_id=chat_id,
+                message_kind="text",
+                route=route,
+                outcome="handled",
+            )
+            await _send_reply(
+                message=update.effective_message,
+                log_path=log_path,
+                chat_id=chat_id,
+                route=route,
+                text=reply_text,
+                trace_id=trace_id,
+            )
+            log_event(
+                log_path,
+                "telegram_message",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "route": route,
                     "trace_id": trace_id,
                 },
             )

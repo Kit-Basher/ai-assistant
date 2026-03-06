@@ -40,6 +40,7 @@
 4. Talk to Telegram naturally.
 5. Use `doctor/status/health/brief` when needed.
 6. Telegram `help/setup/status/health/doctor/memory` semantics match the CLI/runtime contracts.
+7. Telegram typo handling keeps continuity paths safe (`breif` -> brief, `memory/resume` -> continuity summary).
 
 ## When LLM Is Down
 - Telegram/CLI should show deterministic setup or recovery guidance.

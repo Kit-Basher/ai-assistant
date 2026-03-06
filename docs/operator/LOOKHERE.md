@@ -77,6 +77,7 @@ Continuity contract:
 - `memory` (or plain text: `what are we doing?`, `where were we?`, `resume`)
 
 All of the above now use the same canonical runtime/setup/doctor/memory contracts as the unified CLI.
+Telegram plain text `status` is canonical runtime status output (legacy ENABLE_WRITES/audit block removed).
 
 ## Logs
 

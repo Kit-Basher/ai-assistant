@@ -109,6 +109,48 @@ class _FakeRuntime:
     def llm_status(self) -> dict[str, object]:
         return dict(self._status_payload)
 
+    def ready_status(self) -> dict[str, object]:
+        model = str(
+            self._status_payload.get("resolved_default_model")
+            or self._status_payload.get("default_model")
+            or ""
+        ).strip()
+        provider = str(self._status_payload.get("default_provider") or "").strip().lower()
+        provider_health = (
+            self._status_payload.get("active_provider_health")
+            if isinstance(self._status_payload.get("active_provider_health"), dict)
+            else {"status": "ok" if model else "down"}
+        )
+        model_health = (
+            self._status_payload.get("active_model_health")
+            if isinstance(self._status_payload.get("active_model_health"), dict)
+            else {"status": "ok" if model else "down"}
+        )
+        ready = bool(model and str(provider_health.get("status") or "").strip().lower() == "ok")
+        runtime_mode = "READY" if ready else "BOOTSTRAP_REQUIRED"
+        summary = (
+            f"Agent is ready. Using {provider} / {model}."
+            if ready
+            else "Setup needed. No chat model is ready yet."
+        )
+        return {
+            "ok": True,
+            "ready": ready,
+            "phase": "ready" if ready else "degraded",
+            "runtime_mode": runtime_mode,
+            "runtime_status": {
+                "runtime_mode": runtime_mode,
+                "summary": summary,
+                "next_action": None if ready else "Run: python -m agent setup",
+            },
+            "telegram": {"state": "running", "configured": True},
+            "onboarding": {
+                "state": "READY" if ready else "LLM_MISSING",
+                "summary": "Setup complete. The agent is ready." if ready else "No chat model available right now.",
+                "next_action": "No action needed." if ready else "Run: python -m agent setup",
+            },
+        }
+
     def llm_availability_state(self) -> dict[str, object]:
         if self._llm_available:
             return {"available": True, "reason": "ok"}
@@ -252,6 +294,99 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertEqual("chat fallback", reply)
             self.assertNotIn("Reply 1, 2, or 3.", reply)
 
+    def test_memory_text_routes_to_memory_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            runtime._llm_available = False
+            runtime._status_payload = {
+                "ok": True,
+                "default_provider": "ollama",
+                "default_model": None,
+                "resolved_default_model": None,
+                "allow_remote_fallback": False,
+                "active_provider_health": {"status": "down"},
+                "active_model_health": {"status": "down"},
+                "providers": [{"id": "ollama", "enabled": True, "health": {"status": "down"}}],
+                "models": [],
+            }
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "memory")
+            asyncio.run(_handle_message(update, context))
+            self.assertEqual([("/memory", "12345")], orchestrator.calls)
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("chat fallback", reply)
+            self.assertNotIn("Setup state:", reply)
+
+    def test_resume_text_routes_to_memory_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            runtime._llm_available = False
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "resume")
+            asyncio.run(_handle_message(update, context))
+            self.assertEqual([("/memory", "12345")], orchestrator.calls)
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("chat fallback", reply)
+
+    def test_breif_text_routes_to_brief_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            runtime._llm_available = False
+            runtime._status_payload = {
+                "ok": True,
+                "default_provider": "ollama",
+                "default_model": None,
+                "resolved_default_model": None,
+                "allow_remote_fallback": False,
+                "active_provider_health": {"status": "down"},
+                "active_model_health": {"status": "down"},
+                "providers": [{"id": "ollama", "enabled": True, "health": {"status": "down"}}],
+                "models": [],
+            }
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "breif")
+            asyncio.run(_handle_message(update, context))
+            self.assertEqual([("/brief", "12345")], orchestrator.calls)
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("chat fallback", reply)
+            self.assertNotIn("Setup state:", reply)
+
     def test_setup_text_uses_bootstrap_guidance_when_chat_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = _FakeRuntime()
@@ -287,6 +422,60 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertIn("Next:", reply)
             self.assertNotIn("Reply 1, 2, or 3.", reply)
             self.assertNotIn("LLM unavailable right now.", reply)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_setup_text_returns_complete_summary_when_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "setup")
+            asyncio.run(_handle_message(update, context))
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Setup is complete", reply)
+            self.assertNotIn("status is unavailable", reply.lower())
+            self.assertEqual([], orchestrator.calls)
+
+    def test_setup_text_reports_not_started_when_runtime_state_empty(self) -> None:
+        class _EmptyRuntime(_FakeRuntime):
+            def ready_status(self) -> dict[str, object]:
+                return {}
+
+            def llm_status(self) -> dict[str, object]:
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _EmptyRuntime()
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "setup")
+            asyncio.run(_handle_message(update, context))
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Setup state: not started", reply)
+            self.assertIn("Next:", reply)
+            self.assertNotIn("status is unavailable", reply.lower())
             self.assertEqual([], orchestrator.calls)
 
     def test_help_prioritizes_setup_when_not_ready(self) -> None:

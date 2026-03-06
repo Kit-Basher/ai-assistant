@@ -40,6 +40,7 @@ Unified CLI:
 3. Talk to Telegram in plain English.
 4. If anything looks wrong, run `python -m agent doctor` and follow the single `Next action`.
 5. Telegram `help/setup/status/health/doctor/memory` now uses the same canonical contracts as CLI/runtime helpers.
+6. Telegram plain-text `status` now uses canonical runtime contract output (no legacy audit/status block).
 
 Runtime contract (all surfaces use the same mode names):
 - `READY`: normal operation.
