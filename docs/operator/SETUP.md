@@ -1,5 +1,7 @@
 # Setup
 
+Canonical product/runtime source: [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
+
 Canonical first-run command:
 
 - `python -m agent setup`
@@ -11,6 +13,7 @@ Canonical first-run command:
 1. Run `python -m agent setup`.
 2. Follow exactly one `Next action`.
 3. Re-run `python -m agent status` until runtime is stable.
+4. Use native UI as primary setup/recovery surface; Telegram mirrors runtime setup state when enabled.
 
 ## Setup Complete
 

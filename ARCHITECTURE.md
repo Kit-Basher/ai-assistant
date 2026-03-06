@@ -1,14 +1,17 @@
 # Architecture (Current Branch)
 
 This file describes the structural shape of the project as implemented on `brief-v0.2-clean`.
+Canonical product/runtime target is defined in [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
+v1 functional focus is local-first PC health management with read-only diagnostics/guidance first.
 
 ## Runtime Entry Points
 
-- Telegram bot: `telegram_adapter/bot.py`
-- Local API server: `agent/api_server.py`
+- Core runtime service (authoritative): `agent/api_server.py`
+- Native UI (primary user surface): served by core runtime (`GET /` from `agent/webui/dist`)
 - Unified operator CLI: `python -m agent` (`agent/cli.py`, `agent/__main__.py`)
+- Optional Telegram adapter surface: `telegram_adapter/bot.py`
 
-Both runtimes depend on shared core modules (`agent/orchestrator.py`, skills, memory DB, llm router).
+All surfaces must depend on shared core modules (`agent/orchestrator.py`, skills, memory DB, llm router) and must not become separate business-logic owners.
 
 ## Source Of Truth
 
@@ -36,9 +39,10 @@ Telegram/API input (untrusted)
 Service startup
   -> `agent/startup_checks.py` (fast PASS/WARN/FAIL checks)
   -> runtime init
-  -> API listen + embedded Telegram runner
-  -> user sends plain text on Telegram
-  -> deterministic pre-routing (doctor/status/health/brief/setup/help)
+  -> API listen + native UI available
+  -> optional embedded Telegram runner (transport only)
+  -> user sends natural-language request (UI/CLI/Telegram)
+  -> deterministic pre-routing at transport boundary when needed
   -> orchestrator + LLM chat path
   -> deterministic fallback/bootstrapping only when LLM is unavailable
 
@@ -114,7 +118,7 @@ Service startup
 - Scheduling entrypoints:
   - observe: `agent/scheduled_observe.py`
   - daily brief: `agent/scheduled_daily_brief.py`
-  - optional in-process snapshots in Telegram runtime when enabled
+  - transport adapters should not own scheduling/business logic
 
 ## Data/State Boundaries
 

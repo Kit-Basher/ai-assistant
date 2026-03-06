@@ -3,13 +3,13 @@
 Branch: `brief-v0.2-clean`  
 HEAD: `see git rev-parse --short HEAD`  
 Date (UTC): `2026-03-06`  
-Tests: `770 passed in 15.67s (pytest -q)`
+Tests: `832 passed in 16.28s (pytest -q)`
 
 ## Canonical
 This file is the authoritative current-state document for this branch.
-If any other doc disagrees with this file, trust this file.
+If any other doc disagrees with this file, trust `PRODUCT_RUNTIME_SPEC.md` first, then this file.
 Documentation hierarchy:
-- root: `README.md`, `ARCHITECTURE.md`, `PROJECT_STATUS.md`, `STABILITY.md`
+- root: `PRODUCT_RUNTIME_SPEC.md`, `README.md`, `ARCHITECTURE.md`, `PROJECT_STATUS.md`, `STABILITY.md`
 - operator docs: `docs/operator/*`
 - design docs: `docs/design/*`
 - history docs: `docs/history/*` and `docs/archive/*`
@@ -24,15 +24,17 @@ Single operator entrypoint:
 - `python -m agent memory`
 
 ## Current Product Shape
+- v1 scope: local-first PC health management, read-only guidance first.
 - Golden path:
   1. Start `personal-agent-api.service`
   2. Run `python -m agent setup --dry-run`
   3. Verify `python -m agent status`
-  4. Use Telegram in plain English
+  4. Use native UI as primary user surface
   5. Use `doctor/status/health/brief` deterministically when needed
-  6. Telegram text commands (`help/setup/status/health/doctor/memory`) are routed through the same canonical runtime/setup/doctor/memory contracts as CLI.
-  7. Telegram `status` no longer uses legacy ENABLE_WRITES/audit text; it uses canonical runtime mode/next-action semantics.
-  8. Meta summary actions (`memory/setup/status/doctor/resume`) do not overwrite continuity `last action`.
+  6. Use Telegram as optional transport surface when enabled
+  7. Telegram text commands (`help/setup/status/health/doctor/memory`) are routed through the same canonical runtime/setup/doctor/memory contracts as CLI.
+  8. Telegram `status` no longer uses legacy ENABLE_WRITES/audit text; it uses canonical runtime mode/next-action semantics.
+  9. Meta summary actions (`memory/setup/status/doctor/resume`) do not overwrite continuity `last action`.
 - Startup safety:
   - API + Telegram startup checks run via `agent/startup_checks.py`
   - FAIL exits non-zero with one next action
@@ -145,7 +147,8 @@ Single operator entrypoint:
   - HF local acquisition is always confirmation-gated: no download/install runs before explicit `confirm=true`.
 
 ## Runtime Note
-- Telegram bot polling now runs inside `personal-agent-api.service` when a Telegram token is configured; no separate `python -m telegram_adapter` process is required.
+- Default runtime model is one main service (`personal-agent-api.service`).
+- Telegram is optional and treated as a transport adapter surface (embedded today by default when token is configured).
 - Readiness check after restart:
   1. `systemctl --user restart personal-agent-api.service`
   2. `python tools/wait_ready.py`

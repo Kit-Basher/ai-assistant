@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+"""Telegram transport adapter.
+
+This module should stay transport-focused; core product/runtime decisions belong to the shared runtime contracts.
+"""
+
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone, time

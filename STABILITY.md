@@ -1,10 +1,13 @@
 # Stability Guarantees (Current Branch)
 
 This file captures practical guarantees that should remain stable unless intentionally changed and documented.
+Canonical product/runtime target: [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
 
 ## Core Guarantees
 
 - Local-first operation: core runtime works with local DB and local config paths.
+- One core runtime brain owns business logic; surfaces must remain adapters.
+- Default install uses one main runtime service; optional surfaces must remain thin.
 - Telegram and API input are treated as untrusted.
 - ModelOps execution is constrained to explicit, whitelisted model-management actions.
 - Permission defaults are restrictive (`manual_confirm` mode with allow/deny action map).
@@ -16,6 +19,7 @@ This file captures practical guarantees that should remain stable unless intenti
 - Deterministic doctor output ordering and stable JSON/text field names.
 - No silent token leakage in logs/doctor/CLI output (redaction by default).
 - One canonical help text per user surface (Telegram and CLI paths).
+- Native UI is the primary end-user surface; Telegram is optional transport.
 - Truthful identity responses via centralized identity helper.
 - Telegram safe-send fallback: truncate, retry plain text on BadRequest, and emit `telegram.out` after successful delivery.
 - Unified runtime contract across user surfaces (`agent/runtime_contract.py`) with stable mode names:

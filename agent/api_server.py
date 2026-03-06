@@ -476,6 +476,11 @@ def compute_autopilot_bootstrap_apply_policy(runtime: "AgentRuntime") -> dict[st
 
 
 class AgentRuntime:
+    """Authoritative core runtime.
+
+    Business logic and shared state belong here; surfaces should call this runtime instead of duplicating behavior.
+    """
+
     @staticmethod
     def _runtime_state_path(
         config: Config,

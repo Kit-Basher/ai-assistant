@@ -235,6 +235,11 @@ class OrchestratorResponse:
 
 
 class Orchestrator:
+    """Core runtime orchestration layer.
+
+    Product/business logic belongs here (or shared core modules), not in transport adapters.
+    """
+
     def __init__(
         self,
         db: MemoryDB,

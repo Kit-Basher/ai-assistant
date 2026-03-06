@@ -2,13 +2,16 @@
 
 ## Source Priority
 
+- Product/runtime contract: `PRODUCT_RUNTIME_SPEC.md`
 - Current branch reality: `PROJECT_STATUS.md`
 - Mission/behavior contract: `docs/design/CANONICAL_HANDOFF_V3.md`
 - Setup/API/UI details: `README.md`
 
 ## Runtime Modes
 
-- Canonical runtime: `personal-agent-api.service` (API + embedded Telegram)
+- Canonical runtime: `personal-agent-api.service` (core runtime brain)
+- Native UI is primary user surface.
+- Telegram is optional transport adapter; it must not become a second brain.
 - Manual debug runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
 
 ## Service Control

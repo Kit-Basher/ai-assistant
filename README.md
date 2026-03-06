@@ -1,15 +1,18 @@
-# Personal Agent (Telegram-first)
+# Personal Agent (Local-first PC Health Agent)
 
 Local-first personal assistant with SQLite memory, deterministic routing, and systemd-managed scheduling.
+Canonical product/runtime truth: [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
+v1 scope is local-first PC health management with read-only diagnostics/guidance first; skill packs extend capabilities later.
 
 ## Documentation Order (Source of Truth)
 Use docs in this order when context conflicts:
-1. `README.md`
-2. `ARCHITECTURE.md`
-3. `PROJECT_STATUS.md`
-4. `docs/operator/*`
-5. `docs/design/*`
-6. `docs/history/*`
+1. `PRODUCT_RUNTIME_SPEC.md`
+2. `README.md`
+3. `ARCHITECTURE.md`
+4. `PROJECT_STATUS.md`
+5. `docs/operator/*`
+6. `docs/design/*`
+7. `docs/history/*`
 
 ## Getting Started In 60 Seconds
 1. Create venv:
@@ -37,10 +40,11 @@ Unified CLI:
 ## Golden Path
 1. Start/restart the API service.
 2. Verify with `python -m agent status`.
-3. Talk to Telegram in plain English.
-4. If anything looks wrong, run `python -m agent doctor` and follow the single `Next action`.
-5. Telegram `help/setup/status/health/doctor/memory` now uses the same canonical contracts as CLI/runtime helpers.
-6. Telegram plain-text `status` now uses canonical runtime contract output (no legacy audit/status block).
+3. Use native UI or CLI first for setup/status.
+4. Talk to Telegram in plain English if enabled.
+5. If anything looks wrong, run `python -m agent doctor` and follow the single `Next action`.
+6. Telegram is an optional transport surface; it does not own runtime business logic.
+7. Telegram `help/setup/status/health/doctor/memory` uses the same canonical contracts as CLI/runtime helpers.
 
 Runtime contract (all surfaces use the same mode names):
 - `READY`: normal operation.
@@ -84,12 +88,14 @@ Recovery contract (single best next action per mode):
 - `python -m agent doctor`
 
 ## First 5 Minutes
-1. Set Telegram token: `python -m agent.secrets set telegram:bot_token`
+1. Start service: `systemctl --user restart personal-agent-api.service`
 2. Run setup guide: `python -m agent setup`
-3. Restart Telegram service: `systemctl --user restart personal-agent-telegram.service`
-4. Verify: `python -m agent status`
-5. Diagnose if needed: `python -m agent doctor`
-6. Send Telegram message: `help`
+3. Verify: `python -m agent status`
+4. Diagnose if needed: `python -m agent doctor`
+5. Optional Telegram transport:
+   - set token: `python -m agent.secrets set telegram:bot_token`
+   - restart telegram service: `systemctl --user restart personal-agent-telegram.service`
+   - send Telegram message: `help`
 
 ## Troubleshooting
 - First step for any issue: `python -m agent doctor`

@@ -1,5 +1,7 @@
 # Golden Path
 
+Canonical product/runtime source: [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
+
 ## Runtime Modes
 - `READY`: normal operation.
 - `BOOTSTRAP_REQUIRED`: setup guidance only.
@@ -38,11 +40,12 @@
 1. Restart service: `systemctl --user restart personal-agent-api.service`
 2. Verify setup: `python -m agent setup --dry-run`
 3. Verify runtime: `python -m agent status`
-4. Talk to Telegram naturally.
-5. Use `doctor/status/health/brief` when needed.
-6. Telegram `help/setup/status/health/doctor/memory` semantics match the CLI/runtime contracts.
-7. Telegram typo handling keeps continuity paths safe (`breif` -> brief, `memory/resume` -> continuity summary).
-8. `READY` semantics are aligned across CLI and Telegram from the same runtime readiness source.
+4. Use native UI as primary user path.
+5. Talk to Telegram naturally if enabled.
+6. Use `doctor/status/health/brief` when needed.
+7. Telegram `help/setup/status/health/doctor/memory` semantics match the CLI/runtime contracts.
+8. Telegram typo handling keeps continuity paths safe (`breif` -> brief, `memory/resume` -> continuity summary).
+9. `READY` semantics are aligned across CLI and Telegram from the same runtime readiness source.
 
 ## When LLM Is Down
 - Telegram/CLI should show deterministic setup or recovery guidance.
