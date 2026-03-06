@@ -43,6 +43,8 @@ from agent.onboarding_contract import onboarding_next_action, onboarding_summary
 from agent.recovery_contract import recovery_next_action, recovery_summary
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import deterministic_error_message
+from agent.skills.system_health import collect_system_health
+from agent.skills.system_health_summary import render_system_health_summary
 from agent.tool_contract import normalize_tool_request
 from agent.tool_executor import ToolExecutor
 from agent.memory_runtime import MemoryRuntime
@@ -296,6 +298,7 @@ class Orchestrator:
                 "status": self._tool_handler_status,
                 "health": self._tool_handler_health,
                 "doctor": self._tool_handler_doctor,
+                "observe_system_health": self._tool_handler_observe_system_health,
                 "observe_now": self._tool_handler_observe_now,
             },
             emit_log=self._emit_tool_log,
@@ -386,6 +389,7 @@ class Orchestrator:
             "/status": "status",
             "/health": "health",
             "/doctor": "doctor",
+            "/health_system": "observe_system_health",
             "/observe_now": "observe_now",
         }
         tool_name = command_map.get(normalized)
@@ -544,6 +548,16 @@ class Orchestrator:
             "Run: python -m agent doctor --json for details."
         )
         return {"ok": True, "user_text": text, "data": {"trace_id": report.trace_id, "summary_status": report.summary_status}}
+
+    def _tool_handler_observe_system_health(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
+        _ = request
+        _ = user_id
+        data = collect_system_health()
+        return {
+            "ok": True,
+            "user_text": render_system_health_summary(data),
+            "data": {"system_health": data},
+        }
 
     def _tool_handler_observe_now(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
         _ = request
@@ -869,6 +883,12 @@ class Orchestrator:
         normalized = " ".join(str(user_text or "").lower().split()).strip()
         if not normalized:
             return None
+        if normalized == "health":
+            return "/health_system"
+        if re.search(r"(how is my pc|check system|how is the computer running)", normalized):
+            return "/health_system"
+        if re.search(r"(system health|pc health|computer health)", normalized):
+            return "/health_system"
         if re.search(r"(changed|what changed).*(pc|computer|system)", normalized):
             return "/brief"
         if re.search(r"(status|uptime|agent status|bot status)", normalized):
@@ -2430,6 +2450,17 @@ class Orchestrator:
                 user_id,
                 runtime_mode=("READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"),
             )
+            if not cmd:
+                tool_command = self._heuristic_llm_command(effective_user_text)
+                if tool_command == "/health_system":
+                    tool_request = self._command_to_tool_request(tool_command, reason="deterministic_system_health")
+                    if tool_request is not None:
+                        return self._execute_tool_request(
+                            tool_request=tool_request,
+                            user_id=user_id,
+                            surface="orchestrator",
+                            runtime_mode=self._tool_runtime_mode(),
+                        )
             if cmd:
                 try:
                     memory_ingest.ingest_event(
@@ -4011,6 +4042,14 @@ class Orchestrator:
                         "observe_now",
                         {},
                         [],
+                    )
+
+                if cmd.name == "health_system":
+                    self._record_conversation_topic(user_id, "system_health", "command")
+                    data = collect_system_health()
+                    return OrchestratorResponse(
+                        render_system_health_summary(data),
+                        {"system_health": data},
                     )
 
                 if cmd.name == "what_if":

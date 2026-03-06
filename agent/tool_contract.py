@@ -8,6 +8,7 @@ _TOOL_SPECS: dict[str, dict[str, Any]] = {
     "status": {"read_only": True},
     "health": {"read_only": True},
     "doctor": {"read_only": True},
+    "observe_system_health": {"read_only": True},
     "observe_now": {"read_only": False},
 }
 
@@ -78,4 +79,3 @@ __all__ = [
     "tool_request_to_public_summary",
     "validate_tool_request",
 ]
-

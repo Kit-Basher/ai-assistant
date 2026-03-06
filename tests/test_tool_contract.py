@@ -13,7 +13,7 @@ from agent.tool_contract import (
 class TestToolContract(unittest.TestCase):
     def test_supported_tools_allowlist_is_stable(self) -> None:
         self.assertEqual(
-            ("brief", "doctor", "health", "observe_now", "status"),
+            ("brief", "doctor", "health", "observe_now", "observe_system_health", "status"),
             supported_tools(),
         )
 

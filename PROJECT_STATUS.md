@@ -20,11 +20,13 @@ Single operator entrypoint:
 - `python -m agent doctor`
 - `python -m agent status`
 - `python -m agent health`
+- `python -m agent health_system`
 - `python -m agent brief`
 - `python -m agent memory`
 
 ## Current Product Shape
 - v1 scope: local-first PC health management, read-only guidance first.
+- PC health monitoring (read-only) implemented.
 - Golden path:
   1. Start `personal-agent-api.service`
   2. Run `python -m agent setup --dry-run`

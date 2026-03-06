@@ -32,10 +32,14 @@ Unified CLI:
 - `python -m agent doctor`
 - `python -m agent status`
 - `python -m agent health`
+- `python -m agent health_system`
 - `python -m agent brief`
 - `python -m agent memory`
 - `python -m agent logs`
 - `python -m agent version`
+
+Implemented now:
+- PC health monitoring (read-only) via `python -m agent health_system`
 
 ## Golden Path
 1. Start/restart the API service.

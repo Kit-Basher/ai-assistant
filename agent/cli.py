@@ -19,6 +19,8 @@ from agent.golden_path import (
 )
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.runtime_contract import normalize_user_facing_status
+from agent.skills.system_health import collect_system_health
+from agent.skills.system_health_summary import render_system_health_summary
 from agent.setup_wizard import render_setup_text, run_setup_wizard
 
 
@@ -190,6 +192,12 @@ def _cmd_health(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_health_system(_args: argparse.Namespace) -> int:
+    data = collect_system_health()
+    print(render_system_health_summary(data), flush=True)
+    return 0
+
+
 def _cmd_brief(args: argparse.Namespace) -> int:
     ok, payload_or_error = _http_json(
         base_url=str(args.api_base_url),
@@ -335,6 +343,8 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser = sub.add_parser("health", help="Show LLM/runtime health snapshot")
     health_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
 
+    sub.add_parser("health_system", help="Show local PC health summary")
+
     logs_parser = sub.add_parser("logs", help="Show recent agent logs")
     logs_parser.add_argument("--lines", type=int, default=50)
     logs_parser.add_argument("--path", default=None)
@@ -374,6 +384,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_setup(args)
     if command == "health":
         return _cmd_health(args)
+    if command == "health_system":
+        return _cmd_health_system(args)
     if command == "logs":
         return _cmd_logs(args)
     if command == "version":
