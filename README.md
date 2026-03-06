@@ -1,5 +1,3 @@
-# moltbook-v2
-
 > WARNING — DESIGN ONLY — DO NOT IMPLEMENT OR EXECUTE
 >
 > Status: Design-only / Do Not Implement Yet
