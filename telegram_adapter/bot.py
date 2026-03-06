@@ -59,10 +59,7 @@ from agent.permissions import PermissionStore
 from agent.runtime_contract import normalize_user_facing_status
 from agent.ux.clarify_suggest import (
     build_clarify_message,
-    build_suggest_message,
     classify_ambiguity,
-    parse_recovery_choice,
-    recovery_options,
 )
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore, confirm_token_for_plan_rows
 from memory.db import MemoryDB
@@ -80,10 +77,12 @@ _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
 _TELEGRAM_FALLBACK_TEXT = "I hit an internal error, but I’m still running. Try one of these:"
 _TELEGRAM_HELP_TEXT = (
     "Available commands:\n\n"
-    "doctor – run system diagnostics\n"
-    "status – agent status\n"
-    "health – runtime health\n"
-    "brief – system summary"
+    "doctor – diagnostics\n"
+    "setup – setup/recovery guidance\n"
+    "status – runtime status\n"
+    "health – health snapshot\n"
+    "brief – system summary\n"
+    "memory – what are we doing / resume"
 )
 _TELEGRAM_UNKNOWN_FALLBACK_TEXT = (
     "I can help with diagnostics, health, status, and summaries.\n"
@@ -98,13 +97,6 @@ _MODEL_PROVIDER_INTENTS = {
     "provider.help",
     "none",
 }
-_MODEL_PROVIDER_HELP_TEXT = (
-    "Setup commands:\n"
-    "- setup ollama\n"
-    "- setup openrouter\n"
-    "- what model are we using\n"
-    "- check models"
-)
 _NO_ACTIVE_CHOICE_TEXT = "No active choice right now. Ask me to check models or set up a provider."
 _WIZARD_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind", "quit"}
 _WIZARD_YES_TOKENS = {"1", "yes", "y", "ok", "ready"}
@@ -337,6 +329,7 @@ def _deterministic_text_command(text: str) -> str | None:
     if _contains_any(
         normalized,
         (
+            "health",
             "how is the bot health",
             "bot health",
             "health check",
@@ -834,10 +827,8 @@ def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str 
 def _setup_help_text(*, runtime: Any | None) -> str:
     setup_result = _setup_result_from_runtime(runtime)
     if setup_result is None:
-        return _MODEL_PROVIDER_HELP_TEXT
-    if str(setup_result.onboarding_state or "").strip().upper() != ONBOARDING_READY:
-        return render_telegram_setup_text(setup_result)
-    return "Setup is complete.\n" + _MODEL_PROVIDER_HELP_TEXT
+        return "Setup status is unavailable right now. Run: python -m agent setup --dry-run"
+    return render_telegram_setup_text(setup_result)
 
 
 def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
@@ -851,26 +842,6 @@ def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
     if not isinstance(state, dict):
         return False, "llm_unavailable"
     return bool(state.get("available", False)), str(state.get("reason") or "llm_unavailable").strip().lower()
-
-
-def _set_recovery_wizard_state(
-    *,
-    wizard_store: TelegramModelProviderWizardStore | None,
-    chat_id: str,
-    reason: str,
-) -> None:
-    if wizard_store is None:
-        return
-    _save_setup_state(
-        wizard_store,
-        chat_id=chat_id,
-        flow="recovery",
-        step="awaiting_recovery_choice",
-        question="Reply 1, 2, or 3.",
-        issue_code="llm.recovery",
-        choices=recovery_options(),
-        pending={"reason": str(reason or "").strip().lower() or "llm_unavailable"},
-    )
 
 
 def _llm_status_payload(runtime: Any | None) -> dict[str, Any]:
@@ -1213,10 +1184,6 @@ def _setup_wizard_route_reply(
     *,
     runtime: Any | None,
     wizard_store: TelegramModelProviderWizardStore | None,
-    llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None,
-    llm_fixit_store: LLMFixitWizardStore | None,
-    audit_log: AuditLog | None,
-    orchestrator: Orchestrator | None,
     chat_id: str,
     text: str,
 ) -> str | None:
@@ -1242,43 +1209,11 @@ def _setup_wizard_route_reply(
     pending = state.get("pending") if isinstance(state.get("pending"), dict) else {}
     issue_code = str(state.get("issue_code") or "provider.setup").strip()
 
-    if flow == "recovery" and step == "awaiting_recovery_choice":
-        options = state.get("choices") if isinstance(state.get("choices"), list) else recovery_options()
-        choice = parse_recovery_choice(text, options=options)
-        if not choice:
-            return "Reply 1, 2, or 3."
+    if flow == "recovery":
+        # Legacy recovery wizard flow is deprecated; clear stale state and continue
+        # through canonical setup/doctor/status/health/memory routing.
         wizard_store.clear()
-        if choice == "status":
-            return _model_status_report(runtime=runtime)
-        if choice == "fixit":
-            if llm_fixit_fn is None:
-                return "LLM fix-it is unavailable right now."
-            ok, body = llm_fixit_fn({"actor": "telegram"})
-            persisted_state = _persist_fixit_prompt_state_from_response(
-                wizard_store=llm_fixit_store if isinstance(llm_fixit_store, LLMFixitWizardStore) else None,
-                body=body if isinstance(body, dict) else None,
-            )
-            if isinstance(persisted_state, dict):
-                prompt_step = str(persisted_state.get("step") or "").strip()
-                prompt_issue = str(persisted_state.get("issue_code") or "").strip()
-                prompt_status = "needs_confirmation" if prompt_step == "awaiting_confirm" else "needs_user_choice"
-                _safe_audit_fixit_prompt_shown(
-                    audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
-                    chat_id=chat_id,
-                    status=prompt_status,
-                    issue_code=prompt_issue,
-                    step=prompt_step,
-                )
-            message = str((body or {}).get("message") or (body or {}).get("next_question") or "").strip()
-            if message:
-                return message
-            return "LLM fix-it is ready." if ok else "LLM fix-it is unavailable right now."
-        if orchestrator is not None:
-            response = orchestrator.handle_message("/brief", user_id=chat_id)
-            reply = str((response.text if response else "") or "").strip()
-            if reply:
-                return reply
-        return "Brief summary is unavailable right now."
+        return None
 
     if flow == "openrouter_setup":
         if step == "awaiting_openrouter_has_key":
@@ -1952,86 +1887,99 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Remember which chat we're talking to (useful for reminders/jobs).
         db.set_preference("telegram_chat_id", chat_id)
 
-        fixit_reply, fixit_route = _maybe_handle_llm_fixit_reply_with_route(
-            llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
-            wizard_store=wizard_store if isinstance(wizard_store, LLMFixitWizardStore) else None,
-            audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
-            chat_id=chat_id,
-            text=text,
-            log_path=log_path,
-        )
-        if fixit_reply is not None:
-            route = str(fixit_route or "fixit")
-            _safe_append_telegram_message_audit(
-                audit_log=audit_log,
-                action="telegram.message.handled",
-                chat_id=chat_id,
-                message_kind="text",
-                route=route,
-                outcome="handled",
-            )
-            await _send_reply(
-                message=update.effective_message,
-                log_path=log_path,
-                chat_id=chat_id,
-                route=route,
-                text=str(fixit_reply),
-                trace_id=trace_id,
-            )
-            log_event(
-                log_path,
-                "telegram_fixit_intercept",
-                {
-                    "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": route,
-                    "trace_id": trace_id,
-                },
-            )
-            return
-
-        setup_reply = _setup_wizard_route_reply(
-            runtime=bot_data.get("runtime"),
-            wizard_store=(
-                model_provider_wizard_store
-                if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
-                else None
-            ),
-            llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
-            llm_fixit_store=wizard_store if isinstance(wizard_store, LLMFixitWizardStore) else None,
-            audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
-            orchestrator=orchestrator if isinstance(orchestrator, Orchestrator) else None,
-            chat_id=chat_id,
-            text=text,
-        )
-        if setup_reply is not None:
-            _safe_append_telegram_message_audit(
-                audit_log=audit_log,
-                action="telegram.message.handled",
-                chat_id=chat_id,
-                message_kind="text",
-                route="fixit",
-                outcome="handled",
-            )
-            await _send_reply(
-                message=update.effective_message,
-                log_path=log_path,
-                chat_id=chat_id,
-                route="fixit",
-                text=str(setup_reply),
-                trace_id=trace_id,
-            )
-            log_event(
-                log_path,
-                "telegram_fixit_intercept",
-                {
-                    "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": "fixit",
-                    "trace_id": trace_id,
-                },
-            )
-            return
-
         normalized_text = _normalize_user_text(text)
+        deterministic_command = _deterministic_text_command(text)
+        model_provider_intent = classify_model_provider_intent(text)
+        operator_reply, operator_route = _deterministic_operator_reply(
+            text,
+            runtime=bot_data.get("runtime"),
+        )
+        smalltalk_reply, smalltalk_route = _smalltalk_preroute_reply(text, bot_data)
+        has_canonical_text_route = any(
+            (
+                deterministic_command is not None,
+                model_provider_intent != "none",
+                operator_reply is not None,
+                smalltalk_reply is not None,
+            )
+        )
+
+        if not has_canonical_text_route:
+            fixit_reply, fixit_route = _maybe_handle_llm_fixit_reply_with_route(
+                llm_fixit_fn=llm_fixit_fn if callable(llm_fixit_fn) else None,
+                wizard_store=wizard_store if isinstance(wizard_store, LLMFixitWizardStore) else None,
+                audit_log=audit_log if isinstance(audit_log, AuditLog) else None,
+                chat_id=chat_id,
+                text=text,
+                log_path=log_path,
+            )
+            if fixit_reply is not None:
+                route = str(fixit_route or "fixit")
+                _safe_append_telegram_message_audit(
+                    audit_log=audit_log,
+                    action="telegram.message.handled",
+                    chat_id=chat_id,
+                    message_kind="text",
+                    route=route,
+                    outcome="handled",
+                )
+                await _send_reply(
+                    message=update.effective_message,
+                    log_path=log_path,
+                    chat_id=chat_id,
+                    route=route,
+                    text=str(fixit_reply),
+                    trace_id=trace_id,
+                )
+                log_event(
+                    log_path,
+                    "telegram_fixit_intercept",
+                    {
+                        "chat_id_redacted": _redact_chat_id(chat_id),
+                        "route": route,
+                        "trace_id": trace_id,
+                    },
+                )
+                return
+
+            setup_reply = _setup_wizard_route_reply(
+                runtime=bot_data.get("runtime"),
+                wizard_store=(
+                    model_provider_wizard_store
+                    if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
+                    else None
+                ),
+                chat_id=chat_id,
+                text=text,
+            )
+            if setup_reply is not None:
+                _safe_append_telegram_message_audit(
+                    audit_log=audit_log,
+                    action="telegram.message.handled",
+                    chat_id=chat_id,
+                    message_kind="text",
+                    route="fixit",
+                    outcome="handled",
+                )
+                await _send_reply(
+                    message=update.effective_message,
+                    log_path=log_path,
+                    chat_id=chat_id,
+                    route="fixit",
+                    text=str(setup_reply),
+                    trace_id=trace_id,
+                )
+                log_event(
+                    log_path,
+                    "telegram_fixit_intercept",
+                    {
+                        "chat_id_redacted": _redact_chat_id(chat_id),
+                        "route": "fixit",
+                        "trace_id": trace_id,
+                    },
+                )
+                return
+
         if normalized_text in {"1", "2", "3"}:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2060,7 +2008,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        model_provider_intent = classify_model_provider_intent(text)
         preroute_reply, preroute_route = _handle_model_provider_intent(
             intent=model_provider_intent,
             bot_data=bot_data,
@@ -2095,10 +2042,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        operator_reply, operator_route = _deterministic_operator_reply(
-            text,
-            runtime=bot_data.get("runtime"),
-        )
         if operator_reply is not None and operator_route is not None:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2127,7 +2070,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        smalltalk_reply, smalltalk_route = _smalltalk_preroute_reply(text, bot_data)
         if smalltalk_reply is not None and smalltalk_route is not None:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2156,7 +2098,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        deterministic_command = _deterministic_text_command(text)
         if deterministic_command == "/doctor":
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2230,29 +2171,20 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     },
                 )
                 return
-            _set_recovery_wizard_state(
-                wizard_store=(
-                    model_provider_wizard_store
-                    if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
-                    else None
-                ),
-                chat_id=chat_id,
-                reason=availability_reason,
-            )
-            suggest_text = build_suggest_message(availability_reason=availability_reason)
+            suggest_text = _setup_help_text(runtime=bot_data.get("runtime"))
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
                 action="telegram.message.handled",
                 chat_id=chat_id,
                 message_kind="text",
-                route="fallback",
+                route="setup",
                 outcome="handled",
             )
             await _send_reply(
                 message=update.effective_message,
                 log_path=log_path,
                 chat_id=chat_id,
-                route="fallback",
+                route="setup",
                 text=str(suggest_text),
                 trace_id=trace_id,
             )
@@ -2261,9 +2193,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "telegram_message",
                 {
                     "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": "fallback",
+                    "route": "setup",
                     "trace_id": trace_id,
-                    "clarify_suggest_mode": "suggest",
                     "availability_reason": availability_reason,
                 },
             )

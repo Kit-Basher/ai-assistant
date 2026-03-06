@@ -250,6 +250,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertTrue(update.effective_message.replies)
             reply = str(update.effective_message.replies[-1]["text"] or "")
             self.assertEqual("chat fallback", reply)
+            self.assertNotIn("Reply 1, 2, or 3.", reply)
 
     def test_setup_text_uses_bootstrap_guidance_when_chat_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -284,6 +285,8 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             reply = str(update.effective_message.replies[-1]["text"] or "")
             self.assertIn("No chat model available right now.", reply)
             self.assertIn("Next:", reply)
+            self.assertNotIn("Reply 1, 2, or 3.", reply)
+            self.assertNotIn("LLM unavailable right now.", reply)
             self.assertEqual([], orchestrator.calls)
 
     def test_help_prioritizes_setup_when_not_ready(self) -> None:
@@ -341,6 +344,9 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             reply = str(update.effective_message.replies[-1]["text"] or "")
             self.assertIn("Available commands:", reply)
             self.assertIn("doctor", reply.lower())
+            self.assertIn("setup", reply.lower())
+            self.assertIn("memory", reply.lower())
+            self.assertNotIn("Reply 1, 2, or 3.", reply)
             self.assertEqual([], orchestrator.calls)
 
     def test_why_not_working_routes_to_setup_guidance(self) -> None:
@@ -530,6 +536,17 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = _FakeRuntime()
             runtime._llm_available = False
+            runtime._status_payload = {
+                "ok": True,
+                "default_provider": "ollama",
+                "default_model": None,
+                "resolved_default_model": None,
+                "allow_remote_fallback": False,
+                "active_provider_health": {"status": "down"},
+                "active_model_health": {"status": "down"},
+                "providers": [{"id": "ollama", "enabled": True, "health": {"status": "down"}}],
+                "models": [],
+            }
             orchestrator = _FakeOrchestrator()
             wizard_store = TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json")
             context = _FakeContext(
@@ -547,27 +564,22 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             first = _FakeUpdate(12345, "fix it")
             asyncio.run(_handle_message(first, context))
             first_reply = str(first.effective_message.replies[-1]["text"] or "")
-            self.assertIn("1)", first_reply)
-            self.assertIn("2)", first_reply)
-            self.assertIn("3)", first_reply)
-            self.assertEqual(
-                "awaiting_recovery_choice",
-                str(context.application.bot_data["model_provider_wizard_store"].state.get("step")),  # type: ignore[index]
-            )
+            self.assertIn("Setup state:", first_reply)
+            self.assertIn("Next:", first_reply)
+            self.assertNotIn("Reply 1, 2, or 3.", first_reply)
+            self.assertFalse(bool(context.application.bot_data["model_provider_wizard_store"].state.get("active")))  # type: ignore[index]
             second = _FakeUpdate(12345, "1")
             asyncio.run(_handle_message(second, context))
             second_reply = str(second.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Current provider/model:", second_reply)
-            self.assertFalse(bool(context.application.bot_data["model_provider_wizard_store"].state.get("active")))  # type: ignore[index]
+            self.assertIn("No active choice right now", second_reply)
             self.assertEqual([], orchestrator.calls)
 
-    def test_fixit_prompt_response_persists_wizard_state_and_audits_prompt(self) -> None:
+    def test_legacy_recovery_wizard_state_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = _FakeRuntime()
             orchestrator = _FakeOrchestrator()
             audit_path = f"{tmpdir}/audit.jsonl"
             model_store = TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json")
-            llm_fixit_store = LLMFixitWizardStore(path=f"{tmpdir}/fixit.json")
             model_store.save(
                 {
                     "active": True,
@@ -585,19 +597,6 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
                 }
             )
 
-            def _llm_fixit(_payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
-                return True, {
-                    "ok": True,
-                    "status": "needs_user_choice",
-                    "issue_code": "openrouter_down",
-                    "message": "OpenRouter is currently unavailable.\n1) Use local-only\n2) Repair OpenRouter\n3) Details",
-                    "choices": [
-                        {"id": "local_only", "label": "Use local-only", "recommended": True},
-                        {"id": "repair_openrouter", "label": "Repair OpenRouter", "recommended": False},
-                        {"id": "details", "label": "Details", "recommended": False},
-                    ],
-                }
-
             context = _FakeContext(
                 {
                     "runtime": runtime,
@@ -605,22 +604,21 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
                     "db": _FakeDB(),
                     "log_path": f"{tmpdir}/agent.log",
                     "audit_log": AuditLog(path=audit_path),
-                    "llm_fixit_fn": _llm_fixit,
-                    "llm_fixit_store": llm_fixit_store,
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
                     "model_provider_wizard_store": model_store,
                 }
             )
             update = _FakeUpdate(12345, "2")
             asyncio.run(_handle_message(update, context))
 
-            persisted = llm_fixit_store.load()
-            self.assertTrue(bool(persisted.get("active")))
-            self.assertEqual("awaiting_choice", str(persisted.get("step") or ""))
-            choices = persisted.get("choices") if isinstance(persisted.get("choices"), list) else []
-            self.assertEqual(3, len(choices))
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("No active choice right now", reply)
+            self.assertFalse(bool(model_store.state.get("active")))
             rows = _read_audit_rows(audit_path)
-            prompt_rows = [row for row in rows if row.get("action") == "telegram.fixit.prompt_shown"]
-            self.assertTrue(prompt_rows)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("numeric_no_wizard", params.get("route"))
 
     def test_model_command_returns_model_status(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

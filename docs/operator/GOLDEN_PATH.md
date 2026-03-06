@@ -39,6 +39,7 @@
 3. Verify runtime: `python -m agent status`
 4. Talk to Telegram naturally.
 5. Use `doctor/status/health/brief` when needed.
+6. Telegram `help/setup/status/health/doctor/memory` semantics match the CLI/runtime contracts.
 
 ## When LLM Is Down
 - Telegram/CLI should show deterministic setup or recovery guidance.

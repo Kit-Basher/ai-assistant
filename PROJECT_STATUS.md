@@ -30,6 +30,7 @@ Single operator entrypoint:
   3. Verify `python -m agent status`
   4. Use Telegram in plain English
   5. Use `doctor/status/health/brief` deterministically when needed
+  6. Telegram text commands (`help/setup/status/health/doctor/memory`) are routed through the same canonical runtime/setup/doctor/memory contracts as CLI.
 - Startup safety:
   - API + Telegram startup checks run via `agent/startup_checks.py`
   - FAIL exits non-zero with one next action

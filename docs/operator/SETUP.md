@@ -17,7 +17,7 @@ Canonical first-run command:
 Setup is complete when onboarding state is `READY` and:
 
 - `python -m agent status` reports healthy runtime mode.
-- Telegram help/setup stops showing onboarding recovery prompts.
+- Telegram `help/setup/status/health/doctor/memory` follows the same canonical contract text as CLI outputs.
 
 ## Onboarding States
 

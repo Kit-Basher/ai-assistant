@@ -74,6 +74,9 @@ Continuity contract:
 - `brief`
 - `doctor`
 - `setup`
+- `memory` (or plain text: `what are we doing?`, `where were we?`, `resume`)
+
+All of the above now use the same canonical runtime/setup/doctor/memory contracts as the unified CLI.
 
 ## Logs
 

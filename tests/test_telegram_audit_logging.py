@@ -99,8 +99,10 @@ class TestTelegramAuditLogging(unittest.TestCase):
             asyncio.run(_handle_message(update, context))
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
             self.assertIn("Available commands:", reply_text)
-            self.assertIn("doctor – run system diagnostics", reply_text)
-            self.assertIn("status – agent status", reply_text)
+            self.assertIn("doctor – diagnostics", reply_text)
+            self.assertIn("setup – setup/recovery guidance", reply_text)
+            self.assertIn("status – runtime status", reply_text)
+            self.assertIn("memory – what are we doing / resume", reply_text)
             self.assertEqual([], orchestrator.calls)
 
     def test_fix_phrase_routes_to_doctor_summary(self) -> None:
@@ -174,6 +176,8 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertIn("Doctor: WARN", reply_text)
             self.assertIn("trace doctor-1700000000-999", reply_text)
             self.assertIn("agent doctor --json", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
+            self.assertNotIn("LLM unavailable right now.", reply_text)
             self.assertEqual([], orchestrator.calls)
 
     def test_received_then_handled_fixit_choice_routes_second_option(self) -> None:
@@ -474,10 +478,12 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
             self.assertIn("Available commands:", reply_text)
-            self.assertIn("doctor – run system diagnostics", reply_text)
-            self.assertIn("status – agent status", reply_text)
-            self.assertIn("health – runtime health", reply_text)
+            self.assertIn("doctor – diagnostics", reply_text)
+            self.assertIn("setup – setup/recovery guidance", reply_text)
+            self.assertIn("status – runtime status", reply_text)
+            self.assertIn("health – health snapshot", reply_text)
             self.assertIn("brief – system summary", reply_text)
+            self.assertIn("memory – what are we doing / resume", reply_text)
             self.assertEqual([], orchestrator.calls)
 
             rows = _read_audit_rows(audit_path)
@@ -511,16 +517,14 @@ class TestTelegramAuditLogging(unittest.TestCase):
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("1)", reply_text)
-            self.assertIn("2)", reply_text)
-            self.assertIn("3)", reply_text)
-            self.assertIn("Reply 1, 2, or 3.", reply_text)
+            self.assertIn("Setup status is unavailable right now.", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
             self.assertEqual([], orchestrator.calls)
 
             rows = _read_audit_rows(audit_path)
             handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
             params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
-            self.assertEqual("fallback", params.get("route"))
+            self.assertEqual("setup", params.get("route"))
 
     def test_health_equivalent_text_routes_to_health_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -547,7 +551,38 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
             self.assertEqual("health ok", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
+            self.assertNotIn("LLM unavailable right now.", reply_text)
             self.assertEqual([("/health", chat_id)], orchestrator.calls)
+
+    def test_status_text_routes_to_status_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="status ok")
+            db = _FakeDB()
+            chat_id = "777123111"
+            update = _FakeUpdate(int(chat_id), "status")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("status ok", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
+            self.assertNotIn("LLM unavailable right now.", reply_text)
+            self.assertEqual([("/status", chat_id)], orchestrator.calls)
 
     def test_health_route_bad_request_retries_plain_and_logs_once(self) -> None:
         class BadRequest(Exception):
