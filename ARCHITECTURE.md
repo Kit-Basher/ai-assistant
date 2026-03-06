@@ -23,6 +23,8 @@ All surfaces must depend on shared core modules (`agent/orchestrator.py`, skills
   - `agent/onboarding_contract.py`
   - `agent/recovery_contract.py`
   - `agent/setup_wizard.py`
+- Telegram canonical UX bridge is centralized in:
+  - `agent/telegram_bridge.py`
 
 ## Core Request Flow
 
@@ -105,7 +107,7 @@ Service startup
 ## Surface Routing
 
 - CLI (`python -m agent`): operator workflows (`doctor/status/health/brief/logs/version`).
-- Telegram: natural-language command mapping + orchestrator forwarding.
+- Telegram: transport adapter with canonical routing delegated through `agent/telegram_bridge.py`.
 - API: contract-first JSON endpoints with never-raise wrappers.
 
 ## Main Components

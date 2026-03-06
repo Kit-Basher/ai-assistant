@@ -164,7 +164,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                 fixes_applied=[],
                 support_bundle_path=None,
             )
-            with patch("telegram_adapter.bot.run_doctor_report", return_value=fake_report):
+            with patch("agent.telegram_bridge.run_doctor_report", return_value=fake_report):
                 asyncio.run(_handle_message(update, context))
 
             self.assertTrue(update.effective_message.replies)
@@ -200,7 +200,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                 fixes_applied=[],
                 support_bundle_path=None,
             )
-            with patch("telegram_adapter.bot.run_doctor_report", return_value=fake_report):
+            with patch("agent.telegram_bridge.run_doctor_report", return_value=fake_report):
                 asyncio.run(_handle_message(update, context))
 
             self.assertTrue(update.effective_message.replies)
@@ -484,6 +484,43 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertEqual("LLM_CHAT_REPLY", reply_text)
             self.assertNotIn("✅ Agent is running", reply_text)
             self.assertEqual([("hello", chat_id)], orchestrator.calls)
+
+    def test_text_command_path_delegates_to_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="should not run")
+            db = _FakeDB()
+            chat_id = "333444555"
+            update = _FakeUpdate(int(chat_id), "status")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
+                }
+            )
+            bridge_payload = {
+                "ok": True,
+                "handled": True,
+                "text": "bridge status",
+                "route": "status",
+                "trace_id": "tg-bridge-1",
+                "next_action": None,
+            }
+            with patch("telegram_adapter.bot.handle_telegram_text", return_value=bridge_payload) as mocked_bridge:
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("bridge status", reply_text)
+            self.assertEqual([], orchestrator.calls)
+            mocked_bridge.assert_called_once()
 
     def test_help_returns_help_route(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

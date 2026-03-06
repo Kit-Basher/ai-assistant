@@ -12,6 +12,7 @@
 - Canonical runtime: `personal-agent-api.service` (core runtime brain)
 - Native UI is primary user surface.
 - Telegram is optional transport adapter; it must not become a second brain.
+- Telegram canonical UX routing is delegated to `agent/telegram_bridge.py`; keep transport safety in `telegram_adapter/bot.py`.
 - Manual debug runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
 
 ## Service Control

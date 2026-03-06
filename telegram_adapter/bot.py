@@ -64,6 +64,14 @@ from agent.setup_wizard import (
 )
 from agent.secret_store import SecretStore
 from agent.startup_checks import run_startup_checks
+from agent.telegram_bridge import (
+    build_telegram_help,
+    build_telegram_setup,
+    build_telegram_status,
+    classify_telegram_text_command,
+    handle_telegram_command,
+    handle_telegram_text,
+)
 from agent.permissions import PermissionStore
 from agent.runtime_contract import normalize_user_facing_status
 from agent.ux.clarify_suggest import (
@@ -780,113 +788,26 @@ def _runtime_llm_status_payload(runtime: Any | None) -> dict[str, Any]:
 
 def _runtime_status_text(bot_data: dict[str, Any]) -> str:
     runtime = bot_data.get("runtime")
-    ready_payload = _runtime_ready_payload(runtime)
-    ready_api = ready_payload.get("api") if isinstance(ready_payload.get("api"), dict) else {}
-    llm_status = _runtime_llm_status_payload(runtime)
-
-    version = str(
-        getattr(runtime, "version", "")
-        or ready_api.get("version")
-        or bot_data.get("runtime_version")
-        or "0.1.0"
-    ).strip() or "0.1.0"
-    commit_value = str(
-        getattr(runtime, "git_commit", "")
-        or ready_api.get("git_commit")
-        or bot_data.get("runtime_git_commit")
-        or "unknown"
-    ).strip()
-    commit_short = _format_commit_short(commit_value)
-
-    started_at = getattr(runtime, "started_at", None)
-    uptime_seconds = 0
-    if isinstance(started_at, datetime):
-        uptime_seconds = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
-    else:
-        try:
-            uptime_seconds = max(0, int(ready_api.get("uptime_seconds") or 0))
-        except Exception:
-            started_ts_raw = bot_data.get("runtime_started_ts")
-            try:
-                started_ts = float(started_ts_raw)
-            except Exception:
-                started_ts = pytime.time()
-            uptime_seconds = max(0, int(pytime.time() - started_ts))
-    provider = str(llm_status.get("default_provider") or "").strip() or None
-    model = (
-        str(llm_status.get("resolved_default_model") or "").strip()
-        or str(llm_status.get("default_model") or "").strip()
-        or None
+    result = build_telegram_status(
+        runtime=runtime,
+        trace_id=f"tg-status-{int(pytime.time())}-{os.getpid()}",
+        runtime_version=str(bot_data.get("runtime_version") or "").strip() or None,
+        runtime_git_commit=str(bot_data.get("runtime_git_commit") or "").strip() or None,
+        runtime_started_ts=bot_data.get("runtime_started_ts"),
+        fetch_local_api_json=(None if runtime is not None else (lambda path: _fetch_local_api_json(path))),
     )
-    provider_state = (
-        str(
-            ((llm_status.get("active_provider_health") or {}).get("status"))
-            if isinstance(llm_status.get("active_provider_health"), dict)
-            else ""
-        )
-        .strip()
-        .lower()
-    )
-    model_state = (
-        str(
-            ((llm_status.get("active_model_health") or {}).get("status"))
-            if isinstance(llm_status.get("active_model_health"), dict)
-            else ""
-        )
-        .strip()
-        .lower()
-    )
-    ready = bool(provider_state == "ok" and model_state == "ok")
-    failure_code = None
-    if not model:
-        failure_code = "no_chat_model"
-    elif provider_state != "ok":
-        failure_code = "provider_unhealthy"
-    elif model_state != "ok":
-        failure_code = "model_unhealthy"
-    runtime_status = (
-        ready_payload.get("runtime_status")
-        if isinstance(ready_payload.get("runtime_status"), dict)
-        else {}
-    )
-    if not runtime_status:
-        runtime_status = normalize_user_facing_status(
-            ready=ready,
-            bootstrap_required=bootstrap_needed(llm_status=llm_status),
-            failure_code=failure_code,
-            provider=provider,
-            model=model,
-            local_providers={"ollama"},
-        )
-    summary = str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
-    runtime_mode = str(runtime_status.get("runtime_mode") or "DEGRADED").strip().upper() or "DEGRADED"
-    telegram_state = (
-        str(((ready_payload.get("telegram") or {}).get("state")) if isinstance(ready_payload.get("telegram"), dict) else "")
-        .strip()
-        .lower()
-        or "unknown"
-    )
-
-    return (
-        f"✅ Agent is running (v{version}, commit {commit_short}, uptime {uptime_seconds}s).\n"
-        f"{summary}\n"
-        f"runtime_mode: {runtime_mode}\n"
-        f"telegram: {telegram_state}"
-    )
+    return _safe_reply_text(str(result.get("text") or ""))
 
 
 def _doctor_summary_text() -> str:
-    report = run_doctor_report(online=False, fix=False)
-    pass_count = sum(1 for item in report.checks if item.status == "OK")
-    warn_count = sum(1 for item in report.checks if item.status == "WARN")
-    fail_count = sum(1 for item in report.checks if item.status == "FAIL")
-    next_action = report.next_action or "none"
-    return (
-        f"Doctor: {report.summary_status} (trace {report.trace_id})\\n"
-        f"PASS {pass_count} · WARN {warn_count} · FAIL {fail_count}\\n"
-        f"Next: {next_action}\\n"
-        "Run: python -m agent doctor --json for details."
+    result = handle_telegram_command(
+        command="/doctor",
+        chat_id="system",
+        trace_id=f"tg-doctor-{int(pytime.time())}-{os.getpid()}",
+        runtime=None,
+        orchestrator=None,
     )
+    return _safe_reply_text(str(result.get("text") or "Doctor summary unavailable."))
 
 
 def _setup_result_from_runtime(runtime: Any | None) -> Any | None:
@@ -933,12 +854,11 @@ def _setup_trace_id() -> str:
 
 
 def _telegram_help_text(*, runtime: Any | None) -> str:
-    setup_result = _setup_result_from_runtime(runtime)
-    if setup_result is None:
-        return _TELEGRAM_HELP_TEXT
-    if str(setup_result.onboarding_state or "").strip().upper() != ONBOARDING_READY:
-        return render_telegram_setup_text(setup_result)
-    return _TELEGRAM_HELP_TEXT
+    result = build_telegram_help(
+        runtime=runtime,
+        trace_id=f"tg-help-{int(pytime.time())}-{os.getpid()}",
+    )
+    return _safe_reply_text(str(result.get("text") or ""))
 
 
 def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -949,15 +869,11 @@ def _smalltalk_preroute_reply(text: str, bot_data: dict[str, Any]) -> tuple[str 
 
 
 def _setup_help_text(*, runtime: Any | None, trace_id: str | None = None) -> str:
-    setup_result = _setup_result_from_runtime(runtime)
-    if setup_result is None:
-        return deterministic_error_message(
-            title="❌ Setup status is unavailable",
-            trace_id=str(trace_id or _setup_trace_id()),
-            component="telegram.setup",
-            next_action="run `python -m agent setup --dry-run`",
-        )
-    return render_telegram_setup_text(setup_result)
+    result = build_telegram_setup(
+        runtime=runtime,
+        trace_id=str(trace_id or _setup_trace_id()),
+    )
+    return _safe_reply_text(str(result.get("text") or ""))
 
 
 def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
@@ -2011,20 +1927,12 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         db.set_preference("telegram_chat_id", chat_id)
 
         normalized_text = _normalize_user_text(text)
-        deterministic_command = _deterministic_text_command(text)
+        bridge_command = classify_telegram_text_command(text)
         model_provider_intent = classify_model_provider_intent(text)
-        operator_reply, operator_route = _deterministic_operator_reply(
-            text,
-            runtime=bot_data.get("runtime"),
-            trace_id=trace_id,
-        )
-        smalltalk_reply, smalltalk_route = _smalltalk_preroute_reply(text, bot_data)
         has_canonical_text_route = any(
             (
-                deterministic_command is not None,
+                bridge_command is not None,
                 model_provider_intent != "none",
-                operator_reply is not None,
-                smalltalk_reply is not None,
             )
         )
 
@@ -2166,121 +2074,18 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        if operator_reply is not None and operator_route is not None:
-            _safe_append_telegram_message_audit(
-                audit_log=audit_log,
-                action="telegram.message.handled",
-                chat_id=chat_id,
-                message_kind="text",
-                route=operator_route,
-                outcome="handled",
-            )
-            await _send_reply(
-                message=update.effective_message,
-                log_path=log_path,
-                chat_id=chat_id,
-                route=operator_route,
-                text=str(operator_reply),
-                trace_id=trace_id,
-            )
-            log_event(
-                log_path,
-                "telegram_message",
-                {
-                    "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": operator_route,
-                    "trace_id": trace_id,
-                },
-            )
-            return
-
-        if smalltalk_reply is not None and smalltalk_route is not None:
-            _safe_append_telegram_message_audit(
-                audit_log=audit_log,
-                action="telegram.message.handled",
-                chat_id=chat_id,
-                message_kind="text",
-                route=smalltalk_route,
-                outcome="handled",
-            )
-            await _send_reply(
-                message=update.effective_message,
-                log_path=log_path,
-                chat_id=chat_id,
-                route=smalltalk_route,
-                text=str(smalltalk_reply),
-                trace_id=trace_id,
-            )
-            log_event(
-                log_path,
-                "telegram_message",
-                {
-                    "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": smalltalk_route,
-                    "trace_id": trace_id,
-                },
-            )
-            return
-
-        if deterministic_command == "/doctor":
-            _safe_append_telegram_message_audit(
-                audit_log=audit_log,
-                action="telegram.message.handled",
-                chat_id=chat_id,
-                message_kind="text",
-                route="doctor",
-                outcome="handled",
-            )
-            await _send_reply(
-                message=update.effective_message,
-                log_path=log_path,
-                chat_id=chat_id,
-                route="doctor",
-                text=_doctor_summary_text(),
-                trace_id=trace_id,
-            )
-            log_event(
-                log_path,
-                "telegram_message",
-                {
-                    "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": "doctor",
-                    "trace_id": trace_id,
-                },
-            )
-            return
-        if deterministic_command == "/status":
-            status_text = _runtime_status_text(bot_data)
-            _safe_append_telegram_message_audit(
-                audit_log=audit_log,
-                action="telegram.message.handled",
-                chat_id=chat_id,
-                message_kind="text",
-                route="status",
-                outcome="handled",
-            )
-            await _send_reply(
-                message=update.effective_message,
-                log_path=log_path,
-                chat_id=chat_id,
-                route="status",
-                text=status_text,
-                trace_id=trace_id,
-            )
-            log_event(
-                log_path,
-                "telegram_message",
-                {
-                    "chat_id_redacted": _redact_chat_id(chat_id),
-                    "route": "status",
-                    "trace_id": trace_id,
-                },
-            )
-            return
-        if deterministic_command in {"/health", "/brief", "/memory"}:
-            route = deterministic_command.lstrip("/")
-            response = orchestrator.handle_message(deterministic_command, user_id=chat_id)
-            reply_text = _safe_reply_text(response.text if response else "")
+        bridge_result = handle_telegram_text(
+            text=text,
+            chat_id=chat_id,
+            trace_id=trace_id,
+            runtime=bot_data.get("runtime"),
+            orchestrator=orchestrator,
+            runtime_version=str(bot_data.get("runtime_version") or "").strip() or None,
+            runtime_git_commit=str(bot_data.get("runtime_git_commit") or "").strip() or None,
+            runtime_started_ts=bot_data.get("runtime_started_ts"),
+        )
+        if bool(bridge_result.get("handled")):
+            route = str(bridge_result.get("route") or "chat").strip().lower() or "chat"
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
                 action="telegram.message.handled",
@@ -2294,7 +2099,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 log_path=log_path,
                 chat_id=chat_id,
                 route=route,
-                text=reply_text,
+                text=str(bridge_result.get("text") or ""),
                 trace_id=trace_id,
             )
             log_event(
@@ -2307,7 +2112,8 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 },
             )
             return
-        if deterministic_command is None:
+
+        if bridge_command is None:
             ambiguity = classify_ambiguity(text)
         else:
             ambiguity = None
@@ -2318,7 +2124,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     "user_id": chat_id,
                     "message_kind": "text",
                     "route": "command",
-                    "command": deterministic_command,
+                    "command": bridge_command,
                     "trace_id": trace_id,
                 },
             )
@@ -2383,7 +2189,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
 
         # Route ALL non-command text through the orchestrator (single brain).
-        forward_text = deterministic_command or text
+        forward_text = bridge_command or text
         log_event(
             log_path,
             "telegram.forward",
@@ -2642,8 +2448,27 @@ async def _handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     chat_id = str(update.effective_chat.id)
     log_path: str = context.application.bot_data["log_path"]
     _log_command_route(log_path=log_path, chat_id=chat_id, command="/status")
-    reply_text = _runtime_status_text(context.application.bot_data)
-    await update.effective_message.reply_text(_safe_reply_text(reply_text))
+    trace_id = _trace_id_from_update(update)
+    runtime = context.application.bot_data.get("runtime")
+    result = handle_telegram_command(
+        command="/status",
+        chat_id=chat_id,
+        trace_id=trace_id,
+        runtime=runtime,
+        orchestrator=context.application.bot_data.get("orchestrator"),
+        runtime_version=str(context.application.bot_data.get("runtime_version") or "").strip() or None,
+        runtime_git_commit=str(context.application.bot_data.get("runtime_git_commit") or "").strip() or None,
+        runtime_started_ts=context.application.bot_data.get("runtime_started_ts"),
+        fetch_local_api_json=(None if runtime is not None else (lambda path: _fetch_local_api_json(path))),
+    )
+    await _send_reply(
+        message=update.effective_message,
+        log_path=log_path,
+        chat_id=chat_id,
+        route=str(result.get("route") or "status"),
+        text=str(result.get("text") or ""),
+        trace_id=trace_id,
+    )
 
 
 async def _handle_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2653,16 +2478,19 @@ async def _handle_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     log_path: str = context.application.bot_data["log_path"]
     _log_command_route(log_path=log_path, chat_id=chat_id, command="/doctor")
     trace_id = _trace_id_from_update(update)
-    try:
-        reply_text = _doctor_summary_text()
-    except Exception:
-        reply_text = "Doctor failed. Run: python -m agent doctor --json"
+    result = handle_telegram_command(
+        command="/doctor",
+        chat_id=chat_id,
+        trace_id=trace_id,
+        runtime=context.application.bot_data.get("runtime"),
+        orchestrator=context.application.bot_data.get("orchestrator"),
+    )
     await _send_reply(
         message=update.effective_message,
         log_path=log_path,
         chat_id=chat_id,
-        route="doctor",
-        text=reply_text,
+        route=str(result.get("route") or "doctor"),
+        text=str(result.get("text") or "Doctor failed. Run: python -m agent doctor --json"),
         trace_id=trace_id,
     )
 
@@ -2772,9 +2600,22 @@ async def _handle_brief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     log_path: str = context.application.bot_data["log_path"]
     _log_command_route(log_path=log_path, chat_id=chat_id, command="/brief")
-
-    response = orchestrator.handle_message("/brief", user_id=chat_id)
-    await update.effective_message.reply_text(_safe_reply_text(response.text))
+    trace_id = _trace_id_from_update(update)
+    result = handle_telegram_command(
+        command="/brief",
+        chat_id=chat_id,
+        trace_id=trace_id,
+        runtime=context.application.bot_data.get("runtime"),
+        orchestrator=orchestrator,
+    )
+    await _send_reply(
+        message=update.effective_message,
+        log_path=log_path,
+        chat_id=chat_id,
+        route=str(result.get("route") or "brief"),
+        text=str(result.get("text") or ""),
+        trace_id=trace_id,
+    )
 
 
 async def _handle_brief_alias(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2808,8 +2649,23 @@ async def _handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         route="help",
         outcome="handled",
     )
-    runtime = context.application.bot_data.get("runtime")
-    await update.effective_message.reply_text(_telegram_help_text(runtime=runtime))
+    log_path: str = context.application.bot_data["log_path"]
+    trace_id = _trace_id_from_update(update)
+    result = handle_telegram_command(
+        command="/help",
+        chat_id=chat_id,
+        trace_id=trace_id,
+        runtime=context.application.bot_data.get("runtime"),
+        orchestrator=context.application.bot_data.get("orchestrator"),
+    )
+    await _send_reply(
+        message=update.effective_message,
+        log_path=log_path,
+        chat_id=chat_id,
+        route=str(result.get("route") or "help"),
+        text=str(result.get("text") or ""),
+        trace_id=trace_id,
+    )
 
 
 async def _handle_model(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2932,8 +2788,22 @@ async def _handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     log_path: str = context.application.bot_data["log_path"]
     _log_command_route(log_path=log_path, chat_id=chat_id, command="/health")
-    response = orchestrator.handle_message("/health", user_id=chat_id)
-    await update.effective_message.reply_text(_safe_reply_text(response.text))
+    trace_id = _trace_id_from_update(update)
+    result = handle_telegram_command(
+        command="/health",
+        chat_id=chat_id,
+        trace_id=trace_id,
+        runtime=context.application.bot_data.get("runtime"),
+        orchestrator=orchestrator,
+    )
+    await _send_reply(
+        message=update.effective_message,
+        log_path=log_path,
+        chat_id=chat_id,
+        route=str(result.get("route") or "health"),
+        text=str(result.get("text") or ""),
+        trace_id=trace_id,
+    )
 
 
 async def _handle_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2941,8 +2811,22 @@ async def _handle_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
     log_path = str(context.application.bot_data.get("log_path") or "")
     _log_command_route(log_path=log_path, chat_id=chat_id, command="/memory")
-    response = orchestrator.handle_message("/memory", user_id=chat_id)
-    await update.effective_message.reply_text(_safe_reply_text(response.text))
+    trace_id = _trace_id_from_update(update)
+    result = handle_telegram_command(
+        command="/memory",
+        chat_id=chat_id,
+        trace_id=trace_id,
+        runtime=context.application.bot_data.get("runtime"),
+        orchestrator=orchestrator,
+    )
+    await _send_reply(
+        message=update.effective_message,
+        log_path=log_path,
+        chat_id=chat_id,
+        route=str(result.get("route") or "memory"),
+        text=str(result.get("text") or ""),
+        trace_id=trace_id,
+    )
 
 
 async def _handle_daily_brief_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

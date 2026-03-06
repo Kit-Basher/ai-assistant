@@ -43,6 +43,7 @@ Single operator entrypoint:
   - identity is centralized in `agent/identity.py`
   - fallback guidance for no-chat-model is centralized in `agent/golden_path.py`
   - runtime mode contract is centralized in `agent/runtime_contract.py`
+  - Telegram canonical product UX delegation is centralized in `agent/telegram_bridge.py`
   - onboarding/recovery contracts are centralized in:
     - `agent/onboarding_contract.py`
     - `agent/recovery_contract.py`

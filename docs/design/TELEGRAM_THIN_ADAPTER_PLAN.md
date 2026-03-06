@@ -28,6 +28,11 @@ Keep Telegram as a transport adapter, not a second brain.
 - Memory/continuity summary interface.
 - Shared deterministic error envelope formatter.
 
+## Current Extraction Step
+- Implemented bridge: `agent/telegram_bridge.py`.
+- Canonical text/command UX (`help/setup/status/health/doctor/brief/memory`) now routes through the bridge.
+- Transport send/retry/lock/polling remains in `telegram_adapter/bot.py`.
+
 ## Runtime Unavailable Behavior
 - Telegram should return a deterministic transport error block:
   - short failure statement

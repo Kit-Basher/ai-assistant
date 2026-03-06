@@ -138,7 +138,7 @@ class TestGoldenPathSmoke(unittest.TestCase):
                 fixes_applied=[],
                 support_bundle_path=None,
             )
-            with patch("telegram_adapter.bot.run_doctor_report", return_value=report):
+            with patch("agent.telegram_bridge.run_doctor_report", return_value=report):
                 doctor = _FakeUpdate(42, "doctor")
                 asyncio.run(_handle_message(doctor, context))
             self.assertIn("Doctor: OK", str(doctor.effective_message.replies[-1]["text"] or ""))
