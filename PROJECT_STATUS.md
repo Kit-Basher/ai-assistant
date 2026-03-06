@@ -32,6 +32,7 @@ Single operator entrypoint:
   5. Use `doctor/status/health/brief` deterministically when needed
   6. Telegram text commands (`help/setup/status/health/doctor/memory`) are routed through the same canonical runtime/setup/doctor/memory contracts as CLI.
   7. Telegram `status` no longer uses legacy ENABLE_WRITES/audit text; it uses canonical runtime mode/next-action semantics.
+  8. Meta summary actions (`memory/setup/status/doctor/resume`) do not overwrite continuity `last action`.
 - Startup safety:
   - API + Telegram startup checks run via `agent/startup_checks.py`
   - FAIL exits non-zero with one next action
@@ -99,6 +100,7 @@ Single operator entrypoint:
 - User-facing continuity summary:
   - CLI: `python -m agent memory`
   - Telegram text aliases: `what are we doing?`, `where were we`, `resume`
+  - Meta summaries never recursively store their own rendered output as `last_agent_action`.
 
 ## Remaining Rough Edges
 - Root-level docs are now canonicalized, but some historical wording remains inside archived files.

@@ -6,6 +6,8 @@ from agent.memory_contract import (
     PENDING_STATUS_WAITING_FOR_USER,
     build_memory_summary,
     deterministic_memory_snapshot,
+    is_meaningful_action,
+    is_meta_action,
     normalize_pending_item,
     normalize_thread_state,
 )
@@ -118,6 +120,14 @@ class TestMemoryContract(unittest.TestCase):
         )
         pending = snapshot["pending_items"]
         self.assertEqual(["p1", "p2"], [row["pending_id"] for row in pending])
+
+    def test_meta_action_helpers(self) -> None:
+        self.assertTrue(is_meta_action("memory"))
+        self.assertTrue(is_meta_action("/status"))
+        self.assertTrue(is_meta_action("doctor_summary"))
+        self.assertFalse(is_meta_action("brief"))
+        self.assertTrue(is_meaningful_action("brief"))
+        self.assertFalse(is_meaningful_action("resume"))
 
 
 if __name__ == "__main__":

@@ -16,6 +16,7 @@ from agent.memory_contract import (
     PENDING_STATUS_WAITING_FOR_USER,
     build_memory_summary,
     deterministic_memory_snapshot,
+    is_meta_action,
     normalize_pending_item,
     normalize_thread_state,
 )
@@ -135,11 +136,14 @@ class MemoryRuntime:
             return
         self._db.set_user_pref(self._last_request_key(user_id), cleaned)
 
-    def record_agent_action(self, user_id: str, text: str) -> None:
+    def record_agent_action(self, user_id: str, text: str, *, action_kind: str | None = None) -> bool:
+        if is_meta_action(action_kind):
+            return False
         cleaned = " ".join(str(text or "").split()).strip()
         if not cleaned:
-            return
+            return False
         self._db.set_user_pref(self._last_action_key(user_id), cleaned)
+        return True
 
     def _load_pending_items(self, user_id: str) -> list[dict[str, Any]]:
         parsed = self._load_json(self._pending_key(user_id), [])

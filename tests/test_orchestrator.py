@@ -409,6 +409,32 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("Pending items: 1", response.text)
         self.assertIn("Resumable: yes", response.text)
 
+    def test_memory_command_does_not_overwrite_last_meaningful_action(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.record_agent_action("user1", "Ran /brief", action_kind="brief")
+
+        first = orchestrator.handle_message("/memory", "user1")
+        second = orchestrator.handle_message("/memory", "user1")
+
+        self.assertIn("Last action: Ran /brief", first.text)
+        self.assertIn("Last action: Ran /brief", second.text)
+        self.assertNotIn("Last action: Memory summary", second.text)
+
+    def test_resume_without_pending_keeps_memory_summary_stable(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.record_agent_action("user1", "Ran /brief", action_kind="brief")
+
+        orchestrator.handle_message("/resume", "user1")
+        summary_after_first = orchestrator.handle_message("/memory", "user1")
+        orchestrator.handle_message("/resume", "user1")
+        summary_after_second = orchestrator.handle_message("/memory", "user1")
+
+        self.assertIn("Last action: Ran /brief", summary_after_first.text)
+        self.assertIn("Last action: Ran /brief", summary_after_second.text)
+        self.assertEqual(summary_after_first.text, summary_after_second.text)
+
     def test_compare_followup_yes_resumes_pending_compare(self) -> None:
         orchestrator = self._orchestrator()
         orchestrator._set_active_thread_id_for_user("user1", "thread-a")

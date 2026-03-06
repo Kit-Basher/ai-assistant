@@ -2387,10 +2387,27 @@ class Orchestrator:
         response = self._handle_message_impl(text, user_id)
         final_response = self._apply_epistemic_layer(user_id, text, response)
         try:
-            self._memory_runtime.record_agent_action(user_id, final_response.text)
+            self._memory_runtime.record_agent_action(
+                user_id,
+                final_response.text,
+                action_kind=self._memory_action_kind_for_response(text=text, response=final_response),
+            )
         except Exception:
             pass
         return final_response
+
+    @staticmethod
+    def _memory_action_kind_for_response(*, text: str, response: OrchestratorResponse) -> str | None:
+        command = parse_command(str(text or "").strip())
+        if command is not None and str(command.name or "").strip():
+            return str(command.name).strip().lower()
+        response_data = response.data if isinstance(response.data, dict) else {}
+        if isinstance(response_data.get("memory_snapshot"), dict):
+            return "memory_summary"
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if normalized in {"memory", "resume", "what are we doing?", "where were we?"}:
+            return "memory_summary"
+        return None
 
     def _handle_message_impl(self, text: str, user_id: str) -> OrchestratorResponse:
         self._runner = Runner()

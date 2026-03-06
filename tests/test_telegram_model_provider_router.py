@@ -448,15 +448,31 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertEqual([], orchestrator.calls)
 
     def test_setup_text_reports_not_started_when_runtime_state_empty(self) -> None:
-        class _EmptyRuntime(_FakeRuntime):
+        class _NotStartedRuntime(_FakeRuntime):
             def ready_status(self) -> dict[str, object]:
-                return {}
+                return {
+                    "ok": True,
+                    "ready": False,
+                    "phase": "starting",
+                    "runtime_mode": "BOOTSTRAP_REQUIRED",
+                    "runtime_status": {
+                        "runtime_mode": "BOOTSTRAP_REQUIRED",
+                        "summary": "Setup needed. No chat model is ready yet.",
+                        "next_action": "Run: python -m agent setup",
+                    },
+                    "onboarding": {
+                        "state": "NOT_STARTED",
+                        "summary": "Setup has not started.",
+                        "next_action": "Run: python -m agent setup",
+                    },
+                    "telegram": {"state": "running", "configured": True},
+                }
 
             def llm_status(self) -> dict[str, object]:
                 return {}
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _EmptyRuntime()
+            runtime = _NotStartedRuntime()
             orchestrator = _FakeOrchestrator()
             context = _FakeContext(
                 {
@@ -477,6 +493,95 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertIn("Next:", reply)
             self.assertNotIn("status is unavailable", reply.lower())
             self.assertEqual([], orchestrator.calls)
+
+    def test_setup_uses_runtime_ready_payload_when_llm_status_is_empty(self) -> None:
+        class _ReadyRuntime(_FakeRuntime):
+            def ready_status(self) -> dict[str, object]:
+                return {
+                    "ok": True,
+                    "ready": True,
+                    "phase": "ready",
+                    "runtime_mode": "READY",
+                    "runtime_status": {
+                        "runtime_mode": "READY",
+                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "next_action": None,
+                    },
+                    "onboarding": {
+                        "state": "READY",
+                        "summary": "Setup complete. The agent is ready.",
+                        "next_action": "No action needed.",
+                    },
+                    "telegram": {"state": "running", "configured": True},
+                }
+
+            def llm_status(self) -> dict[str, object]:
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _ReadyRuntime()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": _FakeOrchestrator(),
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "setup")
+            asyncio.run(_handle_message(update, context))
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Setup is complete", reply)
+            self.assertNotIn("not started", reply.lower())
+
+    def test_status_uses_runtime_ready_payload_when_llm_status_is_empty(self) -> None:
+        class _ReadyRuntime(_FakeRuntime):
+            def ready_status(self) -> dict[str, object]:
+                return {
+                    "ok": True,
+                    "ready": True,
+                    "phase": "ready",
+                    "runtime_mode": "READY",
+                    "runtime_status": {
+                        "runtime_mode": "READY",
+                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "next_action": None,
+                    },
+                    "telegram": {
+                        "state": "running",
+                        "configured": True,
+                    },
+                    "api": {"version": "0.2.0", "git_commit": "abcdef123456", "uptime_seconds": 123},
+                }
+
+            def llm_status(self) -> dict[str, object]:
+                return {}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _ReadyRuntime()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": _FakeOrchestrator(),
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "status")
+            asyncio.run(_handle_message(update, context))
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("runtime_mode: READY", reply)
+            self.assertIn("telegram: running", reply)
+            self.assertNotIn("BOOTSTRAP_REQUIRED", reply)
+            self.assertNotIn("No chat model is ready yet", reply)
 
     def test_help_prioritizes_setup_when_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

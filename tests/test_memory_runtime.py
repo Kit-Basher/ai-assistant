@@ -123,6 +123,17 @@ class TestMemoryRuntime(unittest.TestCase):
         self.assertEqual(1, summary["pending_count"])
         self.assertTrue(summary["resumable"])
 
+    def test_record_agent_action_skips_meta_actions(self) -> None:
+        wrote = self.runtime.record_agent_action("u1", "Memory summary text", action_kind="memory")
+        self.assertFalse(wrote)
+        summary = self.runtime.get_memory_summary("u1")
+        self.assertIsNone(summary.get("last_agent_action"))
+
+        wrote_meaningful = self.runtime.record_agent_action("u1", "Ran brief report", action_kind="brief")
+        self.assertTrue(wrote_meaningful)
+        summary_after = self.runtime.get_memory_summary("u1")
+        self.assertEqual("Ran brief report", summary_after.get("last_agent_action"))
+
     def test_resolve_followup_reports_expired_when_only_expired_items_exist(self) -> None:
         self.runtime.set_thread_state("u1", thread_id="thread-a")
         self.runtime.add_pending_item(

@@ -57,6 +57,7 @@ Continuity contract:
 - Thread/pending summary and follow-up resolution live in `agent/memory_runtime.py`.
 - Use `python -m agent memory` or Telegram `what are we doing?` for current resumable state.
 - Follow-up actions never cross threads silently; ambiguous follow-ups are rejected.
+- Meta summary actions (`memory/setup/status/doctor/resume`) do not overwrite last meaningful action.
 
 ## Timers
 
@@ -78,6 +79,7 @@ Continuity contract:
 
 All of the above now use the same canonical runtime/setup/doctor/memory contracts as the unified CLI.
 Telegram plain text `status` is canonical runtime status output (legacy ENABLE_WRITES/audit block removed).
+Telegram `setup/status` readiness semantics are sourced from the same runtime truth as CLI (`/ready` contract).
 
 ## Logs
 

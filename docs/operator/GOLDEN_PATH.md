@@ -32,6 +32,7 @@
 - Continuity state is centralized (`agent/memory_runtime.py`).
 - Follow-up phrases (`yes/no/do it/that one/show me more`) only bind when one valid pending item exists in the active thread.
 - If ambiguous/expired/missing, the agent returns one deterministic next step instead of guessing.
+- Meta summary commands (`memory/setup/status/doctor/resume`) do not overwrite the last meaningful action.
 
 ## When Everything Works
 1. Restart service: `systemctl --user restart personal-agent-api.service`
@@ -41,6 +42,7 @@
 5. Use `doctor/status/health/brief` when needed.
 6. Telegram `help/setup/status/health/doctor/memory` semantics match the CLI/runtime contracts.
 7. Telegram typo handling keeps continuity paths safe (`breif` -> brief, `memory/resume` -> continuity summary).
+8. `READY` semantics are aligned across CLI and Telegram from the same runtime readiness source.
 
 ## When LLM Is Down
 - Telegram/CLI should show deterministic setup or recovery guidance.

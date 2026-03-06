@@ -22,6 +22,20 @@ _PENDING_STATUSES = {
 }
 
 _PENDING_KINDS = {"clarification", "confirmation", "followup", "task"}
+_META_ACTION_KINDS = {
+    "memory",
+    "memory_summary",
+    "setup",
+    "setup_summary",
+    "doctor",
+    "doctor_summary",
+    "status",
+    "status_summary",
+    "health",
+    "health_summary",
+    "help",
+    "resume",
+}
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -40,6 +54,13 @@ def _as_text(value: Any) -> str | None:
     return text or None
 
 
+def _normalize_action_kind(value: Any) -> str:
+    kind = str(value or "").strip().lower()
+    if kind.startswith("/"):
+        kind = kind[1:]
+    return kind.replace(" ", "_")
+
+
 def _normalize_runtime_mode(value: Any) -> str:
     mode = str(value or "").strip().upper()
     if mode in {"READY", "BOOTSTRAP_REQUIRED", "DEGRADED", "FAILED"}:
@@ -50,6 +71,16 @@ def _normalize_runtime_mode(value: Any) -> str:
 def _normalize_status(value: Any, default: str = "active") -> str:
     status = str(value or "").strip().lower()
     return status or default
+
+
+def is_meta_action(action_kind: Any) -> bool:
+    normalized = _normalize_action_kind(action_kind)
+    return normalized in _META_ACTION_KINDS
+
+
+def is_meaningful_action(action_kind: Any) -> bool:
+    normalized = _normalize_action_kind(action_kind)
+    return bool(normalized) and normalized not in _META_ACTION_KINDS
 
 
 @dataclass(frozen=True)
@@ -261,6 +292,8 @@ __all__ = [
     "PENDING_STATUS_WAITING_FOR_USER",
     "build_memory_summary",
     "deterministic_memory_snapshot",
+    "is_meaningful_action",
+    "is_meta_action",
     "normalize_pending_item",
     "normalize_thread_state",
 ]

@@ -15,6 +15,8 @@ import tempfile
 import time as pytime
 import traceback
 from typing import Any, Callable
+from urllib import error as urllib_error
+from urllib import request as urllib_request
 
 try:
     from telegram import Update
@@ -50,6 +52,7 @@ from agent.audit_log import AuditLog
 from agent.identity import get_public_identity
 from agent.onboarding_contract import ONBOARDING_READY
 from agent.setup_wizard import (
+    SetupWizardResult,
     build_setup_result,
     render_telegram_setup_text,
     run_setup_wizard,
@@ -104,6 +107,7 @@ _WIZARD_YES_TOKENS = {"1", "yes", "y", "ok", "ready"}
 _WIZARD_NO_TOKENS = {"2", "no", "n"}
 _WIZARD_CHOICE_TOKENS = {"1", "2", "3", "yes", "no", "y", "n", "ok", "cancel"}
 _SETUP_WIZARD_SCHEMA_VERSION = 1
+_DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
 _OLLAMA_TIER_CHOICES = [
     {"id": "small", "label": "Small (fastest)", "recommended": True},
     {"id": "medium", "label": "Medium (balanced)", "recommended": False},
@@ -713,10 +717,80 @@ def _format_commit_short(value: str | None) -> str:
     return commit[:12]
 
 
+def _api_base_url() -> str:
+    configured = str(os.getenv("AGENT_API_BASE_URL") or os.getenv("PERSONAL_AGENT_API_BASE_URL") or "").strip()
+    if configured:
+        return configured.rstrip("/")
+    return _DEFAULT_API_BASE_URL
+
+
+def _fetch_local_api_json(path: str, *, timeout_seconds: float = 0.6) -> dict[str, Any]:
+    endpoint = str(path or "").strip()
+    if not endpoint.startswith("/"):
+        endpoint = f"/{endpoint}"
+    url = f"{_api_base_url()}{endpoint}"
+    request = urllib_request.Request(url=url, method="GET")
+    try:
+        with urllib_request.urlopen(request, timeout=float(timeout_seconds)) as response:
+            body = response.read()
+    except (urllib_error.URLError, TimeoutError, OSError):
+        return {}
+    except Exception:
+        return {}
+    try:
+        decoded = body.decode("utf-8", errors="replace")
+        payload = json.loads(decoded)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _runtime_ready_payload(runtime: Any | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if runtime is not None and hasattr(runtime, "ready_status"):
+        try:
+            row = runtime.ready_status()  # type: ignore[attr-defined]
+            if isinstance(row, dict):
+                payload = row
+        except Exception:
+            payload = {}
+    if payload:
+        return payload
+    return _fetch_local_api_json("/ready")
+
+
+def _runtime_llm_status_payload(runtime: Any | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if runtime is not None and hasattr(runtime, "llm_status"):
+        try:
+            row = runtime.llm_status()  # type: ignore[attr-defined]
+            if isinstance(row, dict):
+                payload = row
+        except Exception:
+            payload = {}
+    if payload:
+        return payload
+    return _fetch_local_api_json("/llm/status")
+
+
 def _runtime_status_text(bot_data: dict[str, Any]) -> str:
     runtime = bot_data.get("runtime")
-    version = str(getattr(runtime, "version", "") or bot_data.get("runtime_version") or "0.1.0").strip() or "0.1.0"
-    commit_value = str(getattr(runtime, "git_commit", "") or bot_data.get("runtime_git_commit") or "unknown").strip()
+    ready_payload = _runtime_ready_payload(runtime)
+    ready_api = ready_payload.get("api") if isinstance(ready_payload.get("api"), dict) else {}
+    llm_status = _runtime_llm_status_payload(runtime)
+
+    version = str(
+        getattr(runtime, "version", "")
+        or ready_api.get("version")
+        or bot_data.get("runtime_version")
+        or "0.1.0"
+    ).strip() or "0.1.0"
+    commit_value = str(
+        getattr(runtime, "git_commit", "")
+        or ready_api.get("git_commit")
+        or bot_data.get("runtime_git_commit")
+        or "unknown"
+    ).strip()
     commit_short = _format_commit_short(commit_value)
 
     started_at = getattr(runtime, "started_at", None)
@@ -724,25 +798,15 @@ def _runtime_status_text(bot_data: dict[str, Any]) -> str:
     if isinstance(started_at, datetime):
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - started_at).total_seconds()))
     else:
-        started_ts_raw = bot_data.get("runtime_started_ts")
         try:
-            started_ts = float(started_ts_raw)
+            uptime_seconds = max(0, int(ready_api.get("uptime_seconds") or 0))
         except Exception:
-            started_ts = pytime.time()
-        uptime_seconds = max(0, int(pytime.time() - started_ts))
-
-    ready_payload: dict[str, Any] = {}
-    if runtime is not None and hasattr(runtime, "ready_status"):
-        try:
-            payload = runtime.ready_status()  # type: ignore[attr-defined]
-            if isinstance(payload, dict):
-                ready_payload = payload
-        except Exception:
-            ready_payload = {}
-    if not isinstance(ready_payload, dict):
-        ready_payload = {}
-
-    llm_status = _llm_status_payload(runtime)
+            started_ts_raw = bot_data.get("runtime_started_ts")
+            try:
+                started_ts = float(started_ts_raw)
+            except Exception:
+                started_ts = pytime.time()
+            uptime_seconds = max(0, int(pytime.time() - started_ts))
     provider = str(llm_status.get("default_provider") or "").strip() or None
     model = (
         str(llm_status.get("resolved_default_model") or "").strip()
@@ -821,24 +885,29 @@ def _doctor_summary_text() -> str:
 
 
 def _setup_result_from_runtime(runtime: Any | None) -> Any | None:
-    ready_payload: dict[str, Any] = {}
-    llm_status: dict[str, Any] = {}
-    if runtime is not None:
-        if hasattr(runtime, "ready_status"):
-            try:
-                payload = runtime.ready_status()  # type: ignore[attr-defined]
-                if isinstance(payload, dict):
-                    ready_payload = payload
-            except Exception:
-                ready_payload = {}
-        if hasattr(runtime, "llm_status"):
-            try:
-                payload = runtime.llm_status()  # type: ignore[attr-defined]
-                if isinstance(payload, dict):
-                    llm_status = payload
-            except Exception:
-                llm_status = {}
-    if runtime is not None:
+    ready_payload = _runtime_ready_payload(runtime)
+    llm_status = _runtime_llm_status_payload(runtime)
+    onboarding_row = ready_payload.get("onboarding") if isinstance(ready_payload.get("onboarding"), dict) else {}
+    onboarding_state = str(onboarding_row.get("state") or "").strip().upper()
+    if onboarding_state:
+        steps_raw = onboarding_row.get("steps") if isinstance(onboarding_row.get("steps"), list) else []
+        steps = [str(item).strip() for item in steps_raw if str(item).strip()]
+        recovery_row = ready_payload.get("recovery") if isinstance(ready_payload.get("recovery"), dict) else {}
+        why_value = str(onboarding_row.get("summary") or "").strip() or "Setup state reported by runtime."
+        return SetupWizardResult(
+            trace_id=_setup_trace_id(),
+            generated_at=datetime.now(timezone.utc).isoformat(),
+            onboarding_state=onboarding_state,
+            recovery_mode=str(recovery_row.get("mode") or "UNKNOWN_FAILURE"),
+            summary=str(onboarding_row.get("summary") or "").strip() or "Setup state reported by runtime.",
+            why=why_value,
+            next_action=str(onboarding_row.get("next_action") or "").strip() or "Run: python -m agent setup",
+            steps=steps,
+            suggestions=[],
+            dry_run=True,
+            api_reachable=True,
+        )
+    if ready_payload or llm_status:
         try:
             return build_setup_result(
                 ready_payload=ready_payload,
@@ -900,13 +969,7 @@ def _runtime_llm_availability(bot_data: dict[str, Any]) -> tuple[bool, str]:
 
 
 def _llm_status_payload(runtime: Any | None) -> dict[str, Any]:
-    if runtime is None or not hasattr(runtime, "llm_status"):
-        return {}
-    try:
-        payload = runtime.llm_status()  # type: ignore[attr-defined]
-    except Exception:
-        return {}
-    return payload if isinstance(payload, dict) else {}
+    return _runtime_llm_status_payload(runtime)
 
 
 def _log_runtime_contract_event(
