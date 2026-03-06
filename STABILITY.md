@@ -31,6 +31,11 @@ This file captures practical guarantees that should remain stable unless intenti
   - `tool.decision`
   - `tool.execute`
   - `tool.result`
+- Continuity guarantees (`agent/memory_contract.py` + `agent/memory_runtime.py`):
+  - deterministic thread-state and pending-item normalization
+  - pending expiry is explicit (never silently assumed active)
+  - follow-up binding requires exactly one valid pending item in-thread
+  - ambiguous follow-ups are refused deterministically (no thread mixing)
 
 ## Compatibility Expectations
 

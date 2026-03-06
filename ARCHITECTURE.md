@@ -69,6 +69,21 @@ Service startup
   - one next-action policy for blocked actions
 - Orchestrator LLM tool requests, directive shims, and deterministic heuristic tool paths share this execution gate.
 
+## Continuity Contract
+
+- Canonical continuity data shapes are in `agent/memory_contract.py`:
+  - `thread_state`
+  - `pending_item`
+  - `memory_summary`
+- Runtime continuity access is centralized in `agent/memory_runtime.py`:
+  - thread state read/write
+  - pending lifecycle (including expiry)
+  - resumable snapshot summary
+  - follow-up resolution rules
+- Thread fidelity rule:
+  - short follow-ups (`yes/no/do it/that one/show me more`) bind only when exactly one valid pending item exists for the active thread.
+  - ambiguous or expired follow-ups are refused deterministically (no implicit thread mixing).
+
 ## Surface Routing
 
 - CLI (`python -m agent`): operator workflows (`doctor/status/health/brief/logs/version`).

@@ -20,6 +20,7 @@ Single operator entrypoint:
 - `python -m agent status`
 - `python -m agent health`
 - `python -m agent brief`
+- `python -m agent memory`
 
 ## Current Product Shape
 - Golden path:
@@ -61,6 +62,16 @@ Single operator entrypoint:
 - Single permission decision helper: `agent/permission_contract.py`
   - read-only/write gating semantics are centralized
   - block reasons + next actions are deterministic and reused
+
+## Continuity Contract
+- Canonical continuity shapes and normalization: `agent/memory_contract.py`
+- Single continuity store access layer: `agent/memory_runtime.py`
+- Thread fidelity hardening:
+  - follow-up bind only when exactly one valid pending item exists in the active thread
+  - ambiguity/expiry/no-resumable paths are deterministic and never guessed
+- User-facing continuity summary:
+  - CLI: `python -m agent memory`
+  - Telegram text aliases: `what are we doing?`, `where were we`, `resume`
 
 ## Remaining Rough Edges
 - Root-level docs are now canonicalized, but some historical wording remains inside archived files.

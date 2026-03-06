@@ -316,6 +316,17 @@ def _deterministic_text_command(text: str) -> str | None:
     normalized = _normalize_user_text(text)
     if not normalized:
         return None
+    if _contains_any(
+        normalized,
+        (
+            "what are we doing",
+            "where were we",
+            "resume",
+            "continue where we left off",
+            "continue",
+        ),
+    ):
+        return "/memory"
     if normalized in {"doctor", "fix", "diagnose", "diagnostics", "run doctor"}:
         return "/doctor"
     if _contains_any(
@@ -2762,6 +2773,15 @@ async def _handle_health(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
+async def _handle_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
+    log_path = str(context.application.bot_data.get("log_path") or "")
+    _log_command_route(log_path=log_path, chat_id=chat_id, command="/memory")
+    response = orchestrator.handle_message("/memory", user_id=chat_id)
+    await update.effective_message.reply_text(_safe_reply_text(response.text))
+
+
 async def _handle_daily_brief_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.effective_message is None:
         return
@@ -3134,6 +3154,7 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("done", _handle_done))
     app.add_handler(CommandHandler("open_loops", _handle_open_loops))
     app.add_handler(CommandHandler("health", _handle_health))
+    app.add_handler(CommandHandler("memory", _handle_memory))
     app.add_handler(CommandHandler("daily_brief_status", _handle_daily_brief_status))
     app.add_handler(CommandHandler("ask", _handle_ask))
     app.add_handler(CommandHandler("ask_opinion", _handle_ask_opinion))

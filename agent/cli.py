@@ -214,6 +214,32 @@ def _cmd_brief(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_memory(args: argparse.Namespace) -> int:
+    ok, payload_or_error = _http_json(
+        base_url=str(args.api_base_url),
+        path="/chat",
+        method="POST",
+        payload={"messages": [{"role": "user", "content": "/memory"}]},
+        timeout_seconds=2.5,
+    )
+    if not ok or not isinstance(payload_or_error, dict):
+        return _print_error(
+            title="Memory summary unavailable",
+            component="agent.cli.memory",
+            next_action="run `agent doctor`",
+        )
+    payload = payload_or_error
+    message = str(payload.get("message") or "").strip()
+    if not message:
+        return _print_error(
+            title="Memory summary unavailable",
+            component="agent.cli.memory",
+            next_action="run `agent doctor`",
+        )
+    print(message, flush=True)
+    return 0
+
+
 def _resolve_log_path(explicit: str | None) -> Path:
     if explicit:
         return Path(str(explicit)).expanduser()
@@ -284,6 +310,9 @@ def build_parser() -> argparse.ArgumentParser:
     brief_parser = sub.add_parser("brief", help="Show short system summary")
     brief_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
 
+    memory_parser = sub.add_parser("memory", help="Show continuity summary")
+    memory_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
+
     health_parser = sub.add_parser("health", help="Show LLM/runtime health snapshot")
     health_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
 
@@ -319,6 +348,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_status(args)
     if command == "brief":
         return _cmd_brief(args)
+    if command == "memory":
+        return _cmd_memory(args)
     if command == "health":
         return _cmd_health(args)
     if command == "logs":

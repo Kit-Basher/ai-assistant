@@ -11,6 +11,11 @@
 - Read-only checks stay available in degraded/bootstrap when possible.
 - Write actions remain policy-gated and may be blocked with one explicit next step.
 
+## Continuity Path
+- Continuity state is centralized (`agent/memory_runtime.py`).
+- Follow-up phrases (`yes/no/do it/that one/show me more`) only bind when one valid pending item exists in the active thread.
+- If ambiguous/expired/missing, the agent returns one deterministic next step instead of guessing.
+
 ## When Everything Works
 1. Restart service: `systemctl --user restart personal-agent-api.service`
 2. Verify: `python -m agent status`

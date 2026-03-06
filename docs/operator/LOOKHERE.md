@@ -24,6 +24,7 @@ User service:
   - `python -m agent version`
   - `python -m agent status`
   - `python -m agent brief`
+  - `python -m agent memory`
 - Logs:
   - `python -m agent logs`
 - Doctor checks:
@@ -45,6 +46,11 @@ Tool execution contract:
 - Execution and permission gating are centralized in:
   - `agent/tool_executor.py`
   - `agent/permission_contract.py`
+
+Continuity contract:
+- Thread/pending summary and follow-up resolution live in `agent/memory_runtime.py`.
+- Use `python -m agent memory` or Telegram `what are we doing?` for current resumable state.
+- Follow-up actions never cross threads silently; ambiguous follow-ups are rejected.
 
 ## Timers
 

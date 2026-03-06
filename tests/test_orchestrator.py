@@ -322,6 +322,101 @@ class TestOrchestrator(unittest.TestCase):
         run_mock.assert_not_called()
         self.assertEqual(1, llm.chat_calls)
 
+    def test_followup_yes_is_ambiguous_with_multiple_pending_items(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.add_pending_item(
+            "user1",
+            {
+                "pending_id": "p1",
+                "kind": "clarification",
+                "origin_tool": "ask_query",
+                "question": "Pick one",
+                "options": ["a", "b"],
+                "thread_id": "thread-a",
+                "created_at": 1,
+                "expires_at": 9999999999,
+                "status": "WAITING_FOR_USER",
+            },
+        )
+        orchestrator._memory_runtime.add_pending_item(
+            "user1",
+            {
+                "pending_id": "p2",
+                "kind": "clarification",
+                "origin_tool": "ask_query",
+                "question": "Pick one",
+                "options": ["a", "b"],
+                "thread_id": "thread-a",
+                "created_at": 2,
+                "expires_at": 9999999999,
+                "status": "WAITING_FOR_USER",
+            },
+        )
+        response = orchestrator.handle_message("yes", "user1")
+        self.assertIn("failure_code: followup_ambiguous", response.text)
+        self.assertIn("trace_id:", response.text)
+        self.assertIn("next_action:", response.text)
+
+    def test_followup_yes_without_pending_returns_no_resumable_error(self) -> None:
+        orchestrator = self._orchestrator()
+        response = orchestrator.handle_message("yes", "user1")
+        self.assertIn("failure_code: no_resumable_work", response.text)
+        self.assertIn("trace_id:", response.text)
+        self.assertIn("next_action:", response.text)
+
+    def test_followup_yes_with_expired_pending_returns_expired_error(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.add_pending_item(
+            "user1",
+            {
+                "pending_id": "p-exp",
+                "kind": "followup",
+                "origin_tool": "compare_now",
+                "question": "Run compare?",
+                "options": ["yes", "no"],
+                "thread_id": "thread-a",
+                "created_at": 1,
+                "expires_at": 2,
+                "status": "READY_TO_RESUME",
+            },
+        )
+        response = orchestrator.handle_message("yes", "user1")
+        self.assertIn("failure_code: pending_expired", response.text)
+        self.assertIn("trace_id:", response.text)
+
+    def test_memory_command_returns_deterministic_summary(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="setup ollama")
+        orchestrator._memory_runtime.add_pending_item(
+            "user1",
+            {
+                "pending_id": "p1",
+                "kind": "clarification",
+                "origin_tool": "setup",
+                "question": "Which model size?",
+                "options": ["small", "medium"],
+                "thread_id": "thread-a",
+                "created_at": 1,
+                "expires_at": 9999999999,
+                "status": "WAITING_FOR_USER",
+            },
+        )
+        response = orchestrator.handle_message("/memory", "user1")
+        self.assertIn("Memory summary (thread thread-a):", response.text)
+        self.assertIn("Pending items: 1", response.text)
+        self.assertIn("Resumable: yes", response.text)
+
+    def test_compare_followup_yes_resumes_pending_compare(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._store_pending_compare("user1", "what if we lower background apps")
+        with patch("agent.orchestrator.compare_now_to_what_if", return_value="COMPARE_OUTPUT"):
+            response = orchestrator.handle_message("yes", "user1")
+        self.assertEqual("COMPARE_OUTPUT", response.text)
+
     def test_knowledge_query_cache_and_cta(self) -> None:
         orchestrator = self._orchestrator()
         response = orchestrator.handle_message("what changed this week", "user1")

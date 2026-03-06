@@ -65,6 +65,16 @@ class TestAgentCLI(unittest.TestCase):
         self.assertIn("version=", text)
         self.assertIn("commit=abc1234", text)
 
+    def test_memory_subcommand_prints_summary(self) -> None:
+        payload = {"ok": True, "message": "Memory summary (thread user:1):\nPending items: 0"}
+        output = io.StringIO()
+        with patch("agent.cli._http_json", return_value=(True, payload)), redirect_stdout(output):
+            code = cli.main(["memory"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("Memory summary", text)
+        self.assertIn("Pending items: 0", text)
+
     def test_main_uses_sys_argv_for_doctor_when_argv_none(self) -> None:
         with patch.object(sys, "argv", ["python -m agent", "doctor", "--json"]):
             with patch("agent.cli.doctor_main", return_value=0) as doctor_main:

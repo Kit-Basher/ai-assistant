@@ -227,6 +227,30 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertIn("python -m agent.secrets set telegram:bot_token", reply)
             self.assertEqual([], orchestrator.calls)
 
+    def test_where_were_we_routes_to_memory_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime = _FakeRuntime()
+            orchestrator = _FakeOrchestrator()
+            context = _FakeContext(
+                {
+                    "runtime": runtime,
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "model_provider_wizard_store": TelegramModelProviderWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+            update = _FakeUpdate(12345, "where were we")
+            asyncio.run(_handle_message(update, context))
+
+            self.assertEqual([("/memory", "12345")], orchestrator.calls)
+            self.assertTrue(update.effective_message.replies)
+            reply = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("chat fallback", reply)
+
     def test_setup_text_uses_bootstrap_guidance_when_chat_not_ready(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime = _FakeRuntime()

@@ -44,6 +44,14 @@ from agent.runtime_contract import get_effective_llm_identity, normalize_user_fa
 from agent.error_response_ux import deterministic_error_message
 from agent.tool_contract import normalize_tool_request
 from agent.tool_executor import ToolExecutor
+from agent.memory_runtime import MemoryRuntime
+from agent.memory_contract import (
+    PENDING_STATUS_ABORTED,
+    PENDING_STATUS_DONE,
+    PENDING_STATUS_EXPIRED,
+    PENDING_STATUS_READY_TO_RESUME,
+    PENDING_STATUS_WAITING_FOR_USER,
+)
 from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
     ALLOWED_PREF_KEYS,
@@ -275,6 +283,7 @@ class Orchestrator:
         self._epistemic_monitor = EpistemicMonitor(db)
         self._epistemic_history: dict[tuple[str, str], list[MessageTurn]] = {}
         self._epistemic_thread_state: dict[str, dict[str, str | None]] = {}
+        self._memory_runtime = MemoryRuntime(db)
         self._tool_executor = ToolExecutor(
             handlers={
                 "brief": self._tool_handler_brief,
@@ -335,6 +344,32 @@ class Orchestrator:
             local_providers={"ollama"},
         )
         return OrchestratorResponse(str(status.get("summary") or "Agent is starting or degraded."))
+
+    @staticmethod
+    def _trace_id(prefix: str) -> str:
+        return f"{prefix}-{uuid.uuid4().hex[:10]}"
+
+    def _continuity_error_response(
+        self,
+        *,
+        title: str,
+        failure_code: str,
+        next_action: str,
+    ) -> OrchestratorResponse:
+        trace_id = self._trace_id("cont")
+        return OrchestratorResponse(
+            deterministic_error_message(
+                title=title,
+                trace_id=trace_id,
+                component="orchestrator.continuity",
+                failure_code=failure_code,
+                next_action=next_action,
+            ),
+            {
+                "trace_id": trace_id,
+                "failure_code": failure_code,
+            },
+        )
 
     def _tool_runtime_mode(self) -> str:
         return "READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"
@@ -405,6 +440,7 @@ class Orchestrator:
             safe_mode=False,
         )
         if bool(result.get("ok", False)):
+            self._memory_runtime.set_last_tool(user_id, str(result.get("tool") or ""))
             return OrchestratorResponse(
                 str(result.get("user_text") or "Done.").strip() or "Done.",
                 {
@@ -439,8 +475,40 @@ class Orchestrator:
         if audit_entries:
             lines.append("Recent audits:")
             for entry in audit_entries:
-                lines.append(f"- {entry['id']} {entry['status']}")
+                    lines.append(f"- {entry['id']} {entry['status']}")
         return OrchestratorResponse("\n".join(lines))
+
+    def _memory_summary_response(self, user_id: str) -> OrchestratorResponse:
+        thread_id = self._active_thread_id_for_user(user_id)
+        snapshot = self._memory_runtime.deterministic_snapshot(user_id, thread_id=thread_id)
+        summary = snapshot.get("memory_summary") if isinstance(snapshot.get("memory_summary"), dict) else {}
+        pending_items = snapshot.get("pending_items") if isinstance(snapshot.get("pending_items"), list) else []
+        lines = [
+            f"Memory summary (thread {thread_id}):",
+            f"Current topic: {str(summary.get('current_topic') or 'none')}",
+            f"Pending items: {int(summary.get('pending_count') or 0)}",
+            f"Last tool: {str(summary.get('last_tool') or 'none')}",
+            f"Resumable: {'yes' if bool(summary.get('resumable', False)) else 'no'}",
+        ]
+        last_request = str(summary.get("last_meaningful_user_request") or "").strip()
+        if last_request:
+            lines.append(f"Last request: {last_request}")
+        last_action = str(summary.get("last_agent_action") or "").strip()
+        if last_action:
+            lines.append(f"Last action: {last_action}")
+        if pending_items:
+            first = pending_items[0] if isinstance(pending_items[0], dict) else {}
+            question = str(first.get("question") or "").strip()
+            if question:
+                lines.append(f"Next pending: {question}")
+        return OrchestratorResponse(
+            "\n".join(lines),
+            {
+                "memory_snapshot": snapshot,
+                "thread_id": thread_id,
+                "skip_friction_formatting": True,
+            },
+        )
 
     def _tool_handler_brief(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
         _ = request
@@ -917,6 +985,11 @@ class Orchestrator:
         value = state.get("active_thread_id")
         if isinstance(value, str) and value.strip():
             return value.strip()
+        runtime_state = self._memory_runtime.get_thread_state(user_id)
+        runtime_thread_id = str(runtime_state.get("thread_id") or "").strip()
+        if runtime_thread_id:
+            self._set_active_thread_id_for_user(user_id, runtime_thread_id)
+            return runtime_thread_id
         return self._default_thread_id(user_id)
 
     def _set_active_thread_id_for_user(self, user_id: str, thread_id: str) -> None:
@@ -929,6 +1002,11 @@ class Orchestrator:
             "thread_created_at": now_iso,
             "thread_label": None,
         }
+        self._memory_runtime.set_thread_state(
+            user_id,
+            thread_id=normalized,
+            updated_at=int(datetime.now(timezone.utc).timestamp()),
+        )
 
     def _create_new_thread_id_for_user(self, user_id: str) -> str:
         base = self._default_thread_id(user_id)
@@ -1076,6 +1154,22 @@ class Orchestrator:
             options_json,
             expires_at,
             now_dt.isoformat(),
+        )
+        expires_ts = int((now_dt + timedelta(minutes=minutes)).timestamp())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "clarification",
+                "origin_tool": intent_type,
+                "question": question,
+                "options": list(options),
+                "created_at": int(now_dt.timestamp()),
+                "expires_at": expires_ts,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_WAITING_FOR_USER,
+                "context": {"chat_id": str(chat_id)},
+            },
         )
 
     def _intent_context(self, chat_id: str | None = None) -> dict[str, Any]:
@@ -1481,6 +1575,11 @@ class Orchestrator:
         if not topic:
             return
         record_event(self.db, user_id, topic, intent_type)
+        self._memory_runtime.set_current_topic(
+            user_id,
+            topic=topic,
+            last_tool=intent_type,
+        )
 
     def _topic_tags_for_decision(self, decision: dict[str, Any] | None) -> list[str]:
         if not decision:
@@ -1513,6 +1612,21 @@ class Orchestrator:
         now = datetime.now(timezone.utc).isoformat()
         expires = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
         self._pending_compare[user_id] = {"what_if_text": what_if_text, "expires_at": expires}
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "kind": "followup",
+                "origin_tool": "compare_now",
+                "question": "Run compare-now on the latest what-if scenario?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {"what_if_text": what_if_text},
+            },
+        )
 
     def _get_pending_compare(self, user_id: str) -> dict[str, Any] | None:
         row = self._pending_compare.get(user_id)
@@ -1521,6 +1635,15 @@ class Orchestrator:
         try:
             if row.get("expires_at") and datetime.fromisoformat(row["expires_at"]) <= datetime.now(timezone.utc):
                 self._pending_compare.pop(user_id, None)
+                pending_items = self._memory_runtime.list_pending_items(user_id, include_expired=True)
+                for pending in pending_items:
+                    if str(pending.get("origin_tool") or "") != "compare_now":
+                        continue
+                    self._memory_runtime.set_pending_status(
+                        user_id,
+                        str(pending.get("pending_id") or ""),
+                        PENDING_STATUS_EXPIRED,
+                    )
                 return None
         except (TypeError, ValueError):
             return None
@@ -1566,6 +1689,12 @@ class Orchestrator:
             "thread_created_at": created_at,
             "thread_label": next_label,
         }
+        self._memory_runtime.set_thread_state(
+            user_id,
+            thread_id=active_thread_id,
+            status="active",
+            updated_at=int(datetime.now(timezone.utc).timestamp()),
+        )
         return active_thread_id, created_at, next_label
 
     def _epistemic_recent_messages(self, user_id: str, thread_id: str, limit: int = 8) -> tuple[MessageTurn, ...]:
@@ -2085,9 +2214,12 @@ class Orchestrator:
             return OrchestratorResponse("Permission denied.")
 
         if decision.requires_confirmation and not confirmed:
+            now_epoch = int(datetime.now(timezone.utc).timestamp())
+            pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
             pending = PendingAction(
                 user_id=user_id,
                 action={
+                    "pending_id": pending_id,
                     "skill": skill_name,
                     "function": function_name,
                     "args": args,
@@ -2097,6 +2229,20 @@ class Orchestrator:
                 message="This will delete or overwrite data. Reply /confirm to proceed.",
             )
             self.confirmations.set(pending)
+            self._memory_runtime.add_pending_item(
+                user_id,
+                {
+                    "pending_id": pending_id,
+                    "kind": "confirmation",
+                    "origin_tool": function_name or skill_name,
+                    "question": pending.message,
+                    "options": ["/confirm", "cancel"],
+                    "created_at": now_epoch,
+                    "expires_at": now_epoch + 600,
+                    "thread_id": self._active_thread_id_for_user(user_id),
+                    "status": PENDING_STATUS_WAITING_FOR_USER,
+                },
+            )
             return OrchestratorResponse(pending.message)
 
         ctx = dict(self._context())
@@ -2240,7 +2386,12 @@ class Orchestrator:
 
     def handle_message(self, text: str, user_id: str) -> OrchestratorResponse:
         response = self._handle_message_impl(text, user_id)
-        return self._apply_epistemic_layer(user_id, text, response)
+        final_response = self._apply_epistemic_layer(user_id, text, response)
+        try:
+            self._memory_runtime.record_agent_action(user_id, final_response.text)
+        except Exception:
+            pass
+        return final_response
 
     def _handle_message_impl(self, text: str, user_id: str) -> OrchestratorResponse:
         self._runner = Runner()
@@ -2250,6 +2401,14 @@ class Orchestrator:
             if cmd and cmd.name == "nomem":
                 cmd = None
                 text = cleaned_text
+            effective_user_text = cleaned_text if override else text
+            self._memory_runtime.clear_expired_pending_items(user_id)
+            if str(effective_user_text or "").strip() and not str(effective_user_text).strip().startswith("/"):
+                self._memory_runtime.record_user_request(user_id, str(effective_user_text))
+            self._memory_runtime.set_thread_state(
+                user_id,
+                runtime_mode=("READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"),
+            )
             if cmd:
                 try:
                     memory_ingest.ingest_event(
@@ -2262,11 +2421,15 @@ class Orchestrator:
                     )
                 except (TypeError, ValueError, sqlite3.Error, OSError):
                     pass
+                self._memory_runtime.set_last_tool(user_id, cmd.name)
                 if cmd.name == "confirm":
                     pending = self.confirmations.pop(user_id)
                     if not pending:
                         return OrchestratorResponse("No pending action to confirm.")
                     action = pending.action
+                    pending_id = str(action.get("pending_id") or "").strip()
+                    if pending_id:
+                        self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
                     return self._call_skill(
                         user_id,
                         action["skill"],
@@ -3487,6 +3650,30 @@ class Orchestrator:
 
                 if cmd.name == "resume":
                     thread_id = self._active_thread_id_for_user(user_id)
+                    pending_items = self._memory_runtime.list_pending_items(
+                        user_id,
+                        thread_id=thread_id,
+                        include_expired=False,
+                    )
+                    resumable_items = [
+                        item
+                        for item in pending_items
+                        if item.get("status") in {PENDING_STATUS_WAITING_FOR_USER, PENDING_STATUS_READY_TO_RESUME}
+                    ]
+                    if resumable_items:
+                        first = resumable_items[0]
+                        question = str(first.get("question") or "").strip() or "Pending follow-up."
+                        options = first.get("options") if isinstance(first.get("options"), list) else []
+                        lines = [
+                            f"Resume (thread {thread_id}):",
+                            f"Pending: {question}",
+                        ]
+                        if options:
+                            lines.append("Options: " + ", ".join(str(option) for option in options if str(option).strip()))
+                        return OrchestratorResponse(
+                            "\n".join(lines),
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
                     rows = self.db.list_thread_anchors(thread_id, limit=2)
                     lines = [f"Resume (thread {thread_id}):"]
                     if not rows:
@@ -3553,6 +3740,9 @@ class Orchestrator:
                         "\n".join(lines),
                         {"skip_friction_formatting": True, "thread_id": thread_id},
                     )
+
+                if cmd.name == "memory":
+                    return self._memory_summary_response(user_id)
 
                 if cmd.name == "anchors_reset":
                     thread_id = self._active_thread_id_for_user(user_id)
@@ -4083,6 +4273,107 @@ class Orchestrator:
                 if cmd.name == "health":
                     return self._cards_response(user_id, self._health_payload(user_id))
 
+            thread_id = self._active_thread_id_for_user(user_id)
+            if (
+                self._memory_runtime.should_start_new_thread(user_id, text, thread_id)
+                and str(self._last_offer_topic.get(user_id) or "").strip() != "brief_offer"
+            ):
+                self._memory_runtime.abort_pending_for_thread(user_id, thread_id)
+
+            followup = self._memory_runtime.resolve_followup(user_id, text, thread_id)
+            followup_type = str(followup.get("type") or "")
+            followup_reason = str(followup.get("reason") or "")
+            followup_intent = str(followup.get("intent") or "")
+            if followup_type == "ambiguous":
+                return self._continuity_error_response(
+                    title="❌ Follow-up is ambiguous.",
+                    failure_code="followup_ambiguous",
+                    next_action="Reply with the exact question you want to continue.",
+                )
+            if followup_type == "expired":
+                return self._continuity_error_response(
+                    title="❌ That pending step expired.",
+                    failure_code="pending_expired",
+                    next_action="Ask me to run it again.",
+                )
+            if followup_type == "none" and followup_reason == "no_pending":
+                if str(self._last_offer_topic.get(user_id) or "").strip() != "brief_offer":
+                    return self._continuity_error_response(
+                        title="❌ No resumable work is active.",
+                        failure_code="no_resumable_work",
+                        next_action="Ask \"what are we doing?\" or start a new request.",
+                    )
+            if followup_type == "match":
+                pending_item = followup.get("pending_item") if isinstance(followup.get("pending_item"), dict) else {}
+                pending_id = str(pending_item.get("pending_id") or "").strip()
+                pending_kind = str(pending_item.get("kind") or "").strip().lower()
+                pending_status = str(pending_item.get("status") or "").strip().upper()
+                if pending_status == PENDING_STATUS_EXPIRED:
+                    if pending_id:
+                        self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_EXPIRED)
+                    return self._continuity_error_response(
+                        title="❌ That pending step expired.",
+                        failure_code="pending_expired",
+                        next_action="Ask me to run it again.",
+                    )
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "compare_now":
+                    if followup_intent in {"accept", "details"}:
+                        compare_pending = self._get_pending_compare(user_id)
+                        if not compare_pending or not compare_pending.get("what_if_text"):
+                            if pending_id:
+                                self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                            return self._continuity_error_response(
+                                title="❌ Compare context is no longer available.",
+                                failure_code="resumable_missing",
+                                next_action="Ask a new what-if question first.",
+                            )
+                        what_if_text = str(compare_pending.get("what_if_text") or "").strip()
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        self._pending_compare.pop(user_id, None)
+                        return OrchestratorResponse(compare_now_to_what_if(what_if_text))
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        self._pending_compare.pop(user_id, None)
+                        return OrchestratorResponse("Okay — I cancelled that pending compare step.")
+                if pending_kind == "confirmation":
+                    if followup_intent in {"accept", "details"}:
+                        pending_action = self.confirmations.pop(user_id)
+                        if not pending_action:
+                            if pending_id:
+                                self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                            return self._continuity_error_response(
+                                title="❌ Confirmation target is no longer available.",
+                                failure_code="resumable_missing",
+                                next_action="Re-run the action you want to confirm.",
+                            )
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        action = pending_action.action
+                        return self._call_skill(
+                            user_id,
+                            action["skill"],
+                            action["function"],
+                            action["args"],
+                            action["requested_permissions"],
+                            action.get("action_type"),
+                            confirmed=True,
+                        )
+                    if followup_intent == "decline":
+                        self.confirmations.pop(user_id)
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I cancelled that pending confirmation.")
+                if pending_kind in {"clarification", "confirmation", "task"}:
+                    question = str(pending_item.get("question") or "").strip() or "Please answer the pending prompt."
+                    options = pending_item.get("options") if isinstance(pending_item.get("options"), list) else []
+                    lines = [question]
+                    if options:
+                        lines.append("Options: " + ", ".join(str(item) for item in options if str(item).strip()))
+                    lines.append("Reply with the exact option.")
+                    return OrchestratorResponse("\n".join(lines))
+
             reply_action, pending = opinion_gate.handle_reply(self.db, user_id, text, self.log_path)
             if reply_action == "expired":
                 return OrchestratorResponse("Opinion request expired.")
@@ -4309,6 +4600,19 @@ class Orchestrator:
                 text = pending.get("what_if_text") or ""
                 if not text:
                     return OrchestratorResponse("No what-if scenario to compare. Ask a what-if question first.")
+                for pending_item in self._memory_runtime.list_pending_items(
+                    user_id,
+                    thread_id=self._active_thread_id_for_user(user_id),
+                    include_expired=True,
+                ):
+                    if str(pending_item.get("origin_tool") or "") != "compare_now":
+                        continue
+                    self._memory_runtime.set_pending_status(
+                        user_id,
+                        str(pending_item.get("pending_id") or ""),
+                        PENDING_STATUS_DONE,
+                    )
+                self._pending_compare.pop(user_id, None)
                 return OrchestratorResponse(compare_now_to_what_if(text))
 
             if decision.get("type") == "resource_followup":

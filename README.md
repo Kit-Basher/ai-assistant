@@ -28,6 +28,7 @@ Unified CLI:
 - `python -m agent status`
 - `python -m agent health`
 - `python -m agent brief`
+- `python -m agent memory`
 - `python -m agent logs`
 - `python -m agent version`
 
@@ -49,6 +50,12 @@ Runtime contract (all surfaces use the same mode names):
 - Execution goes through one gate (`agent/tool_executor.py`) with one permission decision path (`agent/permission_contract.py`).
 - Read-only tools can run in degraded/bootstrap modes when possible.
 - Write tools are blocked unless explicitly allowed by policy (`enable_writes` and safe-mode checks).
+
+## Continuity Contract
+- Conversation continuity is normalized by `agent/memory_contract.py` and persisted via `agent/memory_runtime.py`.
+- Follow-ups like `yes/no/do it/that one/show me more` only bind when exactly one valid pending item exists in the current thread.
+- Ambiguous/expired/no-resumable follow-ups return deterministic error blocks (`trace_id`, `component`, `next_action`) with no guessing.
+- Use `python -m agent memory` (or Telegram: `what are we doing?`) for a short, truthful continuity summary.
 
 ## If You Only Learn 3 Commands
 - `python -m agent status`
