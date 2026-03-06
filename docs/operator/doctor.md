@@ -13,6 +13,7 @@ Canonical local diagnostics entrypoint:
 - no sudo required
 - no secret/token leakage (redacted output)
 - trace id included in stdout and per-check logs
+- stdout/journald visibility is part of the supported runtime model; `logging.stdout` should pass unless logging is explicitly misconfigured
 - aligns with runtime permission semantics: read-only diagnostics are always preferred
 
 ## Safe Fix Scope (`--fix`)

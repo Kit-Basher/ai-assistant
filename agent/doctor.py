@@ -20,6 +20,7 @@ from memory.db import MemoryDB
 from skills.observe_now.handler import observe_now
 from agent.audit_log import redact
 from agent.golden_path import next_step_for_failure
+from agent.logging_bootstrap import configure_logging_if_needed
 from agent.secret_store import SecretStore
 from agent.config import load_config
 
@@ -365,13 +366,8 @@ class DoctorReport:
 
 
 def _doctor_logger() -> logging.Logger:
-    logger = logging.getLogger("agent.doctor")
-    if not logger.handlers:
-        handler = logging.StreamHandler(sys.stderr)
-        handler.setLevel(logging.INFO)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
+    configure_logging_if_needed()
+    return logging.getLogger("agent.doctor")
 
 
 def _doctor_trace_id(now_epoch: int | None = None) -> str:
@@ -705,7 +701,7 @@ def _check_logging_to_stdout() -> DoctorCheck:
             detail_short="no logging handlers configured",
             next_action="Configure logging to stdout for journald visibility.",
         )
-    return DoctorCheck(check_id="logging.stdout", status="OK", detail_short=f"handlers={len(handlers)}")
+    return DoctorCheck(check_id="logging.stdout", status="OK", detail_short=f"stdout/journald handlers={len(handlers)}")
 
 
 def _doctor_checks(
@@ -861,6 +857,7 @@ def run_doctor_report(
     api_base_url: str = "http://127.0.0.1:8765",
     now_epoch: int | None = None,
 ) -> DoctorReport:
+    configure_logging_if_needed()
     root = Path(repo_root or Path(__file__).resolve().parents[1]).expanduser().resolve()
     trace_id = _doctor_trace_id(now_epoch=now_epoch)
     checks = _doctor_checks(repo_root=root, online=bool(online), api_base_url=api_base_url)
@@ -916,6 +913,7 @@ def _render_text_report(report: DoctorReport) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging_if_needed()
     parser = argparse.ArgumentParser(description="Personal Agent doctor checks")
     parser.add_argument("--json", action="store_true", help="emit JSON output")
     parser.add_argument("--fix", action="store_true", help="apply deterministic safe fixes")

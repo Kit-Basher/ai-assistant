@@ -103,6 +103,7 @@ Recovery contract (single best next action per mode):
 - Canonical first-run and recovery guide: `python -m agent setup`
 - Detailed machine-readable output: `python -m agent doctor --json`
 - Safe local remediation only: `python -m agent doctor --fix`
+- Runtime entrypoints bootstrap stdout logging automatically, so logs are visible in journald/stdout by default.
 
 ## Local API + Web UI
 Run local HTTP API (no Telegram token required):

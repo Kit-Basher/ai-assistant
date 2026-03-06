@@ -78,6 +78,7 @@ from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
 from agent.audit_log import AuditLog, redact as redact_audit_value
 from agent.bootstrap.snapshot import collect_bootstrap_snapshot
+from agent.logging_bootstrap import configure_logging_if_needed
 from agent.llm.action_ledger import ActionLedgerStore
 from agent.llm.autopilot_safety import AutopilotSafetyStateStore, detect_autopilot_churn
 from agent.llm.autoconfig import apply_autoconfig_plan, build_autoconfig_plan
@@ -15266,6 +15267,7 @@ def build_runtime(config: Config | None = None, *, defer_bootstrap_warmup: bool 
 
 
 def run_server(host: str, port: int) -> None:
+    configure_logging_if_needed()
     server_started = time.monotonic()
     _startup_stdout_event("server.start.begin", host=host, port=int(port))
     runtime = build_runtime(defer_bootstrap_warmup=True)

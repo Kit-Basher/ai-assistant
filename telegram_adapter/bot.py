@@ -55,6 +55,7 @@ from agent.daily_brief import should_send_daily_brief
 from agent.model_scout import build_model_scout
 from agent.audit_log import AuditLog
 from agent.identity import get_public_identity
+from agent.logging_bootstrap import configure_logging_if_needed
 from agent.onboarding_contract import ONBOARDING_READY
 from agent.setup_wizard import (
     SetupWizardResult,
@@ -80,13 +81,6 @@ from agent.ux.clarify_suggest import (
 )
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore, confirm_token_for_plan_rows
 from memory.db import MemoryDB
-
-if not logging.getLogger().handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        handlers=[logging.StreamHandler(sys.stdout)],
-        format="%(asctime)s %(levelname)s %(name)s %(message)s",
-    )
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -3360,6 +3354,7 @@ def run_polling_with_backoff(
 
 
 def main() -> None:
+    configure_logging_if_needed()
     loaded = load_config(require_telegram_token=False)
     if not bool(getattr(loaded, "telegram_enabled", False)):
         _LOGGER.info(

@@ -17,6 +17,7 @@ from agent.golden_path import (
     bootstrap_needed,
     next_step_for_failure,
 )
+from agent.logging_bootstrap import configure_logging_if_needed
 from agent.runtime_contract import normalize_user_facing_status
 from agent.setup_wizard import render_setup_text, run_setup_wizard
 
@@ -343,6 +344,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging_if_needed()
     if argv is None:
         incoming = list(sys.argv[1:])
     else:

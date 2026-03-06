@@ -89,6 +89,7 @@ Telegram `setup/status` readiness semantics are sourced from the same runtime tr
 ## Logs
 
 - Default app log: `logs/agent.jsonl`
+- Supported runtime model: entrypoints bootstrap stdout logging automatically, so journald/stdout should always show runtime logs unless an explicit external logging config replaces it.
 - System journal:
   - system scope: `journalctl -u personal-agent.service -n 200 --no-pager`
   - user scope: `journalctl --user -u personal-agent-api.service -n 200 --no-pager`

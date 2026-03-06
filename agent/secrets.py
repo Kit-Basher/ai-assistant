@@ -5,6 +5,7 @@ import os
 import re
 import sys
 
+from agent.logging_bootstrap import configure_logging_if_needed
 from agent.secret_store import SecretStore
 
 _TELEGRAM_BOT_TOKEN_SECRET_KEY = "telegram:bot_token"
@@ -46,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    configure_logging_if_needed()
     parser = build_parser()
     args = parser.parse_args(argv)
     store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
