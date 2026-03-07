@@ -18,7 +18,10 @@ from agent.golden_path import (
     bootstrap_needed,
     next_step_for_failure,
 )
+from agent.llm.install_approval import validate_install_approval
+from agent.llm.install_executor import execute_install_plan
 from agent.llm.install_planner import build_install_plan
+from agent.llm.install_planner import build_install_plan_for_model
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_selector import select_model_for_task
 from agent.llm.registry import load_registry
@@ -402,6 +405,88 @@ def _cmd_llm_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_llm_install(args: argparse.Namespace) -> int:
+    config = load_config(require_telegram_token=False)
+    registry = load_registry(config)
+    inventory = build_model_inventory(config=config, registry=registry)
+    if str(getattr(args, "model", "") or "").strip():
+        plan = build_install_plan_for_model(
+            inventory=inventory,
+            model_ref=str(args.model),
+        )
+        task_request: dict[str, Any] = {"task_type": "explicit_model", "requirements": [], "preferred_local": True}
+    else:
+        task_text = str(args.task or "").strip()
+        task_request = classify_task_request(task_text)
+        selection = select_model_for_task(
+            inventory,
+            task_request,
+            allow_remote_fallback=bool(registry.defaults.allow_remote_fallback),
+            policy_name="default",
+            policy=config.default_policy if isinstance(config.default_policy, dict) else None,
+        )
+        plan = build_install_plan(
+            inventory=inventory,
+            task_request=task_request,
+            selection_result=selection,
+            allow_remote_fallback=bool(registry.defaults.allow_remote_fallback),
+            policy_name="default",
+            policy=config.default_policy if isinstance(config.default_policy, dict) else None,
+        )
+    if bool(getattr(args, "json", False)) and not bool(getattr(args, "approve", False)):
+        payload = {
+            "task_request": task_request,
+            "plan": plan,
+            "approval": validate_install_approval(plan, approve=False),
+        }
+        print(json.dumps(payload, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+        return 0
+    if not bool(getattr(args, "approve", False)):
+        approval = validate_install_approval(plan, approve=False)
+        lines = [
+            "LLM install request",
+            f"needed: {str(bool(plan.get('needed', False))).lower()}",
+            f"approved: {str(bool(plan.get('approved', False))).lower()}",
+            f"approval_required: {str(str(approval.get('error_kind') or '') == 'approval_required').lower()}",
+            f"model_id: {str(approval.get('model_id') or 'none')}",
+            f"install_name: {str(approval.get('install_name') or 'none')}",
+            f"next_action: {str(plan.get('next_action') or approval.get('message') or 'none')}",
+        ]
+        print("\n".join(lines), flush=True)
+        return 0
+
+    result = execute_install_plan(
+        config=config,
+        registry=registry,
+        plan=plan,
+        approve=True,
+        trace_id=_trace_id("llm-install"),
+    )
+    if bool(getattr(args, "json", False)):
+        print(json.dumps(result, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+    else:
+        lines = [
+            "LLM install result",
+            f"ok: {str(bool(result.get('ok', False))).lower()}",
+            f"executed: {str(bool(result.get('executed', False))).lower()}",
+            f"model_id: {str(result.get('model_id') or 'none')}",
+            f"install_name: {str(result.get('install_name') or 'none')}",
+            f"error_kind: {str(result.get('error_kind') or 'none')}",
+            f"message: {str(result.get('message') or 'none')}",
+            f"trace_id: {str(result.get('trace_id') or 'none')}",
+        ]
+        verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
+        if verification:
+            lines.extend(
+                [
+                    "verification:",
+                    f"- found={str(bool(verification.get('found', False))).lower()} installed={str(bool(verification.get('installed', False))).lower()} available={str(bool(verification.get('available', False))).lower()} healthy={str(bool(verification.get('healthy', False))).lower()}",
+                ]
+            )
+        print("\n".join(lines), flush=True)
+    return 0 if bool(result.get("ok", False)) else 1
+
+
 def _cmd_brief(args: argparse.Namespace) -> int:
     ok, payload_or_error = _http_json(
         base_url=str(args.api_base_url),
@@ -562,6 +647,13 @@ def build_parser() -> argparse.ArgumentParser:
     llm_plan_parser.add_argument("--task", required=True, help="task description")
     llm_plan_parser.add_argument("--json", action="store_true", help="emit JSON output")
 
+    llm_install_parser = sub.add_parser("llm_install", help="Preview or execute an approved local Ollama install")
+    llm_install_target = llm_install_parser.add_mutually_exclusive_group(required=True)
+    llm_install_target.add_argument("--task", help="task description")
+    llm_install_target.add_argument("--model", help="approved local model id, for example ollama:llava:7b")
+    llm_install_parser.add_argument("--approve", action="store_true", help="execute the approved local install")
+    llm_install_parser.add_argument("--json", action="store_true", help="emit JSON output")
+
     logs_parser = sub.add_parser("logs", help="Show recent agent logs")
     logs_parser.add_argument("--lines", type=int, default=50)
     logs_parser.add_argument("--path", default=None)
@@ -609,6 +701,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_llm_select(args)
     if command == "llm_plan":
         return _cmd_llm_plan(args)
+    if command == "llm_install":
+        return _cmd_llm_install(args)
     if command == "logs":
         return _cmd_logs(args)
     if command == "version":

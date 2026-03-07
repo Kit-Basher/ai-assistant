@@ -101,6 +101,8 @@ Recovery contract (single best next action per mode):
 - Approved install plans are planning-only. They do not silently download or switch models.
 - Approved install planning uses a small local Ollama shortlist, not broad remote catalog guessing.
 - v1 coding selection requires `chat` capability. JSON output is optional, not required, for local coding assistance.
+- Approved local install execution is available through `python -m agent llm_install ... --approve`.
+- v1 install execution is local Ollama only and always requires explicit operator approval.
 
 ## Continuity Contract
 - Conversation continuity is normalized by `agent/memory_contract.py` and persisted via `agent/memory_runtime.py`.

@@ -246,12 +246,12 @@ class TestOrchestrator(unittest.TestCase):
                 "needed": True,
                 "approved": True,
                 "plan": [{"action": "ollama.pull_model", "model": "qwen2.5:3b-instruct"}],
-                "next_action": "Review install plan for ollama:qwen2.5:3b-instruct.",
+                "next_action": "Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve",
             },
         ):
             response = orchestrator._llm_chat("user1", "tell me a joke")
         self.assertIn("No suitable local-first model is ready", response.text)
-        self.assertIn("Review install plan for ollama:qwen2.5:3b-instruct.", response.text)
+        self.assertIn("Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve", response.text)
         self.assertEqual([], llm.chat_calls)
 
     def test_llm_chat_keeps_junk_command_suffix_unchanged_when_no_trigger(self) -> None:

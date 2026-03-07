@@ -37,6 +37,7 @@ Single operator entrypoint:
   - deterministic model selection with strict capability matching
   - approved install planning based on suitable installed healthy models, not mere existence
   - approved local model profiles for chat, coding, vision, and reasoning recommendations
+  - explicit local Ollama install execution with operator approval
 - Golden path:
   1. Start `personal-agent-api.service`
   2. Run `python -m agent setup --dry-run`
@@ -118,6 +119,7 @@ Single operator entrypoint:
   - recommends from a small approved local Ollama shortlist
   - remains honest when no approved local profile fits
   - v1 coding requires `chat`, not `json`
+  - execution is local Ollama only and requires explicit approval
 
 ## Tool Execution Contract
 - Canonical LLM tool request schema: `agent/tool_contract.py`

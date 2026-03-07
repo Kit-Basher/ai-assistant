@@ -422,7 +422,7 @@ class TestLLMControlPlane(unittest.TestCase):
         self.assertTrue(bool(plan["approved"]))
         self.assertEqual("ollama pull llava:7b", plan["install_command"])
         self.assertEqual("ollama:llava:7b", plan["candidates"][0]["model_id"])
-        self.assertEqual("Run: ollama pull llava:7b", plan["next_action"])
+        self.assertEqual("Run: python -m agent llm_install --model ollama:llava:7b --approve", plan["next_action"])
 
     def test_install_planner_local_only_is_not_satisfied_by_remote_only_candidate(self) -> None:
         inventory = [

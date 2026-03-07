@@ -163,7 +163,7 @@ class TestAgentCLI(unittest.TestCase):
                 "plan": {
                     "needed": True,
                     "approved": True,
-                    "next_action": "Review install plan for ollama:qwen2.5:3b-instruct.",
+                    "next_action": "Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve",
                     "plan": [{"id": "01_pull_model", "action": "ollama.pull_model", "model": "qwen2.5:3b-instruct"}],
                 },
             },
@@ -185,7 +185,7 @@ class TestAgentCLI(unittest.TestCase):
                     "approved": True,
                     "reason": "no_local_model_with_required_capabilities",
                     "install_command": "ollama pull llava:7b",
-                    "next_action": "Run: ollama pull llava:7b",
+                    "next_action": "Run: python -m agent llm_install --model ollama:llava:7b --approve",
                     "candidates": [
                         {
                             "model_id": "ollama:llava:7b",
@@ -205,6 +205,69 @@ class TestAgentCLI(unittest.TestCase):
         self.assertIn("reason: no_local_model_with_required_capabilities", text)
         self.assertIn("install_command: ollama pull llava:7b", text)
         self.assertIn("candidates:", text)
+        self.assertIn("ollama:llava:7b", text)
+
+    def test_llm_install_subcommand_without_approve_shows_preview_only(self) -> None:
+        output = io.StringIO()
+        plan = {
+            "needed": True,
+            "approved": True,
+            "approval_required": True,
+            "reason": "no_local_model_with_required_capabilities",
+            "install_command": "ollama pull llava:7b",
+            "next_action": "Run: python -m agent llm_install --model ollama:llava:7b --approve",
+            "candidates": [{"model_id": "ollama:llava:7b", "install_name": "llava:7b"}],
+            "plan": [{"id": "01_pull_model", "action": "ollama.pull_model", "model": "llava:7b"}],
+        }
+        with patch("agent.cli.load_config"), patch("agent.cli.load_registry"), patch(
+            "agent.cli.build_model_inventory", return_value=[]
+        ), patch(
+            "agent.cli.build_install_plan_for_model", return_value=plan
+        ), patch(
+            "agent.cli.execute_install_plan"
+        ) as execute_mock, redirect_stdout(output):
+            code = cli.main(["llm_install", "--model", "ollama:llava:7b"])
+        self.assertEqual(0, code)
+        execute_mock.assert_not_called()
+        text = output.getvalue()
+        self.assertIn("approval_required: true", text)
+        self.assertIn("model_id: ollama:llava:7b", text)
+
+    def test_llm_install_subcommand_with_approve_executes(self) -> None:
+        output = io.StringIO()
+        plan = {
+            "needed": True,
+            "approved": True,
+            "approval_required": True,
+            "reason": "no_local_model_with_required_capabilities",
+            "install_command": "ollama pull llava:7b",
+            "next_action": "Run: python -m agent llm_install --model ollama:llava:7b --approve",
+            "candidates": [{"model_id": "ollama:llava:7b", "install_name": "llava:7b"}],
+            "plan": [{"id": "01_pull_model", "action": "ollama.pull_model", "model": "llava:7b"}],
+        }
+        result = {
+            "ok": True,
+            "executed": True,
+            "model_id": "ollama:llava:7b",
+            "install_name": "llava:7b",
+            "trace_id": "cli-install-1",
+            "error_kind": None,
+            "message": "Installed and verified ollama:llava:7b.",
+            "verification": {"found": True, "installed": True, "available": True, "healthy": True},
+        }
+        with patch("agent.cli.load_config"), patch("agent.cli.load_registry"), patch(
+            "agent.cli.build_model_inventory", return_value=[]
+        ), patch(
+            "agent.cli.build_install_plan_for_model", return_value=plan
+        ), patch(
+            "agent.cli.execute_install_plan", return_value=result
+        ) as execute_mock, redirect_stdout(output):
+            code = cli.main(["llm_install", "--model", "ollama:llava:7b", "--approve"])
+        self.assertEqual(0, code)
+        execute_mock.assert_called_once()
+        text = output.getvalue()
+        self.assertIn("LLM install result", text)
+        self.assertIn("executed: true", text)
         self.assertIn("ollama:llava:7b", text)
 
     def test_logs_subcommand_tails_last_lines(self) -> None:

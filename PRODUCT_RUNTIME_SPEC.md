@@ -61,6 +61,7 @@ If implementation or other docs conflict with this file, this file wins.
   - model selection
   - approved install planning
   - approved local model profiles used for deterministic Ollama recommendations
+  - explicit approved local Ollama install execution behind operator approval
 - Skill packs add additional capabilities later.
 - Skill packs require explicit approval/registry policy.
 - Future self-generated skills must still follow approval/registry controls.

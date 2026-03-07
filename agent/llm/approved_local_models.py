@@ -75,6 +75,19 @@ def approved_local_model_profiles() -> list[dict[str, Any]]:
     return rows
 
 
+def approved_local_profile_for_ref(model_ref: str) -> dict[str, Any] | None:
+    normalized = str(model_ref or "").strip()
+    if not normalized:
+        return None
+    for profile in approved_local_model_profiles():
+        if normalized in {
+            str(profile.get("id") or "").strip(),
+            str(profile.get("install_name") or "").strip(),
+        }:
+            return dict(profile)
+    return None
+
+
 def _profile_inventory_row(profile: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": str(profile.get("id") or "").strip(),
@@ -127,4 +140,8 @@ def approved_local_profiles_for_task(task_request: dict[str, Any], *, limit: int
     return matched[: max(0, int(limit))]
 
 
-__all__ = ["approved_local_model_profiles", "approved_local_profiles_for_task"]
+__all__ = [
+    "approved_local_model_profiles",
+    "approved_local_profile_for_ref",
+    "approved_local_profiles_for_task",
+]
