@@ -693,6 +693,9 @@ class Orchestrator:
                         inventory=llm_inventory,
                         task_request=task_request,
                         selection_result=selection,
+                        allow_remote_fallback=bool(getattr(llm_registry.defaults, "allow_remote_fallback", True)),
+                        policy_name="default",
+                        policy=getattr(llm_config, "default_policy", None),
                     )
                     self._log_llm_selection(
                         trace_id=trace_id,

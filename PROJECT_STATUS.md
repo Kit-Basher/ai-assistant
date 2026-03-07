@@ -32,10 +32,10 @@ Single operator entrypoint:
 - PC health monitoring (read-only) implemented.
 - System health output now includes deterministic warning analysis, severity, and actionable suggestions.
 - LLM control plane implemented:
-  - deterministic local-first inventory
+  - deterministic local-first inventory with one normalized health truth
   - deterministic task classification
-  - deterministic model selection
-  - approved install planning when no suitable local model exists
+  - deterministic model selection with strict capability matching
+  - approved install planning based on suitable installed healthy models, not mere existence
 - Golden path:
   1. Start `personal-agent-api.service`
   2. Run `python -m agent setup --dry-run`
@@ -106,6 +106,7 @@ Single operator entrypoint:
   - `python -m agent llm_select --task \"...\"`
   - `python -m agent llm_plan --task \"...\"`
 - Selection behavior:
+  - one shared health truth
   - healthy
   - approved
   - local-first

@@ -252,6 +252,54 @@ class TestLLMControlPlane(unittest.TestCase):
         self.assertEqual("ollama:llama3", selection["selected_model"])
         self.assertEqual("ollama", selection["provider"])
 
+    def test_selector_does_not_treat_unhealthy_inventory_row_as_healthy_selection(self) -> None:
+        inventory = [
+            {
+                "id": "ollama:qwen2.5:3b-instruct",
+                "provider": "ollama",
+                "installed": True,
+                "available": True,
+                "healthy": False,
+                "capabilities": ["chat"],
+                "context_window": 8192,
+                "local": True,
+                "approved": True,
+                "reason": "provider_down",
+                "health_failure_kind": "provider_down",
+                "quality_rank": 6,
+                "cost_rank": 1,
+                "price_in": None,
+                "price_out": None,
+            },
+            {
+                "id": "openrouter:cheap-chat",
+                "provider": "openrouter",
+                "installed": False,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat", "json"],
+                "context_window": 65536,
+                "local": False,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 4,
+                "cost_rank": 2,
+                "price_in": 0.1,
+                "price_out": 0.2,
+            },
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("how is my pc"),
+            allow_remote_fallback=True,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 1.0, "allowlist": []},
+            trace_id="sel-health",
+        )
+        self.assertEqual("openrouter:cheap-chat", selection["selected_model"])
+        self.assertIn("healthy", str(selection["reason"]))
+        self.assertNotIn("ollama:qwen2.5:3b-instruct", str(selection["reason"]))
+
     def test_selector_respects_remote_disable_and_policy(self) -> None:
         inventory = [
             {
@@ -289,6 +337,52 @@ class TestLLMControlPlane(unittest.TestCase):
         )
         self.assertIsNone(blocked_cost["selected_model"])
 
+    def test_selector_never_offers_embedding_model_as_chat_or_coding_fallback(self) -> None:
+        inventory = [
+            {
+                "id": "ollama:nomic-embed-text:latest",
+                "provider": "ollama",
+                "installed": True,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["embedding"],
+                "context_window": 8192,
+                "local": True,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 1,
+                "cost_rank": 1,
+                "price_in": None,
+                "price_out": None,
+            },
+            {
+                "id": "openrouter:coding-pro",
+                "provider": "openrouter",
+                "installed": False,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat", "json"],
+                "context_window": 65536,
+                "local": False,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 8,
+                "cost_rank": 3,
+                "price_in": 0.3,
+                "price_out": 0.6,
+            },
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("debug this python traceback"),
+            allow_remote_fallback=True,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            trace_id="sel-code",
+        )
+        self.assertEqual("openrouter:coding-pro", selection["selected_model"])
+        self.assertNotIn("ollama:nomic-embed-text:latest", selection["fallbacks"])
+
     def test_install_planner_creates_approved_local_plan_when_needed(self) -> None:
         plan = build_install_plan(
             inventory=[],
@@ -303,13 +397,65 @@ class TestLLMControlPlane(unittest.TestCase):
 
     def test_install_planner_has_no_vision_install_plan_yet(self) -> None:
         plan = build_install_plan(
-            inventory=[],
+            inventory=[
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "installed": True,
+                    "available": True,
+                    "healthy": True,
+                    "capabilities": ["chat"],
+                    "context_window": 8192,
+                    "local": True,
+                    "approved": True,
+                    "reason": "healthy",
+                }
+            ],
             task_request=classify_task_request("analyze this image"),
             selection_result={"selected_model": None, "provider": None, "reason": "no_suitable_model", "fallbacks": [], "trace_id": "t1"},
         )
-        self.assertFalse(bool(plan["needed"]))
+        self.assertTrue(bool(plan["needed"]))
         self.assertFalse(bool(plan["approved"]))
         self.assertIn("No approved local install plan", str(plan["next_action"]))
+
+    def test_install_planner_local_only_is_not_satisfied_by_remote_only_candidate(self) -> None:
+        inventory = [
+            {
+                "id": "openrouter:cheap-chat",
+                "provider": "openrouter",
+                "installed": False,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat", "json"],
+                "context_window": 65536,
+                "local": False,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 6,
+                "cost_rank": 2,
+                "price_in": 0.1,
+                "price_out": 0.2,
+            }
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("hello there"),
+            allow_remote_fallback=False,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            trace_id="sel-local-only",
+        )
+        self.assertIsNone(selection["selected_model"])
+        plan = build_install_plan(
+            inventory=inventory,
+            task_request=classify_task_request("hello there"),
+            selection_result=selection,
+            allow_remote_fallback=False,
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            policy_name="default",
+        )
+        self.assertTrue(bool(plan["needed"]))
+        self.assertTrue(bool(plan["approved"]))
 
 
 if __name__ == "__main__":

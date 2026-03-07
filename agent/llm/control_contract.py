@@ -52,6 +52,7 @@ def _normalize_inventory_item(raw: Mapping[str, Any] | None) -> dict[str, Any]:
         "health_failure_kind",
         "model_name",
         "source",
+        "configured",
     ):
         if key in payload:
             normalized[key] = payload.get(key)

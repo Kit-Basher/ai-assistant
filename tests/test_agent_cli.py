@@ -94,6 +94,45 @@ class TestAgentCLI(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual("ollama:qwen2.5:3b-instruct", payload["inventory"][0]["id"])
 
+    def test_llm_inventory_plain_text_prioritizes_useful_rows_and_hides_noise_by_default(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent.cli._load_llm_control_state",
+            return_value={
+                "inventory": [
+                    {
+                        "id": "openrouter:catalog-noise",
+                        "provider": "openrouter",
+                        "local": False,
+                        "installed": False,
+                        "available": True,
+                        "healthy": True,
+                        "approved": False,
+                        "configured": False,
+                        "capabilities": ["chat"],
+                    },
+                    {
+                        "id": "ollama:qwen2.5:3b-instruct",
+                        "provider": "ollama",
+                        "local": True,
+                        "installed": True,
+                        "available": True,
+                        "healthy": True,
+                        "approved": True,
+                        "configured": True,
+                        "capabilities": ["chat"],
+                    },
+                ]
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["llm_inventory"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("ollama:qwen2.5:3b-instruct", text)
+        self.assertIn("configured=true", text)
+        self.assertNotIn("openrouter:catalog-noise", text)
+        self.assertIn("additional rows hidden; use --all", text)
+
     def test_llm_select_subcommand_prints_reason_and_selection(self) -> None:
         output = io.StringIO()
         with patch(

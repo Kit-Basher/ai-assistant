@@ -18,6 +18,19 @@ def _size_label(model_name: str) -> str | None:
     return f"{match.group(1)}B"
 
 
+def _configured_model_ids(registry: Registry) -> set[str]:
+    defaults = registry.defaults
+    return {
+        str(item).strip()
+        for item in (
+            defaults.chat_model,
+            defaults.embed_model,
+            defaults.default_model,
+        )
+        if str(item or "").strip()
+    }
+
+
 def _approved_model_ids(config: Config) -> set[str]:
     default_allowlist = config.default_policy.get("allowlist") if isinstance(config.default_policy, dict) else []
     premium_allowlist = config.premium_policy.get("allowlist") if isinstance(config.premium_policy, dict) else []
@@ -70,6 +83,7 @@ def _inventory_row_from_model(
     local = bool(provider_cfg.local) if provider_cfg is not None else False
     installed = model.model in installed_local_names if local else False
     available = bool(model.enabled and (installed if local else model.available))
+    configured = model.id in _configured_model_ids(registry)
     provider_health = provider_health_cache.get(model.provider) or {}
     health = check_model_health(
         config=config,
@@ -105,42 +119,69 @@ def _inventory_row_from_model(
         "health_failure_kind": health.get("failure_kind"),
         "model_name": model.model,
         "source": "registry",
+        "configured": configured,
     }
 
 
 def _discovered_rows(
     *,
+    config: Config,
     registry: Registry,
     installed_local_names: set[str],
     approved_ids: set[str],
+    provider_health_cache: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     existing = {model.model for model in registry.models.values() if model.provider == "ollama"}
     rows: list[dict[str, Any]] = []
+    provider_health = provider_health_cache.get("ollama") or {}
     for model_name in sorted(installed_local_names):
         if model_name in existing:
             continue
         model_id = f"ollama:{model_name}"
+        capabilities = _inferred_capabilities_for_discovered(model_name)
+        temp_model = ModelConfig(
+            id=model_id,
+            provider="ollama",
+            model=model_name,
+            capabilities=frozenset(capabilities),
+            quality_rank=0,
+            cost_rank=0,
+            default_for=tuple(),
+            enabled=True,
+            available=True,
+            input_cost_per_million_tokens=None,
+            output_cost_per_million_tokens=None,
+            max_context_tokens=None,
+        )
+        health = check_model_health(
+            config=config,
+            registry=registry,
+            model=temp_model,
+            installed=True,
+            provider_health=provider_health,
+        )
         rows.append(
             {
                 "id": model_id,
                 "provider": "ollama",
                 "installed": True,
                 "available": True,
-                "healthy": True,
-                "capabilities": _inferred_capabilities_for_discovered(model_name),
+                "healthy": bool(health.get("healthy", False)),
+                "capabilities": capabilities,
                 "size": _size_label(model_name),
                 "context_window": None,
                 "local": True,
                 "approved": True if not approved_ids else model_id in approved_ids,
-                "reason": "discovered_local_model",
+                "reason": "discovered_local_model" if bool(health.get("healthy", False)) else str(health.get("failure_kind") or "unavailable"),
                 "quality_rank": 0,
                 "cost_rank": 0,
                 "price_in": None,
                 "price_out": None,
-                "health_status": "ok",
-                "health_failure_kind": None,
+                "health_status": "ok" if bool(health.get("healthy", False)) else "down",
+                "health_failure_kind": health.get("failure_kind"),
                 "model_name": model_name,
                 "source": "ollama_list",
+                "configured": False,
             }
         )
     return rows
@@ -186,9 +227,11 @@ def build_model_inventory(
     ]
     rows.extend(
         _discovered_rows(
+            config=config,
             registry=active_registry,
             installed_local_names=installed_local_names,
             approved_ids=approved_ids,
+            provider_health_cache=provider_health_cache,
         )
     )
     return normalize_model_inventory(rows)

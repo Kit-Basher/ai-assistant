@@ -89,9 +89,10 @@ Recovery contract (single best next action per mode):
 - The core runtime now has a deterministic LLM control plane under `agent/llm/*`.
 - It covers:
   - inventory of known + installed models
+  - one normalized health truth shared by inventory, selector, and planner
   - deterministic task classification
-  - local-first model selection
-  - approved install planning when no suitable local model exists
+  - local-first model selection with strict capability matching
+  - approved install planning based on suitable installed healthy models, not mere catalog existence
 - Operator entrypoints:
   - `python -m agent llm_inventory`
   - `python -m agent llm_select --task "debug this traceback"`

@@ -219,6 +219,8 @@ def _load_llm_control_state(*, task_text: str | None = None) -> dict[str, Any]:
     config = load_config(require_telegram_token=False)
     registry = load_registry(config)
     inventory = build_model_inventory(config=config, registry=registry)
+    allow_remote_fallback = bool(registry.defaults.allow_remote_fallback)
+    default_policy = config.default_policy if isinstance(config.default_policy, dict) else None
     payload: dict[str, Any] = {
         "config": config,
         "registry": registry,
@@ -229,14 +231,17 @@ def _load_llm_control_state(*, task_text: str | None = None) -> dict[str, Any]:
         selection = select_model_for_task(
             inventory,
             task_request,
-            allow_remote_fallback=bool(registry.defaults.allow_remote_fallback),
+            allow_remote_fallback=allow_remote_fallback,
             policy_name="default",
-            policy=config.default_policy if isinstance(config.default_policy, dict) else None,
+            policy=default_policy,
         )
         plan = build_install_plan(
             inventory=inventory,
             task_request=task_request,
             selection_result=selection,
+            allow_remote_fallback=allow_remote_fallback,
+            policy_name="default",
+            policy=default_policy,
         )
         payload.update(
             {
@@ -248,19 +253,50 @@ def _load_llm_control_state(*, task_text: str | None = None) -> dict[str, Any]:
     return payload
 
 
+def _inventory_priority(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        0 if bool(row.get("configured", False)) else 1,
+        0 if bool(row.get("local", False)) and bool(row.get("installed", False)) else 1,
+        0 if bool(row.get("local", False)) else 1,
+        0 if bool(row.get("approved", False)) else 1,
+        0 if bool(row.get("healthy", False)) else 1,
+        0 if bool(row.get("available", False)) else 1,
+        str(row.get("provider") or ""),
+        str(row.get("id") or ""),
+    )
+
+
 def _cmd_llm_inventory(args: argparse.Namespace) -> int:
     state = _load_llm_control_state()
     inventory = state.get("inventory") if isinstance(state.get("inventory"), list) else []
     if bool(getattr(args, "json", False)):
         print(json.dumps({"inventory": inventory}, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
         return 0
+    ordered_inventory = sorted(
+        [row for row in inventory if isinstance(row, dict)],
+        key=_inventory_priority,
+    )
+    visible_rows = ordered_inventory
+    hidden_count = 0
+    if not bool(getattr(args, "all", False)):
+        preferred_rows = [
+            row
+            for row in ordered_inventory
+            if bool(row.get("configured", False))
+            or bool(row.get("local", False))
+            or bool(row.get("approved", False))
+        ]
+        if preferred_rows:
+            visible_rows = preferred_rows[:12]
+            hidden_count = max(0, len(ordered_inventory) - len(visible_rows))
+        else:
+            visible_rows = ordered_inventory[:12]
+            hidden_count = max(0, len(ordered_inventory) - len(visible_rows))
     lines = ["LLM inventory"]
-    for row in inventory:
-        if not isinstance(row, dict):
-            continue
+    for row in visible_rows:
         capabilities = ",".join(row.get("capabilities") or []) if isinstance(row.get("capabilities"), list) else "none"
         lines.append(
-            "- {id} | provider={provider} | local={local} | installed={installed} | available={available} | healthy={healthy} | approved={approved} | caps={caps}".format(
+            "- {id} | provider={provider} | local={local} | installed={installed} | available={available} | healthy={healthy} | approved={approved} | configured={configured} | caps={caps}".format(
                 id=str(row.get("id") or "unknown"),
                 provider=str(row.get("provider") or "unknown"),
                 local=str(bool(row.get("local", False))).lower(),
@@ -268,9 +304,12 @@ def _cmd_llm_inventory(args: argparse.Namespace) -> int:
                 available=str(bool(row.get("available", False))).lower(),
                 healthy=str(bool(row.get("healthy", False))).lower(),
                 approved=str(bool(row.get("approved", False))).lower(),
+                configured=str(bool(row.get("configured", False))).lower(),
                 caps=capabilities or "none",
             )
         )
+    if hidden_count > 0:
+        lines.append(f"... {hidden_count} additional rows hidden; use --all to show the full inventory.")
     print("\n".join(lines), flush=True)
     return 0
 
@@ -496,6 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     llm_inventory_parser = sub.add_parser("llm_inventory", help="Show deterministic LLM inventory")
     llm_inventory_parser.add_argument("--json", action="store_true", help="emit JSON output")
+    llm_inventory_parser.add_argument("--all", action="store_true", help="show the full inventory in plain-text mode")
 
     llm_select_parser = sub.add_parser("llm_select", help="Show which model would be selected for a task")
     llm_select_parser.add_argument("--task", required=True, help="task description")
