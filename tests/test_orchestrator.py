@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import json
+import types
 from unittest.mock import patch
 
 from agent.knowledge_cache import facts_hash
@@ -186,6 +187,72 @@ class TestOrchestrator(unittest.TestCase):
             response = orchestrator._llm_chat("user1", "hello")
         self.assertEqual("Regular chat answer", response.text)
         run_mock.assert_not_called()
+
+    def test_llm_chat_uses_control_plane_selection_when_runtime_metadata_exists(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="Code answer")
+        llm.config = object()  # type: ignore[attr-defined]
+        llm.registry = types.SimpleNamespace(defaults=types.SimpleNamespace(allow_remote_fallback=True))  # type: ignore[attr-defined]
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        with patch(
+            "agent.orchestrator.build_model_inventory",
+            return_value=[{"id": "ollama:qwen2.5:7b-instruct", "provider": "ollama", "local": True, "available": True, "healthy": True, "approved": True, "capabilities": ["chat", "json"]}],
+        ), patch(
+            "agent.orchestrator.select_model_for_task",
+            return_value={
+                "selected_model": "ollama:qwen2.5:7b-instruct",
+                "provider": "ollama",
+                "reason": "healthy+approved+local_first+task=coding",
+                "fallbacks": ["ollama:qwen2.5:3b-instruct"],
+                "trace_id": "orch-test",
+            },
+        ):
+            response = orchestrator._llm_chat("user1", "debug this python traceback")
+        self.assertEqual("Code answer", response.text)
+        call = llm.chat_calls[0]
+        kwargs = call.get("kwargs") if isinstance(call, dict) else {}
+        self.assertEqual("coding", (kwargs or {}).get("task_type"))
+        self.assertEqual("ollama", (kwargs or {}).get("provider_override"))
+        self.assertEqual("ollama:qwen2.5:7b-instruct", (kwargs or {}).get("model_override"))
+
+    def test_llm_chat_returns_install_plan_guidance_when_no_model_selected(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="unused")
+        llm.config = object()  # type: ignore[attr-defined]
+        llm.registry = types.SimpleNamespace(defaults=types.SimpleNamespace(allow_remote_fallback=False))  # type: ignore[attr-defined]
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        with patch("agent.orchestrator.build_model_inventory", return_value=[]), patch(
+            "agent.orchestrator.select_model_for_task",
+            return_value={
+                "selected_model": None,
+                "provider": None,
+                "reason": "no_suitable_model",
+                "fallbacks": [],
+                "trace_id": "orch-test",
+            },
+        ), patch(
+            "agent.orchestrator.build_install_plan",
+            return_value={
+                "needed": True,
+                "approved": True,
+                "plan": [{"action": "ollama.pull_model", "model": "qwen2.5:3b-instruct"}],
+                "next_action": "Review install plan for ollama:qwen2.5:3b-instruct.",
+            },
+        ):
+            response = orchestrator._llm_chat("user1", "tell me a joke")
+        self.assertIn("No suitable local-first model is ready", response.text)
+        self.assertIn("Review install plan for ollama:qwen2.5:3b-instruct.", response.text)
+        self.assertEqual([], llm.chat_calls)
 
     def test_llm_chat_keeps_junk_command_suffix_unchanged_when_no_trigger(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="Regular answer /brief /status /help")

@@ -21,6 +21,9 @@ Single operator entrypoint:
 - `python -m agent status`
 - `python -m agent health`
 - `python -m agent health_system`
+- `python -m agent llm_inventory`
+- `python -m agent llm_select --task \"...\"`
+- `python -m agent llm_plan --task \"...\"`
 - `python -m agent brief`
 - `python -m agent memory`
 
@@ -28,6 +31,11 @@ Single operator entrypoint:
 - v1 scope: local-first PC health management, read-only guidance first.
 - PC health monitoring (read-only) implemented.
 - System health output now includes deterministic warning analysis, severity, and actionable suggestions.
+- LLM control plane implemented:
+  - deterministic local-first inventory
+  - deterministic task classification
+  - deterministic model selection
+  - approved install planning when no suitable local model exists
 - Golden path:
   1. Start `personal-agent-api.service`
   2. Run `python -m agent setup --dry-run`
@@ -84,6 +92,26 @@ Single operator entrypoint:
   - `normalize_user_facing_status(...)`
 - Truthfulness rule:
   - user-facing provider/model identity can explicitly be `unknown` when certainty is missing.
+
+## LLM Control Plane
+- Canonical control-plane modules:
+  - `agent/llm/control_contract.py`
+  - `agent/llm/model_inventory.py`
+  - `agent/llm/model_health_check.py`
+  - `agent/llm/task_classifier.py`
+  - `agent/llm/model_selector.py`
+  - `agent/llm/install_planner.py`
+- Operator surfaces:
+  - `python -m agent llm_inventory`
+  - `python -m agent llm_select --task \"...\"`
+  - `python -m agent llm_plan --task \"...\"`
+- Selection behavior:
+  - healthy
+  - approved
+  - local-first
+  - capability/context match
+  - policy/cost-cap aware
+  - deterministic tie-break
 
 ## Tool Execution Contract
 - Canonical LLM tool request schema: `agent/tool_contract.py`

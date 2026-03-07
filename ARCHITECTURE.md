@@ -89,6 +89,18 @@ Service startup
   - one next-action policy for blocked actions
 - Orchestrator LLM tool requests, directive shims, and deterministic heuristic tool paths share this execution gate.
 
+## LLM Control Plane
+
+- Deterministic LLM control-plane modules live under `agent/llm/*` and stay inside the core runtime.
+- Current control-plane responsibilities:
+  - `agent/llm/control_contract.py`: canonical inventory/task/selection shapes
+  - `agent/llm/model_inventory.py`: local-first inventory of registry + installed Ollama models
+  - `agent/llm/model_health_check.py`: lightweight local/provider health classification
+  - `agent/llm/task_classifier.py`: deterministic task classification
+  - `agent/llm/model_selector.py`: policy-aware model selection
+  - `agent/llm/install_planner.py`: approved install/download planning only
+- Surfaces should ask the core runtime/control-plane for model truth instead of inventing provider/model decisions locally.
+
 ## Continuity Contract
 
 - Canonical continuity data shapes are in `agent/memory_contract.py`:

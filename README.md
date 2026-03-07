@@ -33,6 +33,9 @@ Unified CLI:
 - `python -m agent status`
 - `python -m agent health`
 - `python -m agent health_system`
+- `python -m agent llm_inventory`
+- `python -m agent llm_select --task "..."`
+- `python -m agent llm_plan --task "..."`
 - `python -m agent brief`
 - `python -m agent memory`
 - `python -m agent logs`
@@ -41,6 +44,7 @@ Unified CLI:
 Implemented now:
 - PC health monitoring (read-only) via `python -m agent health_system`
 - Deterministic system health analysis with severity (`OK/WARN/CRITICAL`) and actionable suggestions
+- Deterministic LLM control plane for local-first model inventory, task classification, model selection, and approved install planning
 
 ## Golden Path
 1. Start/restart the API service.
@@ -80,6 +84,19 @@ Recovery contract (single best next action per mode):
 - Execution goes through one gate (`agent/tool_executor.py`) with one permission decision path (`agent/permission_contract.py`).
 - Read-only tools can run in degraded/bootstrap modes when possible.
 - Write tools are blocked unless explicitly allowed by policy (`enable_writes` and safe-mode checks).
+
+## LLM Control Plane
+- The core runtime now has a deterministic LLM control plane under `agent/llm/*`.
+- It covers:
+  - inventory of known + installed models
+  - deterministic task classification
+  - local-first model selection
+  - approved install planning when no suitable local model exists
+- Operator entrypoints:
+  - `python -m agent llm_inventory`
+  - `python -m agent llm_select --task "debug this traceback"`
+  - `python -m agent llm_plan --task "compare these approaches"`
+- Approved install plans are planning-only. They do not silently download or switch models.
 
 ## Continuity Contract
 - Conversation continuity is normalized by `agent/memory_contract.py` and persisted via `agent/memory_runtime.py`.

@@ -54,6 +54,12 @@ If implementation or other docs conflict with this file, this file wins.
 
 ## 7) Capability Growth Model
 - Core runtime remains focused on PC health in v1.
+- The core runtime also owns the LLM control plane for approved/local models:
+  - inventory
+  - capability classification
+  - health probing
+  - model selection
+  - approved install planning
 - Skill packs add additional capabilities later.
 - Skill packs require explicit approval/registry policy.
 - Future self-generated skills must still follow approval/registry controls.

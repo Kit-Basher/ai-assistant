@@ -74,6 +74,67 @@ class TestAgentCLI(unittest.TestCase):
         payload = json.loads(output.getvalue())
         self.assertEqual(report, payload)
 
+    def test_llm_inventory_subcommand_json(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent.cli._load_llm_control_state",
+            return_value={
+                "inventory": [
+                    {
+                        "id": "ollama:qwen2.5:3b-instruct",
+                        "provider": "ollama",
+                        "local": True,
+                        "healthy": True,
+                    }
+                ]
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["llm_inventory", "--json"])
+        self.assertEqual(0, code)
+        payload = json.loads(output.getvalue())
+        self.assertEqual("ollama:qwen2.5:3b-instruct", payload["inventory"][0]["id"])
+
+    def test_llm_select_subcommand_prints_reason_and_selection(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent.cli._load_llm_control_state",
+            return_value={
+                "task_request": {"task_type": "coding", "requirements": ["chat", "json"], "preferred_local": True},
+                "selection": {
+                    "selected_model": "ollama:qwen2.5:7b-instruct",
+                    "provider": "ollama",
+                    "reason": "healthy+approved+local_first+task=coding",
+                    "fallbacks": ["ollama:qwen2.5:3b-instruct"],
+                },
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["llm_select", "--task", "debug this code"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("task_type: coding", text)
+        self.assertIn("selected_model: ollama:qwen2.5:7b-instruct", text)
+        self.assertIn("reason: healthy+approved+local_first+task=coding", text)
+
+    def test_llm_plan_subcommand_json(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent.cli._load_llm_control_state",
+            return_value={
+                "task_request": {"task_type": "chat", "requirements": ["chat"], "preferred_local": True},
+                "plan": {
+                    "needed": True,
+                    "approved": True,
+                    "next_action": "Review install plan for ollama:qwen2.5:3b-instruct.",
+                    "plan": [{"id": "01_pull_model", "action": "ollama.pull_model", "model": "qwen2.5:3b-instruct"}],
+                },
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["llm_plan", "--task", "hello", "--json"])
+        self.assertEqual(0, code)
+        payload = json.loads(output.getvalue())
+        self.assertTrue(bool(payload["plan"]["needed"]))
+        self.assertEqual("ollama.pull_model", payload["plan"]["plan"][0]["action"])
+
     def test_logs_subcommand_tails_last_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "agent.log"

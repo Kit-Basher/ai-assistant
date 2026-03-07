@@ -11,12 +11,18 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from agent.config import load_config
 from agent.doctor import main as doctor_main
 from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import (
     bootstrap_needed,
     next_step_for_failure,
 )
+from agent.llm.install_planner import build_install_plan
+from agent.llm.model_inventory import build_model_inventory
+from agent.llm.model_selector import select_model_for_task
+from agent.llm.registry import load_registry
+from agent.llm.task_classifier import classify_task_request
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.runtime_contract import normalize_user_facing_status
 from agent.skills.system_health_analyzer import build_system_health_report
@@ -209,6 +215,137 @@ def _cmd_health_system(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_llm_control_state(*, task_text: str | None = None) -> dict[str, Any]:
+    config = load_config(require_telegram_token=False)
+    registry = load_registry(config)
+    inventory = build_model_inventory(config=config, registry=registry)
+    payload: dict[str, Any] = {
+        "config": config,
+        "registry": registry,
+        "inventory": inventory,
+    }
+    if task_text is not None:
+        task_request = classify_task_request(task_text)
+        selection = select_model_for_task(
+            inventory,
+            task_request,
+            allow_remote_fallback=bool(registry.defaults.allow_remote_fallback),
+            policy_name="default",
+            policy=config.default_policy if isinstance(config.default_policy, dict) else None,
+        )
+        plan = build_install_plan(
+            inventory=inventory,
+            task_request=task_request,
+            selection_result=selection,
+        )
+        payload.update(
+            {
+                "task_request": task_request,
+                "selection": selection,
+                "plan": plan,
+            }
+        )
+    return payload
+
+
+def _cmd_llm_inventory(args: argparse.Namespace) -> int:
+    state = _load_llm_control_state()
+    inventory = state.get("inventory") if isinstance(state.get("inventory"), list) else []
+    if bool(getattr(args, "json", False)):
+        print(json.dumps({"inventory": inventory}, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+        return 0
+    lines = ["LLM inventory"]
+    for row in inventory:
+        if not isinstance(row, dict):
+            continue
+        capabilities = ",".join(row.get("capabilities") or []) if isinstance(row.get("capabilities"), list) else "none"
+        lines.append(
+            "- {id} | provider={provider} | local={local} | installed={installed} | available={available} | healthy={healthy} | approved={approved} | caps={caps}".format(
+                id=str(row.get("id") or "unknown"),
+                provider=str(row.get("provider") or "unknown"),
+                local=str(bool(row.get("local", False))).lower(),
+                installed=str(bool(row.get("installed", False))).lower(),
+                available=str(bool(row.get("available", False))).lower(),
+                healthy=str(bool(row.get("healthy", False))).lower(),
+                approved=str(bool(row.get("approved", False))).lower(),
+                caps=capabilities or "none",
+            )
+        )
+    print("\n".join(lines), flush=True)
+    return 0
+
+
+def _cmd_llm_select(args: argparse.Namespace) -> int:
+    state = _load_llm_control_state(task_text=str(args.task or ""))
+    task_request = state.get("task_request") if isinstance(state.get("task_request"), dict) else {}
+    selection = state.get("selection") if isinstance(state.get("selection"), dict) else {}
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {
+                    "task_request": task_request,
+                    "selection": selection,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return 0
+    fallbacks = selection.get("fallbacks") if isinstance(selection.get("fallbacks"), list) else []
+    lines = [
+        "LLM selection",
+        f"task_type: {str(task_request.get('task_type') or 'chat')}",
+        "requirements: " + ",".join(task_request.get("requirements") or []) if isinstance(task_request.get("requirements"), list) else "requirements: none",
+        f"preferred_local: {str(bool(task_request.get('preferred_local', True))).lower()}",
+        f"selected_model: {str(selection.get('selected_model') or 'none')}",
+        f"provider: {str(selection.get('provider') or 'none')}",
+        f"reason: {str(selection.get('reason') or 'no_selection')}",
+        "fallbacks: " + (", ".join(str(item) for item in fallbacks) if fallbacks else "none"),
+    ]
+    print("\n".join(lines), flush=True)
+    return 0
+
+
+def _cmd_llm_plan(args: argparse.Namespace) -> int:
+    state = _load_llm_control_state(task_text=str(args.task or ""))
+    task_request = state.get("task_request") if isinstance(state.get("task_request"), dict) else {}
+    plan = state.get("plan") if isinstance(state.get("plan"), dict) else {}
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {
+                    "task_request": task_request,
+                    "plan": plan,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return 0
+    lines = [
+        "LLM install plan",
+        f"task_type: {str(task_request.get('task_type') or 'chat')}",
+        f"needed: {str(bool(plan.get('needed', False))).lower()}",
+        f"approved: {str(bool(plan.get('approved', False))).lower()}",
+        f"next_action: {str(plan.get('next_action') or 'none')}",
+    ]
+    steps = plan.get("plan") if isinstance(plan.get("plan"), list) else []
+    if steps:
+        lines.append("plan:")
+        for row in steps:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                f"- {str(row.get('id') or 'step')}: {str(row.get('action') or 'unknown')} {str(row.get('model') or '').strip()}".rstrip()
+            )
+    print("\n".join(lines), flush=True)
+    return 0
+
+
 def _cmd_brief(args: argparse.Namespace) -> int:
     ok, payload_or_error = _http_json(
         base_url=str(args.api_base_url),
@@ -357,6 +494,17 @@ def build_parser() -> argparse.ArgumentParser:
     health_system_parser = sub.add_parser("health_system", help="Show local PC health summary")
     health_system_parser.add_argument("--json", action="store_true", help="emit observed + analyzed JSON output")
 
+    llm_inventory_parser = sub.add_parser("llm_inventory", help="Show deterministic LLM inventory")
+    llm_inventory_parser.add_argument("--json", action="store_true", help="emit JSON output")
+
+    llm_select_parser = sub.add_parser("llm_select", help="Show which model would be selected for a task")
+    llm_select_parser.add_argument("--task", required=True, help="task description")
+    llm_select_parser.add_argument("--json", action="store_true", help="emit JSON output")
+
+    llm_plan_parser = sub.add_parser("llm_plan", help="Show approved local install plan for a task")
+    llm_plan_parser.add_argument("--task", required=True, help="task description")
+    llm_plan_parser.add_argument("--json", action="store_true", help="emit JSON output")
+
     logs_parser = sub.add_parser("logs", help="Show recent agent logs")
     logs_parser.add_argument("--lines", type=int, default=50)
     logs_parser.add_argument("--path", default=None)
@@ -398,6 +546,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_health(args)
     if command == "health_system":
         return _cmd_health_system(args)
+    if command == "llm_inventory":
+        return _cmd_llm_inventory(args)
+    if command == "llm_select":
+        return _cmd_llm_select(args)
+    if command == "llm_plan":
+        return _cmd_llm_plan(args)
     if command == "logs":
         return _cmd_logs(args)
     if command == "version":
