@@ -32,6 +32,14 @@ from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.setup_wizard import render_setup_text, run_setup_wizard
+from agent.telegram_runtime_state import (
+    TELEGRAM_SERVICE_NAME,
+    clear_stale_telegram_locks,
+    get_telegram_runtime_state,
+    resolve_telegram_token_with_source,
+    telegram_control_env,
+    write_telegram_enablement,
+)
 
 
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
@@ -97,6 +105,7 @@ def _print_error(*, title: str, component: str, next_action: str) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
+    operator_env = telegram_control_env()
     ok, payload_or_error = _http_json(
         base_url=str(args.api_base_url),
         path="/ready",
@@ -109,8 +118,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
             next_action="run `agent doctor`",
         )
     payload = payload_or_error
-    telegram = payload.get("telegram") if isinstance(payload.get("telegram"), dict) else {}
-    telegram_state = str(telegram.get("state") or "unknown").strip().lower() or "unknown"
+    telegram_runtime = get_telegram_runtime_state(env=operator_env)
+    telegram_state = str(telegram_runtime.get("effective_state") or "unknown").strip().lower() or "unknown"
     runtime_status = payload.get("runtime_status") if isinstance(payload.get("runtime_status"), dict) else {}
     if runtime_status:
         summary = str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
@@ -143,17 +152,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
         summary = str(normalized_status.get("summary") or "").strip() or "Agent is starting or degraded."
         runtime_mode = str(normalized_status.get("runtime_mode") or "DEGRADED").strip().upper() or "DEGRADED"
     message = str(payload.get("message") or "").strip() or ("ready" if payload.get("ready") else "starting")
-    print(
-        "\n".join(
-            [
-                summary,
-                f"runtime_mode: {runtime_mode}",
-                f"telegram: {telegram_state}",
-                f"message: {message}",
-            ]
-        ),
-        flush=True,
-    )
+    lines = [
+        summary,
+        f"runtime_mode: {runtime_mode}",
+        f"telegram: {telegram_state}",
+        f"message: {message}",
+    ]
+    next_action = str(telegram_runtime.get("next_action") or "").strip()
+    if telegram_state not in {"enabled_running", "disabled_optional"} and next_action:
+        lines.append(f"telegram_next_action: {next_action}")
+    print("\n".join(lines), flush=True)
     return 0
 
 
@@ -608,6 +616,74 @@ def _cmd_version(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_systemctl_user(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["systemctl", "--user", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+    )
+
+
+def _render_telegram_status(state: dict[str, Any]) -> str:
+    lines = [
+        f"enabled: {str(bool(state.get('enabled', False))).lower()}",
+        f"config_source: {str(state.get('config_source') or 'default')}",
+        f"service_installed: {str(bool(state.get('service_installed', False))).lower()}",
+        f"service_active: {str(bool(state.get('service_active', False))).lower()}",
+        f"token_configured: {str(bool(state.get('token_configured', False))).lower()}",
+        f"lock_present: {str(bool(state.get('lock_present', False))).lower()}",
+        f"effective_state: {str(state.get('effective_state') or 'unknown')}",
+        f"next_action: {str(state.get('next_action') or 'No action needed.')}",
+    ]
+    return "\n".join(lines)
+
+
+def _cmd_telegram_status(_args: argparse.Namespace) -> int:
+    state = get_telegram_runtime_state(env=telegram_control_env())
+    print(_render_telegram_status(state), flush=True)
+    return 0
+
+
+def _cmd_telegram_enable(_args: argparse.Namespace) -> int:
+    operator_env = telegram_control_env()
+    write_telegram_enablement(True, env=operator_env)
+    state_before = get_telegram_runtime_state(env=operator_env)
+    token_configured = bool(state_before.get("token_configured", False))
+    try:
+        token, _token_source = resolve_telegram_token_with_source(env=operator_env)
+    except Exception:
+        token = None
+    cleared = clear_stale_telegram_locks(token, env=operator_env)
+    try:
+        _run_systemctl_user(["daemon-reload"])
+    except Exception:
+        pass
+    if token_configured and bool(state_before.get("service_installed", False)):
+        _run_systemctl_user(["restart", TELEGRAM_SERVICE_NAME])
+    state = get_telegram_runtime_state(env=operator_env)
+    if cleared:
+        state = {**state, "next_action": str(state.get("next_action") or "No action needed.")}
+    print(_render_telegram_status(state), flush=True)
+    return 0
+
+
+def _cmd_telegram_disable(_args: argparse.Namespace) -> int:
+    operator_env = telegram_control_env()
+    write_telegram_enablement(False, env=operator_env)
+    try:
+        _run_systemctl_user(["daemon-reload"])
+    except Exception:
+        pass
+    state_before = get_telegram_runtime_state(env=operator_env)
+    if bool(state_before.get("service_installed", False)):
+        _run_systemctl_user(["stop", TELEGRAM_SERVICE_NAME])
+    state = get_telegram_runtime_state(env=operator_env)
+    print(_render_telegram_status(state), flush=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m agent", description="Personal Agent operator CLI")
     sub = parser.add_subparsers(dest="command")
@@ -658,6 +734,9 @@ def build_parser() -> argparse.ArgumentParser:
     logs_parser.add_argument("--lines", type=int, default=50)
     logs_parser.add_argument("--path", default=None)
 
+    sub.add_parser("telegram_status", help="Show Telegram optional adapter state")
+    sub.add_parser("telegram_enable", help="Enable and start the Telegram optional adapter")
+    sub.add_parser("telegram_disable", help="Disable and stop the Telegram optional adapter")
     sub.add_parser("version", help="Show version and git commit")
     return parser
 
@@ -705,6 +784,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_llm_install(args)
     if command == "logs":
         return _cmd_logs(args)
+    if command == "telegram_status":
+        return _cmd_telegram_status(args)
+    if command == "telegram_enable":
+        return _cmd_telegram_enable(args)
+    if command == "telegram_disable":
+        return _cmd_telegram_disable(args)
     if command == "version":
         return _cmd_version(args)
 

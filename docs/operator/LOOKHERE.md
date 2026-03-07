@@ -12,7 +12,10 @@
 - Canonical runtime: `personal-agent-api.service` (core runtime brain)
 - Native UI is primary user surface.
 - Telegram is optional transport adapter; it must not become a second brain.
-- Telegram is disabled by default; enable explicitly with `TELEGRAM_ENABLED=1`.
+- Telegram is disabled by default; inspect/control it with:
+  - `python -m agent telegram_status`
+  - `python -m agent telegram_enable`
+  - `python -m agent telegram_disable`
 - Telegram canonical UX routing is delegated to `agent/telegram_bridge.py`; keep transport safety in `telegram_adapter/bot.py`.
 - Manual debug runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
 
@@ -103,7 +106,9 @@ Bot/API not responding:
 
 Telegram conflict (`terminated by other getUpdates request`):
 - ensure only one process uses the same bot token
-- stop duplicate pollers and restart the intended service
+- run `python -m agent telegram_status`
+- if blocked by a stale lock, run `python -m agent telegram_enable`
+- if blocked by a live duplicate poller, stop the duplicate process and keep only the intended service
 
 No reports/snapshots yet:
 - run `/storage_snapshot` once to seed baseline

@@ -22,6 +22,7 @@ from agent.audit_log import redact
 from agent.golden_path import next_step_for_failure
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.secret_store import SecretStore
+from agent.telegram_runtime_state import get_telegram_runtime_state, read_telegram_enablement, telegram_control_env
 from agent.config import load_config
 
 
@@ -423,12 +424,15 @@ def _is_truthy(value: Any) -> bool:
 
 def _telegram_enabled_for_doctor() -> bool:
     try:
-        cfg = load_config(require_telegram_token=False)
-        raw = getattr(cfg, "telegram_enabled", None)
-        if isinstance(raw, bool):
-            return raw
+        return bool(read_telegram_enablement(env=telegram_control_env()).get("enabled", False))
     except Exception:
-        pass
+        try:
+            cfg = load_config(require_telegram_token=False)
+            raw = getattr(cfg, "telegram_enabled", None)
+            if isinstance(raw, bool):
+                return raw
+        except Exception:
+            pass
     return _is_truthy(os.getenv("TELEGRAM_ENABLED", "0"))
 
 
@@ -583,6 +587,25 @@ def _check_systemd_service(unit: str, check_id: str) -> DoctorCheck:
 
 
 def _check_telegram_poller_singleton() -> DoctorCheck:
+    try:
+        state = get_telegram_runtime_state(env=telegram_control_env())
+        if bool(state.get("lock_present", False)) and not bool(state.get("service_active", False)):
+            if bool(state.get("lock_stale", False)):
+                return DoctorCheck(
+                    check_id="process.telegram_pollers",
+                    status="WARN",
+                    detail_short="stale telegram lock detected",
+                    next_action="Run: python -m agent telegram_enable",
+                )
+            if bool(state.get("lock_live", False)):
+                return DoctorCheck(
+                    check_id="process.telegram_pollers",
+                    status="FAIL",
+                    detail_short="telegram lock held by another process",
+                    next_action="Stop duplicate Telegram pollers and keep only one running instance.",
+                )
+    except Exception:
+        pass
     try:
         proc = subprocess.run(
             ["ps", "-eo", "pid,args"],

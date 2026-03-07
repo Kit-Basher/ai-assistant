@@ -194,7 +194,12 @@ Single operator entrypoint:
 
 ## Runtime Note
 - Default runtime model is one main service (`personal-agent-api.service`).
-- Telegram is optional and treated as a transport adapter surface (disabled by default; set `TELEGRAM_ENABLED=1` to enable).
+- Telegram is optional and treated as a transport adapter surface (disabled by default).
+- Operator control path:
+  1. `python -m agent telegram_status`
+  2. `python -m agent telegram_enable`
+  3. `python -m agent telegram_disable`
+- Telegram status now reports effective optional-adapter state, token presence, service activity, lock state, and one exact next action.
 - Readiness check after restart:
   1. `systemctl --user restart personal-agent-api.service`
   2. `python tools/wait_ready.py`

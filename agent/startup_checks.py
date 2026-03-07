@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 from agent.config import Config, load_config
 from agent.golden_path import next_step_for_failure
 from agent.secret_store import SecretStore
+from agent.telegram_runtime_state import read_telegram_enablement
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,10 @@ def _truthy(value: Any) -> bool:
 def _telegram_enabled(config: Config | None) -> bool:
     if config is not None and isinstance(getattr(config, "telegram_enabled", None), bool):
         return bool(getattr(config, "telegram_enabled"))
+    try:
+        return bool(read_telegram_enablement().get("enabled", False))
+    except Exception:
+        pass
     return _truthy(os.getenv("TELEGRAM_ENABLED", "0"))
 
 

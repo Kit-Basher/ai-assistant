@@ -42,6 +42,39 @@ class TestSetupWizard(unittest.TestCase):
         self.assertEqual("SERVICES_DOWN", result.onboarding_state)
         self.assertIn("personal-agent-api.service", result.next_action)
 
+    def test_run_setup_wizard_uses_telegram_runtime_state_when_enabled_but_stopped(self) -> None:
+        def _fetch(**kwargs: object) -> tuple[bool, dict[str, object] | str]:
+            path = str(kwargs.get("path") or "")
+            if path == "/ready":
+                return True, {
+                    "ready": True,
+                    "phase": "ready",
+                    "telegram": {"enabled": False, "configured": False, "state": "disabled_optional"},
+                    "runtime_status": {"runtime_mode": "READY", "failure_code": None},
+                }
+            if path == "/llm/status":
+                return True, {
+                    "default_provider": "ollama",
+                    "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                    "active_provider_health": {"status": "ok"},
+                    "active_model_health": {"status": "ok"},
+                }
+            raise AssertionError(f"unexpected path: {path}")
+
+        with patch(
+            "agent.setup_wizard.get_telegram_runtime_state",
+            return_value={
+                "enabled": True,
+                "token_configured": True,
+                "effective_state": "enabled_stopped",
+                "ready_state": "stopped",
+            },
+        ):
+            result = run_setup_wizard(fetch_json=_fetch, dry_run=True)
+        self.assertEqual("SERVICES_DOWN", result.onboarding_state)
+        self.assertEqual("TELEGRAM_DOWN", result.recovery_mode)
+        self.assertIn("personal-agent-telegram.service", result.next_action)
+
     def test_no_contradictory_next_action_for_token_missing(self) -> None:
         status = normalize_user_facing_status(
             ready=False,

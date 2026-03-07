@@ -14,7 +14,7 @@ Canonical first-run command:
 2. Follow exactly one `Next action`.
 3. Re-run `python -m agent status` until runtime is stable.
 4. Use native UI as primary setup/recovery surface; Telegram mirrors runtime setup state when enabled.
-5. Telegram is optional and off by default (`TELEGRAM_ENABLED=0`).
+5. Telegram is optional and off by default. Use `python -m agent telegram_status` to inspect it and `python -m agent telegram_enable` to turn it on.
 
 ## Setup Complete
 
@@ -48,15 +48,27 @@ Setup is complete when onboarding state is `READY` and:
 - token missing:
   - (only when Telegram is enabled)
   - `python -m agent.secrets set telegram:bot_token`
-  - `systemctl --user restart personal-agent-telegram.service`
+  - `python -m agent telegram_enable`
 - telegram down:
   - (only when Telegram is enabled)
-  - `systemctl --user restart personal-agent-telegram.service`
+  - `python -m agent telegram_status`
+  - `python -m agent telegram_enable`
 - api down:
   - `systemctl --user restart personal-agent-api.service`
 - llm unavailable:
   - `python -m agent setup`
   - `python -m agent doctor`
+
+## Telegram Adapter Control
+
+- status:
+  - `python -m agent telegram_status`
+- enable:
+  - `python -m agent telegram_enable`
+- disable:
+  - `python -m agent telegram_disable`
+
+`telegram_status` reports whether Telegram is intentionally disabled, running, misconfigured, or blocked by a stale/live poll lock. If a stale lock exists, `telegram_enable` clears it safely before restarting the service.
 
 ## If Setup Fails
 

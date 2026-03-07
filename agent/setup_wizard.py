@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
 from agent.onboarding_contract import (
+    ONBOARDING_SERVICES_DOWN,
     ONBOARDING_READY,
     detect_onboarding_state,
     onboarding_next_action,
@@ -21,6 +22,9 @@ from agent.recovery_contract import (
     recovery_next_action,
     recovery_summary,
 )
+from agent.telegram_runtime_state import get_telegram_runtime_state
+from agent.telegram_runtime_state import read_telegram_enablement
+from agent.telegram_runtime_state import telegram_control_env
 
 
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
@@ -41,7 +45,10 @@ def _telegram_enabled(ready_payload: Mapping[str, Any] | None = None) -> bool:
         return False
     if normalized in {"1", "true", "on", "yes"}:
         return True
-    return str(os.getenv("TELEGRAM_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+    try:
+        return bool(read_telegram_enablement(env=telegram_control_env()).get("enabled", False))
+    except Exception:
+        return str(os.getenv("TELEGRAM_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _trace_id() -> str:
@@ -205,8 +212,8 @@ def build_setup_result(
         llm_status=llm_status,
         startup_report=startup_report,
     )
-    if api_reachable is False and onboarding_state == "NOT_STARTED":
-        onboarding_state = "SERVICES_DOWN"
+    if api_reachable is False:
+        onboarding_state = ONBOARDING_SERVICES_DOWN
     recovery_mode = detect_recovery_mode(
         ready_payload=ready_payload,
         llm_status=llm_status,
@@ -258,7 +265,27 @@ def run_setup_wizard(
 ) -> SetupWizardResult:
     fetch = fetch_json or _api_get_json
     ready_ok, ready_payload_or_error = fetch(base_url=api_base_url, path="/ready", timeout_seconds=1.0)
-    ready_payload = ready_payload_or_error if ready_ok and isinstance(ready_payload_or_error, Mapping) else {}
+    ready_payload = dict(ready_payload_or_error) if ready_ok and isinstance(ready_payload_or_error, Mapping) else {}
+    try:
+        telegram_state = get_telegram_runtime_state(env=telegram_control_env())
+    except Exception:
+        telegram_state = {}
+    if telegram_state:
+        ready_payload["telegram"] = {
+            "enabled": bool(telegram_state.get("enabled", False)),
+            "configured": bool(telegram_state.get("token_configured", False)),
+            "state": str(telegram_state.get("ready_state") or "disabled_optional"),
+        }
+        effective_state = str(telegram_state.get("effective_state") or "")
+        if effective_state == "enabled_blocked_by_lock":
+            ready_payload["failure_code"] = "lock_conflict"
+            ready_payload["ready"] = False
+        elif effective_state == "enabled_stopped":
+            ready_payload["failure_code"] = "service_down"
+            ready_payload["ready"] = False
+        elif effective_state == "enabled_misconfigured":
+            ready_payload["failure_code"] = "missing_token" if not bool(telegram_state.get("token_configured", False)) else "service_down"
+            ready_payload["ready"] = False
     llm_status: Mapping[str, Any] = {}
     if ready_ok:
         status_ok, status_payload_or_error = fetch(base_url=api_base_url, path="/llm/status", timeout_seconds=1.0)

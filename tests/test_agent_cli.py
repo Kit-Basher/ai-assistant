@@ -28,13 +28,113 @@ class TestAgentCLI(unittest.TestCase):
             "telegram": {"state": "running"},
         }
         output = io.StringIO()
-        with patch("agent.cli._http_json", return_value=(True, payload)), redirect_stdout(output):
+        with patch("agent.cli._http_json", return_value=(True, payload)), patch(
+            "agent.cli.get_telegram_runtime_state",
+            return_value={"effective_state": "enabled_running", "next_action": "No action needed."},
+        ), redirect_stdout(output):
             code = cli.main(["status"])
         self.assertEqual(0, code)
         text = output.getvalue()
         self.assertIn("Agent is ready.", text)
-        self.assertIn("telegram: running", text)
+        self.assertIn("telegram: enabled_running", text)
         self.assertIn("message: Ready.", text)
+
+    def test_telegram_status_command_reports_disabled_optional(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent.cli.get_telegram_runtime_state",
+            return_value={
+                "enabled": False,
+                "config_source": "default",
+                "service_installed": True,
+                "service_active": False,
+                "token_configured": False,
+                "lock_present": False,
+                "effective_state": "disabled_optional",
+                "next_action": "Run: python -m agent telegram_enable",
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["telegram_status"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("enabled: false", text)
+        self.assertIn("effective_state: disabled_optional", text)
+
+    def test_telegram_enable_command_starts_service(self) -> None:
+        output = io.StringIO()
+        states = [
+            {
+                "enabled": True,
+                "service_installed": True,
+                "service_active": False,
+                "token_configured": True,
+                "effective_state": "enabled_stopped",
+                "next_action": "Run: python -m agent telegram_enable",
+            },
+            {
+                "enabled": True,
+                "config_source": "config",
+                "service_installed": True,
+                "service_active": True,
+                "token_configured": True,
+                "lock_present": False,
+                "effective_state": "enabled_running",
+                "next_action": "No action needed.",
+            },
+        ]
+        with patch("agent.cli.write_telegram_enablement"), patch(
+            "agent.cli.get_telegram_runtime_state",
+            side_effect=states,
+        ), patch(
+            "agent.cli.resolve_telegram_token_with_source",
+            return_value=("123:token", "secret_store"),
+        ), patch(
+            "agent.cli.clear_stale_telegram_locks",
+            return_value=[],
+        ), patch(
+            "agent.cli._run_systemctl_user",
+        ) as systemctl_mock, redirect_stdout(output):
+            code = cli.main(["telegram_enable"])
+        self.assertEqual(0, code)
+        commands = [call.args[0] for call in systemctl_mock.call_args_list]
+        self.assertIn(["daemon-reload"], commands)
+        self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+        self.assertIn("effective_state: enabled_running", output.getvalue())
+
+    def test_telegram_disable_command_stops_service(self) -> None:
+        output = io.StringIO()
+        states = [
+            {
+                "enabled": False,
+                "service_installed": True,
+                "service_active": True,
+                "token_configured": True,
+                "effective_state": "enabled_running",
+                "next_action": "No action needed.",
+            },
+            {
+                "enabled": False,
+                "config_source": "config",
+                "service_installed": True,
+                "service_active": False,
+                "token_configured": True,
+                "lock_present": False,
+                "effective_state": "disabled_optional",
+                "next_action": "Run: python -m agent telegram_enable",
+            },
+        ]
+        with patch("agent.cli.write_telegram_enablement"), patch(
+            "agent.cli.get_telegram_runtime_state",
+            side_effect=states,
+        ), patch(
+            "agent.cli._run_systemctl_user",
+        ) as systemctl_mock, redirect_stdout(output):
+            code = cli.main(["telegram_disable"])
+        self.assertEqual(0, code)
+        commands = [call.args[0] for call in systemctl_mock.call_args_list]
+        self.assertIn(["daemon-reload"], commands)
+        self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+        self.assertIn("effective_state: disabled_optional", output.getvalue())
 
     def test_health_subcommand_failure_returns_structured_error(self) -> None:
         output = io.StringIO()

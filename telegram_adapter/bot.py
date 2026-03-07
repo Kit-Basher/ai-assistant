@@ -65,6 +65,7 @@ from agent.setup_wizard import (
 )
 from agent.secret_store import SecretStore
 from agent.startup_checks import run_startup_checks
+from agent.telegram_runtime_state import clear_stale_telegram_locks, get_telegram_runtime_state
 from agent.telegram_bridge import (
     build_telegram_help,
     build_telegram_setup,
@@ -3417,7 +3418,8 @@ def run_polling_with_backoff(
 def main() -> None:
     configure_logging_if_needed()
     loaded = load_config(require_telegram_token=False)
-    if not bool(getattr(loaded, "telegram_enabled", False)):
+    runtime_state = get_telegram_runtime_state()
+    if not bool(runtime_state.get("enabled", False)):
         _LOGGER.info(
             "telegram.disabled %s",
             json.dumps(
@@ -3425,6 +3427,7 @@ def main() -> None:
                     "mode": "adapter",
                     "reason": "config_disabled",
                     "env": "TELEGRAM_ENABLED",
+                    "config_source": str(runtime_state.get("config_source") or "default"),
                 },
                 ensure_ascii=True,
                 sort_keys=True,
@@ -3470,12 +3473,28 @@ def main() -> None:
     if not token:
         _LOGGER.error("telegram.startup.token_missing")
         raise SystemExit(1)
+    stale_removed = clear_stale_telegram_locks(token)
+    if stale_removed:
+        _LOGGER.info(
+            "telegram.lock_cleared %s",
+            json.dumps(
+                {
+                    "removed": stale_removed,
+                    "token_source": token_source,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+            ),
+        )
     poll_lock = acquire_telegram_poll_lock(token)
     if poll_lock is None:
+        lock_state = get_telegram_runtime_state()
         warning_payload = {
             "pid": os.getpid(),
             "lock_path": str(telegram_poll_lock_path(token)),
             "token_source": token_source,
+            "lock_stale": bool(lock_state.get("lock_stale", False)),
+            "lock_live": bool(lock_state.get("lock_live", False)),
         }
         _LOGGER.warning(
             "Telegram polling already active for this token; exiting. %s",
