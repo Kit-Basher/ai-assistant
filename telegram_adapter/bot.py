@@ -580,7 +580,61 @@ async def _send_reply(
             sort_keys=True,
         ),
     )
+    log_event(
+        log_path,
+        "response_sent",
+        {
+            "user_id": chat_id,
+            "chat_id": chat_id,
+            "route": route,
+            "reply_prefix": _text_prefix(delivered_text),
+            "trace_id": trace_id,
+        },
+    )
     return delivered_text
+
+
+def _call_orchestrator_from_telegram(
+    *,
+    orchestrator: Orchestrator,
+    forward_text: str,
+    chat_id: str,
+    trace_id: str,
+    log_path: str | None,
+) -> Any:
+    payload = {
+        "trace_id": trace_id,
+        "user_id": chat_id,
+        "text_prefix": _text_prefix(forward_text),
+    }
+    log_event(log_path, "orchestrator_call", payload)
+    _LOGGER.info(
+        "orchestrator_call %s",
+        json.dumps(payload, ensure_ascii=True, sort_keys=True),
+    )
+    return orchestrator.handle_message(forward_text, user_id=chat_id)
+
+
+def _telegram_reply_from_orchestrator_response(response: Any) -> tuple[str, str | None, str]:
+    route = "chat"
+    parse_mode = None
+    reply_text = ""
+    data = getattr(response, "data", None)
+    if isinstance(data, dict):
+        if data.get("ok") is False:
+            reason = (
+                str(data.get("error_kind") or "").strip()
+                or str(data.get("message") or "").strip()
+                or str(data.get("failure_code") or "").strip()
+                or "unknown_error"
+            )
+            return f"Agent could not complete the request.\nReason: {reason}", None, "error"
+        ok, _ = validate_cards_payload(data)
+        if ok:
+            return render_cards_markdown(data), "Markdown", route
+    if response and getattr(response, "text", None):
+        reply_text = str(response.text or "").strip()
+    return reply_text, parse_mode, route
 
 
 class TelegramModelProviderWizardStore:
@@ -1897,6 +1951,15 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "trace_id": trace_id,
         },
     )
+    log_event(
+        log_path,
+        "incoming_message",
+        {
+            "user_id": chat_id,
+            "text_prefix": _text_prefix(text),
+            "trace_id": trace_id,
+        },
+    )
     _safe_append_telegram_message_audit(
         audit_log=audit_log,
         action="telegram.message.received",
@@ -2207,7 +2270,13 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             ),
         )
         try:
-            response = orchestrator.handle_message(forward_text, user_id=chat_id)
+            response = _call_orchestrator_from_telegram(
+                orchestrator=orchestrator,
+                forward_text=forward_text,
+                chat_id=chat_id,
+                trace_id=trace_id,
+                log_path=log_path,
+            )
         except Exception as exc:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2264,15 +2333,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 fallback_used=True,
             )
             return
-        reply_text = response.text.strip() if response and response.text else ""
-        parse_mode = None
-        route = "chat"
-        if response and isinstance(response.data, dict):
-            ok, _ = validate_cards_payload(response.data)
-            if ok:
-                reply_text = render_cards_markdown(response.data)
-                parse_mode = "Markdown"
-                route = "chat"
+        reply_text, parse_mode, route = _telegram_reply_from_orchestrator_response(response)
         if not reply_text or _is_unknown_orchestrator_reply(reply_text):
             reply_text = _TELEGRAM_UNKNOWN_FALLBACK_TEXT
             parse_mode = None
