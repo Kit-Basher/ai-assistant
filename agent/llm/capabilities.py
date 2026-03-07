@@ -27,6 +27,14 @@ _OLLAMA_CHAT_NAME_MARKERS = (
     "command-r",
 )
 
+_OLLAMA_VISION_NAME_MARKERS = (
+    "llava",
+    "bakllava",
+    "moondream",
+    "minicpm-v",
+    "vision",
+)
+
 _ORDERED_CAPABILITIES = ("chat", "embedding", "image", "json", "tools", "vision")
 
 
@@ -61,6 +69,13 @@ def is_embedding_model_name(model_name: str) -> bool:
     return any(marker in normalized for marker in _EMBEDDING_ONLY_NAME_MARKERS)
 
 
+def is_vision_model_name(model_name: str) -> bool:
+    normalized = str(model_name or "").strip().lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in _OLLAMA_VISION_NAME_MARKERS)
+
+
 def infer_capabilities_from_catalog(provider_id: str, catalog_entry: dict[str, Any]) -> dict[str, bool]:
     provider = str(provider_id or "").strip().lower()
     entry = catalog_entry if isinstance(catalog_entry, dict) else {}
@@ -86,6 +101,11 @@ def infer_capabilities_from_catalog(provider_id: str, catalog_entry: dict[str, A
             inferred["tools"] = False
             inferred["image"] = False
             inferred["vision"] = False
+            return inferred
+        if is_vision_model_name(normalized_name):
+            inferred["chat"] = True
+            inferred["image"] = True
+            inferred["vision"] = True
             return inferred
 
         chat_hint = (
@@ -291,4 +311,5 @@ __all__ = [
     "capability_list_from_inference",
     "infer_capabilities_from_catalog",
     "is_embedding_model_name",
+    "is_vision_model_name",
 ]

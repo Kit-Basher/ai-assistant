@@ -120,6 +120,8 @@ Single operator entrypoint:
   - remains honest when no approved local profile fits
   - v1 coding requires `chat`, not `json`
   - execution is local Ollama only and requires explicit approval
+  - approved profiles can strengthen capability truth for installed Ollama models
+  - post-install verification understands local vision-capable Ollama models
 
 ## Tool Execution Contract
 - Canonical LLM tool request schema: `agent/tool_contract.py`

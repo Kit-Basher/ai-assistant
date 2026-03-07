@@ -4,6 +4,7 @@ import re
 from typing import Any, Iterable
 
 from agent.config import Config
+from agent.llm.approved_local_models import approved_local_profile_for_ref
 from agent.llm.capabilities import capability_list_from_inference, infer_capabilities_from_catalog, is_embedding_model_name
 from agent.llm.control_contract import normalize_model_inventory
 from agent.llm.model_health_check import check_model_health, check_provider_health
@@ -70,6 +71,27 @@ def _inferred_capabilities_for_discovered(model_name: str) -> list[str]:
     return capability_list_from_inference(inferred)
 
 
+def _merged_capabilities_for_model(model_id: str, model_name: str, current_capabilities: Iterable[str]) -> tuple[list[str], str]:
+    current = {
+        str(item).strip().lower()
+        for item in current_capabilities
+        if str(item).strip()
+    }
+    profile = approved_local_profile_for_ref(model_id) or approved_local_profile_for_ref(model_name)
+    if isinstance(profile, dict):
+        profile_caps = {
+            str(item).strip().lower()
+            for item in (profile.get("capabilities") or [])
+            if str(item).strip()
+        }
+        merged = sorted(current | profile_caps)
+        if profile_caps and profile_caps.difference(current):
+            return merged, "approved_profile"
+        if profile_caps:
+            return merged, "approved_profile"
+    return sorted(current), "inferred"
+
+
 def _inventory_row_from_model(
     *,
     model: ModelConfig,
@@ -85,6 +107,7 @@ def _inventory_row_from_model(
     available = bool(model.enabled and (installed if local else model.available))
     configured = model.id in _configured_model_ids(registry)
     provider_health = provider_health_cache.get(model.provider) or {}
+    capabilities, capability_source = _merged_capabilities_for_model(model.id, model.model, model.capabilities)
     health = check_model_health(
         config=config,
         registry=registry,
@@ -105,7 +128,7 @@ def _inventory_row_from_model(
         "installed": installed,
         "available": available,
         "healthy": bool(health.get("healthy", False)),
-        "capabilities": sorted(model.capabilities),
+        "capabilities": capabilities,
         "size": _size_label(model.model),
         "context_window": model.max_context_tokens,
         "local": local,
@@ -117,9 +140,11 @@ def _inventory_row_from_model(
         "price_out": model.output_cost_per_million_tokens,
         "health_status": "ok" if bool(health.get("healthy", False)) else "down",
         "health_failure_kind": health.get("failure_kind"),
+        "health_reason": str((health.get("model_health") or {}).get("health_reason") or (health.get("model_health") or {}).get("detail") or health.get("failure_kind") or reason),
         "model_name": model.model,
         "source": "registry",
         "configured": configured,
+        "capability_source": capability_source,
     }
 
 
@@ -138,7 +163,11 @@ def _discovered_rows(
         if model_name in existing:
             continue
         model_id = f"ollama:{model_name}"
-        capabilities = _inferred_capabilities_for_discovered(model_name)
+        capabilities, capability_source = _merged_capabilities_for_model(
+            model_id,
+            model_name,
+            _inferred_capabilities_for_discovered(model_name),
+        )
         temp_model = ModelConfig(
             id=model_id,
             provider="ollama",
@@ -179,9 +208,11 @@ def _discovered_rows(
                 "price_out": None,
                 "health_status": "ok" if bool(health.get("healthy", False)) else "down",
                 "health_failure_kind": health.get("failure_kind"),
+                "health_reason": str((health.get("model_health") or {}).get("health_reason") or (health.get("model_health") or {}).get("detail") or health.get("failure_kind") or "discovered_local_model"),
                 "model_name": model_name,
                 "source": "ollama_list",
                 "configured": False,
+                "capability_source": capability_source,
             }
         )
     return rows

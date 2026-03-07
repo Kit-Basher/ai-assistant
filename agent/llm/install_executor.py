@@ -32,13 +32,20 @@ def _verification_row(inventory: list[dict[str, Any]], model_id: str) -> dict[st
             "installed": False,
             "available": False,
             "healthy": False,
+            "verification_status": "degraded",
         }
+    installed = bool(row.get("installed", False))
+    available = bool(row.get("available", False))
+    healthy = bool(row.get("healthy", False))
     return {
         "found": True,
-        "installed": bool(row.get("installed", False)),
-        "available": bool(row.get("available", False)),
-        "healthy": bool(row.get("healthy", False)),
+        "installed": installed,
+        "available": available,
+        "healthy": healthy,
         "reason": str(row.get("reason") or "").strip() or None,
+        "health_reason": str(row.get("health_reason") or row.get("health_failure_kind") or row.get("reason") or "").strip() or None,
+        "capability_source": str(row.get("capability_source") or "").strip() or None,
+        "verification_status": "ok" if (installed and available and healthy) else "degraded",
         "provider": str(row.get("provider") or "").strip() or None,
         "capabilities": list(row.get("capabilities") or []) if isinstance(row.get("capabilities"), list) else [],
     }
@@ -172,6 +179,7 @@ def execute_install_plan(
             "stderr_tail": stderr_tail,
         }
     if not bool(verification.get("healthy", False)):
+        health_reason = str(verification.get("health_reason") or "degraded").strip() or "degraded"
         return {
             "ok": True,
             "executed": True,
@@ -179,7 +187,7 @@ def execute_install_plan(
             "install_name": install_name,
             "trace_id": active_trace_id,
             "error_kind": None,
-            "message": "Install completed, but health verification is degraded.",
+            "message": f"Install completed, but health verification is degraded ({health_reason}).",
             "verification": verification,
             "stdout_tail": stdout_tail,
             "stderr_tail": stderr_tail,

@@ -103,6 +103,8 @@ Recovery contract (single best next action per mode):
 - v1 coding selection requires `chat` capability. JSON output is optional, not required, for local coding assistance.
 - Approved local install execution is available through `python -m agent llm_install ... --approve`.
 - v1 install execution is local Ollama only and always requires explicit operator approval.
+- Approved local profiles can strengthen capability truth for installed Ollama models.
+- Post-install verification now understands local vision-capable Ollama models such as `llava:7b`.
 
 ## Continuity Contract
 - Conversation continuity is normalized by `agent/memory_contract.py` and persisted via `agent/memory_runtime.py`.

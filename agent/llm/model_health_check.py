@@ -4,6 +4,7 @@ import os
 from typing import Any, Callable
 
 from agent.config import Config
+from agent.llm.approved_local_models import approved_local_profile_for_ref
 from agent.llm.probes import probe_model, probe_provider
 from agent.llm.registry import ModelConfig, ProviderConfig, Registry
 
@@ -128,6 +129,25 @@ def check_model_health(
             "failure_kind": "unavailable",
             "provider_health": provider_health,
             "model_health": {"status": "down", "error_kind": "unavailable"},
+        }
+    approved_profile = approved_local_profile_for_ref(model.id) or approved_local_profile_for_ref(model.model)
+    approved_caps = {
+        str(item).strip().lower()
+        for item in ((approved_profile or {}).get("capabilities") or [])
+        if str(item).strip()
+    }
+    if provider_cfg.local and installed and "vision" in approved_caps:
+        return {
+            "healthy": True,
+            "failure_kind": None,
+            "provider_health": provider_health,
+            "model_health": {
+                "status": "ok",
+                "error_kind": None,
+                "detail": "metadata verified local vision profile",
+                "health_reason": "approved_profile_local_vision",
+                "probe_mode": "metadata",
+            },
         }
     # Only actively probe local models. Remote models inherit provider health to stay cheap and deterministic.
     if not provider_cfg.local:

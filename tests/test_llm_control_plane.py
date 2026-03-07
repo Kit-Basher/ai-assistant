@@ -208,6 +208,76 @@ class TestLLMControlPlane(unittest.TestCase):
         self.assertTrue(bool(inventory[1]["installed"]))
         self.assertEqual("ollama_list", inventory[1]["source"])
 
+    def test_inventory_applies_approved_profile_capabilities_for_local_vision_model(self) -> None:
+        cfg = _config()
+        registry = _registry()
+        from unittest.mock import patch
+
+        with patch(
+            "agent.llm.model_inventory.check_provider_health",
+            return_value={"provider_health": {"status": "ok"}},
+        ):
+            inventory = build_model_inventory(
+                config=cfg,
+                registry=registry,
+                discovered_local_models=["llava:7b"],
+            )
+        llava = next(row for row in inventory if row["id"] == "ollama:llava:7b")
+        self.assertIn("vision", llava["capabilities"])
+        self.assertEqual("approved_profile", llava["capability_source"])
+        self.assertTrue(bool(llava["healthy"]))
+        self.assertEqual("approved_profile_local_vision", llava["health_reason"])
+
+    def test_approved_profile_capability_override_does_not_affect_unrelated_models(self) -> None:
+        cfg = _config()
+        registry = _registry()
+        from unittest.mock import patch
+
+        with patch(
+            "agent.llm.model_inventory.check_provider_health",
+            return_value={"provider_health": {"status": "ok"}},
+        ):
+            inventory = build_model_inventory(
+                config=cfg,
+                registry=registry,
+                discovered_local_models=["llama3"],
+            )
+        llama = next(row for row in inventory if row["id"] == "ollama:llama3")
+        self.assertIn("chat", llama["capabilities"])
+        self.assertNotIn("vision", llama["capabilities"])
+
+    def test_local_vision_health_check_uses_approved_profile_metadata(self) -> None:
+        cfg = _config()
+        registry = _registry()
+        vision_model = ModelConfig(
+            id="ollama:llava:7b",
+            provider="ollama",
+            model="llava:7b",
+            capabilities=frozenset({"chat"}),
+            quality_rank=0,
+            cost_rank=0,
+            default_for=tuple(),
+            enabled=True,
+            available=True,
+            input_cost_per_million_tokens=None,
+            output_cost_per_million_tokens=None,
+            max_context_tokens=None,
+        )
+
+        def _should_not_probe(*_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("vision model should not use chat-only probe")
+
+        health = check_model_health(
+            config=cfg,
+            registry=registry,
+            model=vision_model,
+            installed=True,
+            provider_health={"status": "ok"},
+            model_probe_fn=_should_not_probe,
+        )
+        self.assertTrue(bool(health["healthy"]))
+        self.assertEqual("approved_profile_local_vision", health["model_health"]["health_reason"])
+
     def test_selector_prefers_healthy_local_model(self) -> None:
         inventory = [
             {
@@ -506,6 +576,35 @@ class TestLLMControlPlane(unittest.TestCase):
         )
         self.assertIsNone(selection["selected_model"])
         self.assertEqual("no_local_model_with_required_capabilities", selection["reason"])
+
+    def test_selector_can_choose_installed_local_vision_model_after_capability_fix(self) -> None:
+        inventory = [
+            {
+                "id": "ollama:llava:7b",
+                "provider": "ollama",
+                "installed": True,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat", "vision"],
+                "context_window": 32768,
+                "local": True,
+                "approved": True,
+                "reason": "healthy",
+                "health_reason": "approved_profile_local_vision",
+                "capability_source": "approved_profile",
+                "quality_rank": 6,
+                "cost_rank": 2,
+            }
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("analyze this image"),
+            allow_remote_fallback=False,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            trace_id="sel-vision-ok",
+        )
+        self.assertEqual("ollama:llava:7b", selection["selected_model"])
 
 
 if __name__ == "__main__":

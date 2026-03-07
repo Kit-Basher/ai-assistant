@@ -112,6 +112,8 @@ class TestLLMInstallExecution(unittest.TestCase):
                         "available": True,
                         "healthy": True,
                         "reason": "healthy",
+                        "health_reason": "approved_profile_local_vision",
+                        "capability_source": "approved_profile",
                         "capabilities": ["chat", "vision"],
                     }
                 ],
@@ -136,6 +138,9 @@ class TestLLMInstallExecution(unittest.TestCase):
         self.assertTrue(bool(result["executed"]))
         self.assertEqual(["ollama", "pull", "llava:7b"], commands[0])
         self.assertTrue(bool(result["verification"]["healthy"]))
+        self.assertEqual("approved_profile", result["verification"]["capability_source"])
+        self.assertEqual("ok", result["verification"]["verification_status"])
+        self.assertIn("vision", result["verification"]["capabilities"])
 
     def test_same_plan_without_approve_does_not_execute(self) -> None:
         builder = _InventoryBuilder([[]])
@@ -188,6 +193,8 @@ class TestLLMInstallExecution(unittest.TestCase):
                         "available": True,
                         "healthy": True,
                         "reason": "healthy",
+                        "health_reason": "approved_profile_local_vision",
+                        "capability_source": "approved_profile",
                         "capabilities": ["chat", "vision"],
                     }
                 ]
@@ -217,6 +224,8 @@ class TestLLMInstallExecution(unittest.TestCase):
                         "available": True,
                         "healthy": False,
                         "reason": "provider_down",
+                        "health_reason": "callable_probe_failed",
+                        "capability_source": "approved_profile",
                         "capabilities": ["chat", "vision"],
                     }
                 ],
@@ -238,6 +247,8 @@ class TestLLMInstallExecution(unittest.TestCase):
         self.assertTrue(bool(result["ok"]))
         self.assertTrue(bool(result["executed"]))
         self.assertFalse(bool(result["verification"]["healthy"]))
+        self.assertEqual("degraded", result["verification"]["verification_status"])
+        self.assertEqual("approved_profile", result["verification"]["capability_source"])
         self.assertIn("degraded", str(result["message"]).lower())
 
 

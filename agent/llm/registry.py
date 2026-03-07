@@ -9,6 +9,7 @@ import tempfile
 from typing import Any
 
 from agent.config import Config
+from agent.llm.capabilities import is_vision_model_name
 
 
 _REGISTRY_SCHEMA_VERSION = 2
@@ -308,6 +309,8 @@ def _default_capabilities(provider: str, model: str) -> frozenset[str]:
             caps.add("vision")
         return frozenset(caps)
     if provider_name == "ollama":
+        if is_vision_model_name(model_name):
+            return frozenset({"chat", "image", "vision"})
         return frozenset({"chat"})
     return frozenset({"chat"})
 
