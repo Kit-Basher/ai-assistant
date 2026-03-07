@@ -39,10 +39,7 @@ from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
 from agent.identity import get_public_identity
-from agent.llm.install_planner import build_install_plan
-from agent.llm.model_inventory import build_model_inventory
-from agent.llm.model_selector import select_model_for_task
-from agent.llm.task_classifier import classify_task_request
+from agent.llm.inference_router import route_inference
 from agent.onboarding_contract import onboarding_next_action, onboarding_summary
 from agent.recovery_contract import recovery_next_action, recovery_summary
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
@@ -656,73 +653,6 @@ class Orchestrator:
                 fallback_count=0,
             )
             return self._bootstrap_no_chat_response()
-        task_request = classify_task_request(text)
-        selected_provider: str | None = None
-        selected_model: str | None = None
-        selection_reason = "router_default"
-        selection_fallbacks: list[str] = []
-        llm_inventory: list[dict[str, Any]] = []
-        llm_plan: dict[str, Any] | None = None
-        try:
-            llm_config = getattr(self.llm_client, "config", None)
-            llm_registry = getattr(self.llm_client, "registry", None)
-            if llm_config is not None and llm_registry is not None:
-                llm_inventory = build_model_inventory(
-                    config=llm_config,
-                    registry=llm_registry,
-                    timeout_seconds=1.0,
-                )
-                selection = select_model_for_task(
-                    llm_inventory,
-                    task_request,
-                    allow_remote_fallback=bool(getattr(llm_registry.defaults, "allow_remote_fallback", True)),
-                    trace_id=trace_id,
-                    policy_name="default",
-                    policy=getattr(llm_config, "default_policy", None),
-                )
-                selected_provider = str(selection.get("provider") or "").strip().lower() or None
-                selected_model = str(selection.get("selected_model") or "").strip() or None
-                selection_reason = str(selection.get("reason") or "router_default").strip() or "router_default"
-                selection_fallbacks = [
-                    str(item).strip()
-                    for item in (selection.get("fallbacks") if isinstance(selection.get("fallbacks"), list) else [])
-                    if str(item).strip()
-                ]
-                if not selected_model:
-                    llm_plan = build_install_plan(
-                        inventory=llm_inventory,
-                        task_request=task_request,
-                        selection_result=selection,
-                        allow_remote_fallback=bool(getattr(llm_registry.defaults, "allow_remote_fallback", True)),
-                        policy_name="default",
-                        policy=getattr(llm_config, "default_policy", None),
-                    )
-                    self._log_llm_selection(
-                        trace_id=trace_id,
-                        provider=None,
-                        model=None,
-                        reason="no_suitable_model",
-                        fallback_used=True,
-                        task_type=str(task_request.get("task_type") or "chat"),
-                        fallback_count=len(selection_fallbacks),
-                    )
-                    next_action = str((llm_plan or {}).get("next_action") or "Run: python -m agent doctor").strip()
-                    return OrchestratorResponse(
-                        f"No suitable local-first model is ready for this request.\nNext: {next_action}",
-                        {
-                            "llm_control": {
-                                "trace_id": trace_id,
-                                "task_request": task_request,
-                                "selection": selection,
-                                "plan": llm_plan,
-                            }
-                        },
-                    )
-        except Exception:
-            selected_provider = None
-            selected_model = None
-            selection_reason = "router_default"
-            selection_fallbacks = []
         system_prompt = (
             "You are Personal Agent, a local-first assistant.\n"
             "Identity rule: you run inside the user's Personal Agent runtime.\n"
@@ -741,212 +671,148 @@ class Orchestrator:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": str(text or "")},
         ]
-        result: Any
         try:
-            try:
-                result = self.llm_client.chat(
-                    messages,
-                    purpose="chat",
-                    task_type=str(task_request.get("task_type") or "chat"),
-                    compute_tier="low",
-                    provider_override=selected_provider,
-                    model_override=selected_model,
-                    metadata={
-                        "trace_id": trace_id,
-                        "selection_reason": selection_reason,
-                        "source_surface": "orchestrator",
-                    },
-                )
-            except TypeError:
-                try:
-                    result = self.llm_client.chat(
-                        messages,
-                        purpose="chat",
-                        provider_override=selected_provider,
-                        model_override=selected_model,
-                    )
-                except TypeError:
-                    result = self.llm_client.chat(messages)
+            router_result = route_inference(
+                llm_client=self.llm_client,
+                messages=messages,
+                user_text=text,
+                task_hint=text,
+                purpose="chat",
+                trace_id=trace_id,
+                compute_tier="low",
+                metadata={
+                    "trace_id": trace_id,
+                    "source_surface": "orchestrator",
+                },
+            )
         except Exception:
             self._log_llm_selection(
                 trace_id=trace_id,
                 provider=None,
                 model=None,
-                reason="llm_chat_exception",
+                reason="llm_router_exception",
                 fallback_used=True,
-                task_type=str(task_request.get("task_type") or "chat"),
-                fallback_count=len(selection_fallbacks),
+                task_type="chat",
+                fallback_count=0,
             )
             return self._llm_error_fallback_response(user_id, text)
-
-        if isinstance(result, dict):
-            llm_text = str(result.get("text") or "").strip()
+        router_data = router_result.get("data") if isinstance(router_result.get("data"), dict) else {}
+        task_request = router_data.get("task_request") if isinstance(router_data.get("task_request"), dict) else {}
+        task_type = str(task_request.get("task_type") or router_result.get("task_type") or "chat")
+        selection = router_data.get("selection") if isinstance(router_data.get("selection"), dict) else {}
+        selection_reason = str(router_result.get("selection_reason") or selection.get("reason") or "router_default").strip() or "router_default"
+        selection_fallbacks = [
+            str(item).strip()
+            for item in (selection.get("fallbacks") if isinstance(selection.get("fallbacks"), list) else [])
+            if str(item).strip()
+        ]
+        selected_provider = str(router_result.get("provider") or "").strip() or None
+        selected_model = str(router_result.get("model") or "").strip() or None
+        if not bool(router_result.get("ok")):
+            self._log_llm_selection(
+                trace_id=trace_id,
+                provider=selected_provider,
+                model=selected_model,
+                reason=str(router_result.get("error_kind") or selection_reason or "llm_inference_failed"),
+                fallback_used=True,
+                task_type=task_type,
+                fallback_count=len(selection_fallbacks),
+            )
+            llm_text = str(router_result.get("text") or "").strip()
             if llm_text:
-                llm_text = self._sanitize_vendor_identity_claim(
-                    llm_text,
-                    provider=str(result.get("provider") or "").strip() or None,
-                    model=str(result.get("model") or "").strip() or None,
-                )
-                tool_request = self._parse_llm_tool_request(llm_text)
-                if tool_request is not None:
-                    response = self._execute_tool_request(
-                        tool_request=tool_request,
-                        user_id=user_id,
-                        surface="llm",
-                        runtime_mode="READY",
-                    )
-                    self._log_llm_selection(
-                        trace_id=trace_id,
-                        provider=str(result.get("provider") or "").strip() or None,
-                        model=str(result.get("model") or "").strip() or None,
-                        reason="tool_request",
-                        fallback_used=True,
-                        task_type=str(task_request.get("task_type") or "chat"),
-                        fallback_count=len(selection_fallbacks),
-                    )
-                    return response
-                directive_command = self._parse_llm_run_directive(llm_text)
-                if directive_command:
-                    try:
-                        tool_request = self._command_to_tool_request(
-                            directive_command,
-                            reason="run_directive",
-                        )
-                        if tool_request is None:
-                            raise RuntimeError("directive_tool_missing")
-                        response = self._execute_tool_request(
-                            tool_request=tool_request,
-                            user_id=user_id,
-                            surface="llm",
-                            runtime_mode="READY",
-                        )
-                        self._log_llm_selection(
-                            trace_id=trace_id,
-                            provider=str(result.get("provider") or "").strip() or None,
-                            model=str(result.get("model") or "").strip() or None,
-                            reason="run_directive",
-                            fallback_used=True,
-                            task_type=str(task_request.get("task_type") or "chat"),
-                            fallback_count=len(selection_fallbacks),
-                        )
-                        return response
-                    except Exception:
-                        self._log_llm_selection(
-                            trace_id=trace_id,
-                            provider=None,
-                            model=None,
-                            reason="run_directive_failed",
-                            fallback_used=True,
-                            task_type=str(task_request.get("task_type") or "chat"),
-                            fallback_count=len(selection_fallbacks),
-                        )
-                        return self._llm_error_fallback_response(user_id, text)
-                self._log_llm_selection(
-                    trace_id=trace_id,
-                    provider=str(result.get("provider") or selected_provider or "").strip() or None,
-                    model=str(result.get("model") or selected_model or "").strip() or None,
-                    reason=selection_reason if selected_model else "llm_chat",
-                    fallback_used=False,
-                    task_type=str(task_request.get("task_type") or "chat"),
-                    fallback_count=len(selection_fallbacks),
-                )
                 return OrchestratorResponse(
                     llm_text,
                     {
-                        "llm_chat": {
+                        "llm_control": {
                             "trace_id": trace_id,
-                            "route": "chat",
-                            "source_surface": "orchestrator",
-                            "provider": str(result.get("provider") or selected_provider or "").strip() or None,
-                            "model": str(result.get("model") or selected_model or "").strip() or None,
-                            "task_type": str(task_request.get("task_type") or "chat"),
+                            **router_data,
                         }
                     },
                 )
-        elif isinstance(result, str):
-            llm_text = result.strip()
-            if llm_text:
-                llm_text = self._sanitize_vendor_identity_claim(
-                    llm_text,
-                    provider=None,
-                    model=None,
+            return self._llm_error_fallback_response(user_id, text)
+        llm_text = str(router_result.get("text") or "").strip()
+        if llm_text:
+            llm_text = self._sanitize_vendor_identity_claim(
+                llm_text,
+                provider=selected_provider,
+                model=selected_model,
+            )
+            tool_request = self._parse_llm_tool_request(llm_text)
+            if tool_request is not None:
+                response = self._execute_tool_request(
+                    tool_request=tool_request,
+                    user_id=user_id,
+                    surface="llm",
+                    runtime_mode="READY",
                 )
-                tool_request = self._parse_llm_tool_request(llm_text)
-                if tool_request is not None:
-                    response = self._execute_tool_request(
-                        tool_request=tool_request,
-                        user_id=user_id,
-                        surface="llm",
-                        runtime_mode="READY",
-                    )
-                    self._log_llm_selection(
-                        trace_id=trace_id,
-                        provider=None,
-                        model=None,
-                        reason="tool_request",
-                        fallback_used=True,
-                        task_type=str(task_request.get("task_type") or "chat"),
-                        fallback_count=len(selection_fallbacks),
-                    )
-                    return response
-                directive_command = self._parse_llm_run_directive(llm_text)
-                if directive_command:
-                    try:
-                        tool_request = self._command_to_tool_request(
-                            directive_command,
-                            reason="run_directive",
-                        )
-                        if tool_request is None:
-                            raise RuntimeError("directive_tool_missing")
-                        response = self._execute_tool_request(
-                            tool_request=tool_request,
-                            user_id=user_id,
-                            surface="llm",
-                            runtime_mode="READY",
-                        )
-                        self._log_llm_selection(
-                            trace_id=trace_id,
-                            provider=None,
-                            model=None,
-                            reason="run_directive",
-                            fallback_used=True,
-                            task_type=str(task_request.get("task_type") or "chat"),
-                            fallback_count=len(selection_fallbacks),
-                        )
-                        return response
-                    except Exception:
-                        self._log_llm_selection(
-                            trace_id=trace_id,
-                            provider=None,
-                            model=None,
-                            reason="run_directive_failed",
-                            fallback_used=True,
-                            task_type=str(task_request.get("task_type") or "chat"),
-                            fallback_count=len(selection_fallbacks),
-                        )
-                        return self._llm_error_fallback_response(user_id, text)
                 self._log_llm_selection(
                     trace_id=trace_id,
                     provider=selected_provider,
                     model=selected_model,
-                    reason=selection_reason if selected_model else "llm_chat",
-                    fallback_used=False,
-                    task_type=str(task_request.get("task_type") or "chat"),
+                    reason="tool_request",
+                    fallback_used=True,
+                    task_type=task_type,
                     fallback_count=len(selection_fallbacks),
                 )
-                return OrchestratorResponse(
-                    llm_text,
-                    {
-                        "llm_chat": {
-                            "trace_id": trace_id,
-                            "route": "chat",
-                            "source_surface": "orchestrator",
-                            "provider": selected_provider,
-                            "model": selected_model,
-                            "task_type": str(task_request.get("task_type") or "chat"),
-                        }
-                    },
-                )
+                return response
+            directive_command = self._parse_llm_run_directive(llm_text)
+            if directive_command:
+                try:
+                    tool_request = self._command_to_tool_request(
+                        directive_command,
+                        reason="run_directive",
+                    )
+                    if tool_request is None:
+                        raise RuntimeError("directive_tool_missing")
+                    response = self._execute_tool_request(
+                        tool_request=tool_request,
+                        user_id=user_id,
+                        surface="llm",
+                        runtime_mode="READY",
+                    )
+                    self._log_llm_selection(
+                        trace_id=trace_id,
+                        provider=selected_provider,
+                        model=selected_model,
+                        reason="run_directive",
+                        fallback_used=True,
+                        task_type=task_type,
+                        fallback_count=len(selection_fallbacks),
+                    )
+                    return response
+                except Exception:
+                    self._log_llm_selection(
+                        trace_id=trace_id,
+                        provider=None,
+                        model=None,
+                        reason="run_directive_failed",
+                        fallback_used=True,
+                        task_type=task_type,
+                        fallback_count=len(selection_fallbacks),
+                    )
+                    return self._llm_error_fallback_response(user_id, text)
+            self._log_llm_selection(
+                trace_id=trace_id,
+                provider=selected_provider,
+                model=selected_model,
+                reason=selection_reason if selected_model else "llm_chat",
+                fallback_used=bool(router_result.get("fallback_used", False)),
+                task_type=task_type,
+                fallback_count=len(selection_fallbacks),
+            )
+            return OrchestratorResponse(
+                llm_text,
+                {
+                    "llm_chat": {
+                        "trace_id": trace_id,
+                        "route": "chat",
+                        "source_surface": "orchestrator",
+                        "provider": selected_provider,
+                        "model": selected_model,
+                        "task_type": task_type,
+                    }
+                },
+            )
 
         self._log_llm_selection(
             trace_id=trace_id,
@@ -954,7 +820,7 @@ class Orchestrator:
             model=None,
             reason="llm_empty_response",
             fallback_used=True,
-            task_type=str(task_request.get("task_type") or "chat"),
+            task_type=task_type,
             fallback_count=len(selection_fallbacks),
         )
         return self._llm_error_fallback_response(user_id, text)
@@ -1528,14 +1394,19 @@ class Orchestrator:
                 },
             ]
             try:
-                result = self.llm_client.chat(
-                    messages,
+                result = route_inference(
+                    llm_client=self.llm_client,
+                    messages=messages,
+                    user_text=user_text,
+                    task_hint=user_text,
                     purpose="authoritative_domain",
+                    task_type="chat",
                     compute_tier="low",
                     require_tools=True,
+                    trace_id=self._trace_id("llm"),
                 )
-            except TypeError:
-                result = self.llm_client.chat(messages, purpose="authoritative_domain")
+            except Exception:
+                result = None
             if isinstance(result, dict) and result.get("ok") and str(result.get("text") or "").strip():
                 llm_text = str(result.get("text") or "").strip()
 
@@ -1646,16 +1517,20 @@ class Orchestrator:
             return text
         if not self.llm_client or not hasattr(self.llm_client, "chat"):
             return text
-        result = self.llm_client.chat(
-            [
+        result = route_inference(
+            llm_client=self.llm_client,
+            messages=[
                 {
                     "role": "system",
                     "content": "Summarize the payload in 2-4 concise bullet lines with no recommendations.",
                 },
                 {"role": "user", "content": json.dumps({"kind": kind, "payload": payload}, ensure_ascii=True)},
             ],
+            task_hint=kind,
             purpose="narration",
+            task_type="chat",
             compute_tier="low",
+            trace_id=self._trace_id("llm"),
         )
         if not result.get("ok") or not result.get("text"):
             return text
@@ -1669,16 +1544,20 @@ class Orchestrator:
             return text
         if not self.llm_client or not hasattr(self.llm_client, "chat"):
             return text
-        result = self.llm_client.chat(
-            [
+        result = route_inference(
+            llm_client=self.llm_client,
+            messages=[
                 {
                     "role": "system",
                     "content": "Summarize the report in 2-4 concise bullet lines with no recommendations.",
                 },
                 {"role": "user", "content": json.dumps({"kind": kind, "report_text": text}, ensure_ascii=True)},
             ],
+            task_hint=kind,
             purpose="narration",
+            task_type="chat",
             compute_tier="low",
+            trace_id=self._trace_id("llm"),
         )
         if not result.get("ok") or not result.get("text"):
             return text
@@ -4137,24 +4016,29 @@ class Orchestrator:
                     provider_override = None
                     if cmd.args:
                         provider_override = cmd.args.strip().lower() or None
-                    result = router.chat(
-                        [
+                    result = route_inference(
+                        llm_client=router,
+                        messages=[
                             {"role": "system", "content": "Reply with the single word PONG."},
                             {"role": "user", "content": "ping"},
                         ],
+                        task_hint="ping diagnostics",
                         purpose="diagnostics",
+                        task_type="chat",
                         compute_tier="low",
                         provider_override=provider_override,
+                        trace_id=self._trace_id("llm"),
                     )
                     status = "OK" if result.get("ok") else "FAIL"
-                    reason = result.get("error_class") or ""
+                    result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+                    reason = result.get("error_kind") or result_data.get("error_kind") or ""
                     reason_part = f" reason={reason}" if status == "FAIL" and reason else ""
                     return OrchestratorResponse(
                         "LLM ping: provider={provider} model={model} status={status} duration_ms={duration_ms}{reason}".format(
                             provider=result.get("provider") or "none",
                             model=result.get("model") or "none",
                             status=status,
-                            duration_ms=result.get("duration_ms") or 0,
+                            duration_ms=result.get("duration_ms") or result_data.get("duration_ms") or 0,
                             reason=reason_part,
                         )
                     )

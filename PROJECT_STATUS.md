@@ -98,6 +98,7 @@ Single operator entrypoint:
 ## LLM Control Plane
 - Canonical control-plane modules:
   - `agent/llm/control_contract.py`
+  - `agent/llm/inference_router.py`
   - `agent/llm/model_inventory.py`
   - `agent/llm/model_health_check.py`
   - `agent/llm/task_classifier.py`
@@ -115,6 +116,9 @@ Single operator entrypoint:
   - capability/context match
   - policy/cost-cap aware
   - deterministic tie-break
+- Boundary rule:
+  - `agent/orchestrator.py` never calls providers directly.
+  - `agent/llm/inference_router.py` is the single orchestrator-facing LLM execution boundary.
 - Install planning behavior:
   - recommends from a small approved local Ollama shortlist
   - remains honest when no approved local profile fits

@@ -11,7 +11,7 @@ v1 functional focus is local-first PC health management with read-only diagnosti
 - Unified operator CLI: `python -m agent` (`agent/cli.py`, `agent/__main__.py`)
 - Optional Telegram adapter surface: `telegram_adapter/bot.py`
 
-All surfaces must depend on shared core modules (`agent/orchestrator.py`, skills, memory DB, llm router) and must not become separate business-logic owners.
+All surfaces must depend on shared core modules (`agent/orchestrator.py`, skills, memory DB, inference router) and must not become separate business-logic owners.
 
 ## Source Of Truth
 
@@ -94,11 +94,16 @@ Service startup
 - Deterministic LLM control-plane modules live under `agent/llm/*` and stay inside the core runtime.
 - Current control-plane responsibilities:
   - `agent/llm/control_contract.py`: canonical inventory/task/selection shapes
+  - `agent/llm/inference_router.py`: single orchestrator-facing LLM execution boundary
   - `agent/llm/model_inventory.py`: local-first inventory of registry + installed Ollama models
   - `agent/llm/model_health_check.py`: lightweight local/provider health classification
   - `agent/llm/task_classifier.py`: deterministic task classification
   - `agent/llm/model_selector.py`: policy-aware model selection
   - `agent/llm/install_planner.py`: approved install/download planning only
+- Boundary rule:
+  - `agent/orchestrator.py` decides whether to use tools or inference.
+  - `agent/llm/inference_router.py` decides how LLM execution runs.
+  - provider adapters perform provider-specific transport only.
 - Surfaces should ask the core runtime/control-plane for model truth instead of inventing provider/model decisions locally.
 
 ## Continuity Contract

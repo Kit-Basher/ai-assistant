@@ -29,6 +29,9 @@ If implementation or other docs conflict with this file, this file wins.
   - memory/continuity
   - LLM routing
   - skill pack loading
+- The orchestrator decides whether a request should use tools or inference.
+- `agent/llm/inference_router.py` is the single LLM execution boundary for orchestrator-facing inference.
+- Provider adapters perform provider-specific calls only.
 - Surfaces (native UI, CLI, optional Telegram) call into the same runtime.
 - Telegram is an optional adapter surface, not an independent decision-making layer.
 
