@@ -2,33 +2,44 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from agent.llm.approved_local_models import approved_local_profiles_for_task
 from agent.llm.control_contract import normalize_model_inventory, normalize_selection_result, normalize_task_request
 from agent.llm.model_state import build_effective_model_state
 
 
-_APPROVED_INSTALLS: dict[str, dict[str, Any]] = {
-    "chat": {
-        "model": "qwen2.5:3b-instruct",
-        "size": "3B",
-        "tasks": {"chat", "health", "tool_use"},
-    },
-    "coding": {
-        "model": "qwen2.5:7b-instruct",
-        "size": "7B",
-        "tasks": {"coding", "reasoning"},
-    },
-}
-
-
-def _plan_target(task_type: str) -> dict[str, Any] | None:
-    normalized = str(task_type or "chat").strip().lower() or "chat"
-    for row in _APPROVED_INSTALLS.values():
-        tasks = row.get("tasks") if isinstance(row.get("tasks"), set) else set()
-        if normalized in tasks:
-            return dict(row)
-    if normalized == "vision":
-        return None
-    return dict(_APPROVED_INSTALLS["chat"])
+def _build_plan_steps(*, profile: dict[str, Any], task_type: str) -> list[dict[str, Any]]:
+    model_name = str(profile.get("install_name") or "").strip()
+    canonical_id = str(profile.get("id") or "").strip()
+    steps: list[dict[str, Any]] = [
+        {
+            "id": "01_pull_model",
+            "action": "ollama.pull_model",
+            "provider": "ollama",
+            "model": model_name,
+            "reason": "approved_local_model_missing",
+            "size": str(profile.get("size_hint") or "unknown"),
+        },
+        {
+            "id": "02_probe_model",
+            "action": "provider.test",
+            "provider": "ollama",
+            "model": model_name,
+            "reason": "verify_model_callable",
+        },
+    ]
+    if task_type in {"chat", "health", "tool_use"}:
+        steps.insert(
+            1,
+            {
+                "id": "02_set_chat_default",
+                "action": "defaults.set_chat_model",
+                "provider": "ollama",
+                "model": canonical_id,
+                "reason": "promote_installed_local_model",
+            },
+        )
+        steps[2]["id"] = "03_probe_model"
+    return steps
 
 
 def build_install_plan(
@@ -60,6 +71,9 @@ def build_install_plan(
                     "needed": False,
                     "approved": True,
                     "plan": [],
+                    "candidates": [],
+                    "install_command": None,
+                    "reason": "already_satisfied",
                     "next_action": "No action needed.",
                 }
 
@@ -79,48 +93,47 @@ def build_install_plan(
             "needed": False,
             "approved": True,
             "plan": [],
+            "candidates": [],
+            "install_command": None,
+            "reason": "already_satisfied",
             "next_action": "No action needed.",
         }
 
-    target = _plan_target(str(normalized_task.get("task_type") or "chat"))
-    if target is None:
+    profiles = approved_local_profiles_for_task(normalized_task, limit=2)
+    if not profiles:
         return {
             "needed": True,
             "approved": False,
             "plan": [],
+            "candidates": [],
+            "install_command": None,
+            "reason": str(normalized_selection.get("reason") or "no_approved_local_model"),
             "next_action": "No approved local install plan exists for this task yet.",
         }
 
-    model_name = str(target.get("model") or "").strip()
-    canonical_id = f"ollama:{model_name}"
+    task_type = str(normalized_task.get("task_type") or "chat")
+    preferred = profiles[0]
+    install_name = str(preferred.get("install_name") or "").strip()
+    install_command = f"ollama pull {install_name}"
+    candidates = [
+        {
+            "model_id": str(profile.get("id") or "").strip(),
+            "install_name": str(profile.get("install_name") or "").strip(),
+            "reason": str(profile.get("reason") or "approved_local_profile").strip() or "approved_local_profile",
+            "size_hint": str(profile.get("size_hint") or "unknown"),
+            "preferred": bool(profile.get("preferred", False)),
+            "min_memory_gb": int(profile.get("min_memory_gb") or 0),
+        }
+        for profile in profiles
+    ]
     return {
         "needed": True,
         "approved": True,
-        "plan": [
-            {
-                "id": "01_pull_model",
-                "action": "ollama.pull_model",
-                "provider": "ollama",
-                "model": model_name,
-                "reason": "approved_local_model_missing",
-                "size": str(target.get("size") or "unknown"),
-            },
-            {
-                "id": "02_set_chat_default",
-                "action": "defaults.set_chat_model",
-                "provider": "ollama",
-                "model": canonical_id,
-                "reason": "promote_installed_local_model",
-            },
-            {
-                "id": "03_probe_model",
-                "action": "provider.test",
-                "provider": "ollama",
-                "model": model_name,
-                "reason": "verify_model_callable",
-            },
-        ],
-        "next_action": f"Review install plan for {canonical_id}.",
+        "reason": str(normalized_selection.get("reason") or "no_suitable_model"),
+        "candidates": candidates,
+        "install_command": install_command,
+        "plan": _build_plan_steps(profile=preferred, task_type=task_type),
+        "next_action": f"Run: {install_command}",
     }
 
 

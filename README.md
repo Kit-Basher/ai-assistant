@@ -93,11 +93,14 @@ Recovery contract (single best next action per mode):
   - deterministic task classification
   - local-first model selection with strict capability matching
   - approved install planning based on suitable installed healthy models, not mere catalog existence
+  - approved local model profiles for chat, coding, vision, and reasoning install recommendations
 - Operator entrypoints:
   - `python -m agent llm_inventory`
   - `python -m agent llm_select --task "debug this traceback"`
   - `python -m agent llm_plan --task "compare these approaches"`
 - Approved install plans are planning-only. They do not silently download or switch models.
+- Approved install planning uses a small local Ollama shortlist, not broad remote catalog guessing.
+- v1 coding selection requires `chat` capability. JSON output is optional, not required, for local coding assistance.
 
 ## Continuity Contract
 - Conversation continuity is normalized by `agent/memory_contract.py` and persisted via `agent/memory_runtime.py`.

@@ -4,7 +4,12 @@ import time
 from typing import Any, Iterable
 
 from agent.llm.control_contract import normalize_model_inventory, normalize_selection_result, normalize_task_request
-from agent.llm.model_state import build_effective_model_state, build_fallback_candidates, effective_state_sort_key
+from agent.llm.model_state import (
+    build_effective_model_state,
+    build_fallback_candidates,
+    effective_state_sort_key,
+    explain_no_selection_reason,
+)
 from agent.llm.value_policy import ValuePolicy, normalize_policy
 
 
@@ -47,7 +52,13 @@ def select_model_for_task(
             {
                 "selected_model": None,
                 "provider": None,
-                "reason": "no_suitable_model",
+                "reason": explain_no_selection_reason(
+                    normalized_inventory,
+                    task_request=normalized_task,
+                    allow_remote_fallback=allow_remote_fallback,
+                    policy=normalized_policy,
+                    policy_name=policy_name,
+                ),
                 "fallbacks": [state.get("id") for state in fallback_states],
                 "trace_id": trace_id or f"llm-select-{int(time.time())}",
             }

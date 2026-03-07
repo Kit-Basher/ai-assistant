@@ -157,7 +157,9 @@ class TestLLMControlPlane(unittest.TestCase):
 
     def test_task_classifier_is_deterministic(self) -> None:
         self.assertEqual("health", classify_task_request("how is my pc")["task_type"])
-        self.assertEqual("coding", classify_task_request("debug this python traceback")["task_type"])
+        coding = classify_task_request("debug this python traceback")
+        self.assertEqual("coding", coding["task_type"])
+        self.assertEqual(["chat"], coding["requirements"])
         self.assertEqual("vision", classify_task_request("analyze this image")["task_type"])
         reasoning = classify_task_request("compare these approaches and reason deeply")
         self.assertEqual("reasoning", reasoning["task_type"])
@@ -391,11 +393,13 @@ class TestLLMControlPlane(unittest.TestCase):
         )
         self.assertTrue(bool(plan["needed"]))
         self.assertTrue(bool(plan["approved"]))
+        self.assertEqual("ollama pull qwen2.5-coder:7b", plan["install_command"])
+        self.assertEqual("ollama:qwen2.5-coder:7b", plan["candidates"][0]["model_id"])
         first = plan["plan"][0]
         self.assertEqual("ollama.pull_model", first["action"])
-        self.assertEqual("qwen2.5:7b-instruct", first["model"])
+        self.assertEqual("qwen2.5-coder:7b", first["model"])
 
-    def test_install_planner_has_no_vision_install_plan_yet(self) -> None:
+    def test_install_planner_returns_concrete_vision_profile_when_needed(self) -> None:
         plan = build_install_plan(
             inventory=[
                 {
@@ -415,8 +419,10 @@ class TestLLMControlPlane(unittest.TestCase):
             selection_result={"selected_model": None, "provider": None, "reason": "no_suitable_model", "fallbacks": [], "trace_id": "t1"},
         )
         self.assertTrue(bool(plan["needed"]))
-        self.assertFalse(bool(plan["approved"]))
-        self.assertIn("No approved local install plan", str(plan["next_action"]))
+        self.assertTrue(bool(plan["approved"]))
+        self.assertEqual("ollama pull llava:7b", plan["install_command"])
+        self.assertEqual("ollama:llava:7b", plan["candidates"][0]["model_id"])
+        self.assertEqual("Run: ollama pull llava:7b", plan["next_action"])
 
     def test_install_planner_local_only_is_not_satisfied_by_remote_only_candidate(self) -> None:
         inventory = [
@@ -456,6 +462,50 @@ class TestLLMControlPlane(unittest.TestCase):
         )
         self.assertTrue(bool(plan["needed"]))
         self.assertTrue(bool(plan["approved"]))
+
+    def test_install_planner_stays_honest_when_no_approved_profile_matches_requirements(self) -> None:
+        plan = build_install_plan(
+            inventory=[],
+            task_request={"task_type": "vision", "requirements": ["chat", "vision", "json"], "preferred_local": True},
+            selection_result={
+                "selected_model": None,
+                "provider": None,
+                "reason": "no_local_model_with_required_capabilities",
+                "fallbacks": [],
+                "trace_id": "t-json-vision",
+            },
+        )
+        self.assertTrue(bool(plan["needed"]))
+        self.assertFalse(bool(plan["approved"]))
+        self.assertEqual("no_local_model_with_required_capabilities", plan["reason"])
+        self.assertEqual([], plan["candidates"])
+        self.assertIn("No approved local install plan exists for this task yet.", str(plan["next_action"]))
+
+    def test_selector_reports_capability_gap_reason_when_no_local_model_fits(self) -> None:
+        inventory = [
+            {
+                "id": "ollama:qwen2.5:3b-instruct",
+                "provider": "ollama",
+                "installed": True,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat"],
+                "context_window": 8192,
+                "local": True,
+                "approved": True,
+                "reason": "healthy",
+            }
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("analyze this image"),
+            allow_remote_fallback=False,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            trace_id="sel-vision-gap",
+        )
+        self.assertIsNone(selection["selected_model"])
+        self.assertEqual("no_local_model_with_required_capabilities", selection["reason"])
 
 
 if __name__ == "__main__":

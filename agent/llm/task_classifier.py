@@ -44,7 +44,8 @@ def classify_task_request(text: str) -> dict[str, Any]:
         requirements = ["chat", "vision"]
     elif any(re.search(pattern, normalized) for pattern in _CODING_PATTERNS):
         task_type = "coding"
-        requirements = ["chat", "json"]
+        # v1 coding assistance is conversational and local-first. Structured JSON is optional, not required.
+        requirements = ["chat"]
     elif any(re.search(pattern, normalized) for pattern in _TOOL_USE_PATTERNS):
         task_type = "tool_use"
     elif any(re.search(pattern, normalized) for pattern in _REASONING_PATTERNS):

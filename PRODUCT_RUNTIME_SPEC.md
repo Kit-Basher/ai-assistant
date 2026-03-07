@@ -60,6 +60,7 @@ If implementation or other docs conflict with this file, this file wins.
   - health probing
   - model selection
   - approved install planning
+  - approved local model profiles used for deterministic Ollama recommendations
 - Skill packs add additional capabilities later.
 - Skill packs require explicit approval/registry policy.
 - Future self-generated skills must still follow approval/registry controls.

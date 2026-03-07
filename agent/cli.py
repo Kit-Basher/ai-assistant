@@ -370,8 +370,25 @@ def _cmd_llm_plan(args: argparse.Namespace) -> int:
         f"task_type: {str(task_request.get('task_type') or 'chat')}",
         f"needed: {str(bool(plan.get('needed', False))).lower()}",
         f"approved: {str(bool(plan.get('approved', False))).lower()}",
+        f"reason: {str(plan.get('reason') or 'none')}",
+        f"install_command: {str(plan.get('install_command') or 'none')}",
         f"next_action: {str(plan.get('next_action') or 'none')}",
     ]
+    candidates = plan.get("candidates") if isinstance(plan.get("candidates"), list) else []
+    if candidates:
+        lines.append("candidates:")
+        for row in candidates:
+            if not isinstance(row, dict):
+                continue
+            lines.append(
+                "- {model_id} | install={install_name} | size={size_hint} | preferred={preferred} | reason={reason}".format(
+                    model_id=str(row.get("model_id") or "unknown"),
+                    install_name=str(row.get("install_name") or "unknown"),
+                    size_hint=str(row.get("size_hint") or "unknown"),
+                    preferred=str(bool(row.get("preferred", False))).lower(),
+                    reason=str(row.get("reason") or "unknown"),
+                )
+            )
     steps = plan.get("plan") if isinstance(plan.get("plan"), list) else []
     if steps:
         lines.append("plan:")

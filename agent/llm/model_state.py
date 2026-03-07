@@ -172,10 +172,64 @@ def build_fallback_candidates(
     return filtered[: max(0, int(limit))]
 
 
+def explain_no_selection_reason(
+    inventory: Iterable[dict[str, Any]],
+    *,
+    task_request: dict[str, Any],
+    allow_remote_fallback: bool,
+    policy: dict[str, Any] | ValuePolicy | None = None,
+    policy_name: str = "default",
+) -> str:
+    normalized_task = normalize_task_request(task_request)
+    states = [
+        build_effective_model_state(
+            item,
+            task_request=normalized_task,
+            allow_remote_fallback=allow_remote_fallback,
+            policy=policy,
+            policy_name=policy_name,
+        )
+        for item in normalize_model_inventory(inventory)
+    ]
+    local_states = [state for state in states if bool(state.get("local", False))]
+    capable_local = [state for state in local_states if bool(state.get("capability_ok", False)) and bool(state.get("context_ok", False))]
+    if not capable_local:
+        return "no_local_model_with_required_capabilities"
+    healthy_local = [
+        state
+        for state in capable_local
+        if bool(state.get("available_ok", False)) and bool(state.get("health_ok", False))
+    ]
+    if not healthy_local:
+        return "no_healthy_local_model"
+    approved_local = [state for state in healthy_local if bool(state.get("approved_ok", False))]
+    if not approved_local:
+        return "no_approved_local_model"
+    policy_local = [state for state in approved_local if bool(state.get("policy_ok", False))]
+    if not policy_local:
+        return "no_local_model_allowed_by_policy"
+    if not allow_remote_fallback:
+        remote_capable = [
+            state
+            for state in states
+            if not bool(state.get("local", False))
+            and bool(state.get("capability_ok", False))
+            and bool(state.get("context_ok", False))
+            and bool(state.get("available_ok", False))
+            and bool(state.get("health_ok", False))
+            and bool(state.get("approved_ok", False))
+            and bool(state.get("policy_ok", False))
+        ]
+        if remote_capable:
+            return "remote_fallback_disabled"
+    return "no_suitable_model"
+
+
 __all__ = [
     "build_effective_model_state",
     "build_fallback_candidates",
     "capability_match",
+    "explain_no_selection_reason",
     "effective_state_sort_key",
     "needs_long_context",
     "required_capabilities",

@@ -174,6 +174,39 @@ class TestAgentCLI(unittest.TestCase):
         self.assertTrue(bool(payload["plan"]["needed"]))
         self.assertEqual("ollama.pull_model", payload["plan"]["plan"][0]["action"])
 
+    def test_llm_plan_subcommand_plain_text_shows_candidates_and_install_command(self) -> None:
+        output = io.StringIO()
+        with patch(
+            "agent.cli._load_llm_control_state",
+            return_value={
+                "task_request": {"task_type": "vision", "requirements": ["chat", "vision"], "preferred_local": True},
+                "plan": {
+                    "needed": True,
+                    "approved": True,
+                    "reason": "no_local_model_with_required_capabilities",
+                    "install_command": "ollama pull llava:7b",
+                    "next_action": "Run: ollama pull llava:7b",
+                    "candidates": [
+                        {
+                            "model_id": "ollama:llava:7b",
+                            "install_name": "llava:7b",
+                            "size_hint": "7B",
+                            "preferred": True,
+                            "reason": "approved local vision baseline",
+                        }
+                    ],
+                    "plan": [{"id": "01_pull_model", "action": "ollama.pull_model", "model": "llava:7b"}],
+                },
+            },
+        ), redirect_stdout(output):
+            code = cli.main(["llm_plan", "--task", "analyze this image"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("reason: no_local_model_with_required_capabilities", text)
+        self.assertIn("install_command: ollama pull llava:7b", text)
+        self.assertIn("candidates:", text)
+        self.assertIn("ollama:llava:7b", text)
+
     def test_logs_subcommand_tails_last_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "agent.log"
