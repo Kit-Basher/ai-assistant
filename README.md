@@ -40,6 +40,7 @@ Unified CLI:
 
 Implemented now:
 - PC health monitoring (read-only) via `python -m agent health_system`
+- Deterministic system health analysis with severity (`OK/WARN/CRITICAL`) and actionable suggestions
 
 ## Golden Path
 1. Start/restart the API service.

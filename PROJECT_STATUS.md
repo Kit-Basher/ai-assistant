@@ -27,6 +27,7 @@ Single operator entrypoint:
 ## Current Product Shape
 - v1 scope: local-first PC health management, read-only guidance first.
 - PC health monitoring (read-only) implemented.
+- System health output now includes deterministic warning analysis, severity, and actionable suggestions.
 - Golden path:
   1. Start `personal-agent-api.service`
   2. Run `python -m agent setup --dry-run`

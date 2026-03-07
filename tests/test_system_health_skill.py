@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -7,6 +8,7 @@ from unittest.mock import patch
 
 from agent.orchestrator import Orchestrator
 from agent.skills.system_health import collect_system_health
+from agent.skills.system_health_analyzer import analyze_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.tool_executor import ToolExecutor
 from memory.db import MemoryDB
@@ -45,11 +47,11 @@ class TestSystemHealthSkill(unittest.TestCase):
         self.assertEqual("not_installed", data["gpu"]["error_kind"])
 
     def test_summary_renderer_formats_expected_sections(self) -> None:
-        data = {
+        observed = {
             "cpu": {"load_average": {"1m": 0.2, "5m": 0.1, "15m": 0.05}, "usage_pct": 9.3},
             "memory": {"total_bytes": 8 * 1024**3, "used_bytes": 3 * 1024**3, "available_bytes": 5 * 1024**3, "used_pct": 37.5},
             "disk": [{"mountpoint": "/", "used_pct": 44.2, "high_usage": False}],
-            "gpu": {"available": False, "gpus": [], "driver_version": None},
+            "gpu": {"available": False, "expected": False, "gpus": [], "driver_version": None},
             "services": {
                 "ollama": {"service_state": "active", "reachable": True},
                 "personal_agent": {"service_state": "active", "reachable": True},
@@ -57,11 +59,13 @@ class TestSystemHealthSkill(unittest.TestCase):
             "network": {"state": "up", "up_interfaces": ["eth0"], "default_route": True, "dns_configured": True},
             "warnings": [],
         }
-        text = render_system_health_summary(data)
+        analysis = analyze_system_health(observed)
+        text = render_system_health_summary(observed, analysis)
         self.assertIn("System health", text)
         self.assertIn("CPU:", text)
         self.assertIn("Memory:", text)
         self.assertIn("Disk:", text)
+        self.assertIn("Overall: OK", text)
         self.assertIn("Services:", text)
         self.assertIn("Network:", text)
 
@@ -70,8 +74,8 @@ class TestSystemHealthSkill(unittest.TestCase):
             handlers={
                 "observe_system_health": lambda _req, _user: {
                     "ok": True,
-                    "user_text": "System health\nCPU: ok",
-                    "data": {"system_health": {"warnings": []}},
+                    "user_text": "System health\nCPU: ok\nOverall: OK",
+                    "data": {"system_health": {"observed": {"warnings": []}, "analysis": {"status": "ok"}}},
                 }
             },
             component="test.system_health",
@@ -88,6 +92,7 @@ class TestSystemHealthSkill(unittest.TestCase):
         self.assertEqual("observe_system_health", result["tool"])
         self.assertIn("System health", str(result["user_text"]))
         self.assertIn("system_health", result["data"])
+        self.assertEqual("ok", result["data"]["system_health"]["analysis"]["status"])
 
     def test_orchestrator_routes_pc_health_text_without_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -103,12 +108,16 @@ class TestSystemHealthSkill(unittest.TestCase):
             )
             try:
                 with patch("agent.orchestrator.collect_system_health", return_value={"warnings": []}), patch(
+                    "agent.orchestrator.build_system_health_report",
+                    return_value={"observed": {"warnings": []}, "analysis": {"status": "ok", "warnings": [], "suggestions": []}},
+                ), patch(
                     "agent.orchestrator.render_system_health_summary",
-                    return_value="System health\nCPU: ok",
+                    return_value="System health\nCPU: ok\nOverall: OK",
                 ):
                     response = orchestrator.handle_message("how is my pc", "user-1")
-                self.assertEqual("System health\nCPU: ok", response.text)
-                self.assertEqual([], response.data.get("system_health", {}).get("warnings", []))
+                self.assertEqual("System health\nCPU: ok\nOverall: OK", response.text)
+                tool_data = response.data.get("tool_result", {}).get("data", {})
+                self.assertEqual("ok", tool_data.get("system_health", {}).get("analysis", {}).get("status"))
             finally:
                 db.close()
 

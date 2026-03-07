@@ -43,6 +43,7 @@ from agent.onboarding_contract import onboarding_next_action, onboarding_summary
 from agent.recovery_contract import recovery_next_action, recovery_summary
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import deterministic_error_message
+from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.tool_contract import normalize_tool_request
@@ -552,11 +553,14 @@ class Orchestrator:
     def _tool_handler_observe_system_health(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
         _ = request
         _ = user_id
-        data = collect_system_health()
+        report = build_system_health_report(collect_system_health())
         return {
             "ok": True,
-            "user_text": render_system_health_summary(data),
-            "data": {"system_health": data},
+            "user_text": render_system_health_summary(
+                report.get("observed") if isinstance(report.get("observed"), dict) else {},
+                report.get("analysis") if isinstance(report.get("analysis"), dict) else {},
+            ),
+            "data": {"system_health": report},
         }
 
     def _tool_handler_observe_now(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
@@ -4046,10 +4050,13 @@ class Orchestrator:
 
                 if cmd.name == "health_system":
                     self._record_conversation_topic(user_id, "system_health", "command")
-                    data = collect_system_health()
+                    report = build_system_health_report(collect_system_health())
                     return OrchestratorResponse(
-                        render_system_health_summary(data),
-                        {"system_health": data},
+                        render_system_health_summary(
+                            report.get("observed") if isinstance(report.get("observed"), dict) else {},
+                            report.get("analysis") if isinstance(report.get("analysis"), dict) else {},
+                        ),
+                        {"system_health": report},
                     )
 
                 if cmd.name == "what_if":

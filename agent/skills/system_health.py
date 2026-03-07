@@ -173,9 +173,19 @@ def _run_command(
 
 
 def _collect_gpu(run_command: RunCommand) -> dict[str, Any]:
+    gpu_expected = bool(Path("/dev/nvidiactl").exists() or Path("/proc/driver/nvidia/version").exists())
+    if not gpu_expected:
+        for vendor_path in sorted(Path("/sys/class/drm").glob("card*/device/vendor")):
+            try:
+                if vendor_path.read_text(encoding="utf-8").strip().lower() == "0x10de":
+                    gpu_expected = True
+                    break
+            except OSError:
+                continue
     if shutil.which("nvidia-smi") is None:
         return {
             "available": False,
+            "expected": gpu_expected,
             "driver_version": None,
             "gpus": [],
             "error_kind": "not_installed",
@@ -192,6 +202,7 @@ def _collect_gpu(run_command: RunCommand) -> dict[str, Any]:
     if not result["ok"]:
         return {
             "available": False,
+            "expected": gpu_expected,
             "driver_version": None,
             "gpus": [],
             "error_kind": result["error_kind"] or "command_failed",
@@ -222,12 +233,14 @@ def _collect_gpu(run_command: RunCommand) -> dict[str, Any]:
     if not gpus:
         return {
             "available": False,
+            "expected": gpu_expected,
             "driver_version": driver_version,
             "gpus": [],
             "error_kind": "parse_failed",
         }
     return {
         "available": True,
+        "expected": gpu_expected,
         "driver_version": driver_version,
         "gpus": gpus,
         "error_kind": None,
@@ -389,4 +402,3 @@ def collect_system_health(
 
 
 __all__ = ["collect_system_health"]
-

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -48,12 +49,30 @@ class TestAgentCLI(unittest.TestCase):
     def test_health_system_subcommand_uses_local_skill_summary(self) -> None:
         output = io.StringIO()
         with patch("agent.cli.collect_system_health", return_value={"warnings": []}), patch(
+            "agent.cli.build_system_health_report",
+            return_value={"observed": {"warnings": []}, "analysis": {"status": "ok", "warnings": [], "suggestions": []}},
+        ), patch(
             "agent.cli.render_system_health_summary",
-            return_value="System health\nCPU: ok",
+            return_value="System health\nCPU: ok\nOverall: OK",
         ), redirect_stdout(output):
             code = cli.main(["health_system"])
         self.assertEqual(0, code)
-        self.assertEqual("System health\nCPU: ok\n", output.getvalue())
+        self.assertEqual("System health\nCPU: ok\nOverall: OK\n", output.getvalue())
+
+    def test_health_system_subcommand_json_outputs_observed_and_analysis(self) -> None:
+        output = io.StringIO()
+        report = {
+            "observed": {"warnings": [], "cpu": {"usage_pct": 12.5}},
+            "analysis": {"status": "warn", "warnings": [{"id": "cpu_usage_warn"}], "suggestions": []},
+        }
+        with patch("agent.cli.collect_system_health", return_value={"warnings": []}), patch(
+            "agent.cli.build_system_health_report",
+            return_value=report,
+        ), redirect_stdout(output):
+            code = cli.main(["health_system", "--json"])
+        self.assertEqual(0, code)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(report, payload)
 
     def test_logs_subcommand_tails_last_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

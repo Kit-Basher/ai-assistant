@@ -19,6 +19,7 @@ from agent.golden_path import (
 )
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.runtime_contract import normalize_user_facing_status
+from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.setup_wizard import render_setup_text, run_setup_wizard
@@ -193,8 +194,18 @@ def _cmd_health(args: argparse.Namespace) -> int:
 
 
 def _cmd_health_system(_args: argparse.Namespace) -> int:
-    data = collect_system_health()
-    print(render_system_health_summary(data), flush=True)
+    observed = collect_system_health()
+    report = build_system_health_report(observed)
+    if bool(getattr(_args, "json", False)):
+        print(json.dumps(report, ensure_ascii=True, sort_keys=True, indent=2), flush=True)
+        return 0
+    print(
+        render_system_health_summary(
+            report.get("observed") if isinstance(report.get("observed"), dict) else {},
+            report.get("analysis") if isinstance(report.get("analysis"), dict) else {},
+        ),
+        flush=True,
+    )
     return 0
 
 
@@ -343,7 +354,8 @@ def build_parser() -> argparse.ArgumentParser:
     health_parser = sub.add_parser("health", help="Show LLM/runtime health snapshot")
     health_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
 
-    sub.add_parser("health_system", help="Show local PC health summary")
+    health_system_parser = sub.add_parser("health_system", help="Show local PC health summary")
+    health_system_parser.add_argument("--json", action="store_true", help="emit observed + analyzed JSON output")
 
     logs_parser = sub.add_parser("logs", help="Show recent agent logs")
     logs_parser.add_argument("--lines", type=int, default=50)

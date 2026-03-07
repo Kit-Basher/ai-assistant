@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.skills.system_health_analyzer import analyze_system_health
+
 
 def _format_bytes(value: int | float | None) -> str:
     amount = float(value or 0)
@@ -15,14 +17,22 @@ def _format_bytes(value: int | float | None) -> str:
     return f"{amount:.1f} {units[unit_index]}"
 
 
-def render_system_health_summary(data: dict[str, Any]) -> str:
-    cpu = data.get("cpu") if isinstance(data.get("cpu"), dict) else {}
-    memory = data.get("memory") if isinstance(data.get("memory"), dict) else {}
-    disk_rows = data.get("disk") if isinstance(data.get("disk"), list) else []
-    gpu = data.get("gpu") if isinstance(data.get("gpu"), dict) else {}
-    services = data.get("services") if isinstance(data.get("services"), dict) else {}
-    network = data.get("network") if isinstance(data.get("network"), dict) else {}
-    warnings = data.get("warnings") if isinstance(data.get("warnings"), list) else []
+def render_system_health_summary(observed: dict[str, Any], analysis: dict[str, Any] | None = None) -> str:
+    cpu = observed.get("cpu") if isinstance(observed.get("cpu"), dict) else {}
+    memory = observed.get("memory") if isinstance(observed.get("memory"), dict) else {}
+    disk_rows = observed.get("disk") if isinstance(observed.get("disk"), list) else []
+    gpu = observed.get("gpu") if isinstance(observed.get("gpu"), dict) else {}
+    services = observed.get("services") if isinstance(observed.get("services"), dict) else {}
+    network = observed.get("network") if isinstance(observed.get("network"), dict) else {}
+    collector_warnings = observed.get("warnings") if isinstance(observed.get("warnings"), list) else []
+    analysis_payload = analysis if isinstance(analysis, dict) else analyze_system_health(observed)
+    warnings = analysis_payload.get("warnings") if isinstance(analysis_payload.get("warnings"), list) else []
+    suggestions = (
+        analysis_payload.get("suggestions")
+        if isinstance(analysis_payload.get("suggestions"), list)
+        else []
+    )
+    overall_status = str(analysis_payload.get("status") or "ok").strip().upper() or "OK"
 
     disk_by_mount = {
         str(row.get("mountpoint") or ""): row
@@ -66,10 +76,6 @@ def render_system_health_summary(data: dict[str, Any]) -> str:
         f"dns={'yes' if bool(network.get('dns_configured', False)) else 'no'}"
     )
 
-    warning_line = "none"
-    if warnings:
-        warning_line = "; ".join(str(item) for item in warnings[:3])
-
     lines = [
         "System health",
         "CPU: load {one:.2f}/{five:.2f}/{fifteen:.2f}, usage {usage:.1f}%".format(
@@ -91,10 +97,36 @@ def render_system_health_summary(data: dict[str, Any]) -> str:
         f"GPU: {gpu_line}",
         f"Services: {service_line}",
         f"Network: {network_line}",
-        f"Warnings: {warning_line}",
     ]
     if high_usage_mounts:
         lines.insert(4, "High disk usage: " + ", ".join(high_usage_mounts[:3]))
+    lines.append(f"Overall: {overall_status}")
+    if warnings:
+        lines.append("Warnings:")
+        for item in warnings:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "- {message} {details}".format(
+                    message=str(item.get("message") or "").strip(),
+                    details=str(item.get("details") or "").strip(),
+                ).strip()
+            )
+    else:
+        lines.append("Warnings: none")
+        if collector_warnings:
+            lines.append("Observed warnings: " + "; ".join(str(item) for item in collector_warnings[:3]))
+    if suggestions:
+        lines.append("Suggestions:")
+        for item in suggestions:
+            if not isinstance(item, dict):
+                continue
+            lines.append(
+                "- {label}: {next_action}".format(
+                    label=str(item.get("label") or "").strip(),
+                    next_action=str(item.get("next_action") or "").strip(),
+                ).strip()
+            )
     return "\n".join(lines)
 
 
