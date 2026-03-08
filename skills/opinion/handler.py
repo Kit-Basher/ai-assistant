@@ -456,25 +456,39 @@ def _maybe_rewrite_presentation(
 
     must_keep_lines = [timeframe_line, *domain_lines]
     prompt = _presentation_prompt(deterministic_text, must_keep_lines)
-    router = (context or {}).get("llm_router")
-    client = (context or {}).get("llm_presentation_client")
-    broker = (context or {}).get("llm_broker")
+    infer = (context or {}).get("route_inference")
 
     llm_text = None
     decision = None
     failure_reason = None
-    if router and hasattr(router, "chat"):
+    if callable(infer):
         provider_override = provider if selector == "single" and provider != "none" else None
-        route_result = router.chat(
-            [
-                {"role": "system", "content": "Rewrite for presentation only. Preserve facts exactly."},
-                {"role": "user", "content": prompt},
-            ],
-            purpose="presentation_rewrite",
-            provider_override=provider_override,
-            compute_tier="mid",
-        )
-        attempts = route_result.get("attempts") or []
+        try:
+            route_result = infer(
+                messages=[
+                    {"role": "system", "content": "Rewrite for presentation only. Preserve facts exactly."},
+                    {"role": "user", "content": prompt},
+                ],
+                user_text=prompt,
+                task_hint="presentation rewrite for bounded opinion skill",
+                purpose="chat",
+                task_type="chat",
+                provider_override=provider_override,
+                compute_tier="mid",
+                metadata={"source_surface": "skill.opinion"},
+            )
+        except Exception:
+            return {
+                "text": deterministic_text,
+                "attempted": True,
+                "used": False,
+                "validation_passed": False,
+                "provider": provider,
+                "selector_mode": selector,
+                "decision": None,
+                "failure_reason": "router_error",
+            }
+        attempts = route_result.get("attempts") if isinstance(route_result.get("attempts"), list) else []
         decision = {
             "winner_id": route_result.get("model"),
             "winner": {
@@ -508,49 +522,7 @@ def _maybe_rewrite_presentation(
             llm_text = route_result.get("text")
             provider = route_result.get("provider") or provider
         else:
-            failure_reason = route_result.get("error_class") or "router_error"
-    elif selector == "broker":
-        if broker is None:
-            return {
-                "text": deterministic_text,
-                "attempted": True,
-                "used": False,
-                "validation_passed": False,
-                "provider": "none",
-                "selector_mode": selector,
-                "decision": None,
-                "failure_reason": "broker_unavailable",
-            }
-        try:
-            from agent.llm.broker import TaskSpec
-
-            task_spec = TaskSpec(task="presentation_rewrite", require_local=False)
-            client, decision = broker.select(task_spec)
-            provider = (decision or {}).get("winner", {}).get("provider", "none")
-            if hasattr(client, "generate"):
-                llm_text = client.generate(prompt)
-        except Exception:
-            return {
-                "text": deterministic_text,
-                "attempted": True,
-                "used": False,
-                "validation_passed": False,
-                "provider": "none",
-                "selector_mode": selector,
-                "decision": None,
-                "failure_reason": "broker_error",
-            }
-    elif client:
-        provider = getattr(client, "provider", provider)
-        if hasattr(client, "rewrite"):
-            result = client.rewrite(deterministic_text, must_keep_lines)
-            if isinstance(result, dict):
-                llm_text = result.get("text")
-                provider = result.get("provider") or provider
-            else:
-                llm_text = result
-        elif hasattr(client, "generate"):
-            llm_text = client.generate(prompt)
+            failure_reason = route_result.get("error_kind") or route_result.get("error_class") or "router_error"
     else:
         llm_text = None
         failure_reason = "router_unavailable"

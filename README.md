@@ -616,7 +616,6 @@ Uninstall:
 ## Telegram Commands (Registered in `telegram_adapter/bot.py`)
 - `/remind <YYYY-MM-DD HH:MM> | <text>`
 - `/status`
-- `/runtime_status`
 - `/disk_grow [path]`
 - `/audit`
 - `/storage_snapshot`

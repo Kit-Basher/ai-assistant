@@ -23,7 +23,6 @@ from agent.recovery_contract import (
     recovery_summary,
 )
 from agent.telegram_runtime_state import get_telegram_runtime_state
-from agent.telegram_runtime_state import read_telegram_enablement
 from agent.telegram_runtime_state import telegram_control_env
 
 
@@ -46,9 +45,9 @@ def _telegram_enabled(ready_payload: Mapping[str, Any] | None = None) -> bool:
     if normalized in {"1", "true", "on", "yes"}:
         return True
     try:
-        return bool(read_telegram_enablement(env=telegram_control_env()).get("enabled", False))
+        return bool(get_telegram_runtime_state(env=telegram_control_env()).get("enabled", False))
     except Exception:
-        return str(os.getenv("TELEGRAM_ENABLED", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
+        return False
 
 
 def _trace_id() -> str:

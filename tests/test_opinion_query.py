@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import os
+import inspect
 
 from agent.intent_router import route_message
 from agent.orchestrator import Orchestrator
@@ -211,14 +212,27 @@ class TestOpinionQuery(unittest.TestCase):
         self.assertEqual(text, result2.get("text"))
 
     def test_presentation_successful_rewrite(self) -> None:
-        class FakePresentationClient:
-            provider = "fake"
-
+        class FakeRouteInference:
             def __init__(self, text: str) -> None:
                 self.text = text
+                self.calls: list[dict[str, object]] = []
 
+            def __call__(self, **kwargs: object) -> dict[str, object]:
+                self.calls.append(dict(kwargs))
+                return {
+                    "ok": True,
+                    "text": self.text,
+                    "provider": "ollama",
+                    "model": "ollama:qwen2.5:3b-instruct",
+                    "fallback_used": False,
+                    "attempts": [],
+                    "duration_ms": 1,
+                    "error_kind": None,
+                }
+
+        class ExplodingPresentationClient:
             def rewrite(self, _deterministic: str, _must_keep: list[str]):
-                return {"text": self.text, "provider": self.provider}
+                raise AssertionError("direct presentation client should not be used")
 
         timeframe = {
             "label": "last 7 days",
@@ -242,6 +256,7 @@ class TestOpinionQuery(unittest.TestCase):
             "Opinionated Assessment:",
             "Opinionated Assessment:\nPresentation-only note.",
         )
+        infer = FakeRouteInference(rewritten)
 
         os.environ["ENABLE_LLM_PRESENTATION"] = "1"
         os.environ["LLM_PROVIDER"] = "ollama"
@@ -249,13 +264,17 @@ class TestOpinionQuery(unittest.TestCase):
             {
                 "db": self.db,
                 "timezone": "America/Regina",
-                "llm_presentation_client": FakePresentationClient(rewritten),
+                "route_inference": infer,
+                "llm_presentation_client": ExplodingPresentationClient(),
             },
             question="what do you think about my system lately",
             timeframe=timeframe,
             trigger="what do you think",
         )
         text = result.get("text", "")
+        self.assertEqual(1, len(infer.calls))
+        self.assertEqual("chat", infer.calls[0].get("purpose"))
+        self.assertEqual("ollama", infer.calls[0].get("provider_override"))
         self.assertNotEqual(text, base)
         self.assertIn("Presentation-only note.", text)
 
@@ -266,14 +285,23 @@ class TestOpinionQuery(unittest.TestCase):
         self.assertTrue(details.get("llm_validation_passed"))
 
     def test_presentation_forbidden_word_rejected(self) -> None:
-        class FakePresentationClient:
-            provider = "fake"
-
+        class FakeRouteInference:
             def __init__(self, text: str) -> None:
                 self.text = text
+                self.calls: list[dict[str, object]] = []
 
-            def rewrite(self, _deterministic: str, _must_keep: list[str]):
-                return {"text": self.text, "provider": self.provider}
+            def __call__(self, **kwargs: object) -> dict[str, object]:
+                self.calls.append(dict(kwargs))
+                return {
+                    "ok": True,
+                    "text": self.text,
+                    "provider": "ollama",
+                    "model": "ollama:qwen2.5:3b-instruct",
+                    "fallback_used": False,
+                    "attempts": [],
+                    "duration_ms": 1,
+                    "error_kind": None,
+                }
 
         timeframe = {
             "label": "last 7 days",
@@ -297,6 +325,7 @@ class TestOpinionQuery(unittest.TestCase):
             "Confidence & Limits:",
             "Confidence & Limits:\nNo major concerns noted.",
         )
+        infer = FakeRouteInference(rewritten)
 
         os.environ["ENABLE_LLM_PRESENTATION"] = "1"
         os.environ["LLM_PROVIDER"] = "ollama"
@@ -304,12 +333,13 @@ class TestOpinionQuery(unittest.TestCase):
             {
                 "db": self.db,
                 "timezone": "America/Regina",
-                "llm_presentation_client": FakePresentationClient(rewritten),
+                "route_inference": infer,
             },
             question="what do you think about my system lately",
             timeframe=timeframe,
             trigger="what do you think",
         )
+        self.assertEqual(1, len(infer.calls))
         self.assertEqual(result.get("text"), base)
         audit = self.db.audit_log_list_recent("user1", limit=1)[0]
         details = audit.get("details", {})
@@ -318,14 +348,23 @@ class TestOpinionQuery(unittest.TestCase):
         self.assertFalse(details.get("llm_validation_passed"))
 
     def test_presentation_basis_change_rejected(self) -> None:
-        class FakePresentationClient:
-            provider = "fake"
-
+        class FakeRouteInference:
             def __init__(self, text: str) -> None:
                 self.text = text
+                self.calls: list[dict[str, object]] = []
 
-            def rewrite(self, _deterministic: str, _must_keep: list[str]):
-                return {"text": self.text, "provider": self.provider}
+            def __call__(self, **kwargs: object) -> dict[str, object]:
+                self.calls.append(dict(kwargs))
+                return {
+                    "ok": True,
+                    "text": self.text,
+                    "provider": "ollama",
+                    "model": "ollama:qwen2.5:3b-instruct",
+                    "fallback_used": False,
+                    "attempts": [],
+                    "duration_ms": 1,
+                    "error_kind": None,
+                }
 
         timeframe = {
             "label": "last 7 days",
@@ -346,6 +385,7 @@ class TestOpinionQuery(unittest.TestCase):
         ).get("text", "")
 
         rewritten = base.replace("basis:", "basis: CHANGED")
+        infer = FakeRouteInference(rewritten)
 
         os.environ["ENABLE_LLM_PRESENTATION"] = "1"
         os.environ["LLM_PROVIDER"] = "ollama"
@@ -353,18 +393,26 @@ class TestOpinionQuery(unittest.TestCase):
             {
                 "db": self.db,
                 "timezone": "America/Regina",
-                "llm_presentation_client": FakePresentationClient(rewritten),
+                "route_inference": infer,
             },
             question="what do you think about my system lately",
             timeframe=timeframe,
             trigger="what do you think",
         )
+        self.assertEqual(1, len(infer.calls))
         self.assertEqual(result.get("text"), base)
         audit = self.db.audit_log_list_recent("user1", limit=1)[0]
         details = audit.get("details", {})
         self.assertTrue(details.get("llm_presentation_attempted"))
         self.assertFalse(details.get("llm_presentation_used"))
         self.assertFalse(details.get("llm_validation_passed"))
+
+    def test_presentation_handler_source_uses_canonical_route_only(self) -> None:
+        source = inspect.getsource(opinion_handler._maybe_rewrite_presentation)
+        self.assertIn("route_inference", source)
+        self.assertNotIn("llm_router", source)
+        self.assertNotIn("llm_broker", source)
+        self.assertNotIn("llm_presentation_client", source)
 
 
 if __name__ == "__main__":

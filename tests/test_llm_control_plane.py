@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import types
 import unittest
 
@@ -14,6 +15,7 @@ from agent.llm.model_health_check import check_model_health, check_provider_heal
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_selector import select_model_for_task
 from agent.llm.registry import DefaultsConfig, ModelConfig, ProviderConfig, Registry
+from agent.llm.runtime_model_snapshot import build_runtime_model_snapshot
 from agent.llm.task_classifier import classify_task_request
 
 
@@ -138,6 +140,71 @@ def _registry() -> Registry:
     )
 
 
+def _router_snapshot(
+    *,
+    local_status: str = "ok",
+    remote_provider_status: str = "unknown",
+    remote_model_status: str = "unknown",
+) -> dict[str, object]:
+    return {
+        "defaults": {
+            "default_provider": "ollama",
+            "default_model": "ollama:llama3",
+            "allow_remote_fallback": True,
+        },
+        "providers": [
+            {
+                "id": "ollama",
+                "local": True,
+                "enabled": True,
+                "available": True,
+                "health": {
+                    "status": local_status,
+                    "last_checked_at": 1_700_000_000 if local_status != "unknown" else None,
+                },
+            },
+            {
+                "id": "openrouter",
+                "local": False,
+                "enabled": True,
+                "available": True,
+                "health": {
+                    "status": remote_provider_status,
+                    "last_checked_at": 1_700_000_100 if remote_provider_status != "unknown" else None,
+                },
+            },
+        ],
+        "models": [
+            {
+                "id": "ollama:llama3",
+                "provider": "ollama",
+                "model": "llama3",
+                "enabled": True,
+                "available": True,
+                "routable": True,
+                "capabilities": ["chat"],
+                "health": {
+                    "status": local_status,
+                    "last_checked_at": 1_700_000_000 if local_status != "unknown" else None,
+                },
+            },
+            {
+                "id": "openrouter:cheap-chat",
+                "provider": "openrouter",
+                "model": "cheap-chat",
+                "enabled": True,
+                "available": True,
+                "routable": remote_provider_status == "ok" and remote_model_status == "ok",
+                "capabilities": ["chat", "json"],
+                "health": {
+                    "status": remote_model_status,
+                    "last_checked_at": 1_700_000_100 if remote_model_status != "unknown" else None,
+                },
+            },
+        ],
+    }
+
+
 class TestLLMControlPlane(unittest.TestCase):
     def test_control_contract_normalizes_shapes(self) -> None:
         inventory = normalize_model_inventory(
@@ -190,61 +257,173 @@ class TestLLMControlPlane(unittest.TestCase):
     def test_inventory_merges_discovered_local_models_and_orders_deterministically(self) -> None:
         cfg = _config()
         registry = _registry()
-        from unittest.mock import patch
-
-        with patch("agent.llm.model_inventory.check_provider_health", return_value={"provider_health": {"status": "ok"}}), patch(
-            "agent.llm.model_inventory.check_model_health",
-            side_effect=lambda **kwargs: {"healthy": kwargs.get("installed", False) or kwargs["model"].provider != "ollama", "failure_kind": None if (kwargs.get("installed", False) or kwargs["model"].provider != "ollama") else "not_installed"},
-        ):
-            inventory = build_model_inventory(
-                config=cfg,
-                registry=registry,
-                discovered_local_models=["llama3", "qwen2.5:3b-instruct"],
-            )
+        inventory = build_model_inventory(
+            config=cfg,
+            registry=registry,
+            discovered_local_models=["llama3", "qwen2.5:3b-instruct"],
+            router_snapshot=_router_snapshot(),
+        )
         self.assertEqual(
             ["ollama:llama3", "ollama:qwen2.5:3b-instruct", "openrouter:cheap-chat"],
             [row["id"] for row in inventory],
         )
         self.assertTrue(bool(inventory[1]["installed"]))
         self.assertEqual("ollama_list", inventory[1]["source"])
+        self.assertFalse(bool(inventory[1]["available"]))
+        self.assertFalse(bool(inventory[1]["healthy"]))
+        self.assertFalse(bool(inventory[1]["runtime_known"]))
 
-    def test_inventory_applies_approved_profile_capabilities_for_local_vision_model(self) -> None:
+    def test_inventory_marks_discovered_local_approved_profile_as_not_runtime_known(self) -> None:
         cfg = _config()
         registry = _registry()
-        from unittest.mock import patch
-
-        with patch(
-            "agent.llm.model_inventory.check_provider_health",
-            return_value={"provider_health": {"status": "ok"}},
-        ):
-            inventory = build_model_inventory(
-                config=cfg,
-                registry=registry,
-                discovered_local_models=["llava:7b"],
-            )
+        inventory = build_model_inventory(
+            config=cfg,
+            registry=registry,
+            discovered_local_models=["llava:7b"],
+            router_snapshot=_router_snapshot(),
+        )
         llava = next(row for row in inventory if row["id"] == "ollama:llava:7b")
         self.assertIn("vision", llava["capabilities"])
         self.assertEqual("approved_profile", llava["capability_source"])
-        self.assertTrue(bool(llava["healthy"]))
-        self.assertEqual("approved_profile_local_vision", llava["health_reason"])
+        self.assertFalse(bool(llava["healthy"]))
+        self.assertFalse(bool(llava["available"]))
+        self.assertEqual("not_registered", llava["reason"])
+        self.assertFalse(bool(llava["runtime_known"]))
 
     def test_approved_profile_capability_override_does_not_affect_unrelated_models(self) -> None:
         cfg = _config()
         registry = _registry()
-        from unittest.mock import patch
-
-        with patch(
-            "agent.llm.model_inventory.check_provider_health",
-            return_value={"provider_health": {"status": "ok"}},
-        ):
-            inventory = build_model_inventory(
-                config=cfg,
-                registry=registry,
-                discovered_local_models=["llama3"],
-            )
+        inventory = build_model_inventory(
+            config=cfg,
+            registry=registry,
+            discovered_local_models=["llama3"],
+            router_snapshot=_router_snapshot(),
+        )
         llama = next(row for row in inventory if row["id"] == "ollama:llama3")
         self.assertIn("chat", llama["capabilities"])
         self.assertNotIn("vision", llama["capabilities"])
+
+    def test_runtime_snapshot_does_not_claim_remote_health_ok_without_runtime_evidence(self) -> None:
+        cfg = _config()
+        registry = _registry()
+        snapshot = build_runtime_model_snapshot(
+            config=cfg,
+            registry=registry,
+            router_snapshot={
+                **_router_snapshot(remote_provider_status="ok", remote_model_status="ok"),
+                "providers": [
+                    {
+                        "id": "ollama",
+                        "local": True,
+                        "enabled": True,
+                        "available": True,
+                        "health": {"status": "ok", "last_checked_at": 1_700_000_000},
+                    },
+                    {
+                        "id": "openrouter",
+                        "local": False,
+                        "enabled": True,
+                        "available": True,
+                        "health": {"status": "ok"},
+                    },
+                ],
+                "models": [
+                    {
+                        "id": "ollama:llama3",
+                        "provider": "ollama",
+                        "model": "llama3",
+                        "enabled": True,
+                        "available": True,
+                        "routable": True,
+                        "capabilities": ["chat"],
+                        "health": {"status": "ok", "last_checked_at": 1_700_000_000},
+                    },
+                    {
+                        "id": "openrouter:cheap-chat",
+                        "provider": "openrouter",
+                        "model": "cheap-chat",
+                        "enabled": True,
+                        "available": True,
+                        "routable": True,
+                        "capabilities": ["chat", "json"],
+                        "health": {"status": "ok"},
+                    },
+                ],
+            },
+        )
+        provider_lookup = snapshot["provider_lookup"]
+        model_lookup = snapshot["model_lookup"]
+        self.assertEqual("unknown", provider_lookup["openrouter"]["health"]["status"])
+        self.assertEqual("unknown", model_lookup["openrouter:cheap-chat"]["health"]["status"])
+
+    def test_inventory_and_selection_follow_runtime_snapshot_health(self) -> None:
+        cfg = _config()
+        registry = _registry()
+        inventory = build_model_inventory(
+            config=cfg,
+            registry=registry,
+            discovered_local_models=["llama3"],
+            router_snapshot={
+                **_router_snapshot(remote_provider_status="ok", remote_model_status="ok"),
+                "providers": [
+                    {
+                        "id": "ollama",
+                        "local": True,
+                        "enabled": True,
+                        "available": True,
+                        "health": {"status": "down", "last_error_kind": "connection_refused", "last_checked_at": 1_700_000_000},
+                    },
+                    {
+                        "id": "openrouter",
+                        "local": False,
+                        "enabled": True,
+                        "available": True,
+                        "health": {"status": "ok"},
+                    },
+                ],
+                "models": [
+                    {
+                        "id": "ollama:llama3",
+                        "provider": "ollama",
+                        "model": "llama3",
+                        "enabled": True,
+                        "available": True,
+                        "routable": False,
+                        "capabilities": ["chat"],
+                        "health": {"status": "down", "last_error_kind": "connection_refused", "last_checked_at": 1_700_000_000},
+                    },
+                    {
+                        "id": "openrouter:cheap-chat",
+                        "provider": "openrouter",
+                        "model": "cheap-chat",
+                        "enabled": True,
+                        "available": True,
+                        "routable": True,
+                        "capabilities": ["chat", "json"],
+                        "health": {"status": "ok"},
+                    },
+                ],
+            },
+        )
+        remote_row = next(row for row in inventory if row["id"] == "openrouter:cheap-chat")
+        self.assertEqual("unknown", remote_row["health_status"])
+        self.assertFalse(bool(remote_row["healthy"]))
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("hello there"),
+            allow_remote_fallback=True,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            trace_id="sel-runtime-health",
+        )
+        self.assertIsNone(selection["selected_model"])
+        self.assertEqual("no_healthy_local_model", selection["reason"])
+
+    def test_inventory_builder_uses_runtime_snapshot_not_legacy_health_checks(self) -> None:
+        source = inspect.getsource(build_model_inventory)
+        self.assertIn("build_runtime_model_snapshot", source)
+        self.assertNotIn("check_provider_health", source)
+        self.assertNotIn("check_model_health", source)
 
     def test_local_vision_health_check_uses_approved_profile_metadata(self) -> None:
         cfg = _config()

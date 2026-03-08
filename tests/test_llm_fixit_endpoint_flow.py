@@ -559,35 +559,52 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
     def test_ollama_pull_endpoint_happy_path_and_allowlist(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.set_listening("127.0.0.1", 8765)
-        with patch.object(
-            runtime,
-            "_ollama_tags_models",
-            return_value={"ok": True, "models": []},
-        ), patch.object(
+        with patch(
+            "agent.api_server.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.api_server.execute_install_plan",
+            return_value={
+                "ok": True,
+                "executed": True,
+                "model_id": "ollama:qwen2.5:3b-instruct",
+                "install_name": "qwen2.5:3b-instruct",
+                "trace_id": "install-1",
+                "error_kind": None,
+                "message": "Installed and verified ollama:qwen2.5:3b-instruct.",
+                "verification": {
+                    "found": True,
+                    "installed": True,
+                    "available": True,
+                    "healthy": True,
+                    "verification_status": "ok",
+                },
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
+        ) as install_mock, patch.object(
             runtime.modelops_executor.safe_runner,
             "run",
-            return_value=type(
-                "_Result",
-                (),
-                {"ok": True, "timed_out": False, "returncode": 0, "stdout": "", "stderr": "", "truncated": False},
-            )(),
-        ) as pull_mock, patch.object(
+        ) as direct_pull_mock, patch.object(
             runtime,
             "refresh_models",
             return_value=(True, {"ok": True}),
         ):
-            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
+            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct", "confirm": True})
             handler.do_POST()
         self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
         self.assertEqual("qwen2.5:3b-instruct", payload["model"])
         self.assertFalse(bool(payload["already_present"]))
-        pull_mock.assert_called_once()
+        self.assertEqual("install-1", payload["trace_id"])
+        install_mock.assert_called_once()
+        self.assertTrue(bool(install_mock.call_args.kwargs["approve"]))
         self.assertEqual(
-            ["ollama", "pull", "qwen2.5:3b-instruct"],
-            list(pull_mock.call_args.args[0]),
+            "qwen2.5:3b-instruct",
+            install_mock.call_args.kwargs["plan"]["candidates"][0]["install_name"],
         )
+        direct_pull_mock.assert_not_called()
 
         disallowed = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "llama3:8b"})
         disallowed.do_POST()
@@ -603,49 +620,107 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         non_loopback_payload = json.loads(non_loopback.body.decode("utf-8"))
         self.assertEqual("forbidden", non_loopback_payload["error_kind"])
 
-    def test_ollama_pull_endpoint_idempotent_and_timeout(self) -> None:
+    def test_ollama_pull_endpoint_uses_canonical_result_for_noop_and_timeout(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.set_listening("127.0.0.1", 8765)
 
-        with patch.object(
-            runtime,
-            "_ollama_tags_models",
-            return_value={"ok": True, "models": ["qwen2.5:3b-instruct"]},
+        with patch(
+            "agent.api_server.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.api_server.execute_install_plan",
+            return_value={
+                "ok": True,
+                "executed": False,
+                "model_id": "ollama:qwen2.5:3b-instruct",
+                "install_name": "qwen2.5:3b-instruct",
+                "trace_id": "install-noop",
+                "error_kind": None,
+                "message": "Model already installed and healthy.",
+                "verification": {
+                    "found": True,
+                    "installed": True,
+                    "available": True,
+                    "healthy": True,
+                    "verification_status": "ok",
+                },
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
         ), patch.object(
             runtime.modelops_executor.safe_runner,
             "run",
-        ) as pull_mock, patch.object(
+        ) as direct_pull_mock, patch.object(
             runtime,
             "refresh_models",
             return_value=(True, {"ok": True}),
         ):
-            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "ollama:qwen2.5:3b-instruct"})
+            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "ollama:qwen2.5:3b-instruct", "confirm": True})
             handler.do_POST()
         self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
         self.assertTrue(bool(payload["already_present"]))
-        pull_mock.assert_not_called()
+        direct_pull_mock.assert_not_called()
 
-        with patch.object(
-            runtime,
-            "_ollama_tags_models",
-            return_value={"ok": True, "models": []},
-        ), patch.object(
-            runtime.modelops_executor.safe_runner,
-            "run",
-            return_value=type(
-                "_TimeoutResult",
-                (),
-                {"ok": False, "timed_out": True, "returncode": 124, "stdout": "", "stderr": "", "truncated": False},
-            )(),
+        with patch(
+            "agent.api_server.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.api_server.execute_install_plan",
+            return_value={
+                "ok": False,
+                "executed": True,
+                "model_id": "ollama:qwen2.5:3b-instruct",
+                "install_name": "qwen2.5:3b-instruct",
+                "trace_id": "install-timeout",
+                "error_kind": "timed_out",
+                "message": "Ollama pull timed out.",
+                "verification": {},
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
         ):
-            timeout_handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
+            timeout_handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct", "confirm": True})
             timeout_handler.do_POST()
         self.assertEqual(400, timeout_handler.status_code)
         timeout_payload = json.loads(timeout_handler.body.decode("utf-8"))
         self.assertFalse(timeout_payload["ok"])
-        self.assertEqual("timeout", timeout_payload["error_kind"])
+        self.assertEqual("timed_out", timeout_payload["error_kind"])
+
+    def test_ollama_pull_endpoint_requires_explicit_approval(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+
+        with patch(
+            "agent.api_server.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.api_server.execute_install_plan",
+            return_value={
+                "ok": False,
+                "executed": False,
+                "model_id": "ollama:qwen2.5:3b-instruct",
+                "install_name": "qwen2.5:3b-instruct",
+                "trace_id": "install-approval",
+                "error_kind": "approval_required",
+                "message": "Explicit approval is required before executing this local install.",
+                "verification": {},
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
+        ) as install_mock, patch.object(
+            runtime.modelops_executor.safe_runner,
+            "run",
+        ) as direct_pull_mock:
+            handler = _HandlerForTest(runtime, "/providers/ollama/pull", {"model": "qwen2.5:3b-instruct"})
+            handler.do_POST()
+        self.assertEqual(400, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertFalse(payload["ok"])
+        self.assertEqual("approval_required", payload["error_kind"])
+        self.assertFalse(bool(install_mock.call_args.kwargs["approve"]))
+        direct_pull_mock.assert_not_called()
 
     def test_fixit_offers_install_local_models_and_applies_install_plan(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -714,7 +789,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertTrue(third_payload["ok"])
         self.assertIn("Installed and configured", third_payload["message"])
         self.assertEqual("ollama:qwen2.5:3b-instruct", third_payload["chat_model"])
-        pull_mock.assert_called_once()
+        pull_mock.assert_called_once_with({"model": "qwen2.5:3b-instruct", "confirm": True})
         test_provider_mock.assert_called_once()
         called_payload = test_provider_mock.call_args.args[1]
         self.assertEqual("ollama:qwen2.5:3b-instruct", called_payload.get("model"))

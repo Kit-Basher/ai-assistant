@@ -82,6 +82,8 @@ def _normalize_router_result(
         error_kind = _normalize_text(raw_result.get("error_kind") or raw_result.get("error_class")) or None
         resolved_provider = _normalize_text(raw_result.get("provider")) or _normalize_text(provider) or None
         resolved_model = _normalize_text(raw_result.get("model")) or _normalize_text(model) or None
+        attempts = raw_result.get("attempts") if isinstance(raw_result.get("attempts"), list) else []
+        usage = raw_result.get("usage") if isinstance(raw_result.get("usage"), Mapping) else None
         duration_ms_value = raw_result.get("duration_ms")
         try:
             duration_ms = int(duration_ms_value) if duration_ms_value is not None else None
@@ -91,6 +93,8 @@ def _normalize_router_result(
             payload["duration_ms"] = duration_ms
         if error_kind:
             payload["error_kind"] = error_kind
+        if usage is not None:
+            payload["usage"] = dict(usage)
         normalized = {
             "ok": ok,
             "text": text,
@@ -100,10 +104,14 @@ def _normalize_router_result(
             "selection_reason": _normalize_text(selection_reason) or "router_default",
             "fallback_used": bool(raw_result.get("fallback_used", fallback_used)),
             "error_kind": error_kind,
+            "error_class": error_kind,
             "next_action": _normalize_text(raw_result.get("next_action") or next_action) or None,
             "data": payload,
             "trace_id": _normalize_text(trace_id) or None,
+            "attempts": attempts,
         }
+        if usage is not None:
+            normalized["usage"] = dict(usage)
         if duration_ms is not None:
             normalized["duration_ms"] = duration_ms
         return normalized
@@ -138,6 +146,10 @@ class InferenceRouter:
         task_type: str | None = None,
         local_only: bool | None = None,
         structured_output: bool | None = None,
+        require_json: bool | None = None,
+        require_vision: bool | None = None,
+        min_context_tokens: int | None = None,
+        timeout_seconds: float | None = None,
         trace_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         require_tools: bool | None = None,
@@ -216,7 +228,10 @@ class InferenceRouter:
             model_override=selected_model,
             metadata=metadata,
             require_tools=require_tools,
-            structured_output=structured_output,
+            require_json=require_json if require_json is not None else structured_output,
+            require_vision=require_vision,
+            min_context_tokens=min_context_tokens,
+            timeout_seconds=timeout_seconds,
         )
         raw_result = self._call_chat(messages, chat_kwargs)
         return _normalize_router_result(
@@ -280,9 +295,18 @@ class InferenceRouter:
         llm_registry = getattr(self.llm_client, "registry", None)
         if llm_config is None or llm_registry is None:
             return {}
+        router_snapshot = None
+        if hasattr(self.llm_client, "doctor_snapshot"):
+            try:
+                snapshot_payload = self.llm_client.doctor_snapshot()
+            except Exception:
+                snapshot_payload = None
+            if isinstance(snapshot_payload, dict):
+                router_snapshot = snapshot_payload
         inventory = build_model_inventory(
             config=llm_config,
             registry=llm_registry,
+            router_snapshot=router_snapshot,
             timeout_seconds=1.0,
         )
         selection = select_model_for_task(
@@ -319,7 +343,10 @@ class InferenceRouter:
         model_override: str | None,
         metadata: dict[str, Any] | None,
         require_tools: bool | None,
-        structured_output: bool | None,
+        require_json: bool | None,
+        require_vision: bool | None,
+        min_context_tokens: int | None,
+        timeout_seconds: float | None,
     ) -> dict[str, Any]:
         kwargs: dict[str, Any] = {
             "purpose": purpose,
@@ -335,8 +362,14 @@ class InferenceRouter:
             kwargs["metadata"] = dict(metadata)
         if require_tools is not None:
             kwargs["require_tools"] = bool(require_tools)
-        if structured_output is not None:
-            kwargs["structured_output"] = bool(structured_output)
+        if require_json is not None:
+            kwargs["require_json"] = bool(require_json)
+        if require_vision is not None:
+            kwargs["require_vision"] = bool(require_vision)
+        if min_context_tokens is not None:
+            kwargs["min_context_tokens"] = int(min_context_tokens)
+        if timeout_seconds is not None:
+            kwargs["timeout_seconds"] = float(timeout_seconds)
         return kwargs
 
     def _call_chat(self, messages: list[dict[str, Any]], kwargs: dict[str, Any]) -> Any:
@@ -345,16 +378,28 @@ class InferenceRouter:
         seen: set[tuple[tuple[str, str], ...]] = set()
         for candidate in (
             kwargs,
-            {key: value for key, value in kwargs.items() if key not in {"metadata", "structured_output"}},
+            {key: value for key, value in kwargs.items() if key != "metadata"},
             {
                 key: value
                 for key, value in kwargs.items()
-                if key in {"purpose", "task_type", "compute_tier", "provider_override", "model_override", "require_tools"}
+                if key
+                in {
+                    "purpose",
+                    "task_type",
+                    "compute_tier",
+                    "provider_override",
+                    "model_override",
+                    "require_tools",
+                    "require_json",
+                    "require_vision",
+                    "min_context_tokens",
+                    "timeout_seconds",
+                }
             },
             {
                 key: value
                 for key, value in kwargs.items()
-                if key in {"purpose", "provider_override", "model_override"}
+                if key in {"purpose", "provider_override", "model_override", "timeout_seconds"}
             },
             {key: value for key, value in kwargs.items() if key in {"purpose"}},
             {},

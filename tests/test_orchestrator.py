@@ -98,6 +98,29 @@ class TestOrchestrator(unittest.TestCase):
         system_text = str((messages or [{}])[0].get("content") if messages else "")
         self.assertIn("Never say you were created by Anthropic/OpenAI", system_text)
 
+    def test_skill_context_exposes_bound_canonical_route_only(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="hi from llm")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        ctx = orchestrator._context()
+        self.assertIn("route_inference", ctx)
+        self.assertNotIn("llm_router", ctx)
+
+        result = ctx["route_inference"](
+            messages=[{"role": "user", "content": "rewrite this"}],
+            user_text="rewrite this",
+            task_hint="rewrite this",
+            purpose="chat",
+        )
+        self.assertTrue(result.get("ok"))
+        self.assertEqual("hi from llm", result.get("text"))
+        self.assertEqual(1, len(llm.chat_calls))
+
     def test_no_llm_available_returns_bootstrap_chat_setup(self) -> None:
         llm = _FakeChatLLM(enabled=False)
         orchestrator = Orchestrator(

@@ -31,6 +31,7 @@ class Config:
     openai_base_url: str | None = None
     ollama_base_url: str | None = None
     anthropic_api_key: str | None = None
+    # Deprecated compatibility knobs; runtime always uses the canonical LLMRouter path.
     llm_selector: str = "single"
     llm_broker_policy_path: str | None = None
     llm_allow_remote: bool = False
@@ -190,6 +191,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     anthropic_api_key = os.getenv("ANTHROPIC_API_KEY", "").strip() or None
     llm_selector = os.getenv("LLM_SELECTOR", "single").strip().lower() or "single"
     llm_broker_policy_path = os.getenv("LLM_BROKER_POLICY_PATH", "").strip() or None
+    # Preserve legacy selector fields in Config for compatibility, but reject the removed broker runtime path.
     llm_allow_remote = os.getenv("LLM_ALLOW_REMOTE", "0").strip().lower() in {
         "1",
         "true",
@@ -233,13 +235,10 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     if llm_provider == "anthropic" and not anthropic_api_key:
         raise RuntimeError("LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY.")
 
-    if llm_selector not in {"single", "broker"}:
-        raise RuntimeError(f"Unsupported LLM_SELECTOR: {llm_selector}")
     if llm_selector == "broker":
-        if not llm_broker_policy_path:
-            raise RuntimeError("LLM_SELECTOR=broker requires LLM_BROKER_POLICY_PATH.")
-        if not os.path.isfile(llm_broker_policy_path):
-            raise RuntimeError("LLM_BROKER_POLICY_PATH is missing or not readable.")
+        raise RuntimeError("LLM_SELECTOR=broker is no longer supported; runtime always uses LLMRouter.")
+    if llm_selector != "single":
+        raise RuntimeError(f"Unsupported LLM_SELECTOR: {llm_selector}")
 
     ollama_host = ollama_base_url or os.getenv("OLLAMA_HOST", "").strip() or None
     ollama_model = os.getenv("OLLAMA_MODEL", "").strip() or None

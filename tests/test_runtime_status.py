@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from agent.diagnostics import CommandResult
 from agent.runtime_status import build_runtime_status_report
@@ -45,15 +46,18 @@ class TestRuntimeStatusReport(unittest.TestCase):
     def test_report_structure_and_redaction(self) -> None:
         runner = FakeRunner(
             {
-                ("systemctl", "show", "personal-agent", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
+                ("systemctl", "--user", "show", "personal-agent-api.service", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
                     args=[
                         "systemctl",
+                        "--user",
                         "show",
-                        "personal-agent",
+                        "personal-agent-api.service",
                         "-p",
                         "ActiveState",
                         "-p",
                         "SubState",
+                        "-p",
+                        "UnitFileState",
                         "-p",
                         "MainPID",
                         "-p",
@@ -65,25 +69,55 @@ class TestRuntimeStatusReport(unittest.TestCase):
                         "-p",
                         "ExecMainExitTimestamp",
                     ],
-                    stdout="ActiveState=active\nMainPID=123\nResult=success\nExecMainStatus=0\nExecMainCode=exited\nExecMainExitTimestamp=n/a\n",
+                    stdout="ActiveState=active\nUnitFileState=enabled\nMainPID=123\nResult=success\nExecMainStatus=0\nExecMainCode=exited\nExecMainExitTimestamp=n/a\n",
                     stderr="",
                     returncode=0,
                     error=None,
                     permission_denied=False,
                     not_available=False,
                 ),
-                ("ps", "-eo", "pid,ppid,args"): CommandResult(
-                    args=["ps", "-eo", "pid,ppid,args"],
-                    stdout="PID PPID COMMAND\n123 1 python -m telegram_adapter.bot\n",
+                ("systemctl", "--user", "show", "personal-agent-telegram.service", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
+                    args=[
+                        "systemctl",
+                        "--user",
+                        "show",
+                        "personal-agent-telegram.service",
+                        "-p",
+                        "ActiveState",
+                        "-p",
+                        "SubState",
+                        "-p",
+                        "UnitFileState",
+                        "-p",
+                        "MainPID",
+                        "-p",
+                        "Result",
+                        "-p",
+                        "ExecMainStatus",
+                        "-p",
+                        "ExecMainCode",
+                        "-p",
+                        "ExecMainExitTimestamp",
+                    ],
+                    stdout="ActiveState=inactive\nUnitFileState=disabled\nMainPID=0\nResult=success\nExecMainStatus=0\nExecMainCode=exited\nExecMainExitTimestamp=n/a\n",
                     stderr="",
                     returncode=0,
                     error=None,
                     permission_denied=False,
                     not_available=False,
                 ),
-                ("journalctl", "-u", "personal-agent", "-n", "50", "--no-pager"): CommandResult(
-                    args=["journalctl", "-u", "personal-agent", "-n", "50", "--no-pager"],
+                ("journalctl", "--user", "-u", "personal-agent-api.service", "-n", "25", "--no-pager"): CommandResult(
+                    args=["journalctl", "--user", "-u", "personal-agent-api.service", "-n", "25", "--no-pager"],
                     stdout="line one\nTOKEN=12345:ABCDEF1234567890123456\nOPENAI_API_KEY=sk-test\n",
+                    stderr="",
+                    returncode=0,
+                    error=None,
+                    permission_denied=False,
+                    not_available=False,
+                ),
+                ("journalctl", "--user", "-u", "personal-agent-telegram.service", "-n", "25", "--no-pager"): CommandResult(
+                    args=["journalctl", "--user", "-u", "personal-agent-telegram.service", "-n", "25", "--no-pager"],
+                    stdout="telegram line one\n",
                     stderr="",
                     returncode=0,
                     error=None,
@@ -95,13 +129,14 @@ class TestRuntimeStatusReport(unittest.TestCase):
         report = build_runtime_status_report(self.db, run_command_fn=runner)
         order = [
             "1. Service State",
-            "2. Process State",
-            "3. Recent Logs",
-            "4. Database State",
-            "5. Conflicts Detected",
+            "2. Recent Logs",
+            "3. Database State",
+            "4. Notes",
         ]
         indices = [report.index(section) for section in order]
         self.assertEqual(indices, sorted(indices))
+        self.assertIn("personal-agent-api.service: status=active", report)
+        self.assertIn("personal-agent-telegram.service: status=inactive", report)
         self.assertNotIn("12345:ABCDEF1234567890123456", report)
         self.assertNotIn("sk-test", report)
         self.assertIn("[REDACTED]", report)
@@ -129,7 +164,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
     def test_permission_denied_degrades(self) -> None:
         runner = FakeRunner(
             {
-                ("systemctl", "show", "personal-agent", "-p", "ActiveState", "-p", "SubState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
+                ("systemctl", "--user", "show", "personal-agent-api.service", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
                     args=[],
                     stdout="",
                     stderr="permission denied",
@@ -138,7 +173,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
                     permission_denied=True,
                     not_available=True,
                 ),
-                ("ps", "-eo", "pid,ppid,args"): CommandResult(
+                ("systemctl", "--user", "show", "personal-agent-telegram.service", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
                     args=[],
                     stdout="",
                     stderr="permission denied",
@@ -147,7 +182,16 @@ class TestRuntimeStatusReport(unittest.TestCase):
                     permission_denied=True,
                     not_available=True,
                 ),
-                ("journalctl", "-u", "personal-agent", "-n", "50", "--no-pager"): CommandResult(
+                ("journalctl", "--user", "-u", "personal-agent-api.service", "-n", "25", "--no-pager"): CommandResult(
+                    args=[],
+                    stdout="",
+                    stderr="permission denied",
+                    returncode=1,
+                    error=None,
+                    permission_denied=True,
+                    not_available=True,
+                ),
+                ("journalctl", "--user", "-u", "personal-agent-telegram.service", "-n", "25", "--no-pager"): CommandResult(
                     args=[],
                     stdout="",
                     stderr="permission denied",
@@ -159,8 +203,28 @@ class TestRuntimeStatusReport(unittest.TestCase):
             }
         )
         report = build_runtime_status_report(self.db, run_command_fn=runner)
-        self.assertIn("status: not available (permission)", report)
-        self.assertIn("Recent Logs\n- not available (permission)", report)
+        self.assertIn("personal-agent-api.service: status=not available (permission)", report)
+        self.assertIn("personal-agent-telegram.service: status=not available (permission)", report)
+        self.assertIn("2. Recent Logs\n- personal-agent-api.service\n  not available (permission)", report)
+
+    def test_source_and_docs_do_not_reference_obsolete_single_service_topology(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        runtime_source = (repo_root / "agent" / "runtime_status.py").read_text(encoding="utf-8")
+        manifest_source = (repo_root / "skills" / "service_health_report" / "manifest.json").read_text(encoding="utf-8")
+        runbook_source = (repo_root / "docs" / "operator" / "LOOKHERE.md").read_text(encoding="utf-8")
+        readme_source = (repo_root / "README.md").read_text(encoding="utf-8")
+        self.assertFalse((repo_root / "skills" / "runtime_status" / "manifest.json").exists())
+
+        for source in (runtime_source, manifest_source, runbook_source, readme_source):
+            self.assertNotIn("journalctl -u personal-agent", source)
+            self.assertNotIn("personal-agent.service", source)
+        self.assertIn("personal-agent-api.service", runtime_source)
+        self.assertIn("personal-agent-telegram.service", runtime_source)
+        self.assertIn("personal-agent-api.service", manifest_source)
+        self.assertIn("personal-agent-telegram.service", manifest_source)
+        self.assertIn("personal-agent-api.service", runbook_source)
+        self.assertIn("personal-agent-telegram.service", runbook_source)
+        self.assertNotIn("/runtime_status", readme_source)
 
 
 if __name__ == "__main__":

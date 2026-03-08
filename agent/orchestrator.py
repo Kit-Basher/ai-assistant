@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from functools import partial
 import re
 from typing import Any
 import os
@@ -252,8 +253,6 @@ class Orchestrator:
         timezone: str,
         llm_client: Any,
         enable_writes: bool = False,
-        llm_broker: Any | None = None,
-        llm_broker_error: str | None = None,
         perception_enabled: bool = True,
         perception_roots: tuple[str, ...] | None = None,
         perception_interval_seconds: int = 5,
@@ -277,8 +276,6 @@ class Orchestrator:
         self.confirmations = ConfirmationStore()
         self.enable_writes = enable_writes
         self._runner: Runner | None = None
-        self._llm_broker = llm_broker
-        self._llm_broker_error = llm_broker_error
         self.perception_enabled = bool(perception_enabled)
         self.perception_roots = tuple(
             part.strip()
@@ -1118,12 +1115,8 @@ class Orchestrator:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
         if self._runner:
             ctx["runner"] = self._runner
-        if self._llm_broker:
-            ctx["llm_broker"] = self._llm_broker
-        if self._llm_broker_error:
-            ctx["llm_broker_error"] = self._llm_broker_error
         if self.llm_client:
-            ctx["llm_router"] = self.llm_client
+            ctx["route_inference"] = partial(route_inference, llm_client=self.llm_client)
         return ctx
 
     def _ask_contains_advice(self, text: str) -> bool:
@@ -3971,15 +3964,6 @@ class Orchestrator:
                         ["ops:supervisor"],
                     )
 
-                if cmd.name == "runtime_status":
-                    return self._call_skill(
-                        user_id,
-                        "runtime_status",
-                        "runtime_status",
-                        {},
-                        ["db:read"],
-                    )
-
                 if cmd.name == "autonomy_status":
                     return self._call_skill(
                         user_id,
@@ -5545,12 +5529,15 @@ class Orchestrator:
         if skill_name == "service_health_report":
             report = (payload or {}).get("report") or ""
             lower = str(report).lower()
-            running = "running" if "- status: active" in lower else "stopped/degraded"
-            has_error = "error" in lower or "failed" in lower
-            verdict = f"Service is {running}"
-            if has_error:
-                verdict += "; recent errors found"
-            return verdict, ["Show last 20 service logs", "Check runtime status details"]
+            api_active = "- personal-agent-api.service: status=active" in lower
+            telegram_active = "- personal-agent-telegram.service: status=active" in lower
+            telegram_failed = "- personal-agent-telegram.service: status=failed" in lower
+            verdict = "API service is running" if api_active else "API service is stopped/degraded"
+            if telegram_failed:
+                verdict += "; Telegram service failed"
+            elif telegram_active:
+                verdict += "; Telegram service active"
+            return verdict, ["Show last 20 service logs", "Run status"]
         if skill_name == "resource_governor":
             loads = (payload or {}).get("loads") or {}
             mem = (payload or {}).get("memory") or {}

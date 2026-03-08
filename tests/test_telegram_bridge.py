@@ -86,6 +86,9 @@ class TestTelegramBridge(unittest.TestCase):
         self.assertEqual("/brief", classify_telegram_text_command("breif"))
         self.assertEqual("/memory", classify_telegram_text_command("what are we doing?"))
         self.assertEqual("/setup", classify_telegram_text_command("fix setup"))
+        self.assertEqual("/setup", classify_telegram_text_command("repair openrouter"))
+        self.assertEqual("/setup", classify_telegram_text_command("openrouter unavailable"))
+        self.assertEqual("/setup", classify_telegram_text_command("configure ollama"))
 
     def test_help_ready_returns_command_list(self) -> None:
         result = handle_telegram_text(

@@ -65,6 +65,20 @@ class TestConfig(unittest.TestCase):
             config = load_config()
         self.assertTrue(config.enable_writes)
 
+    def test_llm_selector_broker_is_rejected(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "LLM_PROVIDER": "none",
+                "LLM_SELECTOR": "broker",
+                "LLM_BROKER_POLICY_PATH": "/tmp/policy.yaml",
+            },
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "no longer supported"):
+                load_config()
+
     def test_memory_v2_default_false(self) -> None:
         with patch.dict(
             os.environ,

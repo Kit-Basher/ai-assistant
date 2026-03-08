@@ -173,22 +173,22 @@ class TestAuthoritativeDomainGate(unittest.TestCase):
 
         with (
             patch.object(runtime, "_collect_authoritative_observations", return_value=observations) as collect_call,
-            patch.object(runtime._router, "chat", return_value=router_result) as router_chat,
+            patch("agent.api_server.route_inference", return_value=router_result) as route_call,
         ):
             ok, _body = runtime.chat({"messages": [{"role": "user", "content": "my pc is lagging badly"}]})
 
         self.assertTrue(ok)
         self.assertEqual(1, collect_call.call_count)
-        self.assertEqual(1, router_chat.call_count)
-        call_args = router_chat.call_args
-        routed_messages = call_args.args[0]
+        self.assertEqual(1, route_call.call_count)
+        call_args = route_call.call_args
+        routed_messages = call_args.kwargs["messages"]
         self.assertEqual("system", routed_messages[0]["role"])
         self.assertIn("LOCAL_OBSERVATIONS", routed_messages[0]["content"])
         self.assertTrue(call_args.kwargs["require_tools"])
 
         with (
             patch.object(runtime, "_collect_authoritative_observations", return_value=observations) as collect_call,
-            patch.object(runtime._router, "chat", return_value=router_result) as router_chat,
+            patch("agent.api_server.route_inference", return_value=router_result) as route_call,
         ):
             ok, _body = runtime.chat(
                 {
@@ -199,8 +199,8 @@ class TestAuthoritativeDomainGate(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(0, collect_call.call_count)
-        call_args = router_chat.call_args
-        routed_messages = call_args.args[0]
+        call_args = route_call.call_args
+        routed_messages = call_args.kwargs["messages"]
         self.assertEqual("user", routed_messages[0]["role"])
         self.assertFalse(call_args.kwargs["require_tools"])
 

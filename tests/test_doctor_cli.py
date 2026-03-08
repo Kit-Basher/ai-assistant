@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from agent.doctor import (
     DoctorCheck,
+    _telegram_enabled_for_doctor,
     _doctor_checks,
     _check_llm_availability,
     _check_secret_store_path,
@@ -128,6 +129,18 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertEqual("OK", rows["systemd.telegram_service"].status)
         self.assertEqual("OK", rows["process.telegram_pollers"].status)
         self.assertEqual("OK", rows["telegram.token"].status)
+
+    def test_telegram_enabled_for_doctor_uses_live_runtime_state(self) -> None:
+        with patch(
+            "agent.doctor.get_telegram_runtime_state",
+            return_value={"enabled": True},
+        ):
+            self.assertTrue(_telegram_enabled_for_doctor())
+        with patch(
+            "agent.doctor.get_telegram_runtime_state",
+            return_value={"enabled": False},
+        ):
+            self.assertFalse(_telegram_enabled_for_doctor())
 
 
 if __name__ == "__main__":

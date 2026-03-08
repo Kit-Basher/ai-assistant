@@ -150,7 +150,7 @@ class TestValueOptimalSelection(unittest.TestCase):
         runtime.registry_document = _registry_document()
         calls: list[dict[str, object]] = []
 
-        def _fake_chat(_messages: list[dict[str, str]], **kwargs: object) -> dict[str, object]:
+        def _fake_route_inference(**kwargs: object) -> dict[str, object]:
             calls.append(dict(kwargs))
             return {
                 "ok": True,
@@ -163,10 +163,9 @@ class TestValueOptimalSelection(unittest.TestCase):
                 "error_class": None,
             }
 
-        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch.object(
-            runtime._router,
-            "chat",
-            side_effect=_fake_chat,
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch(
+            "agent.api_server.route_inference",
+            side_effect=_fake_route_inference,
         ):
             ok, body = runtime.chat(
                 {
@@ -202,10 +201,9 @@ class TestValueOptimalSelection(unittest.TestCase):
         )
         runtime.registry_document = _registry_document()
 
-        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch.object(
-            runtime._router,
-            "chat",
-        ) as chat_mock:
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch(
+            "agent.api_server.route_inference",
+        ) as route_mock:
             ok, body = runtime.chat(
                 {
                     "messages": [
@@ -218,7 +216,7 @@ class TestValueOptimalSelection(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        chat_mock.assert_not_called()
+        route_mock.assert_not_called()
         assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
         self.assertIn("over the cost cap", str(assistant.get("content") or ""))
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
@@ -228,7 +226,7 @@ class TestValueOptimalSelection(unittest.TestCase):
         self.assertTrue(bool(wizard_state.get("active")))
         self.assertEqual("premium_over_cap", wizard_state.get("issue_code"))
 
-    def test_default_allowlist_blocks_disallowed_default_model(self) -> None:
+    def test_api_chat_leaves_default_model_selection_to_canonical_inference(self) -> None:
         runtime = AgentRuntime(
             _config(
                 self.registry_path,
@@ -244,30 +242,31 @@ class TestValueOptimalSelection(unittest.TestCase):
             )
         )
         runtime.registry_document = _registry_document()
-        captured: list[str] = []
+        calls: list[dict[str, object]] = []
 
-        def _fake_chat(_messages: list[dict[str, str]], **kwargs: object) -> dict[str, object]:
-            captured.append(str(kwargs.get("model_override") or ""))
+        def _fake_route_inference(**kwargs: object) -> dict[str, object]:
+            calls.append(dict(kwargs))
             return {
                 "ok": True,
                 "text": "ok",
-                "provider": kwargs.get("provider_override"),
-                "model": kwargs.get("model_override"),
+                "provider": "openrouter",
+                "model": "openrouter:base-chat",
                 "fallback_used": False,
                 "attempts": [],
                 "duration_ms": 1,
                 "error_class": None,
             }
 
-        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch.object(
-            runtime._router,
-            "chat",
-            side_effect=_fake_chat,
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch(
+            "agent.api_server.route_inference",
+            side_effect=_fake_route_inference,
         ):
-            ok, _body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
+            ok, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
 
         self.assertTrue(ok)
-        self.assertEqual(["openrouter:base-chat"], captured)
+        self.assertIsNone(calls[0].get("model_override"))
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        self.assertEqual("openrouter:base-chat", meta.get("model"))
 
 
 if __name__ == "__main__":

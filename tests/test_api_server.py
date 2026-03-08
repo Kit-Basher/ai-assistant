@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import io
 import json
 import os
@@ -13,6 +14,7 @@ from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.llm.chat_preflight import PreparedChatRequest
 from agent.llm.types import LLMError, Response, Usage
 from agent.modelops.discovery import ModelInfo
 
@@ -562,74 +564,133 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("ollama:llama3", current["default_model"])
         self.assertEqual("ollama:llama3", current["resolved_default_model"])
 
-    def test_chat_uses_chat_model_not_embed_model(self) -> None:
+    def test_chat_delegates_to_route_inference_for_execution(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
-        document = runtime.registry_document
-        models = document.get("models") if isinstance(document.get("models"), dict) else {}
-        models["ollama:qwen2.5:3b-instruct"] = {
-            "provider": "ollama",
-            "model": "qwen2.5:3b-instruct",
-            "capabilities": ["chat"],
-            "enabled": True,
-            "available": True,
-            "quality_rank": 3,
-            "cost_rank": 1,
-            "default_for": ["chat"],
-            "pricing": {
-                "input_per_million_tokens": None,
-                "output_per_million_tokens": None,
-            },
-            "max_context_tokens": 32768,
-        }
-        models["ollama:nomic-embed-text:latest"] = {
-            "provider": "ollama",
-            "model": "nomic-embed-text:latest",
-            "capabilities": ["embedding"],
-            "enabled": True,
-            "available": True,
-            "quality_rank": 1,
-            "cost_rank": 1,
-            "default_for": ["embedding"],
-            "pricing": {
-                "input_per_million_tokens": None,
-                "output_per_million_tokens": None,
-            },
-            "max_context_tokens": 8192,
-        }
-        document["models"] = models
-        runtime._save_registry_document(document)
-
-        ok_defaults, _defaults = runtime.update_defaults(
-            {
-                "default_provider": "ollama",
-                "chat_model": "ollama:qwen2.5:3b-instruct",
-                "embed_model": "ollama:nomic-embed-text:latest",
-            }
-        )
-        self.assertTrue(ok_defaults)
-
         captured: dict[str, object] = {}
+        prepared = PreparedChatRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            last_user_text="hello",
+            provider_override=None,
+            model_override=None,
+            require_tools=False,
+            selection_reason="default_policy",
+            escalation_reasons=(),
+            premium_selected_model=None,
+        )
 
-        def _fake_chat(messages, **kwargs):  # type: ignore[no-untyped-def]
-            _ = messages
+        def _fake_route_inference(**kwargs):  # type: ignore[no-untyped-def]
             captured.update(kwargs)
             return {
                 "ok": True,
                 "text": "ok",
                 "provider": "ollama",
-                "model": str(kwargs.get("model_override") or ""),
+                "model": "ollama:qwen2.5:3b-instruct",
                 "fallback_used": False,
                 "attempts": [],
                 "duration_ms": 1,
-                "error_class": None,
+                "error_kind": None,
+                "selection_reason": "router_default",
             }
 
-        with patch.object(runtime._router, "chat", side_effect=_fake_chat):  # type: ignore[attr-defined]
+        with patch("agent.api_server.prepare_runtime_chat_request", return_value=prepared), patch(
+            "agent.api_server.route_inference",
+            side_effect=_fake_route_inference,
+        ), patch.object(
+            runtime,
+            "_collect_authoritative_observations",
+            side_effect=AssertionError("chat should not collect authoritative observations directly"),
+        ), patch.object(
+            runtime,
+            "_persist_premium_over_cap_prompt",
+            side_effect=AssertionError("chat should not persist premium prompts directly"),
+        ), patch.object(
+            runtime,
+            "_model_policy_candidates",
+            side_effect=AssertionError("chat should not rank model policy candidates directly"),
+        ), patch.object(
+            runtime,
+            "_premium_override_active",
+            side_effect=AssertionError("chat should not consume premium override state directly"),
+        ), patch.object(
+            runtime._router,
+            "chat",
+            side_effect=AssertionError("runtime.chat should not call _router.chat directly"),
+        ):
             ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
 
         self.assertTrue(ok_chat)
         self.assertTrue(body["ok"])
-        self.assertEqual("ollama:qwen2.5:3b-instruct", str(captured.get("model_override") or ""))
+        self.assertIs(runtime._router, captured.get("llm_client"))
+        self.assertEqual([{"role": "user", "content": "hello"}], captured.get("messages"))
+        source = inspect.getsource(AgentRuntime.chat)
+        self.assertNotIn("_router.chat(", source)
+        self.assertNotIn("detect_premium_escalation_triggers", source)
+        self.assertNotIn("LOCAL_OBSERVATIONS", source)
+        self.assertNotIn("premium_over_cap_confirmation_required", source)
+        self.assertNotIn("memory_context_text", source)
+        self.assertNotIn("_model_policy_candidates", source)
+        self.assertNotIn("_premium_override_active", source)
+        self.assertNotIn("_persist_premium_over_cap_prompt", source)
+        self.assertNotIn("_collect_authoritative_observations", source)
+        self.assertNotIn("selection_policy = {", source)
+        self.assertIn("prepare_runtime_chat_request(", source)
+        self.assertIn("build_chat_selection_policy_meta(", source)
+
+    def test_chat_preserves_response_envelope_for_preflight_short_circuit(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        prepared = PreparedChatRequest(
+            messages=[{"role": "user", "content": "hello"}],
+            last_user_text="hello",
+            provider_override="openrouter",
+            model_override="openrouter:base-chat",
+            require_tools=False,
+            selection_reason="premium_over_cap_confirmation_required",
+            escalation_reasons=("user_request",),
+            premium_selected_model="openrouter:premium-reasoner",
+            direct_result={
+                "ok": True,
+                "text": "Premium escalation is over the cost cap.",
+                "provider": "openrouter",
+                "model": "openrouter:base-chat",
+                "fallback_used": False,
+                "attempts": [],
+                "duration_ms": 0,
+                "error_kind": None,
+                "selection_reason": "premium_over_cap_confirmation_required",
+            },
+            response_selection_policy={
+                "mode": "premium_over_cap",
+                "baseline_model": "openrouter:base-chat",
+                "premium_candidate": "openrouter:premium-reasoner",
+                "premium_cost_per_1m": 2.0,
+                "premium_cap_per_1m": 1.0,
+                "escalation_reasons": ["user_request"],
+            },
+            log_reason="premium_over_cap_confirmation_required",
+            log_fallback_used=False,
+        )
+
+        with patch("agent.api_server.prepare_runtime_chat_request", return_value=prepared), patch(
+            "agent.api_server.route_inference",
+            side_effect=AssertionError("short-circuit chat should not call route_inference"),
+        ), patch.object(
+            runtime._router,
+            "chat",
+            side_effect=AssertionError("runtime.chat should not call _router.chat directly"),
+        ):
+            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
+
+        self.assertTrue(ok_chat)
+        self.assertTrue(body["ok"])
+        assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
+        self.assertEqual("Premium escalation is over the cost cap.", assistant.get("content"))
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        self.assertEqual("openrouter", meta.get("provider"))
+        self.assertEqual("openrouter:base-chat", meta.get("model"))
+        self.assertEqual([], meta.get("attempts"))
+        self.assertEqual(0, meta.get("duration_ms"))
+        policy = meta.get("selection_policy") if isinstance(meta.get("selection_policy"), dict) else {}
+        self.assertEqual("premium_over_cap", policy.get("mode"))
 
     def test_defaults_treats_known_provider_prefix_as_full_id(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -912,6 +973,65 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual(payload["runtime_mode"], runtime_status.get("runtime_mode"))
         self.assertIn("summary", runtime_status)
         self.assertIn("next_action", runtime_status)
+
+    def test_llm_status_uses_canonical_snapshot_for_remote_default_health(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        snapshot = {
+            "providers": [
+                {
+                    "id": "openrouter",
+                    "enabled": True,
+                    "local": False,
+                    "available": True,
+                    "health": {"status": "ok"},
+                }
+            ],
+            "models": [
+                {
+                    "id": "openrouter:openai/gpt-4o-mini",
+                    "provider": "openrouter",
+                    "model": "openai/gpt-4o-mini",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "capabilities": ["chat", "json", "tools"],
+                    "health": {"status": "ok"},
+                }
+            ],
+        }
+        with patch.object(
+            runtime,
+            "get_defaults",
+            return_value={
+                "default_provider": "openrouter",
+                "default_model": "openrouter:openai/gpt-4o-mini",
+                "chat_model": "openrouter:openai/gpt-4o-mini",
+                "embed_model": None,
+                "last_chat_model": None,
+                "routing_mode": "prefer_local_lowest_cost_capable",
+                "allow_remote_fallback": True,
+            },
+        ), patch.object(runtime._router, "doctor_snapshot", return_value=snapshot), patch.object(
+            runtime,
+            "llm_health_summary",
+            return_value={
+                "ok": True,
+                "health": {
+                    "drift": {
+                        "details": {
+                            "resolved_default_model": "openrouter:openai/gpt-4o-mini",
+                        }
+                    }
+                },
+            },
+        ):
+            payload = runtime.llm_status()
+
+        self.assertEqual("openrouter", payload["default_provider"])
+        self.assertEqual("openrouter:openai/gpt-4o-mini", payload["resolved_default_model"])
+        self.assertEqual("unknown", payload["active_provider_health"]["status"])
+        self.assertEqual("unknown", payload["active_model_health"]["status"])
+        self.assertEqual("BOOTSTRAP_REQUIRED", payload["runtime_mode"])
 
     def test_telegram_secret_and_test_endpoints(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1491,32 +1611,54 @@ class TestAPIServerRuntime(unittest.TestCase):
                     self.body = body
 
             try:
-                runtime.set_listening("127.0.0.1", 8765)
-                runtime.mark_server_listening()
+                runtime._memory_v2_store = object()  # type: ignore[assignment]
+                with patch.object(runtime, "_memory_v2_bootstrap_completed", return_value=False), patch(
+                    "agent.api_server.get_telegram_runtime_state",
+                    return_value={
+                        "enabled": False,
+                        "token_configured": False,
+                        "token_source": "missing",
+                        "ready_state": "disabled_optional",
+                        "effective_state": "disabled_optional",
+                        "config_source": "default",
+                        "config_source_path": None,
+                        "service_installed": True,
+                        "service_active": False,
+                        "service_enabled": False,
+                        "lock_present": False,
+                        "lock_live": False,
+                        "lock_stale": False,
+                        "lock_path": None,
+                        "lock_pid": None,
+                        "next_action": "Run: python -m agent telegram_enable",
+                    },
+                ):
+                    runtime.set_listening("127.0.0.1", 8765)
+                    runtime.mark_server_listening()
 
-                start = time.time()
-                handler = _HandlerForTest(runtime, "/ready")
-                handler.do_GET()
-                elapsed = time.time() - start
-                payload = json.loads(handler.body.decode("utf-8"))
-                self.assertLess(elapsed, 0.5)
-                self.assertTrue(payload.get("ok"))
-                self.assertFalse(payload.get("ready"))
-                self.assertIn(payload.get("phase"), {"warming", "listening"})
-                self.assertEqual(["memory_bootstrap"], payload.get("warmup_remaining"))
+                    start = time.time()
+                    handler = _HandlerForTest(runtime, "/ready")
+                    handler.do_GET()
+                    elapsed = time.time() - start
+                    payload = json.loads(handler.body.decode("utf-8"))
+                    self.assertLess(elapsed, 0.5)
+                    self.assertTrue(payload.get("ok"))
+                    self.assertFalse(payload.get("ready"))
+                    self.assertIn(payload.get("phase"), {"warming", "listening"})
+                    self.assertEqual(["memory_bootstrap"], payload.get("warmup_remaining"))
 
-                warmup_gate.set()
-                deadline = time.time() + 2.0
-                while time.time() < deadline:
-                    if runtime.startup_phase == "ready":
-                        break
-                    time.sleep(0.02)
-                handler_ready = _HandlerForTest(runtime, "/ready")
-                handler_ready.do_GET()
-                payload_ready = json.loads(handler_ready.body.decode("utf-8"))
-                self.assertTrue(payload_ready.get("ready"))
-                self.assertEqual("ready", payload_ready.get("phase"))
-                self.assertEqual([], payload_ready.get("warmup_remaining"))
+                    warmup_gate.set()
+                    deadline = time.time() + 2.0
+                    while time.time() < deadline:
+                        if runtime.startup_phase == "ready":
+                            break
+                        time.sleep(0.02)
+                    handler_ready = _HandlerForTest(runtime, "/ready")
+                    handler_ready.do_GET()
+                    payload_ready = json.loads(handler_ready.body.decode("utf-8"))
+                    self.assertTrue(payload_ready.get("ready"))
+                    self.assertEqual("ready", payload_ready.get("phase"))
+                    self.assertEqual([], payload_ready.get("warmup_remaining"))
             finally:
                 warmup_gate.set()
                 runtime.close()
@@ -2098,6 +2240,123 @@ class TestAPIServerRuntime(unittest.TestCase):
         exec_payload = json.loads(exec_handler.body.decode("utf-8"))
         self.assertFalse(exec_payload["ok"])
         self.assertEqual("action_not_permitted", exec_payload["error"])
+
+    def test_modelops_execute_pull_model_uses_canonical_install_executor(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch.object(
+            runtime,
+            "_modelops_permission_decision",
+            return_value={
+                "allow": True,
+                "reason": "allowed",
+                "requires_confirmation": True,
+                "mode": "allow",
+                "permissions": {},
+            },
+        ), patch(
+            "agent.api_server.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.api_server.execute_install_plan",
+            return_value={
+                "ok": True,
+                "executed": True,
+                "model_id": "ollama:qwen2.5:3b-instruct",
+                "install_name": "qwen2.5:3b-instruct",
+                "trace_id": "modelops-install-1",
+                "error_kind": None,
+                "message": "Installed and verified ollama:qwen2.5:3b-instruct.",
+                "verification": {
+                    "found": True,
+                    "installed": True,
+                    "available": True,
+                    "healthy": True,
+                    "verification_status": "ok",
+                },
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
+        ) as install_mock, patch.object(
+            runtime.modelops_executor,
+            "execute_plan",
+        ) as execute_plan_mock, patch.object(
+            runtime,
+            "refresh_models",
+            return_value=(True, {"ok": True}),
+        ):
+            ok, body = runtime.modelops_execute(
+                {
+                    "action": "modelops.pull_ollama_model",
+                    "params": {"model": "qwen2.5:3b-instruct"},
+                    "confirm": True,
+                }
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(body["ok"])
+        self.assertIn("canonical_install_plan", body["plan"])
+        self.assertTrue(body["result"]["ok"])
+        self.assertEqual("modelops-install-1", body["result"]["trace_id"])
+        install_mock.assert_called_once()
+        self.assertTrue(bool(install_mock.call_args.kwargs["approve"]))
+        self.assertEqual(
+            "qwen2.5:3b-instruct",
+            install_mock.call_args.kwargs["plan"]["candidates"][0]["install_name"],
+        )
+        execute_plan_mock.assert_not_called()
+
+    def test_modelops_execute_pull_model_uses_canonical_install_approval(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch.object(
+            runtime,
+            "_modelops_permission_decision",
+            return_value={
+                "allow": True,
+                "reason": "allowed",
+                "requires_confirmation": True,
+                "mode": "allow",
+                "permissions": {},
+            },
+        ), patch(
+            "agent.api_server.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.api_server.execute_install_plan",
+            return_value={
+                "ok": False,
+                "executed": False,
+                "model_id": "ollama:qwen2.5:3b-instruct",
+                "install_name": "qwen2.5:3b-instruct",
+                "trace_id": "modelops-install-approval",
+                "error_kind": "approval_required",
+                "message": "Explicit approval is required before executing this local install.",
+                "verification": {},
+                "stdout_tail": "",
+                "stderr_tail": "",
+            },
+        ) as install_mock, patch.object(
+            runtime.modelops_executor,
+            "execute_plan",
+        ) as execute_plan_mock:
+            ok, body = runtime.modelops_execute(
+                {
+                    "action": "modelops.pull_ollama_model",
+                    "params": {"model": "qwen2.5:3b-instruct"},
+                    "confirm": False,
+                }
+            )
+
+        self.assertFalse(ok)
+        self.assertFalse(body["ok"])
+        self.assertEqual("approval_required", body["result"]["error_kind"])
+        install_mock.assert_called_once()
+        self.assertFalse(bool(install_mock.call_args.kwargs["approve"]))
+        execute_plan_mock.assert_not_called()
+
+    def test_pull_ollama_model_source_does_not_shell_out_directly(self) -> None:
+        source = inspect.getsource(AgentRuntime.pull_ollama_model)
+        self.assertNotIn("safe_runner.run", source)
+        self.assertNotIn('[\"ollama\", \"pull\"', source)
 
     def test_root_route_serves_webui_index_html(self) -> None:
         webui_dist = os.path.join(self.tmpdir.name, "webui", "dist")

@@ -22,7 +22,7 @@ from agent.audit_log import redact
 from agent.golden_path import next_step_for_failure
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.secret_store import SecretStore
-from agent.telegram_runtime_state import get_telegram_runtime_state, read_telegram_enablement, telegram_control_env
+from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
 from agent.config import load_config
 
 
@@ -424,16 +424,9 @@ def _is_truthy(value: Any) -> bool:
 
 def _telegram_enabled_for_doctor() -> bool:
     try:
-        return bool(read_telegram_enablement(env=telegram_control_env()).get("enabled", False))
+        return bool(get_telegram_runtime_state(env=telegram_control_env()).get("enabled", False))
     except Exception:
-        try:
-            cfg = load_config(require_telegram_token=False)
-            raw = getattr(cfg, "telegram_enabled", None)
-            if isinstance(raw, bool):
-                return raw
-        except Exception:
-            pass
-    return _is_truthy(os.getenv("TELEGRAM_ENABLED", "0"))
+        return False
 
 
 def _telegram_optional_check(check_id: str) -> DoctorCheck:

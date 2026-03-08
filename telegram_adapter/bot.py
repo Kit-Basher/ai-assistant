@@ -16,7 +16,6 @@ import os
 from pathlib import Path
 import re
 import sys
-import tempfile
 import time as pytime
 import traceback
 from typing import Any, Callable
@@ -40,7 +39,6 @@ from agent.error_response_ux import deterministic_error_message
 from agent.fallback_ladder import run_with_fallback
 from agent.golden_path import bootstrap_needed
 from agent.llm_router import LLMRouter
-from agent.llm_client import build_llm_broker
 from agent.logging_utils import log_event
 from agent.scheduled_snapshots import (
     safe_run_scheduled_snapshot,
@@ -104,23 +102,10 @@ _TELEGRAM_UNKNOWN_FALLBACK_TEXT = (
 _MODEL_PROVIDER_INTENTS = {
     "model_watch.run_now",
     "provider.status",
-    "provider.setup.ollama",
-    "provider.setup.openrouter",
-    "provider.help",
     "none",
 }
-_NO_ACTIVE_CHOICE_TEXT = "No active choice right now. Ask me to check models or set up a provider."
-_WIZARD_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind", "quit"}
-_WIZARD_YES_TOKENS = {"1", "yes", "y", "ok", "ready"}
-_WIZARD_NO_TOKENS = {"2", "no", "n"}
-_WIZARD_CHOICE_TOKENS = {"1", "2", "3", "yes", "no", "y", "n", "ok", "cancel"}
-_SETUP_WIZARD_SCHEMA_VERSION = 1
+_NO_ACTIVE_CHOICE_TEXT = "No active choice right now. Say status, setup, or check models."
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
-_OLLAMA_TIER_CHOICES = [
-    {"id": "small", "label": "Small (fastest)", "recommended": True},
-    {"id": "medium", "label": "Medium (balanced)", "recommended": False},
-    {"id": "large", "label": "Large (best quality)", "recommended": False},
-]
 
 
 @dataclass(frozen=True)
@@ -256,31 +241,6 @@ def classify_model_provider_intent(text: str) -> str:
     if _contains_any(
         normalized_cmp,
         (
-            "setup openrouter",
-            "set up openrouter",
-            "configure openrouter",
-            "openrouter setup",
-            "repair openrouter",
-            "fix openrouter",
-            "openrouter down",
-            "openrouter broken",
-            "openrouter unavailable",
-        ),
-    ):
-        return "provider.setup.openrouter"
-    if _contains_any(
-        normalized_cmp,
-        (
-            "setup ollama",
-            "set up ollama",
-            "configure ollama",
-            "ollama setup",
-        ),
-    ):
-        return "provider.setup.ollama"
-    if _contains_any(
-        normalized_cmp,
-        (
             "check models",
             "check for new models",
             "check for better models",
@@ -306,19 +266,6 @@ def classify_model_provider_intent(text: str) -> str:
         ),
     ):
         return "provider.status"
-    if _contains_any(
-        normalized_cmp,
-        (
-            "model help",
-            "provider help",
-            "llm help",
-            "help with model",
-            "help with provider",
-            "setup",
-            "set up",
-        ),
-    ):
-        return "provider.help"
     return "none"
 
 
@@ -638,140 +585,6 @@ def _telegram_reply_from_orchestrator_response(response: Any) -> tuple[str, str 
     return reply_text, parse_mode, route
 
 
-class TelegramModelProviderWizardStore:
-    def __init__(self, path: str | None = None) -> None:
-        self.path = Path(path or self.default_path()).expanduser().resolve()
-        self.state = self.load()
-
-    @staticmethod
-    def default_path() -> str:
-        env_path = os.getenv("AGENT_TELEGRAM_MODEL_WIZARD_STATE_PATH", "").strip()
-        if env_path:
-            return env_path
-        return str(
-            Path.home()
-            / ".local"
-            / "share"
-            / "personal-agent"
-            / "telegram_model_provider_wizard_state.json"
-        )
-
-    @staticmethod
-    def empty_state() -> dict[str, Any]:
-        return {
-            "schema_version": _SETUP_WIZARD_SCHEMA_VERSION,
-            "active": False,
-            "flow": None,
-            "step": "idle",
-            "question": None,
-            "choices": [],
-            "chat_id": None,
-            "issue_code": None,
-            "pending": {},
-            "created_ts": None,
-            "updated_ts": None,
-        }
-
-    def _normalize(self, raw: dict[str, Any]) -> dict[str, Any]:
-        state = self.empty_state()
-        state["schema_version"] = _SETUP_WIZARD_SCHEMA_VERSION
-        state["active"] = bool(raw.get("active", False))
-        flow = str(raw.get("flow") or "").strip().lower()
-        state["flow"] = flow if flow in {"openrouter_setup", "ollama_setup", "recovery"} else None
-        step = str(raw.get("step") or "").strip().lower()
-        valid_steps = {
-            "idle",
-            "awaiting_openrouter_has_key",
-            "awaiting_openrouter_key",
-            "awaiting_openrouter_default",
-            "awaiting_ollama_ready",
-            "awaiting_ollama_size",
-            "awaiting_ollama_pull",
-            "awaiting_ollama_default",
-            "awaiting_recovery_choice",
-        }
-        state["step"] = step if step in valid_steps else "idle"
-        state["question"] = str(raw.get("question") or "").strip() or None
-        state["chat_id"] = str(raw.get("chat_id") or "").strip() or None
-        state["issue_code"] = str(raw.get("issue_code") or "").strip() or None
-        pending = raw.get("pending") if isinstance(raw.get("pending"), dict) else {}
-        state["pending"] = {str(key): pending[key] for key in sorted(pending.keys())}
-        try:
-            state["created_ts"] = int(raw.get("created_ts") or 0) or None
-        except (TypeError, ValueError):
-            state["created_ts"] = None
-        try:
-            state["updated_ts"] = int(raw.get("updated_ts") or 0) or None
-        except (TypeError, ValueError):
-            state["updated_ts"] = None
-        choices_raw = raw.get("choices") if isinstance(raw.get("choices"), list) else []
-        choices: list[dict[str, Any]] = []
-        for row in choices_raw:
-            if not isinstance(row, dict):
-                continue
-            choice_id = str(row.get("id") or "").strip()
-            label = str(row.get("label") or "").strip()
-            if not choice_id or not label:
-                continue
-            choices.append(
-                {
-                    "id": choice_id,
-                    "label": label,
-                    "recommended": bool(row.get("recommended", False)),
-                }
-            )
-        state["choices"] = choices
-        if not bool(state["active"]):
-            state["flow"] = None
-            state["step"] = "idle"
-            state["question"] = None
-            state["choices"] = []
-            state["chat_id"] = None
-            state["issue_code"] = None
-            state["pending"] = {}
-        return state
-
-    def load(self) -> dict[str, Any]:
-        if not self.path.is_file():
-            return self.empty_state()
-        try:
-            parsed = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            return self.empty_state()
-        if not isinstance(parsed, dict):
-            return self.empty_state()
-        return self._normalize(parsed)
-
-    def _write(self, state: dict[str, Any]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=f".{self.path.name}.",
-            suffix=".tmp",
-            dir=str(self.path.parent),
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(state, ensure_ascii=True, indent=2, sort_keys=True) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp_path, self.path)
-        finally:
-            try:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-            except OSError:
-                pass
-
-    def save(self, raw: dict[str, Any]) -> dict[str, Any]:
-        normalized = self._normalize(raw if isinstance(raw, dict) else {})
-        self._write(normalized)
-        self.state = normalized
-        return normalized
-
-    def clear(self) -> dict[str, Any]:
-        return self.save(self.empty_state())
-
-
 def _format_commit_short(value: str | None) -> str:
     commit = str(value or "").strip()
     if not commit:
@@ -1066,177 +879,6 @@ def _model_status_report(*, runtime: Any | None) -> str:
     )
 
 
-def _is_ollama_reachable(*, runtime: Any | None) -> bool:
-    status = _llm_status_payload(runtime)
-    providers_rows = status.get("providers") if isinstance(status.get("providers"), list) else []
-    for row in providers_rows:
-        if not isinstance(row, dict):
-            continue
-        provider_id = str(row.get("id") or "").strip().lower()
-        if provider_id != "ollama":
-            continue
-        health = row.get("health") if isinstance(row.get("health"), dict) else {}
-        health_status = str(health.get("status") or "unknown").strip().lower()
-        if health_status in {"ok", "unknown"}:
-            return True
-    return False
-
-
-def _choose_openrouter_default_model(*, runtime: Any | None) -> str | None:
-    status = _llm_status_payload(runtime)
-    rows = status.get("models") if isinstance(status.get("models"), list) else []
-    candidates: list[str] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("provider") or "").strip().lower() != "openrouter":
-            continue
-        model_id = str(row.get("id") or "").strip()
-        if not model_id:
-            continue
-        if bool(row.get("enabled", False)) and bool(row.get("available", False)) and bool(row.get("routable", False)):
-            candidates.append(model_id)
-    if candidates:
-        return sorted(candidates)[0]
-    fallback = sorted(
-        str(row.get("id") or "").strip()
-        for row in rows
-        if isinstance(row, dict)
-        and str(row.get("provider") or "").strip().lower() == "openrouter"
-        and str(row.get("id") or "").strip()
-    )
-    return fallback[0] if fallback else None
-
-
-def _choose_ollama_model_for_tier(*, runtime: Any | None, tier: str) -> str | None:
-    status = _llm_status_payload(runtime)
-    rows = status.get("models") if isinstance(status.get("models"), list) else []
-    models = sorted(
-        str(row.get("id") or "").strip()
-        for row in rows
-        if isinstance(row, dict)
-        and str(row.get("provider") or "").strip().lower() == "ollama"
-        and str(row.get("id") or "").strip()
-        and bool(row.get("enabled", False))
-    )
-    if not models:
-        return None
-    patterns = {
-        "small": (":1b", ":2b", ":3b", ":4b"),
-        "medium": (":6b", ":7b", ":8b", ":9b", ":10b", ":11b", ":12b", ":13b"),
-        "large": (":14b", ":20b", ":30b", ":32b", ":70b", ":72b"),
-    }
-    tier_patterns = patterns.get(tier, ())
-    for model_id in models:
-        lower_model = model_id.lower()
-        if any(pattern in lower_model for pattern in tier_patterns):
-            return model_id
-    return models[0]
-
-
-def _choice_id_from_text(*, text: str, choices: list[dict[str, Any]]) -> str | None:
-    normalized = _normalize_user_text(text)
-    if not normalized:
-        return None
-    if normalized.isdigit():
-        idx = int(normalized)
-        if 1 <= idx <= len(choices):
-            return str(choices[idx - 1].get("id") or "").strip() or None
-    for row in choices:
-        if not isinstance(row, dict):
-            continue
-        choice_id = str(row.get("id") or "").strip().lower()
-        label = str(row.get("label") or "").strip().lower()
-        if normalized == choice_id or (label and normalized == label):
-            return str(row.get("id") or "").strip() or None
-    return None
-
-
-def _save_setup_state(
-    store: TelegramModelProviderWizardStore,
-    *,
-    chat_id: str,
-    flow: str,
-    step: str,
-    question: str,
-    issue_code: str,
-    choices: list[dict[str, Any]] | None = None,
-    pending: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    now_epoch = int(pytime.time())
-    current = store.state if isinstance(store.state, dict) else store.empty_state()
-    created_ts = int(current.get("created_ts") or now_epoch)
-    state = {
-        "active": True,
-        "flow": flow,
-        "step": step,
-        "question": question,
-        "choices": choices if isinstance(choices, list) else [],
-        "chat_id": chat_id,
-        "issue_code": issue_code,
-        "pending": pending if isinstance(pending, dict) else {},
-        "created_ts": created_ts,
-        "updated_ts": now_epoch,
-    }
-    return store.save(state)
-
-
-def _start_openrouter_setup(
-    *,
-    runtime: Any | None,
-    wizard_store: TelegramModelProviderWizardStore,
-    chat_id: str,
-) -> str:
-    if runtime is None:
-        wizard_store.clear()
-        return "OpenRouter setup is unavailable in this runtime."
-    _save_setup_state(
-        wizard_store,
-        chat_id=chat_id,
-        flow="openrouter_setup",
-        step="awaiting_openrouter_has_key",
-        question="Do you already have an OpenRouter API key? Reply 1 for Yes or 2 for No.",
-        issue_code="provider.setup.openrouter",
-        choices=[
-            {"id": "has_key_yes", "label": "Yes", "recommended": True},
-            {"id": "has_key_no", "label": "No", "recommended": False},
-        ],
-    )
-    return "OpenRouter setup: Do you already have an OpenRouter API key? Reply 1 for Yes or 2 for No."
-
-
-def _start_ollama_setup(
-    *,
-    runtime: Any | None,
-    wizard_store: TelegramModelProviderWizardStore,
-    chat_id: str,
-) -> str:
-    if runtime is None:
-        wizard_store.clear()
-        return "Ollama setup is unavailable in this runtime."
-    if _is_ollama_reachable(runtime=runtime):
-        _save_setup_state(
-            wizard_store,
-            chat_id=chat_id,
-            flow="ollama_setup",
-            step="awaiting_ollama_size",
-            question="Which Ollama size tier do you want? Reply 1 small, 2 medium, or 3 large.",
-            issue_code="provider.setup.ollama",
-            choices=list(_OLLAMA_TIER_CHOICES),
-        )
-        return "Ollama is reachable. Which size tier do you want? Reply 1 small, 2 medium, or 3 large."
-    _save_setup_state(
-        wizard_store,
-        chat_id=chat_id,
-        flow="ollama_setup",
-        step="awaiting_ollama_ready",
-        question="Run this command: ollama list. Then reply READY.",
-        issue_code="provider.setup.ollama",
-        choices=[],
-    )
-    return "I can’t reach Ollama yet. Run this command: `ollama list` and then reply READY."
-
-
 def _model_watch_run_summary(*, runtime: Any | None) -> str:
     if runtime is None or not hasattr(runtime, "run_model_watch_once"):
         return "Model watch is unavailable in this runtime."
@@ -1268,226 +910,18 @@ def _model_watch_run_summary(*, runtime: Any | None) -> str:
     )
 
 
-def _setup_wizard_route_reply(
-    *,
-    runtime: Any | None,
-    wizard_store: TelegramModelProviderWizardStore | None,
-    chat_id: str,
-    text: str,
-) -> str | None:
-    if runtime is None or wizard_store is None:
-        return None
-    try:
-        state = wizard_store.load()
-        wizard_store.state = state
-    except Exception:
-        state = wizard_store.empty_state()
-    if not bool(state.get("active", False)):
-        return None
-    state_chat = str(state.get("chat_id") or "").strip()
-    if state_chat and state_chat != chat_id:
-        return None
-    normalized = _normalize_user_text(text)
-    if normalized in _WIZARD_CANCEL_TOKENS:
-        wizard_store.clear()
-        return "Cancelled."
-
-    flow = str(state.get("flow") or "").strip().lower()
-    step = str(state.get("step") or "").strip().lower()
-    pending = state.get("pending") if isinstance(state.get("pending"), dict) else {}
-    issue_code = str(state.get("issue_code") or "provider.setup").strip()
-
-    if flow == "recovery":
-        # Legacy recovery wizard flow is deprecated; clear stale state and continue
-        # through canonical setup/doctor/status/health/memory routing.
-        wizard_store.clear()
-        return None
-
-    if flow == "openrouter_setup":
-        if step == "awaiting_openrouter_has_key":
-            if normalized in _WIZARD_YES_TOKENS:
-                _save_setup_state(
-                    wizard_store,
-                    chat_id=chat_id,
-                    flow=flow,
-                    step="awaiting_openrouter_key",
-                    question="Paste your OpenRouter API key now.",
-                    issue_code=issue_code,
-                    choices=[],
-                    pending={},
-                )
-                return "Paste your OpenRouter API key now."
-            if normalized in _WIZARD_NO_TOKENS:
-                wizard_store.clear()
-                return "No problem. Create an OpenRouter key, then send 'setup openrouter' again."
-            return "Reply 1 for Yes or 2 for No."
-
-        if step == "awaiting_openrouter_key":
-            api_key = str(text or "").strip()
-            if not api_key:
-                return "Paste your OpenRouter API key now."
-            ok_secret, _body_secret = runtime.set_provider_secret("openrouter", {"api_key": api_key})
-            if not ok_secret:
-                return "I couldn't save that key. Paste it again or reply cancel."
-            ok_test, body_test = runtime.test_provider("openrouter", {})
-            if not ok_test:
-                reason = str((body_test or {}).get("message") or (body_test or {}).get("error") or "test_failed").strip()
-                return f"Key saved, but OpenRouter test failed ({reason}). Paste another key or reply cancel."
-            _save_setup_state(
-                wizard_store,
-                chat_id=chat_id,
-                flow=flow,
-                step="awaiting_openrouter_default",
-                question="OpenRouter is working. Set it as default now? Reply 1 for Yes or 2 for No.",
-                issue_code=issue_code,
-                choices=[
-                    {"id": "set_default_yes", "label": "Yes", "recommended": True},
-                    {"id": "set_default_no", "label": "No", "recommended": False},
-                ],
-                pending={},
-            )
-            return "OpenRouter is working. Set it as default now? Reply 1 for Yes or 2 for No."
-
-        if step == "awaiting_openrouter_default":
-            if normalized in _WIZARD_YES_TOKENS:
-                payload: dict[str, Any] = {"default_provider": "openrouter"}
-                default_model = _choose_openrouter_default_model(runtime=runtime)
-                if default_model:
-                    payload["default_model"] = default_model
-                ok_defaults, body_defaults = runtime.update_defaults(payload)
-                wizard_store.clear()
-                if ok_defaults:
-                    model_text = f" / {default_model}" if default_model else ""
-                    return f"OpenRouter configured. Default set to openrouter{model_text}."
-                reason = str((body_defaults or {}).get("error") or "update_defaults_failed").strip()
-                return f"OpenRouter is configured, but I couldn't set defaults ({reason})."
-            if normalized in _WIZARD_NO_TOKENS:
-                wizard_store.clear()
-                return "OpenRouter is configured. Defaults unchanged."
-            return "Reply 1 for Yes or 2 for No."
-
-    if flow == "ollama_setup":
-        if step == "awaiting_ollama_ready":
-            if normalized in _WIZARD_YES_TOKENS:
-                if not _is_ollama_reachable(runtime=runtime):
-                    return "I still can't reach Ollama. Run `ollama list`, then reply READY."
-                _save_setup_state(
-                    wizard_store,
-                    chat_id=chat_id,
-                    flow=flow,
-                    step="awaiting_ollama_size",
-                    question="Which Ollama size tier do you want? Reply 1 small, 2 medium, or 3 large.",
-                    issue_code=issue_code,
-                    choices=list(_OLLAMA_TIER_CHOICES),
-                    pending={},
-                )
-                return "Which Ollama size tier do you want? Reply 1 small, 2 medium, or 3 large."
-            return "Run `ollama list`, then reply READY."
-
-        if step == "awaiting_ollama_size":
-            choice_id = _choice_id_from_text(text=text, choices=list(_OLLAMA_TIER_CHOICES))
-            if choice_id is None:
-                return "Reply 1 for small, 2 for medium, or 3 for large."
-            candidate_model = _choose_ollama_model_for_tier(runtime=runtime, tier=choice_id)
-            if not candidate_model:
-                _save_setup_state(
-                    wizard_store,
-                    chat_id=chat_id,
-                    flow=flow,
-                    step="awaiting_ollama_pull",
-                    question="No local Ollama models found. Run `ollama pull qwen2.5:3b-instruct`, then reply READY.",
-                    issue_code=issue_code,
-                    choices=[],
-                    pending={"tier": choice_id},
-                )
-                return "No local Ollama models found. Run `ollama pull qwen2.5:3b-instruct`, then reply READY."
-            _save_setup_state(
-                wizard_store,
-                chat_id=chat_id,
-                flow=flow,
-                step="awaiting_ollama_default",
-                question=f"Use {candidate_model} as default now? Reply 1 for Yes or 2 for No.",
-                issue_code=issue_code,
-                choices=[
-                    {"id": "set_default_yes", "label": "Yes", "recommended": True},
-                    {"id": "set_default_no", "label": "No", "recommended": False},
-                ],
-                pending={"tier": choice_id, "model": candidate_model},
-            )
-            return f"Use {candidate_model} as default now? Reply 1 for Yes or 2 for No."
-
-        if step == "awaiting_ollama_pull":
-            if normalized in _WIZARD_YES_TOKENS:
-                tier = str(pending.get("tier") or "small").strip().lower() or "small"
-                candidate_model = _choose_ollama_model_for_tier(runtime=runtime, tier=tier)
-                if not candidate_model:
-                    return "I still don't see local models. Run `ollama pull qwen2.5:3b-instruct`, then reply READY."
-                _save_setup_state(
-                    wizard_store,
-                    chat_id=chat_id,
-                    flow=flow,
-                    step="awaiting_ollama_default",
-                    question=f"Use {candidate_model} as default now? Reply 1 for Yes or 2 for No.",
-                    issue_code=issue_code,
-                    choices=[
-                        {"id": "set_default_yes", "label": "Yes", "recommended": True},
-                        {"id": "set_default_no", "label": "No", "recommended": False},
-                    ],
-                    pending={"tier": tier, "model": candidate_model},
-                )
-                return f"Use {candidate_model} as default now? Reply 1 for Yes or 2 for No."
-            return "Run `ollama pull qwen2.5:3b-instruct`, then reply READY."
-
-        if step == "awaiting_ollama_default":
-            if normalized in _WIZARD_YES_TOKENS:
-                model_id = str(pending.get("model") or "").strip() or _choose_ollama_model_for_tier(
-                    runtime=runtime,
-                    tier=str(pending.get("tier") or "small").strip().lower() or "small",
-                )
-                payload: dict[str, Any] = {"default_provider": "ollama"}
-                if model_id:
-                    payload["default_model"] = model_id
-                ok_defaults, body_defaults = runtime.update_defaults(payload)
-                wizard_store.clear()
-                if ok_defaults:
-                    model_text = f" / {model_id}" if model_id else ""
-                    return f"Ollama configured. Default set to ollama{model_text}."
-                reason = str((body_defaults or {}).get("error") or "update_defaults_failed").strip()
-                return f"Ollama is reachable, but I couldn't set defaults ({reason})."
-            if normalized in _WIZARD_NO_TOKENS:
-                wizard_store.clear()
-                return "Ollama setup complete. Defaults unchanged."
-            return "Reply 1 for Yes or 2 for No."
-
-    wizard_store.clear()
-    return _NO_ACTIVE_CHOICE_TEXT
-
-
 def _handle_model_provider_intent(
     *,
     intent: str,
     bot_data: dict[str, Any],
-    chat_id: str,
 ) -> tuple[str | None, str | None]:
     if intent not in _MODEL_PROVIDER_INTENTS or intent == "none":
         return None, None
     runtime = bot_data.get("runtime")
-    wizard_store = bot_data.get("model_provider_wizard_store")
-    setup_store = wizard_store if isinstance(wizard_store, TelegramModelProviderWizardStore) else None
     if intent == "provider.status":
         return _model_status_report(runtime=runtime), "status"
-    if intent == "provider.help":
-        return _setup_help_text(runtime=runtime), "help"
     if intent == "model_watch.run_now":
         return _model_watch_run_summary(runtime=runtime), "chat"
-    if intent == "provider.setup.openrouter":
-        if setup_store is None:
-            return "Provider setup wizard is unavailable right now.", "fallback"
-        return _start_openrouter_setup(runtime=runtime, wizard_store=setup_store, chat_id=chat_id), "chat"
-    if intent == "provider.setup.ollama":
-        if setup_store is None:
-            return "Provider setup wizard is unavailable right now.", "fallback"
-        return _start_ollama_setup(runtime=runtime, wizard_store=setup_store, chat_id=chat_id), "chat"
     return None, None
 
 
@@ -1930,7 +1364,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     trace_id = _trace_id_from_update(update)
     llm_fixit_fn = bot_data.get("llm_fixit_fn")
     wizard_store = bot_data.get("llm_fixit_store")
-    model_provider_wizard_store = bot_data.get("model_provider_wizard_store")
     _LOGGER.info(
         "telegram.in %s",
         json.dumps(
@@ -2032,44 +1465,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 )
                 return
 
-            setup_reply = _setup_wizard_route_reply(
-                runtime=bot_data.get("runtime"),
-                wizard_store=(
-                    model_provider_wizard_store
-                    if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
-                    else None
-                ),
-                chat_id=chat_id,
-                text=text,
-            )
-            if setup_reply is not None:
-                _safe_append_telegram_message_audit(
-                    audit_log=audit_log,
-                    action="telegram.message.handled",
-                    chat_id=chat_id,
-                    message_kind="text",
-                    route="fixit",
-                    outcome="handled",
-                )
-                await _send_reply(
-                    message=update.effective_message,
-                    log_path=log_path,
-                    chat_id=chat_id,
-                    route="fixit",
-                    text=str(setup_reply),
-                    trace_id=trace_id,
-                )
-                log_event(
-                    log_path,
-                    "telegram_fixit_intercept",
-                    {
-                        "chat_id_redacted": _redact_chat_id(chat_id),
-                        "route": "fixit",
-                        "trace_id": trace_id,
-                    },
-                )
-                return
-
         if normalized_text in {"1", "2", "3"}:
             _safe_append_telegram_message_audit(
                 audit_log=audit_log,
@@ -2101,7 +1496,6 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         preroute_reply, preroute_route = _handle_model_provider_intent(
             intent=model_provider_intent,
             bot_data=bot_data,
-            chat_id=chat_id,
         )
         if preroute_reply is not None and preroute_route is not None:
             _safe_append_telegram_message_audit(
@@ -2549,17 +1943,6 @@ async def _handle_doctor(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text=str(result.get("text") or "Doctor failed. Run: python -m agent doctor --json"),
         trace_id=trace_id,
     )
-
-
-async def _handle_runtime_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None or update.effective_message is None:
-        return
-
-    chat_id = str(update.effective_chat.id)
-    orchestrator: Orchestrator = context.application.bot_data["orchestrator"]
-
-    response = orchestrator.handle_message("/runtime_status", user_id=chat_id)
-    await update.effective_message.reply_text(_safe_reply_text(response.text))
 
 
 async def _handle_disk_grow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3074,7 +2457,7 @@ async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 reminder.text,
                 datetime.now(timezone.utc),
             ):
-                response = orchestrator.handle_message("/runtime_status", user_id=str(chat_id))
+                response = orchestrator.handle_message("/status", user_id=str(chat_id))
                 await context.bot.send_message(chat_id=chat_id, text=response.text)
                 db.mark_reminder_failed(reminder.id, "debug_protocol_triggered")
                 try:
@@ -3138,7 +2521,7 @@ async def _check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                     "failed",
                     datetime.now(timezone.utc),
                 ):
-                    response = orchestrator.handle_message("/runtime_status", user_id=str(chat_id))
+                    response = orchestrator.handle_message("/status", user_id=str(chat_id))
                     await context.bot.send_message(chat_id=chat_id, text=response.text)
 
 
@@ -3236,7 +2619,6 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("start", _handle_status))
     app.add_handler(CommandHandler("status", _handle_status))
     app.add_handler(CommandHandler("doctor", _handle_doctor))
-    app.add_handler(CommandHandler("runtime_status", _handle_runtime_status))
     app.add_handler(CommandHandler("disk_grow", _handle_disk_grow))
     app.add_handler(CommandHandler("audit", _handle_audit))
     app.add_handler(CommandHandler("permissions", _handle_permissions))
@@ -3275,7 +2657,6 @@ def build_app(
     token: str | None = None,
     llm_fixit_fn: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
     llm_fixit_store: LLMFixitWizardStore | None = None,
-    model_provider_wizard_store: TelegramModelProviderWizardStore | None = None,
     audit_log: AuditLog | None = None,
     runtime: Any | None = None,
 ) -> Application:
@@ -3296,7 +2677,6 @@ def build_app(
 
     llm_client = LLMRouter(loaded, log_path=loaded.log_path)
 
-    llm_broker, llm_broker_error = build_llm_broker(loaded)
     model_scout = build_model_scout(loaded)
     permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
     effective_audit_log = audit_log if isinstance(audit_log, AuditLog) else AuditLog(
@@ -3310,8 +2690,6 @@ def build_app(
         timezone=loaded.agent_timezone,
         llm_client=llm_client,
         enable_writes=loaded.enable_writes,
-        llm_broker=llm_broker,
-        llm_broker_error=llm_broker_error,
         perception_enabled=loaded.perception_enabled,
         perception_roots=loaded.perception_roots,
         perception_interval_seconds=loaded.perception_interval_seconds,
@@ -3336,11 +2714,6 @@ def build_app(
     effective_llm_fixit_store = (
         llm_fixit_store if isinstance(llm_fixit_store, LLMFixitWizardStore) else LLMFixitWizardStore()
     )
-    effective_model_provider_wizard_store = (
-        model_provider_wizard_store
-        if isinstance(model_provider_wizard_store, TelegramModelProviderWizardStore)
-        else TelegramModelProviderWizardStore()
-    )
 
     app.bot_data["db"] = db
     app.bot_data["orchestrator"] = orchestrator
@@ -3352,7 +2725,6 @@ def build_app(
     app.bot_data["permission_store"] = permission_store
     app.bot_data["audit_log"] = effective_audit_log
     app.bot_data["llm_fixit_store"] = effective_llm_fixit_store
-    app.bot_data["model_provider_wizard_store"] = effective_model_provider_wizard_store
     app.bot_data["llm_fixit_fn"] = effective_llm_fixit_fn
     app.bot_data["runtime"] = runtime
     app.bot_data["runtime_version"] = str(

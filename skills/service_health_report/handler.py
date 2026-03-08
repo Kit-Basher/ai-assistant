@@ -13,10 +13,25 @@ def service_health_report(context: dict[str, Any], user_id: str | None = None) -
         return {"status": "blocked", "text": text, "message": text}
     report_text = build_runtime_status_report(db)
     lines = report_text.splitlines()
-    service_line = next((line for line in lines if line.startswith("- status:")), "- status: unknown")
+    service_lines = [
+        line
+        for line in lines
+        if line.startswith("- personal-agent-api.service:") or line.startswith("- personal-agent-telegram.service:")
+    ]
+    if not service_lines:
+        service_lines = ["personal-agent-api.service: status=unknown"]
+    api_line = next(
+        (line for line in service_lines if line.startswith("- personal-agent-api.service:")),
+        service_lines[0],
+    )
+    api_active = "status=active" in api_line.lower()
+    telegram_failed = any(
+        line.startswith("- personal-agent-telegram.service:") and "status=failed" in line.lower()
+        for line in service_lines
+    )
     log_start = 0
     for i, line in enumerate(lines):
-        if line.strip() == "3. Recent Logs":
+        if line.strip() == "2. Recent Logs":
             log_start = i + 1
             break
     log_lines = [line for line in lines[log_start:log_start + 6] if line.strip()]
@@ -24,8 +39,8 @@ def service_health_report(context: dict[str, Any], user_id: str | None = None) -
         normalize_card(
             {
                 "title": "Service health",
-                "lines": [service_line.replace("- ", "", 1)],
-                "severity": "ok" if "active" in service_line else "warn",
+                "lines": [line.replace("- ", "", 1) for line in service_lines],
+                "severity": "warn" if (not api_active or telegram_failed) else "ok",
             },
             0,
         ),

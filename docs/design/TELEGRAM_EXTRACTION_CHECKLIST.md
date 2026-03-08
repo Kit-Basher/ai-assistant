@@ -9,7 +9,7 @@ This inventory tracks Telegram adapter responsibilities and the target ownership
 | `telegram_adapter/bot.py::_send_reply` | Telegram-safe send (truncate, BadRequest retry, parse fallback), `telegram.out` logging | yes | n/a (transport-only) |
 | `telegram_adapter/bot.py::_handle_message` (input extraction + tracing + audit wrappers) | inbound update extraction, trace/audit wrapper, bridge dispatch, transport send | yes | `agent/telegram_bridge.py` for business routing |
 | `telegram_adapter/bot.py::_handle_status/_handle_doctor/_handle_help/_handle_health/_handle_brief/_handle_memory` | slash-command transport wrappers | yes | `agent/telegram_bridge.py::handle_telegram_command` |
-| `telegram_adapter/bot.py::classify_model_provider_intent + setup wizard state machine` | provider/model setup wizard transport flow | partial | keep temporarily in adapter; converge toward runtime-owned setup contract |
+| `telegram_adapter/bot.py::classify_model_provider_intent` | deterministic transport-side pre-routing for safe non-setup intents | partial | keep only transport-safe intent detection; setup/install guidance lives in `agent/telegram_bridge.py` |
 | `telegram_adapter/bot.py::maybe_handle_llm_fixit_reply` | active fix-it reply interception + state transition persistence | partial | `agent/ux/llm_fixit_wizard.py` (source of truth), adapter as thin mapper |
 | `agent/telegram_bridge.py::classify_telegram_text_command` | canonical NL->command mapping for help/setup/status/health/doctor/brief/memory | no | `agent/telegram_bridge.py` (runtime bridge) |
 | `agent/telegram_bridge.py::handle_telegram_text` | canonical text dispatch to runtime command handlers | no | `agent/telegram_bridge.py` |
@@ -22,4 +22,5 @@ This inventory tracks Telegram adapter responsibilities and the target ownership
 
 ## Immediate extraction result
 - Canonical help/setup/status/health/doctor/brief/memory wording and routing now go through `agent/telegram_bridge.py`.
-- Adapter keeps transport mechanics and wizard interception while delegating canonical product UX generation to the bridge.
+- Provider/setup/install guidance no longer lives in the Telegram adapter.
+- Adapter keeps transport mechanics and fix-it reply interception while delegating canonical product UX generation to the bridge.

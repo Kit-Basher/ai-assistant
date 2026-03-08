@@ -4,17 +4,17 @@ This document describes the current-to-intended runtime architecture gap for v1.
 Canonical target is defined in [PRODUCT_RUNTIME_SPEC.md](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
 
 ## Summary
-- Current implementation has a strong shared core, but transport layers still carry product logic in places.
+- Current implementation has a strong shared core, and Telegram setup/status/help flows now route through shared runtime contracts.
 - Intended model is one core runtime brain with thin surfaces.
-- Main gap is reducing adapter-owned behavior and routing everything through shared runtime contracts.
+- Main remaining gap is trimming residual adapter-owned UX helpers and keeping all decisions on shared runtime contracts.
 
 ## Current vs Intended
 
 | Area | Current | Intended | Action |
 |---|---|---|---|
-| Telegram runtime | `telegram_adapter/bot.py` contains transport + significant UX routing logic | Telegram is a thin transport adapter | Move setup/status/help/doctor/memory decision text generation behind runtime-facing interfaces; keep bot focused on transport and message safety |
+| Telegram runtime | `telegram_adapter/bot.py` is mostly transport, with limited pre-routing/fix-it interception | Telegram is a thin transport adapter | Keep setup/status/help/doctor/memory decision text behind runtime-facing interfaces; keep bot focused on transport and message safety |
 | API runtime | API runtime is primary core owner and already hosts major contracts | Keep API runtime as core owner | Continue consolidating shared behavior here; avoid reintroducing logic to adapters |
-| Onboarding/setup | Shared contracts exist, but Telegram still has fallback/setup shaping logic | One setup contract with native UI primary | Keep setup state source in runtime contracts; Telegram renders only |
+| Onboarding/setup | Shared contracts own setup truth; Telegram routes operators to canonical setup surfaces | One setup contract with native UI primary | Keep setup state source in runtime contracts; Telegram renders only |
 | Recovery UX | Mostly unified contracts, some surface-specific wording remains | One recovery decision path, one next action | Replace residual surface-specific fallback wording with shared contract outputs |
 | Status/help/doctor | Semantics mostly aligned but formatting and routing differ by surface | Same semantics across CLI/UI/Telegram | Preserve surface-specific formatting only; keep decision logic centralized |
 | Memory/continuity | Central runtime exists; historical recursion bugs show adapter interactions can pollute state | Continuity state updated only by core runtime rules | Keep meta-action filtering in runtime; never let transport output rewrite meaningful continuity |

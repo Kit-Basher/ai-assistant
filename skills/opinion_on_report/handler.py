@@ -56,35 +56,25 @@ def _fallback_text() -> str:
 
 
 def _run_llm(context: dict[str, Any], prompt: str) -> str:
-    router = (context or {}).get("llm_router")
-    if router is not None and hasattr(router, "chat"):
+    infer = (context or {}).get("route_inference")
+    if callable(infer):
         try:
-            result = router.chat(
-                [
+            result = infer(
+                messages=[
                     {"role": "system", "content": "Provide concise opinion text only."},
                     {"role": "user", "content": prompt},
                 ],
-                purpose="presentation_rewrite",
+                user_text=prompt,
+                task_hint="opinion on report from provided facts",
+                purpose="chat",
+                task_type="chat",
                 compute_tier="mid",
+                metadata={"source_surface": "skill.opinion_on_report"},
             )
-            if result.get("ok"):
-                return result.get("text") or ""
+            if isinstance(result, dict) and result.get("ok"):
+                return str(result.get("text") or "")
         except Exception:
             return ""
-
-    broker = (context or {}).get("llm_broker")
-    if broker is not None:
-        try:
-            from agent.llm.broker import TaskSpec
-
-            client, _decision = broker.select(TaskSpec(task="presentation_rewrite", require_local=False))
-            if hasattr(client, "generate"):
-                return client.generate(prompt) or ""
-        except Exception:
-            return ""
-    client = (context or {}).get("llm_presentation_client")
-    if client and hasattr(client, "generate"):
-        return client.generate(prompt) or ""
     return ""
 
 

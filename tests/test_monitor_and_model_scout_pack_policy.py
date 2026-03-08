@@ -82,13 +82,7 @@ class TestMonitorAndModelScoutPackPolicy(unittest.TestCase):
     def test_system_monitor_registered(self) -> None:
         loader = SkillLoader(self.skills_path)
         skills = loader.load_all()
-        self.assertIn("runtime_status", skills)
         self.assertIn("service_health_report", skills)
-
-        runtime_status = skills["runtime_status"]
-        self.assertEqual("native", runtime_status.pack_trust)
-        self.assertEqual("runtime_status", runtime_status.pack_id)
-        self.assertIn("runtime_status", (runtime_status.pack_permissions or {}).get("ifaces", []))
 
         service_health = skills["service_health_report"]
         self.assertEqual("native", service_health.pack_trust)
@@ -112,26 +106,26 @@ class TestMonitorAndModelScoutPackPolicy(unittest.TestCase):
             timezone="UTC",
             llm_client=None,
         )
-        orchestrator._pack_store.set_enabled("runtime_status", False)
+        orchestrator._pack_store.set_enabled("service_health_report", False)
         denied_disabled = orchestrator._call_skill(
             "user1",
-            "runtime_status",
-            "runtime_status",
+            "service_health_report",
+            "service_health_report",
             {},
             ["db:read"],
         )
-        self.assertIn("not allowed to call runtime_status", denied_disabled.text)
+        self.assertIn("not allowed to call service_health_report", denied_disabled.text)
 
-        orchestrator._pack_store.set_enabled("runtime_status", True)
-        orchestrator._pack_store.set_approval_hash("runtime_status", "mismatch")
+        orchestrator._pack_store.set_enabled("service_health_report", True)
+        orchestrator._pack_store.set_approval_hash("service_health_report", "mismatch")
         denied_mismatch = orchestrator._call_skill(
             "user1",
-            "runtime_status",
-            "runtime_status",
+            "service_health_report",
+            "service_health_report",
             {},
             ["db:read"],
         )
-        self.assertIn("not allowed to call runtime_status", denied_mismatch.text)
+        self.assertIn("not allowed to call service_health_report", denied_mismatch.text)
 
     def test_model_scout_pack_disabled_or_mismatch_denies_runtime_actions(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, self.skills_path))
@@ -154,7 +148,7 @@ class TestMonitorAndModelScoutPackPolicy(unittest.TestCase):
             timezone="UTC",
             llm_client=None,
         )
-        response = orchestrator.handle_message("/runtime_status", "user1")
+        response = orchestrator.handle_message("service health", "user1")
         self.assertTrue(str(response.text).strip())
 
     def test_model_scout_endpoints_smoke_no_network(self) -> None:

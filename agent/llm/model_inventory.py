@@ -7,9 +7,8 @@ from agent.config import Config
 from agent.llm.approved_local_models import approved_local_profile_for_ref
 from agent.llm.capabilities import capability_list_from_inference, infer_capabilities_from_catalog, is_embedding_model_name
 from agent.llm.control_contract import normalize_model_inventory
-from agent.llm.model_health_check import check_model_health, check_provider_health
-from agent.llm.registry import ModelConfig, Registry, load_registry
-from agent.modelops.discovery import list_models_ollama
+from agent.llm.registry import Registry, load_registry
+from agent.llm.runtime_model_snapshot import build_runtime_model_snapshot
 
 
 def _size_label(model_name: str) -> str | None:
@@ -35,34 +34,35 @@ def _configured_model_ids(registry: Registry) -> set[str]:
 def _approved_model_ids(config: Config) -> set[str]:
     default_allowlist = config.default_policy.get("allowlist") if isinstance(config.default_policy, dict) else []
     premium_allowlist = config.premium_policy.get("allowlist") if isinstance(config.premium_policy, dict) else []
-    values = {
+    return {
         str(item).strip()
         for item in [*(default_allowlist or []), *(premium_allowlist or [])]
         if str(item).strip()
     }
-    return values
 
 
-def _discover_local_model_names(discovered_local_models: Iterable[str] | None) -> set[str]:
-    if discovered_local_models is not None:
-        return {
-            str(item).strip()
-            for item in discovered_local_models
+def _normalize_caps(values: Iterable[Any]) -> list[str]:
+    return sorted(
+        {
+            str(item).strip().lower()
+            for item in values
             if str(item).strip()
         }
-    discovered: set[str] = set()
-    for row in list_models_ollama():
-        model_id = str(getattr(row, "model_id", "") or "").strip()
-        if model_id:
-            discovered.add(model_id)
-    return discovered
+    )
 
 
-def _inferred_capabilities_for_discovered(model_name: str) -> list[str]:
+def _approved_profile_caps(model_id: str, model_name: str) -> list[str]:
+    profile = approved_local_profile_for_ref(model_id) or approved_local_profile_for_ref(model_name)
+    if not isinstance(profile, dict):
+        return []
+    return _normalize_caps(profile.get("capabilities") or [])
+
+
+def _inferred_caps(model_id: str, model_name: str) -> list[str]:
     inferred = infer_capabilities_from_catalog(
         "ollama",
         {
-            "id": f"ollama:{model_name}",
+            "id": model_id,
             "provider_id": "ollama",
             "model": model_name,
             "capabilities": ["embedding"] if is_embedding_model_name(model_name) else ["chat"],
@@ -71,148 +71,135 @@ def _inferred_capabilities_for_discovered(model_name: str) -> list[str]:
     return capability_list_from_inference(inferred)
 
 
-def _merged_capabilities_for_model(model_id: str, model_name: str, current_capabilities: Iterable[str]) -> tuple[list[str], str]:
-    current = {
-        str(item).strip().lower()
-        for item in current_capabilities
-        if str(item).strip()
-    }
-    profile = approved_local_profile_for_ref(model_id) or approved_local_profile_for_ref(model_name)
-    if isinstance(profile, dict):
-        profile_caps = {
-            str(item).strip().lower()
-            for item in (profile.get("capabilities") or [])
-            if str(item).strip()
-        }
-        merged = sorted(current | profile_caps)
-        if profile_caps and profile_caps.difference(current):
-            return merged, "approved_profile"
-        if profile_caps:
-            return merged, "approved_profile"
-    return sorted(current), "inferred"
+def _inventory_reason(*, health_status: str, failure_kind: str | None) -> str:
+    if health_status == "ok":
+        return "healthy"
+    if str(failure_kind or "").strip():
+        return str(failure_kind or "").strip()
+    return health_status or "unknown"
 
 
-def _inventory_row_from_model(
+def _runtime_inventory_rows(
     *,
-    model: ModelConfig,
-    installed_local_names: set[str],
     config: Config,
-    approved_ids: set[str],
     registry: Registry,
-    provider_health_cache: dict[str, dict[str, Any]],
-) -> dict[str, Any]:
-    provider_cfg = registry.providers.get(model.provider)
-    local = bool(provider_cfg.local) if provider_cfg is not None else False
-    installed = model.model in installed_local_names if local else False
-    available = bool(model.enabled and (installed if local else model.available))
-    configured = model.id in _configured_model_ids(registry)
-    provider_health = provider_health_cache.get(model.provider) or {}
-    capabilities, capability_source = _merged_capabilities_for_model(model.id, model.model, model.capabilities)
-    health = check_model_health(
-        config=config,
-        registry=registry,
-        model=model,
-        installed=installed,
-        provider_health=provider_health,
-    )
-    approved = bool(local)
-    if not approved:
-        if approved_ids:
-            approved = model.id in approved_ids
-        else:
-            approved = bool(registry.defaults.allow_remote_fallback)
-    reason = "healthy" if bool(health.get("healthy")) else str(health.get("failure_kind") or "unavailable")
-    return {
-        "id": model.id,
-        "provider": model.provider,
-        "installed": installed,
-        "available": available,
-        "healthy": bool(health.get("healthy", False)),
-        "capabilities": capabilities,
-        "size": _size_label(model.model),
-        "context_window": model.max_context_tokens,
-        "local": local,
-        "approved": approved,
-        "reason": reason,
-        "quality_rank": model.quality_rank,
-        "cost_rank": model.cost_rank,
-        "price_in": model.input_cost_per_million_tokens,
-        "price_out": model.output_cost_per_million_tokens,
-        "health_status": "ok" if bool(health.get("healthy", False)) else "down",
-        "health_failure_kind": health.get("failure_kind"),
-        "health_reason": str((health.get("model_health") or {}).get("health_reason") or (health.get("model_health") or {}).get("detail") or health.get("failure_kind") or reason),
-        "model_name": model.model,
-        "source": "registry",
-        "configured": configured,
-        "capability_source": capability_source,
-    }
+    snapshot: dict[str, Any],
+) -> list[dict[str, Any]]:
+    configured_ids = _configured_model_ids(registry)
+    approved_ids = _approved_model_ids(config)
+    rows: list[dict[str, Any]] = []
+    for model in snapshot.get("models") if isinstance(snapshot.get("models"), list) else []:
+        if not isinstance(model, dict):
+            continue
+        model_id = str(model.get("id") or "").strip()
+        provider_id = str(model.get("provider") or "").strip().lower()
+        model_name = str(model.get("model") or "").strip()
+        if not model_id or not provider_id or not model_name:
+            continue
+        local = bool(model.get("local", False))
+        installed = bool(model.get("installed", False))
+        health = model.get("health") if isinstance(model.get("health"), dict) else {}
+        health_status = str(health.get("status") or "unknown").strip().lower() or "unknown"
+        health_failure_kind = str(health.get("last_error_kind") or "").strip().lower() or None
+        approved = bool(local)
+        if not approved:
+            approved = model_id in approved_ids if approved_ids else bool(registry.defaults.allow_remote_fallback)
+        rows.append(
+            {
+                "id": model_id,
+                "provider": provider_id,
+                "installed": installed,
+                "available": bool(model.get("available", False)),
+                "healthy": health_status == "ok",
+                "capabilities": list(model.get("capabilities") or []) if isinstance(model.get("capabilities"), list) else [],
+                "size": _size_label(model_name),
+                "context_window": model.get("max_context_tokens"),
+                "local": local,
+                "approved": approved,
+                "reason": _inventory_reason(health_status=health_status, failure_kind=health_failure_kind),
+                "quality_rank": int(model.get("quality_rank") or 0),
+                "cost_rank": int(model.get("cost_rank") or 0),
+                "price_in": model.get("input_cost_per_million_tokens"),
+                "price_out": model.get("output_cost_per_million_tokens"),
+                "health_status": health_status,
+                "health_failure_kind": health_failure_kind,
+                "health_reason": str(health.get("last_error_kind") or health_status or "unknown"),
+                "model_name": model_name,
+                "source": "registry",
+                "configured": model_id in configured_ids,
+                "capability_source": str(model.get("capability_source") or "runtime_snapshot"),
+                "capability_provenance": list(model.get("capability_provenance") or []) if isinstance(model.get("capability_provenance"), list) else [],
+                "runtime_known": True,
+                "routable": bool(model.get("routable", False)),
+            }
+        )
+    return rows
 
 
 def _discovered_rows(
     *,
     config: Config,
     registry: Registry,
-    installed_local_names: set[str],
-    approved_ids: set[str],
-    provider_health_cache: dict[str, dict[str, Any]],
+    snapshot: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    existing = {model.model for model in registry.models.values() if model.provider == "ollama"}
+    configured_ids = _configured_model_ids(registry)
+    approved_ids = _approved_model_ids(config)
+    installed_local_names = snapshot.get("installed_local_names")
+    installed_names = (
+        {
+            str(item).strip()
+            for item in installed_local_names
+            if str(item).strip()
+        }
+        if isinstance(installed_local_names, set)
+        else set()
+    )
+    existing_names = {
+        str((row or {}).get("model") or "").strip()
+        for row in (snapshot.get("models") if isinstance(snapshot.get("models"), list) else [])
+        if isinstance(row, dict) and str((row or {}).get("provider") or "").strip().lower() == "ollama"
+    }
     rows: list[dict[str, Any]] = []
-    provider_health = provider_health_cache.get("ollama") or {}
-    for model_name in sorted(installed_local_names):
-        if model_name in existing:
+    for model_name in sorted(installed_names):
+        if model_name in existing_names:
             continue
         model_id = f"ollama:{model_name}"
-        capabilities, capability_source = _merged_capabilities_for_model(
-            model_id,
-            model_name,
-            _inferred_capabilities_for_discovered(model_name),
-        )
-        temp_model = ModelConfig(
-            id=model_id,
-            provider="ollama",
-            model=model_name,
-            capabilities=frozenset(capabilities),
-            quality_rank=0,
-            cost_rank=0,
-            default_for=tuple(),
-            enabled=True,
-            available=True,
-            input_cost_per_million_tokens=None,
-            output_cost_per_million_tokens=None,
-            max_context_tokens=None,
-        )
-        health = check_model_health(
-            config=config,
-            registry=registry,
-            model=temp_model,
-            installed=True,
-            provider_health=provider_health,
-        )
+        approved_caps = _approved_profile_caps(model_id, model_name)
+        inferred_caps = _inferred_caps(model_id, model_name)
+        capabilities = approved_caps or inferred_caps
+        capability_source = "approved_profile" if approved_caps else "catalog_inference"
+        provenance: list[dict[str, Any]] = []
+        if approved_caps:
+            provenance.append({"source": "approved_profile", "capabilities": approved_caps})
+        if inferred_caps:
+            provenance.append({"source": "catalog_inference", "capabilities": inferred_caps})
         rows.append(
             {
                 "id": model_id,
                 "provider": "ollama",
                 "installed": True,
-                "available": True,
-                "healthy": bool(health.get("healthy", False)),
+                "available": False,
+                "healthy": False,
                 "capabilities": capabilities,
                 "size": _size_label(model_name),
                 "context_window": None,
                 "local": True,
                 "approved": True if not approved_ids else model_id in approved_ids,
-                "reason": "discovered_local_model" if bool(health.get("healthy", False)) else str(health.get("failure_kind") or "unavailable"),
+                "reason": "not_registered",
                 "quality_rank": 0,
                 "cost_rank": 0,
                 "price_in": None,
                 "price_out": None,
-                "health_status": "ok" if bool(health.get("healthy", False)) else "down",
-                "health_failure_kind": health.get("failure_kind"),
-                "health_reason": str((health.get("model_health") or {}).get("health_reason") or (health.get("model_health") or {}).get("detail") or health.get("failure_kind") or "discovered_local_model"),
+                "health_status": "unknown",
+                "health_failure_kind": "not_registered",
+                "health_reason": "discovered_local_model_not_registered_in_runtime",
                 "model_name": model_name,
                 "source": "ollama_list",
-                "configured": False,
+                "configured": model_id in configured_ids,
                 "capability_source": capability_source,
+                "capability_provenance": provenance,
+                "runtime_known": False,
+                "routable": False,
             }
         )
     return rows
@@ -223,46 +210,27 @@ def build_model_inventory(
     config: Config,
     registry: Registry | None = None,
     discovered_local_models: Iterable[str] | None = None,
+    router_snapshot: dict[str, Any] | None = None,
     timeout_seconds: float = 2.0,
 ) -> list[dict[str, Any]]:
+    _ = timeout_seconds
     active_registry = registry or load_registry(config)
-    installed_local_names = _discover_local_model_names(discovered_local_models)
-    approved_ids = _approved_model_ids(config)
-    provider_health_cache: dict[str, dict[str, Any]] = {}
-    for provider_id in sorted(active_registry.providers.keys()):
-        provider_cfg = active_registry.providers.get(provider_id)
-        if provider_cfg is not None and not provider_cfg.local:
-            provider_health_cache[provider_id] = {
-                "status": "ok" if provider_cfg.enabled else "down",
-                "error_kind": None if provider_cfg.enabled else "provider_disabled",
-                "detail": "remote_provider_not_probed_by_default",
-            }
-            continue
-        provider_health_cache[provider_id] = check_provider_health(
-            config=config,
-            registry=active_registry,
-            provider_id=provider_id,
-            timeout_seconds=float(timeout_seconds),
-        ).get("provider_health", {})
-
-    rows = [
-        _inventory_row_from_model(
-            model=model,
-            installed_local_names=installed_local_names,
-            config=config,
-            approved_ids=approved_ids,
-            registry=active_registry,
-            provider_health_cache=provider_health_cache,
-        )
-        for model in active_registry.sorted_models()
-    ]
+    snapshot = build_runtime_model_snapshot(
+        config=config,
+        registry=active_registry,
+        router_snapshot=router_snapshot,
+        discovered_local_models=discovered_local_models,
+    )
+    rows = _runtime_inventory_rows(
+        config=config,
+        registry=active_registry,
+        snapshot=snapshot,
+    )
     rows.extend(
         _discovered_rows(
             config=config,
             registry=active_registry,
-            installed_local_names=installed_local_names,
-            approved_ids=approved_ids,
-            provider_health_cache=provider_health_cache,
+            snapshot=snapshot,
         )
     )
     return normalize_model_inventory(rows)

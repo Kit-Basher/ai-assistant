@@ -1,6 +1,6 @@
 {
   "name": "service_health_report",
-  "description": "Read-only service health for personal-agent.service.",
+  "description": "Read-only service health for personal-agent-api.service and personal-agent-telegram.service.",
   "version": "0.1.0",
   "permissions": ["db:read", "sys:read", "net:none"],
   "functions": [

@@ -56,10 +56,7 @@ pytest -q
   - `tests/test_weekly_reflection.py`
 - Model routing and provider switching
   - `agent/llm_router.py` (tiered local or cloud candidate routing)
-  - `agent/llm/broker.py`
-  - `agent/llm/broker_policy.py`
-  - `agent/llm/router.py` (narration routing for OpenAI or Ollama)
-  - `agent/llm_client.py` (OpenAI or Ollama clients + broker factory)
+  - Historical note: this snapshot predates removal of the old broker and direct-provider narration stack.
   - `agent/config.py` (provider config, OpenRouter settings)
 
 ## Data + Persistence
