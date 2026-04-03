@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest.mock import patch
 
 from agent.telegram_bridge import (
     build_telegram_error,
@@ -81,14 +82,53 @@ class _NotStartedRuntime:
         return {}
 
 
+class _StaleOnboardingReadyRuntime(_ReadyRuntime):
+    def ready_status(self) -> dict[str, object]:
+        payload = super().ready_status()
+        payload["onboarding"] = {
+            "state": "SERVICES_DOWN",
+            "summary": "Core services are down or still starting.",
+            "next_action": "Run: systemctl --user restart personal-agent-api.service",
+        }
+        return payload
+
+
 class TestTelegramBridge(unittest.TestCase):
+    def test_setup_runtime_prefers_embedded_ready_llm_snapshot(self) -> None:
+        class _EmbeddedReadyRuntime(_ReadyRuntime):
+            def ready_status(self) -> dict[str, object]:
+                payload = super().ready_status()
+                payload["llm"] = {
+                    "default_provider": "ollama",
+                    "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                    "active_provider_health": {"status": "ok"},
+                    "active_model_health": {"status": "ok"},
+                }
+                return payload
+
+            def llm_status(self) -> dict[str, object]:
+                raise AssertionError("telegram setup bridge should use ready.llm before llm_status")
+
+        result = handle_telegram_text(
+            text="setup",
+            chat_id="1",
+            trace_id="tg-embedded-ready",
+            runtime=_EmbeddedReadyRuntime(),
+            orchestrator=_FakeOrchestrator(),
+        )
+
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("setup", result.get("route"))
+        self.assertIn("Setup is complete.", str(result.get("text") or ""))
+
     def test_classify_command_aliases(self) -> None:
         self.assertEqual("/brief", classify_telegram_text_command("breif"))
         self.assertEqual("/memory", classify_telegram_text_command("what are we doing?"))
-        self.assertEqual("/setup", classify_telegram_text_command("fix setup"))
-        self.assertEqual("/setup", classify_telegram_text_command("repair openrouter"))
-        self.assertEqual("/setup", classify_telegram_text_command("openrouter unavailable"))
-        self.assertEqual("/setup", classify_telegram_text_command("configure ollama"))
+        self.assertIsNone(classify_telegram_text_command("what can you do"))
+        self.assertIsNone(classify_telegram_text_command("fix setup"))
+        self.assertIsNone(classify_telegram_text_command("repair openrouter"))
+        self.assertIsNone(classify_telegram_text_command("openrouter unavailable"))
+        self.assertIsNone(classify_telegram_text_command("configure ollama"))
 
     def test_help_ready_returns_command_list(self) -> None:
         result = handle_telegram_text(
@@ -113,6 +153,53 @@ class TestTelegramBridge(unittest.TestCase):
         text = str(result.get("text") or "")
         self.assertIn("Setup state:", text)
         self.assertIn("Next:", text)
+
+    def test_setup_ignores_stale_onboarding_when_runtime_is_ready(self) -> None:
+        result = handle_telegram_command(
+            command="/setup",
+            chat_id="1",
+            trace_id="tg-stale-setup",
+            runtime=_StaleOnboardingReadyRuntime(),
+            orchestrator=_FakeOrchestrator(),
+        )
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("setup", result.get("route"))
+        text = str(result.get("text") or "")
+        self.assertNotIn("Setup state: services down", text)
+        self.assertNotIn("API service is down.", text)
+        self.assertIn("Setup is complete.", text)
+        diagnosis = result.get("diagnosis") if isinstance(result.get("diagnosis"), dict) else {}
+        self.assertEqual("READY", diagnosis.get("mapped_state"))
+        self.assertEqual("confirmed", diagnosis.get("confidence"))
+
+    def test_setup_transport_failure_with_active_service_is_uncertain(self) -> None:
+        with patch(
+            "agent.setup_wizard.probe_api_service_state",
+            return_value={
+                "checked": True,
+                "available": True,
+                "active_state": "active",
+                "confidence": "confirmed",
+            },
+        ):
+            result = handle_telegram_text(
+                text="setup",
+                chat_id="1",
+                trace_id="tg-setup-uncertain",
+                runtime=None,
+                orchestrator=_FakeOrchestrator(),
+                fetch_local_api_json=lambda _path: {},
+            )
+
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("setup", result.get("route"))
+        text = str(result.get("text") or "")
+        self.assertIn("Setup state: degraded", text)
+        self.assertIn("The API may be restarting or temporarily unavailable.", text)
+        self.assertNotIn("API service is down.", text)
+        diagnosis = result.get("diagnosis") if isinstance(result.get("diagnosis"), dict) else {}
+        self.assertEqual("service_check", diagnosis.get("source"))
+        self.assertEqual("uncertain", diagnosis.get("confidence"))
 
     def test_status_returns_runtime_mode_text(self) -> None:
         result = handle_telegram_command(

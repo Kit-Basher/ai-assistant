@@ -1,6 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import AdminPanel from "./components/AdminPanel";
+import ChatExperience from "./components/ChatExperience";
+import DebugTab from "./components/DebugTab";
+import ModelScoutTab from "./components/ModelScoutTab";
+import OperationsTab from "./components/OperationsTab";
+import PermissionsTab from "./components/PermissionsTab";
+import ProvidersTab from "./components/ProvidersTab";
+import SetupTab from "./components/SetupTab";
+import TelegramTab from "./components/TelegramTab";
+import {
+  buildAssistantMessage,
+  buildComposerPlaceholder,
+  buildStarterPrompts,
+  buildStatusSummary
+} from "./lib/chatUiHelpers";
+import { matchesProviderModelFilter, summarizeProviderCapabilities } from "./lib/providerModelHelpers";
+import {
+  asErrorText,
+  formatNow,
+  healthStatus,
+  newestNotificationHash,
+  normalizeSupportTarget,
+  parseJsonObject
+} from "./lib/uiHelpers";
 
 const ROUTING_MODES = ["auto", "prefer_cheap", "prefer_best", "prefer_local_lowest_cost_capable"];
+const CHAT_SESSION_STORAGE_KEY = "personal-agent-chat-session-id";
+const CHAT_THREAD_STORAGE_KEY = "personal-agent-chat-thread-id";
 const PROVIDER_PRESETS = {
   custom: {
     label: "Custom OpenAI-Compatible",
@@ -25,107 +51,180 @@ const PROVIDER_PRESETS = {
   }
 };
 const MODELOPS_ACTIONS = [
-  "modelops.install_ollama",
-  "modelops.pull_ollama_model",
-  "modelops.import_gguf_to_ollama",
-  "modelops.set_default_model",
-  "modelops.enable_disable_provider_or_model",
-  "llm.autoconfig.apply",
-  "llm.hygiene.apply",
-  "llm.registry.prune",
-  "llm.registry.rollback",
-  "llm.self_heal.apply",
-  "llm.autopilot.bootstrap.apply",
-  "llm.notifications.test",
-  "llm.notifications.send",
-  "llm.notifications.prune"
+  {
+    id: "modelops.install_ollama",
+    label: "Install Ollama",
+    description: "Allow the app to install the local Ollama runtime when it is missing."
+  },
+  {
+    id: "modelops.pull_ollama_model",
+    label: "Download Ollama Models",
+    description: "Allow pulling local Ollama models onto this machine."
+  },
+  {
+    id: "modelops.import_gguf_to_ollama",
+    label: "Import GGUF Models",
+    description: "Allow importing GGUF files into Ollama for local use."
+  },
+  {
+    id: "modelops.set_default_model",
+    label: "Change Default Model",
+    description: "Allow updating the default provider/model used for routing."
+  },
+  {
+    id: "modelops.enable_disable_provider_or_model",
+    label: "Enable or Disable Providers",
+    description: "Allow turning providers or models on and off."
+  },
+  {
+    id: "llm.autoconfig.apply",
+    label: "Apply Autoconfig",
+    description: "Allow automated configuration fixes based on detected runtime state."
+  },
+  {
+    id: "llm.hygiene.apply",
+    label: "Apply Registry Hygiene",
+    description: "Allow cleanup of stale registry entries and metadata drift."
+  },
+  {
+    id: "llm.registry.prune",
+    label: "Prune Registry Snapshots",
+    description: "Allow removing old registry data and cleanup candidates."
+  },
+  {
+    id: "llm.registry.rollback",
+    label: "Rollback Registry",
+    description: "Allow restoring an earlier registry snapshot."
+  },
+  {
+    id: "llm.self_heal.apply",
+    label: "Apply Self-Heal Actions",
+    description: "Allow automatic recovery actions when health checks detect issues."
+  },
+  {
+    id: "llm.autopilot.bootstrap.apply",
+    label: "Bootstrap Defaults",
+    description: "Allow autopilot to seed or repair baseline routing defaults."
+  },
+  {
+    id: "llm.notifications.test",
+    label: "Send Test Notifications",
+    description: "Allow sending test notifications through the configured channel."
+  },
+  {
+    id: "llm.notifications.send",
+    label: "Send Live Notifications",
+    description: "Allow real autopilot notifications to be delivered."
+  },
+  {
+    id: "llm.notifications.prune",
+    label: "Prune Notification History",
+    description: "Allow cleanup of stored notification records."
+  }
 ];
 
-function healthStatus(entity) {
-  return entity?.health?.status || "ok";
-}
+const createChatId = (prefix) => `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-function healthLabel(entity) {
-  const status = healthStatus(entity);
-  if (status === "down") return "down";
-  if (status === "degraded") return "degraded";
-  return "ok";
-}
-
-function asErrorText(error) {
-  if (!error) return "Unknown error";
-  if (typeof error === "string") return error;
-  if (error.message) return error.message;
-  return JSON.stringify(error);
-}
-
-function parseJsonObject(rawText, fieldLabel) {
-  const value = String(rawText || "").trim();
-  if (!value) return { ok: true, value: {} };
-  try {
-    const parsed = JSON.parse(value);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      return { ok: false, error: `${fieldLabel} must be a JSON object` };
-    }
-    return { ok: true, value: parsed };
-  } catch (_error) {
-    return { ok: false, error: `${fieldLabel} must be valid JSON` };
+const loadStoredChatId = (storageKey, prefix) => {
+  if (typeof window === "undefined") {
+    return createChatId(prefix);
   }
-}
+  try {
+    const existing = window.sessionStorage.getItem(storageKey);
+    if (existing) {
+      return existing;
+    }
+    const created = createChatId(prefix);
+    window.sessionStorage.setItem(storageKey, created);
+    return created;
+  } catch (_error) {
+    return createChatId(prefix);
+  }
+};
 
-function formatNow() {
-  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
+const saveStoredChatId = (storageKey, value) => {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.sessionStorage.setItem(storageKey, value);
+  } catch (_error) {
+    // Ignore storage write failures and keep using the in-memory id.
+  }
+};
 
-function formatEpoch(epochSeconds) {
-  if (!epochSeconds) return "n/a";
-  const asNumber = Number(epochSeconds);
-  if (!Number.isFinite(asNumber) || asNumber <= 0) return "n/a";
-  return new Date(asNumber * 1000).toLocaleString();
-}
+const MODEL_SCOUT_PURPOSES = ["chat", "code", "organize", "story"];
+const MODEL_SCOUT_PURPOSE_LABELS = {
+  chat: "chat",
+  code: "code",
+  organize: "organize",
+  story: "story"
+};
 
-function newestNotificationHash(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return "";
-  const first = rows[0] || {};
-  return String(first.dedupe_hash || "").trim();
-}
+const buildCanonicalScoutStatus = ({ checkPayload, lifecyclePayload }) => {
+  const envelope = checkPayload && checkPayload.ok ? checkPayload.envelope || {} : {};
+  const lifecycle = lifecyclePayload && lifecyclePayload.ok !== false ? lifecyclePayload || {} : {};
+  const recommendationsByPurpose = envelope.recommendations_by_purpose || {};
+  const recommendationCount = Object.values(recommendationsByPurpose).reduce((total, rows) => {
+    return total + (Array.isArray(rows) ? rows.length : 0);
+  }, 0);
+  return {
+    mode: String((envelope.policy || {}).mode || "unknown"),
+    currentModel: String(((envelope.current_model || {}).model) || lifecycle.active_model || "").trim(),
+    currentProvider: String(((envelope.current_model || {}).provider) || lifecycle.active_provider || "").trim(),
+    availableCount: Number(envelope.available_count || 0),
+    newModelsCount: Number(envelope.new_models_count || 0),
+    recommendationCount,
+    providerCounts: envelope.provider_counts || {},
+    warnings: Array.isArray(envelope.warnings) ? envelope.warnings : [],
+    lifecycleCounts: lifecycle.counts || {},
+    source: "canonical:/llm/models/check+/llm/models/lifecycle"
+  };
+};
 
-function normalizeSupportTarget(target) {
-  const value = String(target || "").trim();
-  if (!value) return "";
-  if (value.startsWith("provider:")) return value.slice("provider:".length);
-  if (value.startsWith("model:")) return value.slice("model:".length);
-  return value;
-}
-
-function MessageBubble({ message }) {
-  const isAssistant = message.role === "assistant";
-  return (
-    <div className={`message-row ${isAssistant ? "assistant" : "user"}`}>
-      <div className="message-bubble">
-        <div className="message-role">{isAssistant ? "Assistant" : "You"}</div>
-        <div className="message-content">{message.content || "(empty response)"}</div>
-        {isAssistant && message.meta ? (
-          <div className="message-meta">
-            <span className="badge">{`${message.meta.provider || "none"}/${message.meta.model || "none"}`}</span>
-            {message.meta.fallback_used ? <span className="badge fallback">Fallback</span> : null}
-            {message.meta.autopilot?.last_notification?.hash ? (
-              <span className="badge">
-                {`autopilot ${message.meta.autopilot.last_notification.outcome || "unknown"} · ${message.meta.autopilot.last_notification.delivered_to || "none"}`}
-              </span>
-            ) : null}
-            {Number(message.meta.autopilot?.since_last_user_message || 0) > 0 ? (
-              <span className="badge">{`new ops ${Number(message.meta.autopilot.since_last_user_message)}`}</span>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
-    </div>
+const buildCanonicalScoutSuggestions = ({ checkPayload, providerRows }) => {
+  const envelope = checkPayload && checkPayload.ok ? checkPayload.envelope || {} : {};
+  const recommendationsByPurpose = envelope.recommendations_by_purpose || {};
+  const localByProvider = new Map(
+    (Array.isArray(providerRows) ? providerRows : [])
+      .filter((row) => row && row.id)
+      .map((row) => [String(row.id).trim().toLowerCase(), row.local === true])
   );
-}
+  const suggestions = [];
+  MODEL_SCOUT_PURPOSES.forEach((purpose) => {
+    const rows = Array.isArray(recommendationsByPurpose[purpose]) ? recommendationsByPurpose[purpose] : [];
+    rows.forEach((row, index) => {
+      const canonicalModelId = String(row.canonical_model_id || "").trim();
+      const providerId = String(row.provider || canonicalModelId.split(":")[0] || "").trim().toLowerCase();
+      const modelId = String(row.model_id || canonicalModelId).trim();
+      const local = localByProvider.has(providerId) ? localByProvider.get(providerId) === true : providerId === "ollama";
+      const whyBetter = Array.isArray(row.why_better_than_current) ? row.why_better_than_current : [];
+      const tradeoffs = Array.isArray(row.tradeoffs) ? row.tradeoffs : [];
+      suggestions.push({
+        id: `${purpose}:${canonicalModelId}:${index}`,
+        purpose,
+        purposeLabel: MODEL_SCOUT_PURPOSE_LABELS[purpose] || purpose,
+        canonical_model_id: canonicalModelId,
+        provider_id: providerId,
+        model_id: modelId,
+        local,
+        score: Number(row.score || 0),
+        tier: row.tier || null,
+        reason: String(row.reason || "policy_selected"),
+        whyBetter,
+        tradeoffs
+      });
+    });
+  });
+  return suggestions;
+};
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("setup");
+  const [adminOpen, setAdminOpen] = useState(false);
+  const [adminTab, setAdminTab] = useState("setup");
+  const [adminLoaded, setAdminLoaded] = useState(false);
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [readyState, setReadyState] = useState(null);
 
   const [providers, setProviders] = useState([]);
   const [models, setModels] = useState([]);
@@ -134,9 +233,6 @@ export default function App() {
   const [defaultModel, setDefaultModel] = useState("");
   const [allowRemoteFallback, setAllowRemoteFallback] = useState(true);
   const [setupStatus, setSetupStatus] = useState("");
-
-  const [selectedProvider, setSelectedProvider] = useState("");
-  const [selectedModel, setSelectedModel] = useState("");
 
   const [providerDrafts, setProviderDrafts] = useState({});
   const [providerSecrets, setProviderSecrets] = useState({});
@@ -156,6 +252,7 @@ export default function App() {
   const [addProviderStatus, setAddProviderStatus] = useState("");
   const [addProviderBusy, setAddProviderBusy] = useState(false);
   const [activeProviderForModels, setActiveProviderForModels] = useState("");
+  const [providerModelViews, setProviderModelViews] = useState({});
   const [manualModelDraft, setManualModelDraft] = useState({
     model: "",
     capabilities: "chat,json,tools"
@@ -211,13 +308,12 @@ export default function App() {
   const [permissionsConfig, setPermissionsConfig] = useState(null);
   const [permissionsStatus, setPermissionsStatus] = useState("");
   const [auditEntries, setAuditEntries] = useState([]);
-  const [modelOpsPlans, setModelOpsPlans] = useState({});
-  const [modelOpsStatus, setModelOpsStatus] = useState("");
-  const [modelOpsBusy, setModelOpsBusy] = useState({});
 
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatSessionId] = useState(() => loadStoredChatId(CHAT_SESSION_STORAGE_KEY, "chat-session"));
+  const [chatThreadId, setChatThreadId] = useState(() => loadStoredChatId(CHAT_THREAD_STORAGE_KEY, "chat-thread"));
 
   const [logs, setLogs] = useState([]);
   const autopilotLastHashRef = useRef("");
@@ -232,7 +328,8 @@ export default function App() {
     ]);
   };
 
-  const request = async (method, path, body) => {
+  const request = async (method, path, body, options = {}) => {
+    const allowError = options.allowError === true;
     const init = {
       method,
       headers: { "Content-Type": "application/json" }
@@ -242,21 +339,41 @@ export default function App() {
     }
     const response = await fetch(path, init);
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) {
+    if (!response.ok && !allowError) {
       throw new Error(data.error || data.message || `${response.status} ${response.statusText}`);
     }
+    data.__http_ok = response.ok;
+    data.__status = response.status;
     return data;
   };
 
-  const refreshRuntimeState = async () => {
+  const refreshReadyState = async () => {
+    try {
+      const readyPayload = await request("GET", "/ready");
+      setReadyState(readyPayload);
+    } catch (error) {
+      const detail = asErrorText(error);
+      setReadyState({
+        ready: false,
+        phase: "degraded",
+        runtime_mode: "FAILED",
+        onboarding: { summary: "I could not reach the agent right now." },
+        recovery: { summary: "The service may still be starting or unavailable." }
+      });
+      appendLog({ endpoint: "/ready", ok: false, detail });
+    }
+  };
+
+  const refreshAdminState = async () => {
+    setAdminBusy(true);
     try {
       const [
         providersPayload,
         modelsPayload,
         defaultsPayload,
         telegramPayload,
-        scoutStatusPayload,
-        scoutSuggestionsPayload,
+        modelCheckPayload,
+        modelLifecyclePayload,
         llmHealthPayload,
         llmCatalogPayload,
         llmCatalogStatusPayload,
@@ -272,8 +389,8 @@ export default function App() {
         request("GET", "/models"),
         request("GET", "/defaults"),
         request("GET", "/telegram/status").catch(() => null),
-        request("GET", "/model_scout/status").catch(() => null),
-        request("GET", "/model_scout/suggestions").catch(() => null),
+        request("POST", "/llm/models/check", { purposes: MODEL_SCOUT_PURPOSES }).catch(() => null),
+        request("GET", "/llm/models/lifecycle").catch(() => null),
         request("GET", "/llm/health").catch(() => null),
         request("GET", "/llm/catalog?limit=50").catch(() => null),
         request("GET", "/llm/catalog/status").catch(() => null),
@@ -298,12 +415,17 @@ export default function App() {
       if (telegramPayload && telegramPayload.ok) {
         setTelegramConfigured(telegramPayload.configured === true);
       }
-      if (scoutStatusPayload && scoutStatusPayload.ok) {
-        setModelScoutStatus(scoutStatusPayload.status || null);
-      }
-      if (scoutSuggestionsPayload && scoutSuggestionsPayload.ok) {
-        setModelScoutSuggestions(scoutSuggestionsPayload.suggestions || []);
-      }
+      const nextScoutStatus = buildCanonicalScoutStatus({
+        checkPayload: modelCheckPayload,
+        lifecyclePayload: modelLifecyclePayload
+      });
+      setModelScoutStatus(nextScoutStatus);
+      setModelScoutSuggestions(
+        buildCanonicalScoutSuggestions({
+          checkPayload: modelCheckPayload,
+          providerRows
+        })
+      );
       if (llmHealthPayload && llmHealthPayload.ok) {
         setLlmHealth(llmHealthPayload.health || null);
       }
@@ -354,12 +476,6 @@ export default function App() {
         return next;
       });
 
-      if (!selectedProvider && providerRows.length > 0) {
-        setSelectedProvider(defaultsPayload.default_provider || providerRows[0].id);
-      }
-      if (!selectedModel && modelRows.length > 0) {
-        setSelectedModel(defaultsPayload.default_model || modelRows[0].id);
-      }
       if (!activeProviderForModels && providerRows.length > 0) {
         setActiveProviderForModels(providerRows[0].id);
       } else if (activeProviderForModels && !providerRows.find((item) => item.id === activeProviderForModels)) {
@@ -381,17 +497,33 @@ export default function App() {
         }
       }
 
-      appendLog({ endpoint: "bootstrap", ok: true, detail: "Loaded /providers, /models, /defaults" });
+      setAdminLoaded(true);
+      appendLog({ endpoint: "admin/bootstrap", ok: true, detail: "Loaded admin state" });
     } catch (error) {
-      appendLog({ endpoint: "bootstrap", ok: false, detail: asErrorText(error) });
+      appendLog({ endpoint: "admin/bootstrap", ok: false, detail: asErrorText(error) });
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  const refreshRuntimeState = async ({ includeAdmin = adminOpen } = {}) => {
+    await refreshReadyState();
+    if (includeAdmin) {
+      await refreshAdminState();
     }
   };
 
   useEffect(() => {
-    refreshRuntimeState();
+    refreshRuntimeState({ includeAdmin: false });
   }, []);
 
   useEffect(() => {
+    if (!adminOpen || adminLoaded) return;
+    void refreshAdminState();
+  }, [adminLoaded, adminOpen]);
+
+  useEffect(() => {
+    if (!adminOpen) return undefined;
     let stopped = false;
     const poll = async () => {
       try {
@@ -441,7 +573,7 @@ export default function App() {
       stopped = true;
       window.clearInterval(timerId);
     };
-  }, []);
+  }, [adminOpen]);
 
   useEffect(() => {
     if (!autopilotToast) return undefined;
@@ -452,10 +584,6 @@ export default function App() {
   }, [autopilotToast]);
 
   const providerOptions = useMemo(() => providers.map((item) => item.id), [providers]);
-  const modelOptions = useMemo(
-    () => models.filter((item) => !selectedProvider || item.provider === selectedProvider),
-    [models, selectedProvider]
-  );
   const defaultModelOptions = useMemo(
     () => models.filter((item) => !defaultProvider || item.provider === defaultProvider),
     [models, defaultProvider]
@@ -478,6 +606,31 @@ export default function App() {
     () => models.filter((model) => model.provider === activeProviderForModels),
     [models, activeProviderForModels]
   );
+  const providerModelsById = useMemo(() => {
+    const next = {};
+    models.forEach((model) => {
+      const providerId = String(model?.provider || "").trim();
+      if (!providerId) return;
+      if (!next[providerId]) next[providerId] = [];
+      next[providerId].push(model);
+    });
+    return next;
+  }, [models]);
+  const providerModelSummaries = useMemo(() => {
+    const next = {};
+    providers.forEach((provider) => {
+      const providerId = String(provider?.id || "").trim();
+      const rows = providerModelsById[providerId] || [];
+      next[providerId] = {
+        total: rows.length,
+        available: rows.filter((row) => row?.available === true).length,
+        routable: rows.filter((row) => row?.routable === true).length,
+        issues: rows.filter((row) => healthStatus(row) !== "ok" || row?.available === false || row?.routable === false).length,
+        capabilities: summarizeProviderCapabilities(rows)
+      };
+    });
+    return next;
+  }, [providerModelsById, providers]);
   const canSendAutopilotTest =
     permissionsConfig?.actions?.["llm.notifications.test"] === true
     || autopilotNotificationsPolicy?.allow_test_effective === true;
@@ -519,35 +672,22 @@ export default function App() {
     const unread = Number(autopilotNotificationsStatus.unread_count || 0);
     return `Store: ${stored} item(s) · unread ${unread} · last prune removed ${pruned} · at ${pruneAt}`;
   }, [autopilotNotificationsStatus]);
+  const chatStatus = useMemo(() => buildStatusSummary(readyState), [readyState]);
+  const starterPrompts = useMemo(() => buildStarterPrompts(readyState), [readyState]);
+  const composerPlaceholder = useMemo(() => buildComposerPlaceholder(readyState), [readyState]);
 
-  const autopilotPolicyBadge = useMemo(() => {
-    const reason = String(autopilotNotificationsPolicy?.allow_reason || "");
-    if (reason === "loopback_auto") {
-      return {
-        label: "Dev Mode (Loopback Auto-Allow)",
-        className: "health-ok"
-      };
-    }
-    if (reason === "permission_required") {
-      return {
-        label: "Permission Required",
-        className: "health-degraded"
-      };
-    }
-    if (reason === "explicit_true") {
-      return {
-        label: "Explicitly Enabled",
-        className: "policy-explicit-true"
-      };
-    }
-    if (reason === "explicit_false") {
-      return {
-        label: "Explicitly Disabled",
-        className: "health-down"
-      };
-    }
-    return null;
-  }, [autopilotNotificationsPolicy]);
+  const updateProviderModelView = (providerId, patch) => {
+    setProviderModelViews((prev) => ({
+      ...prev,
+      [providerId]: {
+        expanded: false,
+        query: "",
+        filter: "all",
+        ...(prev[providerId] || {}),
+        ...patch
+      }
+    }));
+  };
 
   const saveDefaults = async () => {
     setSetupStatus("Saving defaults...");
@@ -799,8 +939,8 @@ export default function App() {
     }
   };
 
-  const sendMessage = async () => {
-    const content = draft.trim();
+  const sendMessage = async (overrideText) => {
+    const content = String(typeof overrideText === "string" ? overrideText : draft).trim();
     if (!content || chatBusy) return;
 
     const nextUserMessage = { role: "user", content };
@@ -812,27 +952,21 @@ export default function App() {
     try {
       const result = await request("POST", "/chat", {
         messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
-        model: selectedModel || undefined,
-        provider: selectedProvider || undefined,
+        session_id: chatSessionId,
+        thread_id: chatThreadId,
         purpose: "chat",
         task_type: "chat"
-      });
+      }, { allowError: true });
 
-      const assistantMessage = {
-        role: "assistant",
-        content: result.assistant?.content || "",
-        meta: {
-          provider: result.meta?.provider,
-          model: result.meta?.model,
-          fallback_used: !!result.meta?.fallback_used,
-          autopilot: result.meta?.autopilot || null
-        }
-      };
+      const assistantMessage = buildAssistantMessage(result);
       setMessages((prev) => [...prev, assistantMessage]);
       appendLog({
         endpoint: "/chat",
-        ok: true,
-        detail: `${assistantMessage.meta.provider || "none"}/${assistantMessage.meta.model || "none"}`
+        ok: result.ok === true,
+        detail:
+          result.ok === true
+            ? "Conversation updated"
+            : result.error_kind || result.error || "needs_attention"
       });
     } catch (error) {
       const detail = asErrorText(error);
@@ -840,23 +974,35 @@ export default function App() {
         ...prev,
         {
           role: "assistant",
-          content: `Error: ${detail}`,
-          meta: { provider: "none", model: "none", fallback_used: false }
+          content: `I ran into a problem: ${detail}`,
+          tone: "error",
+          ui: { confirmation: null, clarification: null }
         }
       ]);
       appendLog({ endpoint: "/chat", ok: false, detail });
     } finally {
       setChatBusy(false);
+      void refreshReadyState();
     }
   };
 
   const resetConversation = () => {
+    const nextThreadId = createChatId("chat-thread");
+    setChatThreadId(nextThreadId);
+    saveStoredChatId(CHAT_THREAD_STORAGE_KEY, nextThreadId);
     setMessages([]);
     appendLog({ endpoint: "chat/reset", ok: true, detail: "Conversation reset" });
   };
 
   const exportConversation = () => {
-    const blob = new Blob([JSON.stringify(messages, null, 2)], { type: "application/json" });
+    const exportPayload = {
+      exported_at: new Date().toISOString(),
+      messages: messages.map((message) => ({
+        role: message.role,
+        content: message.content
+      }))
+    };
+    const blob = new Blob([JSON.stringify(exportPayload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
@@ -878,6 +1024,7 @@ export default function App() {
       setTelegramConfigured(true);
       setTelegramStatus("Telegram token saved.");
       appendLog({ endpoint: "/telegram/secret", ok: true, detail: "Saved Telegram token" });
+      await refreshRuntimeState();
     } catch (error) {
       const detail = asErrorText(error);
       setTelegramStatus(`Save failed: ${detail}`);
@@ -892,6 +1039,7 @@ export default function App() {
       setTelegramStatus(`Connected: @${username}`);
       setTelegramConfigured(true);
       appendLog({ endpoint: "/telegram/test", ok: true, detail: `Connected @${username}` });
+      await refreshRuntimeState();
     } catch (error) {
       const detail = asErrorText(error);
       setTelegramStatus(`Test failed: ${detail}`);
@@ -901,18 +1049,30 @@ export default function App() {
 
   const runModelScout = async () => {
     setModelScoutRunning(true);
-    setModelScoutMessage("Running scout...");
+    setModelScoutMessage("Refreshing canonical recommendations...");
     try {
-      const result = await request("POST", "/model_scout/run", {});
-      const total = Array.isArray(result.suggestions) ? result.suggestions.length : 0;
-      const fresh = Array.isArray(result.new_suggestions) ? result.new_suggestions.length : 0;
-      setModelScoutMessage(`Scout complete: ${total} candidates (${fresh} new).`);
-      appendLog({ endpoint: "/model_scout/run", ok: true, detail: `suggestions=${total} new=${fresh}` });
-      await refreshRuntimeState();
+      const [checkPayload, lifecyclePayload] = await Promise.all([
+        request("POST", "/llm/models/check", { purposes: MODEL_SCOUT_PURPOSES }),
+        request("GET", "/llm/models/lifecycle")
+      ]);
+      const nextSuggestions = buildCanonicalScoutSuggestions({
+        checkPayload,
+        providerRows: providers
+      });
+      setModelScoutStatus(
+        buildCanonicalScoutStatus({
+          checkPayload,
+          lifecyclePayload
+        })
+      );
+      setModelScoutSuggestions(nextSuggestions);
+      setModelScoutMessage(`Recommendations refreshed: ${nextSuggestions.length} candidate(s).`);
+      appendLog({ endpoint: "/llm/models/check", ok: true, detail: `recommendations=${nextSuggestions.length}` });
+      await refreshReadyState();
     } catch (error) {
       const detail = asErrorText(error);
-      setModelScoutMessage(`Scout failed: ${detail}`);
-      appendLog({ endpoint: "/model_scout/run", ok: false, detail });
+      setModelScoutMessage(`Recommendation refresh failed: ${detail}`);
+      appendLog({ endpoint: "/llm/models/check", ok: false, detail });
     } finally {
       setModelScoutRunning(false);
     }
@@ -1386,32 +1546,6 @@ export default function App() {
     }
   };
 
-  const dismissScoutSuggestion = async (suggestionId) => {
-    try {
-      await request("POST", `/model_scout/suggestions/${encodeURIComponent(suggestionId)}/dismiss`, {});
-      setModelScoutMessage(`Dismissed ${suggestionId}.`);
-      appendLog({ endpoint: "/model_scout/suggestions/*/dismiss", ok: true, detail: suggestionId });
-      await refreshRuntimeState();
-    } catch (error) {
-      const detail = asErrorText(error);
-      setModelScoutMessage(`Dismiss failed: ${detail}`);
-      appendLog({ endpoint: "/model_scout/suggestions/*/dismiss", ok: false, detail });
-    }
-  };
-
-  const markScoutSuggestionInstalled = async (suggestionId) => {
-    try {
-      await request("POST", `/model_scout/suggestions/${encodeURIComponent(suggestionId)}/mark_installed`, {});
-      setModelScoutMessage(`Marked installed: ${suggestionId}.`);
-      appendLog({ endpoint: "/model_scout/suggestions/*/mark_installed", ok: true, detail: suggestionId });
-      await refreshRuntimeState();
-    } catch (error) {
-      const detail = asErrorText(error);
-      setModelScoutMessage(`Mark installed failed: ${detail}`);
-      appendLog({ endpoint: "/model_scout/suggestions/*/mark_installed", ok: false, detail });
-    }
-  };
-
   const updatePermissionAction = (actionName, value) => {
     setPermissionsConfig((prev) => {
       const base = prev || {};
@@ -1467,1174 +1601,224 @@ export default function App() {
     }
   };
 
-  const toModelOpsRequest = (suggestion) => {
-    if (!suggestion) return null;
-    if (suggestion.kind === "local") {
-      const repoId = suggestion.repo_id || "";
-      if (!repoId) return null;
-      return {
-        action: "modelops.pull_ollama_model",
-        params: {
-          model: `hf.co/${repoId}`,
-          estimated_download_gb: 4
-        }
-      };
+  const adminSections = [
+    {
+      id: "setup",
+      label: "Setup",
+      content: (
+        <SetupTab
+          allowRemoteFallback={allowRemoteFallback}
+          defaultModel={defaultModel}
+          defaultModelOptions={defaultModelOptions}
+          defaultProvider={defaultProvider}
+          models={models}
+          providerOptions={providerOptions}
+          providerRecommendations={providerRecommendations}
+          refreshModels={refreshModels}
+          routingMode={routingMode}
+          routingModes={ROUTING_MODES}
+          saveDefaults={saveDefaults}
+          setAllowRemoteFallback={setAllowRemoteFallback}
+          setDefaultModel={setDefaultModel}
+          setDefaultProvider={setDefaultProvider}
+          setRoutingMode={setRoutingMode}
+          setupStatus={setupStatus}
+        />
+      )
+    },
+    {
+      id: "operations",
+      label: "Operations",
+      content: (
+        <OperationsTab
+          autopilotBootstrapBusy={autopilotBootstrapBusy}
+          autopilotLastChange={autopilotLastChange}
+          autopilotLastChangeBusy={autopilotLastChangeBusy}
+          autopilotLastChangeStatus={autopilotLastChangeStatus}
+          autopilotLastReadHash={autopilotLastReadHash}
+          autopilotLedgerEntries={autopilotLedgerEntries}
+          autopilotNotifications={autopilotNotifications}
+          autopilotNotificationsPolicy={autopilotNotificationsPolicy}
+          autopilotNotificationsStatus={autopilotNotificationsStatus}
+          autopilotNotifyBusy={autopilotNotifyBusy}
+          autopilotNotifyStatus={autopilotNotifyStatus}
+          autopilotToast={autopilotToast}
+          autopilotUndoBusy={autopilotUndoBusy}
+          autoconfigBusy={autoconfigBusy}
+          autoconfigPlan={autoconfigPlan}
+          autoconfigStatus={autoconfigStatus}
+          bootstrapAutopilotDefaults={bootstrapAutopilotDefaults}
+          canBootstrapAutopilot={canBootstrapAutopilot}
+          canRollbackRegistry={canRollbackRegistry}
+          canSendAutopilotTest={canSendAutopilotTest}
+          capabilitiesReconcileBusy={capabilitiesReconcileBusy}
+          capabilitiesReconcilePlan={capabilitiesReconcilePlan}
+          capabilitiesReconcileStatus={capabilitiesReconcileStatus}
+          cleanupBusy={cleanupBusy}
+          cleanupPlan={cleanupPlan}
+          cleanupStatus={cleanupStatus}
+          executeSupportRemediation={executeSupportRemediation}
+          explainLastAutopilotChange={explainLastAutopilotChange}
+          exportSupportBundle={exportSupportBundle}
+          hygieneBusy={hygieneBusy}
+          hygienePlan={hygienePlan}
+          hygieneStatus={hygieneStatus}
+          llmCatalogRows={llmCatalogRows}
+          llmCatalogStatus={llmCatalogStatus}
+          llmHealth={llmHealth}
+          llmHealthMessage={llmHealthMessage}
+          llmHealthRunning={llmHealthRunning}
+          markAutopilotRead={markAutopilotRead}
+          notificationStoreSummary={notificationStoreSummary}
+          notifyStatusSummary={notifyStatusSummary}
+          planLlmAutoconfig={planLlmAutoconfig}
+          planLlmCapabilitiesReconcile={planLlmCapabilitiesReconcile}
+          planLlmCleanup={planLlmCleanup}
+          planLlmHygiene={planLlmHygiene}
+          planSupportRemediation={planSupportRemediation}
+          registrySnapshots={registrySnapshots}
+          rollbackBusySnapshotId={rollbackBusySnapshotId}
+          rollbackRegistryToSnapshot={rollbackRegistryToSnapshot}
+          runLlmCatalogRefresh={runLlmCatalogRefresh}
+          runLlmHealthCheck={runLlmHealthCheck}
+          runSupportDiagnosis={runSupportDiagnosis}
+          safetyStatus={safetyStatus}
+          sendAutopilotTestNotification={sendAutopilotTestNotification}
+          setSupportDiagnoseIntent={setSupportDiagnoseIntent}
+          setSupportDiagnoseTarget={setSupportDiagnoseTarget}
+          supportBundlePreview={supportBundlePreview}
+          supportBusy={supportBusy}
+          supportDiagnosis={supportDiagnosis}
+          supportDiagnoseIntent={supportDiagnoseIntent}
+          supportDiagnoseTarget={supportDiagnoseTarget}
+          supportRemediationPlan={supportRemediationPlan}
+          supportRemediationResult={supportRemediationResult}
+          supportStatus={supportStatus}
+          supportTargetOptions={supportTargetOptions}
+          undoLastAutopilotChange={undoLastAutopilotChange}
+          applyLlmAutoconfig={applyLlmAutoconfig}
+          applyLlmCapabilitiesReconcile={applyLlmCapabilitiesReconcile}
+          applyLlmCleanup={applyLlmCleanup}
+          applyLlmHygiene={applyLlmHygiene}
+        />
+      )
+    },
+    {
+      id: "providers",
+      label: "Providers",
+      content: (
+        <ProvidersTab
+          activeProviderForModels={activeProviderForModels}
+          activeProviderModels={activeProviderModels}
+          addManualModel={addManualModel}
+          addProviderBusy={addProviderBusy}
+          addProviderForm={addProviderForm}
+          addProviderStatus={addProviderStatus}
+          applyProviderPreset={applyProviderPreset}
+          deleteProvider={deleteProvider}
+          manualModelDraft={manualModelDraft}
+          providerDrafts={providerDrafts}
+          providerModelSummaries={providerModelSummaries}
+          providerModelViews={providerModelViews}
+          providerModelsById={providerModelsById}
+          providerOptions={providerOptions}
+          providerPresets={PROVIDER_PRESETS}
+          providerSecrets={providerSecrets}
+          providerStatuses={providerStatuses}
+          providers={providers}
+          refreshModels={refreshModels}
+          refreshProviderModels={refreshProviderModels}
+          saveOrTestProvider={saveOrTestProvider}
+          saveProvider={saveProvider}
+          saveProviderSecret={saveProviderSecret}
+          setActiveProviderForModels={setActiveProviderForModels}
+          setManualModelDraft={setManualModelDraft}
+          setProviderSecrets={setProviderSecrets}
+          testProvider={testProvider}
+          updateAddProviderField={updateAddProviderField}
+          updateProviderField={updateProviderField}
+          updateProviderModelView={updateProviderModelView}
+        />
+      )
+    },
+    {
+      id: "telegram",
+      label: "Telegram",
+      content: (
+        <TelegramTab
+          saveTelegramToken={saveTelegramToken}
+          setTelegramToken={setTelegramToken}
+          telegramConfigured={telegramConfigured}
+          telegramStatus={telegramStatus}
+          telegramToken={telegramToken}
+          testTelegramToken={testTelegramToken}
+        />
+      )
+    },
+    {
+      id: "permissions",
+      label: "Permissions",
+      content: (
+        <PermissionsTab
+          actions={MODELOPS_ACTIONS}
+          auditEntries={auditEntries}
+          permissionsConfig={permissionsConfig}
+          permissionsStatus={permissionsStatus}
+          savePermissions={savePermissions}
+          setPermissionsConfig={setPermissionsConfig}
+          updatePermissionAction={updatePermissionAction}
+          updatePermissionConstraint={updatePermissionConstraint}
+        />
+      )
+    },
+    {
+      id: "model_scout",
+      label: "Model Scout",
+      content: (
+        <ModelScoutTab
+          modelScoutMessage={modelScoutMessage}
+          modelScoutRunning={modelScoutRunning}
+          modelScoutStatus={modelScoutStatus}
+          modelScoutSuggestions={modelScoutSuggestions}
+          runModelScout={runModelScout}
+        />
+      )
+    },
+    {
+      id: "debug",
+      label: "Logs",
+      content: <DebugTab logs={logs} />
     }
-
-    const modelId = suggestion.model_id || "";
-    if (!modelId) return null;
-    const provider = suggestion.provider_id || modelId.split(":")[0] || "";
-    return {
-      action: "modelops.set_default_model",
-      params: {
-        default_provider: provider,
-        default_model: modelId
-      }
-    };
-  };
-
-  const planModelOpForSuggestion = async (suggestion) => {
-    const modelOpsRequest = toModelOpsRequest(suggestion);
-    if (!modelOpsRequest) {
-      setModelOpsStatus("Unable to build ModelOps request for this suggestion.");
-      return;
-    }
-    setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: true }));
-    try {
-      const result = await request("POST", "/modelops/plan", {
-        action: modelOpsRequest.action,
-        params: modelOpsRequest.params,
-        dry_run: true
-      });
-      setModelOpsPlans((prev) => ({
-        ...prev,
-        [suggestion.id]: result
-      }));
-      setModelOpsStatus(
-        result.decision?.allow
-          ? `Plan ready for ${suggestion.id}. Confirm to execute.`
-          : `Plan denied for ${suggestion.id}: ${result.decision?.reason || "policy_denied"}`
-      );
-      appendLog({
-        endpoint: "/modelops/plan",
-        ok: true,
-        detail: `${modelOpsRequest.action} allow=${result.decision?.allow === true}`
-      });
-    } catch (error) {
-      const detail = asErrorText(error);
-      setModelOpsStatus(`Plan failed: ${detail}`);
-      appendLog({ endpoint: "/modelops/plan", ok: false, detail });
-    } finally {
-      setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: false }));
-    }
-  };
-
-  const executeModelOpForSuggestion = async (suggestion) => {
-    const planned = modelOpsPlans[suggestion.id];
-    const modelOpsRequest = toModelOpsRequest(suggestion);
-    if (!planned || !modelOpsRequest) {
-      setModelOpsStatus("Run plan first.");
-      return;
-    }
-    setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: true }));
-    try {
-      const result = await request("POST", "/modelops/execute", {
-        action: modelOpsRequest.action,
-        params: modelOpsRequest.params,
-        dry_run: false,
-        confirm: true
-      });
-      const success = result.result?.ok === true;
-      setModelOpsStatus(success ? `Executed ${suggestion.id}.` : `Execution failed for ${suggestion.id}.`);
-      appendLog({
-        endpoint: "/modelops/execute",
-        ok: success,
-        detail: `${modelOpsRequest.action} ${success ? "success" : "failed"}`
-      });
-      await refreshRuntimeState();
-    } catch (error) {
-      const detail = asErrorText(error);
-      setModelOpsStatus(`Execution failed: ${detail}`);
-      appendLog({ endpoint: "/modelops/execute", ok: false, detail });
-    } finally {
-      setModelOpsBusy((prev) => ({ ...prev, [suggestion.id]: false }));
-    }
-  };
+  ];
 
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <div>
-          <h1>Personal Agent Web UI</h1>
-          <p>Manage providers, defaults, and chat via the local API on this host.</p>
-        </div>
-      </header>
-
-      <nav className="tabs">
-        {[
-          ["setup", "Defaults"],
-          ["providers", "Providers"],
-          ["telegram", "Telegram"],
-          ["permissions", "Permissions"],
-          ["model_scout", "Model Scout"],
-          ["chat", "Chat"],
-          ["debug", "Logs/Debug"]
-        ].map(([id, label]) => (
-          <button key={id} className={activeTab === id ? "active" : ""} onClick={() => setActiveTab(id)}>
-            {label}
-          </button>
-        ))}
-      </nav>
-
-      <main className="panel">
-        {activeTab === "setup" ? (
-          <section className="grid two">
-            <div className="card">
-              <h2>Routing Defaults</h2>
-              <label>
-                Routing mode
-                <select value={routingMode} onChange={(event) => setRoutingMode(event.target.value)}>
-                  {ROUTING_MODES.map((mode) => (
-                    <option key={mode} value={mode}>
-                      {mode}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Default provider
-                <select
-                  value={defaultProvider}
-                  onChange={(event) => {
-                    setDefaultProvider(event.target.value);
-                    setDefaultModel("");
-                  }}
-                >
-                  <option value="">(none)</option>
-                  {providerOptions.map((providerId) => (
-                    <option key={providerId} value={providerId}>
-                      {providerId}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Default model
-                <select value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)}>
-                  <option value="">(none)</option>
-                  {defaultModelOptions.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={allowRemoteFallback}
-                  onChange={(event) => setAllowRemoteFallback(event.target.checked)}
-                />
-                Allow remote fallback when local candidates fail
-              </label>
-
-              <div className="row-actions">
-                <button onClick={saveDefaults}>Save Defaults</button>
-                <button onClick={refreshModels}>Refresh Models</button>
-              </div>
-              <p className="status-line">{setupStatus || "No pending changes."}</p>
-            </div>
-
-            <div className="card">
-              <h2>Model Quick View</h2>
-              {providerRecommendations.length > 0 ? (
-                <div className="recommendations">
-                  {providerRecommendations.map((note) => (
-                    <p key={note} className="help-text">
-                      Recommendation: {note}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
-              <div className="model-list">
-                {models.length === 0 ? <p className="empty">No models loaded.</p> : null}
-                {models.map((model) => (
-                  <div key={model.id} className="model-row">
-                    <div className="model-head">
-                      <span>{model.id}</span>
-                      <span className={`badge health-${healthLabel(model)}`}>{healthLabel(model)}</span>
-                    </div>
-                    <div className="meta-line">
-                      {model.provider} · {model.available ? "available" : "unavailable"} · {model.routable ? "routable" : "not routable"}
-                    </div>
-                    {model.health?.last_error_kind ? (
-                      <div className="meta-line">
-                        Last error: {model.health.last_error_kind}
-                        {model.health.status_code ? ` (${model.health.status_code})` : ""}
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card">
-              <h2>LLM Health + Automation</h2>
-              <p className="help-text">
-                Last health run: {llmHealth?.last_run_at_iso || "never"}
-              </p>
-              <p className="help-text">
-                Status counts: ok {Number(llmHealth?.counts?.ok || 0)} · degraded {Number(llmHealth?.counts?.degraded || 0)} · down{" "}
-                {Number(llmHealth?.counts?.down || 0)}
-              </p>
-              <p className="help-text">
-                Scheduler: {llmHealth?.scheduler?.enabled ? "enabled" : "disabled"} · next health {formatEpoch(llmHealth?.scheduler?.next_health_run_at)}
-              </p>
-              <p className="help-text">
-                Next catalog {formatEpoch(llmHealth?.scheduler?.next_catalog_run_at)} · next refresh {formatEpoch(llmHealth?.scheduler?.next_refresh_run_at)}
-              </p>
-              <p className="help-text">
-                Next bootstrap {formatEpoch(llmHealth?.scheduler?.next_bootstrap_run_at)}
-              </p>
-              <p className="help-text">
-                Next reconcile {formatEpoch(llmHealth?.scheduler?.next_capabilities_reconcile_run_at)}
-              </p>
-              <p className="help-text">
-                Next hygiene {formatEpoch(llmHealth?.scheduler?.next_hygiene_run_at)}
-              </p>
-              <p className="help-text">
-                Next cleanup {formatEpoch(llmHealth?.scheduler?.next_cleanup_run_at)}
-              </p>
-              <p className="help-text">
-                Next self-heal {formatEpoch(llmHealth?.scheduler?.next_self_heal_run_at)} · next autoconfig{" "}
-                {formatEpoch(llmHealth?.scheduler?.next_autoconfig_run_at)}
-              </p>
-              <p className="help-text">
-                Next scout {formatEpoch(llmHealth?.scheduler?.next_model_scout_run_at)}
-              </p>
-              <div className="row-actions">
-                <button disabled={llmHealthRunning} onClick={runLlmHealthCheck}>
-                  {llmHealthRunning ? "Running..." : "Run Health Check"}
-                </button>
-                <button disabled={llmHealthRunning} onClick={runLlmCatalogRefresh}>
-                  {llmHealthRunning ? "Working..." : "Run Catalog Refresh"}
-                </button>
-              </div>
-              <p className="status-line">{llmHealthMessage || "No health checks run from UI in this session."}</p>
-              <div className="model-list">
-                {Array.isArray(llmHealth?.last_actions) && llmHealth.last_actions.length > 0 ? null : (
-                  <p className="empty">No recent autopilot actions.</p>
-                )}
-                {(llmHealth?.last_actions || []).slice(0, 5).map((entry, index) => (
-                  <div key={`${entry.ts || "llm-action"}-${index}`} className="model-row">
-                    <div className="model-head">
-                      <span>{entry.action}</span>
-                      <span className={`badge ${entry.outcome === "success" ? "health-ok" : "health-degraded"}`}>
-                        {entry.outcome || "unknown"}
-                      </span>
-                    </div>
-                    <div className="meta-line">
-                      {entry.ts || "n/a"} · {entry.reason || "n/a"} · {entry.duration_ms || 0}ms
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <h3>Recent Notifications</h3>
-              {autopilotToast ? <div className="toast-banner">{autopilotToast}</div> : null}
-              {autopilotPolicyBadge ? (
-                <p className="status-line">
-                  <span className={`badge ${autopilotPolicyBadge.className}`}>{autopilotPolicyBadge.label}</span>
-                </p>
-              ) : null}
-              <p className="status-line">{notifyStatusSummary}</p>
-              <p className="help-text">{notificationStoreSummary}</p>
-              <div className="model-list">
-                {autopilotNotifications.length === 0 ? <p className="empty">No notifications recorded.</p> : null}
-                {autopilotNotifications.map((entry, index) => (
-                  <div key={`${entry.ts || "autopilot-note"}-${index}`} className="model-row">
-                    <div className="model-head">
-                      <span>{String(entry.message || "").split("\n")[0] || "LLM Autopilot updated configuration"}</span>
-                      <span className={`badge ${entry.outcome === "sent" ? "health-ok" : "health-degraded"}`}>
-                        {entry.outcome || "unknown"}
-                      </span>
-                    </div>
-                    <div className="meta-line">
-                      {entry.ts_iso || "n/a"} · {entry.reason || "n/a"} · delivered_to {entry.delivered_to || "none"} ·{" "}
-                      {entry.deferred ? "deferred" : "immediate"}
-                    </div>
-                    <div className="meta-line">
-                      {String(entry.message || "")
-                        .split("\n")
-                        .slice(1, 3)
-                        .join(" ")
-                        .trim() || "(no body preview)"}
-                    </div>
-                    <div className="meta-line">hash: {entry.dedupe_hash || "n/a"}</div>
-                  </div>
-                ))}
-              </div>
-              <div className="row-actions">
-                <button disabled={!canSendAutopilotTest || autopilotNotifyBusy} onClick={sendAutopilotTestNotification}>
-                  {autopilotNotifyBusy ? "Sending..." : "Send Test Notification"}
-                </button>
-                <button disabled={autopilotLastChangeBusy} onClick={explainLastAutopilotChange}>
-                  {autopilotLastChangeBusy ? "Loading..." : "Explain last autopilot change"}
-                </button>
-                <button
-                  disabled={!autopilotNotifications[0]?.dedupe_hash}
-                  onClick={() => markAutopilotRead(autopilotNotifications[0]?.dedupe_hash)}
-                >
-                  Mark Latest Read
-                </button>
-              </div>
-              <p className="status-line">
-                {autopilotNotifyStatus || (canSendAutopilotTest ? "Notification test is allowed by current policy." : "Enable llm.notifications.test in Permissions to send tests.")}
-              </p>
-              <p className="status-line">
-                {autopilotLastChangeStatus || (autopilotLastReadHash ? `Last read hash: ${autopilotLastReadHash.slice(0, 12)}` : "No read acknowledgment stored yet.")}
-              </p>
-              {autopilotLastChange ? (
-                <div className="model-row">
-                  <div className="model-head">
-                    <span>{autopilotLastChange.action || "llm.autopilot.apply"}</span>
-                    <span className="badge">
-                      {autopilotLastChange.snapshot_id_before || "no-snapshot"}
-                    </span>
-                  </div>
-                  <div className="meta-line">
-                    {formatEpoch(autopilotLastChange.ts)} · {autopilotLastChange.reason || "n/a"} · hash{" "}
-                    {String(autopilotLastChange.registry_hash_after || "").slice(0, 12) || "n/a"}
-                  </div>
-                  {(autopilotLastChange.rationale_lines || []).map((line, index) => (
-                    <div key={`${line}-${index}`} className="meta-line">
-                      {line}
-                    </div>
-                  ))}
-                  <div className="meta-line">changed: {(autopilotLastChange.changed_ids || []).join(", ") || "none"}</div>
-                </div>
-              ) : null}
-
-              <div className="row-actions">
-                <button disabled={autoconfigBusy} onClick={planLlmAutoconfig}>
-                  {autoconfigBusy ? "Working..." : "Plan Autoconfig"}
-                </button>
-                <button disabled={autoconfigBusy || !autoconfigPlan} onClick={applyLlmAutoconfig}>
-                  Apply Autoconfig
-                </button>
-              </div>
-              <p className="help-text">
-                Autoconfig plan: {Number(autoconfigPlan?.impact?.changes_count || 0)} change(s)
-              </p>
-              <p className="status-line">{autoconfigStatus || "Autoconfig never runs without permissions."}</p>
-
-              <div className="row-actions">
-                <button disabled={hygieneBusy} onClick={planLlmHygiene}>
-                  {hygieneBusy ? "Working..." : "Plan Hygiene"}
-                </button>
-                <button disabled={hygieneBusy || !hygienePlan} onClick={applyLlmHygiene}>
-                  Apply Hygiene
-                </button>
-              </div>
-              <p className="help-text">Hygiene plan: {Number(hygienePlan?.impact?.changes_count || 0)} change(s)</p>
-              <p className="status-line">{hygieneStatus || "Hygiene only touches registry entries."}</p>
-
-              <h3>Catalog</h3>
-              <p className="help-text">
-                Last refresh: {llmCatalogStatus?.last_run_at_iso || "never"} · providers {Array.isArray(llmCatalogStatus?.providers) ? llmCatalogStatus.providers.length : 0}
-              </p>
-              <p className="help-text">
-                Last errors:{" "}
-                {(Array.isArray(llmCatalogStatus?.providers) ? llmCatalogStatus.providers : [])
-                  .filter((row) => row?.last_error_kind)
-                  .map((row) => `${row.provider_id}:${row.last_error_kind}`)
-                  .join(", ") || "none"}
-              </p>
-              <div className="model-list">
-                {llmCatalogRows.length === 0 ? <p className="empty">No catalog rows available.</p> : null}
-                {llmCatalogRows.slice(0, 8).map((row) => (
-                  <div key={row.id} className="model-row">
-                    <div className="model-head">
-                      <span>{row.id}</span>
-                      <span className="badge">{(row.capabilities || []).join(",") || "chat"}</span>
-                    </div>
-                    <div className="meta-line">
-                      ctx {row.max_context_tokens || "?"} · in {row.input_cost_per_million_tokens ?? "n/a"} · out {row.output_cost_per_million_tokens ?? "n/a"} · {row.source}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <h3>Cleanup</h3>
-              <div className="row-actions">
-                <button disabled={cleanupBusy} onClick={planLlmCleanup}>
-                  {cleanupBusy ? "Working..." : "Plan Cleanup"}
-                </button>
-                <button disabled={cleanupBusy || !cleanupPlan} onClick={applyLlmCleanup}>
-                  Apply Cleanup
-                </button>
-              </div>
-              <p className="help-text">
-                Cleanup plan: {Number(cleanupPlan?.impact?.changes_count || 0)} change(s) · prune candidates {Number(cleanupPlan?.impact?.prune_candidates_count || 0)}
-              </p>
-              <p className="status-line">{cleanupStatus || "Cleanup marks stale entries and prunes only when policy allows."}</p>
-
-              <h3>Capabilities</h3>
-              <p className="help-text">
-                Mismatch models: {Number(llmHealth?.capabilities_reconcile?.mismatch_count || 0)} · planned changes{" "}
-                {Number(llmHealth?.capabilities_reconcile?.changes_count || 0)}
-              </p>
-              <div className="row-actions">
-                <button disabled={capabilitiesReconcileBusy} onClick={planLlmCapabilitiesReconcile}>
-                  {capabilitiesReconcileBusy ? "Working..." : "Plan Reconcile"}
-                </button>
-                <button
-                  disabled={capabilitiesReconcileBusy || !capabilitiesReconcilePlan}
-                  onClick={applyLlmCapabilitiesReconcile}
-                >
-                  Apply Reconcile
-                </button>
-              </div>
-              <p className="help-text">
-                Reconcile plan: {Number(capabilitiesReconcilePlan?.impact?.changes_count || 0)} change(s)
-              </p>
-              <p className="status-line">
-                {capabilitiesReconcileStatus || "Capability reconcile fixes chat/embedding drift from catalog inference."}
-              </p>
-
-              <h3>Safety</h3>
-              <p className="help-text">
-                Safe mode: {llmHealth?.autopilot?.safe_mode ? "enabled" : "disabled"} · last blocked reason{" "}
-                {llmHealth?.autopilot?.last_blocked_reason || "none"}
-              </p>
-              <p className="help-text">
-                Safe mode reason: {llmHealth?.autopilot?.safe_mode_reason || "none"} · last churn{" "}
-                {llmHealth?.autopilot?.last_churn_event_ts_iso || "never"} ({llmHealth?.autopilot?.last_churn_reason || "none"})
-              </p>
-              <p className="help-text">
-                Rollback policy: {llmHealth?.autopilot?.rollback_policy?.allow_reason || "unknown"} ·{" "}
-                {llmHealth?.autopilot?.rollback_policy?.allow_rollback_effective ? "rollback allowed" : "permission required"}
-              </p>
-              <p className="help-text">
-                Bootstrap policy: {llmHealth?.autopilot?.bootstrap_policy?.allow_reason || "unknown"} ·{" "}
-                {llmHealth?.autopilot?.bootstrap_policy?.allow_apply_effective ? "apply allowed" : "permission required"}
-              </p>
-              <div className="row-actions">
-                <button disabled={autopilotLastChangeBusy} onClick={explainLastAutopilotChange}>
-                  {autopilotLastChangeBusy ? "Loading..." : "Explain Last Change"}
-                </button>
-                <button disabled={!canRollbackRegistry || autopilotUndoBusy} onClick={undoLastAutopilotChange}>
-                  {autopilotUndoBusy ? "Undoing..." : "Undo Last Autopilot Change"}
-                </button>
-                <button disabled={!canBootstrapAutopilot || autopilotBootstrapBusy} onClick={bootstrapAutopilotDefaults}>
-                  {autopilotBootstrapBusy ? "Bootstrapping..." : "Bootstrap Defaults"}
-                </button>
-              </div>
-              <p className="status-line">
-                {safetyStatus || (canRollbackRegistry ? "Rollback is allowed by current policy." : "Enable llm.registry.rollback or use loopback auto policy.")}
-              </p>
-              <div className="model-list">
-                {autopilotLedgerEntries.length === 0 ? <p className="empty">No autopilot ledger entries yet.</p> : null}
-                {autopilotLedgerEntries.slice(0, 10).map((entry) => {
-                  const snapshotId = String(entry.snapshot_id || "").trim();
-                  return (
-                    <div key={entry.id} className="model-row">
-                      <div className="model-head">
-                        <span>{entry.action || "llm.apply"}</span>
-                        <span className={`badge ${entry.outcome === "success" ? "health-ok" : "health-degraded"}`}>
-                          {entry.outcome || "unknown"}
-                        </span>
-                      </div>
-                      <div className="meta-line">
-                        {entry.ts_iso || "n/a"} · {entry.reason || "n/a"} · changed {(entry.changed_ids || []).join(", ") || "none"}
-                      </div>
-                      <div className="meta-line">
-                        snapshot {snapshotId || "n/a"} · hash {entry.resulting_registry_hash || "n/a"}
-                      </div>
-                      <div className="row-actions">
-                        <button
-                          disabled={!snapshotId || !canRollbackRegistry || rollbackBusySnapshotId === snapshotId}
-                          onClick={() => rollbackRegistryToSnapshot(snapshotId)}
-                        >
-                          {rollbackBusySnapshotId === snapshotId ? "Rolling Back..." : "Rollback"}
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-              <div className="model-list">
-                {registrySnapshots.length === 0 ? <p className="empty">No snapshots available.</p> : null}
-                {registrySnapshots.slice(0, 10).map((row) => (
-                  <div key={row.snapshot_id} className="model-row">
-                    <div className="model-head">
-                      <span>{row.snapshot_id}</span>
-                      <span className="badge">{row.size_bytes || 0} bytes</span>
-                    </div>
-                    <div className="meta-line">hash {row.registry_hash || "n/a"}</div>
-                    <div className="row-actions">
-                      <button
-                        disabled={!canRollbackRegistry || rollbackBusySnapshotId === row.snapshot_id}
-                        onClick={() => rollbackRegistryToSnapshot(row.snapshot_id)}
-                      >
-                        {rollbackBusySnapshotId === row.snapshot_id ? "Rolling Back..." : "Rollback"}
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="card">
-              <h2>Support</h2>
-              <p className="help-text">
-                Export a deterministic local support bundle, diagnose a provider/model, and generate a deterministic LLM remediation plan.
-              </p>
-              <div className="grid two">
-                <label>
-                  Diagnose Target
-                  <select
-                    value={supportDiagnoseTarget}
-                    onChange={(event) => setSupportDiagnoseTarget(event.target.value)}
-                  >
-                    {supportTargetOptions.length === 0 ? <option value="">No targets available</option> : null}
-                    {supportTargetOptions.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Remediation Intent
-                  <select
-                    value={supportDiagnoseIntent}
-                    onChange={(event) => setSupportDiagnoseIntent(event.target.value)}
-                  >
-                    <option value="fix_routing">Fix Routing</option>
-                    <option value="reduce_churn">Reduce Churn</option>
-                    <option value="bootstrap">Bootstrap</option>
-                  </select>
-                </label>
-              </div>
-              <div className="row-actions">
-                <button disabled={supportBusy} onClick={exportSupportBundle}>
-                  {supportBusy ? "Working..." : "Export Support Bundle"}
-                </button>
-                <button
-                  disabled={supportBusy || !normalizeSupportTarget(supportDiagnoseTarget)}
-                  onClick={runSupportDiagnosis}
-                >
-                  {supportBusy ? "Working..." : "Run Diagnosis"}
-                </button>
-                <button disabled={supportBusy} onClick={planSupportRemediation}>
-                  {supportBusy ? "Working..." : "Fix LLM setup"}
-                </button>
-                <button disabled={supportBusy || !supportRemediationPlan} onClick={executeSupportRemediation}>
-                  {supportBusy ? "Working..." : "Execute safe steps"}
-                </button>
-              </div>
-              <p className="status-line">{supportStatus || "No support actions run in this session."}</p>
-              <p className="help-text">
-                {supportBundlePreview
-                  ? `Bundle ready · registry ${String(supportBundlePreview.registry_hash || "").slice(0, 12)} · safe mode ${supportBundlePreview.safe_mode?.enabled ? "on" : "off"}`
-                  : "Support bundle not exported yet."}
-              </p>
-              <div className="model-list">
-                {!supportDiagnosis ? <p className="empty">Run diagnosis to view root causes and suggested actions.</p> : null}
-                {supportDiagnosis ? (
-                  <div className="model-row">
-                    <div className="model-head">
-                      <span>Status</span>
-                      <span className={`badge ${String(supportDiagnosis.status || "") === "ok" ? "health-ok" : "health-degraded"}`}>
-                        {supportDiagnosis.status || "unknown"}
-                      </span>
-                    </div>
-                    <div className="meta-line">
-                      error {supportDiagnosis.last_error_kind || "none"} · code {supportDiagnosis.status_code || "n/a"} · streak{" "}
-                      {Number(supportDiagnosis.failure_streak || 0)}
-                    </div>
-                    <div className="meta-line">
-                      root causes: {(supportDiagnosis.root_causes || []).join(", ") || "none"}
-                    </div>
-                    {(supportDiagnosis.recommended_actions || []).map((line, index) => (
-                      <div key={`${line}-${index}`} className="meta-line">
-                        {line}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-              <div className="model-list">
-                {!supportRemediationPlan ? <p className="empty">Run remediation plan to view next steps.</p> : null}
-                {supportRemediationPlan ? (
-                  <div className="model-row">
-                    <div className="model-head">
-                      <span>Remediation Plan ({supportRemediationPlan.intent || "fix_routing"})</span>
-                      <span className="badge">{supportRemediationPlan.plan_only ? "plan-only" : "apply"}</span>
-                    </div>
-                    <div className="meta-line">reasons: {(supportRemediationPlan.reasons || []).join(" | ") || "n/a"}</div>
-                    {(supportRemediationPlan.steps || []).map((step) => (
-                      <div key={step.id || step.action} className="meta-line">
-                        {(step.id || "step").replaceAll("_", " ")}: {step.action} ({step.reason})
-                        {step.instructions ? ` · ${step.instructions}` : ""}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-              <div className="model-list">
-                {!supportRemediationResult ? <p className="empty">Execute safe steps to apply registry/model changes.</p> : null}
-                {supportRemediationResult ? (
-                  <div className="model-row">
-                    <div className="model-head">
-                      <span>Remediation Execute</span>
-                      <span className={`badge ${supportRemediationResult.ok ? "health-ok" : "health-degraded"}`}>
-                        {supportRemediationResult.ok ? "ok" : "error"}
-                      </span>
-                    </div>
-                    <div className="meta-line">
-                      executed {(supportRemediationResult.executed_steps || []).length} · blocked{" "}
-                      {(supportRemediationResult.blocked_steps || []).length} · failed{" "}
-                      {(supportRemediationResult.failed_steps || []).length}
-                    </div>
-                    <div className="meta-line">{supportRemediationResult.message || "n/a"}</div>
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </section>
-        ) : null}
-
-        {activeTab === "providers" ? (
-          <section className="grid">
-            <div className="card">
-              <h2>Add Provider (OpenAI-Compatible)</h2>
-              <div className="grid two">
-                <label>
-                  Preset
-                  <select value={addProviderForm.preset} onChange={(event) => applyProviderPreset(event.target.value)}>
-                    {Object.entries(PROVIDER_PRESETS).map(([id, preset]) => (
-                      <option key={id} value={id}>
-                        {preset.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label>
-                  Provider ID
-                  <input
-                    value={addProviderForm.id}
-                    onChange={(event) => updateAddProviderField("id", event.target.value)}
-                    placeholder="provider-id"
-                  />
-                </label>
-                <label>
-                  Base URL
-                  <input
-                    value={addProviderForm.base_url}
-                    onChange={(event) => updateAddProviderField("base_url", event.target.value)}
-                    placeholder="https://api.example.com"
-                  />
-                </label>
-                <label>
-                  Chat path
-                  <input
-                    value={addProviderForm.chat_path}
-                    onChange={(event) => updateAddProviderField("chat_path", event.target.value)}
-                    placeholder="/v1/chat/completions"
-                  />
-                </label>
-                <label>
-                  API Key (optional, stored securely)
-                  <input
-                    type="password"
-                    value={addProviderForm.api_key}
-                    onChange={(event) => updateAddProviderField("api_key", event.target.value)}
-                    placeholder="sk-..."
-                  />
-                </label>
-                <label>
-                  Optional initial model
-                  <input
-                    value={addProviderForm.initial_model}
-                    onChange={(event) => updateAddProviderField("initial_model", event.target.value)}
-                    placeholder="gpt-4o-mini"
-                  />
-                </label>
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={addProviderForm.local}
-                    onChange={(event) => updateAddProviderField("local", event.target.checked)}
-                  />
-                  Local provider
-                </label>
-                <label className="checkbox-row">
-                  <input
-                    type="checkbox"
-                    checked={addProviderForm.enabled}
-                    onChange={(event) => updateAddProviderField("enabled", event.target.checked)}
-                  />
-                  Enabled
-                </label>
-              </div>
-              <label>
-                Default headers JSON (optional)
-                <textarea
-                  value={addProviderForm.default_headers_text}
-                  onChange={(event) => updateAddProviderField("default_headers_text", event.target.value)}
-                  placeholder='{"HTTP-Referer":"https://example.com"}'
-                />
-              </label>
-              <label>
-                Default query params JSON (optional)
-                <textarea
-                  value={addProviderForm.default_query_params_text}
-                  onChange={(event) => updateAddProviderField("default_query_params_text", event.target.value)}
-                  placeholder='{"api-version":"2024-06-01"}'
-                />
-              </label>
-              <div className="row-actions">
-                <button disabled={addProviderBusy} onClick={() => saveOrTestProvider({ runTest: false })}>
-                  {addProviderBusy ? "Saving..." : "Save Provider"}
-                </button>
-                <button disabled={addProviderBusy} onClick={() => saveOrTestProvider({ runTest: true })}>
-                  {addProviderBusy ? "Testing..." : "Save + Test"}
-                </button>
-              </div>
-              <p className="status-line">{addProviderStatus || "Add any OpenAI-compatible endpoint."}</p>
-            </div>
-
-            <div className="card">
-              <h2>Models</h2>
-              <label>
-                Provider
-                <select value={activeProviderForModels} onChange={(event) => setActiveProviderForModels(event.target.value)}>
-                  <option value="">(select provider)</option>
-                  {providerOptions.map((providerId) => (
-                    <option key={providerId} value={providerId}>
-                      {providerId}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="row-actions">
-                <button disabled={!activeProviderForModels} onClick={() => refreshProviderModels(activeProviderForModels)}>
-                  Fetch Models
-                </button>
-                <button onClick={refreshModels}>Refresh All</button>
-              </div>
-              <div className="model-list">
-                {activeProviderModels.length === 0 ? <p className="empty">No models for selected provider.</p> : null}
-                {activeProviderModels.map((model) => (
-                  <div key={model.id} className="model-row">
-                    <div className="model-head">
-                      <span>{model.id}</span>
-                      <span className={`badge health-${healthLabel(model)}`}>{healthLabel(model)}</span>
-                    </div>
-                    <div className="meta-line">
-                      {model.available ? "available" : "unavailable"} · {model.routable ? "routable" : "not routable"}
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="grid two">
-                <label>
-                  Manual model name
-                  <input
-                    value={manualModelDraft.model}
-                    onChange={(event) => setManualModelDraft((prev) => ({ ...prev, model: event.target.value }))}
-                    placeholder="model-name"
-                  />
-                </label>
-                <label>
-                  Capabilities (comma-separated)
-                  <input
-                    value={manualModelDraft.capabilities}
-                    onChange={(event) => setManualModelDraft((prev) => ({ ...prev, capabilities: event.target.value }))}
-                    placeholder="chat,json,tools"
-                  />
-                </label>
-              </div>
-              <button disabled={!activeProviderForModels} onClick={() => addManualModel(activeProviderForModels)}>
-                Add Model Manually
-              </button>
-            </div>
-
-            {providers.map((provider) => {
-              const draftRow = providerDrafts[provider.id] || {};
-              const keySourceType = provider.api_key_source?.type || "none";
-              const keySourceName = provider.api_key_source?.name || "";
-              return (
-                <div className="card" key={provider.id}>
-                  <h2>
-                    {provider.id} <span className={`badge health-${healthLabel(provider)}`}>{healthLabel(provider)}</span>
-                  </h2>
-                  <div className="grid two">
-                    <label>
-                      Base URL
-                      <input
-                        value={draftRow.base_url || ""}
-                        onChange={(event) => updateProviderField(provider.id, "base_url", event.target.value)}
-                      />
-                    </label>
-                    <label>
-                      Chat path
-                      <input
-                        value={draftRow.chat_path || "/v1/chat/completions"}
-                        onChange={(event) => updateProviderField(provider.id, "chat_path", event.target.value)}
-                      />
-                    </label>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={!!draftRow.enabled}
-                        onChange={(event) => updateProviderField(provider.id, "enabled", event.target.checked)}
-                      />
-                      Enabled
-                    </label>
-                    <label className="checkbox-row">
-                      <input
-                        type="checkbox"
-                        checked={!!draftRow.local}
-                        onChange={(event) => updateProviderField(provider.id, "local", event.target.checked)}
-                      />
-                      Local
-                    </label>
-                  </div>
-
-                  <label>
-                    API Key (stored securely)
-                    <input
-                      type="password"
-                      value={providerSecrets[provider.id] || ""}
-                      onChange={(event) =>
-                        setProviderSecrets((prev) => ({
-                          ...prev,
-                          [provider.id]: event.target.value
-                        }))
-                      }
-                      placeholder="Paste provider key"
-                    />
-                  </label>
-
-                  <div className="row-actions">
-                    <button onClick={() => saveProvider(provider.id)}>Save</button>
-                    <button onClick={() => saveProviderSecret(provider.id)}>Set Key</button>
-                    <button onClick={() => testProvider(provider.id)}>Test</button>
-                    <button onClick={() => deleteProvider(provider.id)}>Delete</button>
-                  </div>
-
-                  <p className="status-line">{providerStatuses[provider.id] || ""}</p>
-                  {provider.health?.last_error_kind ? (
-                    <p className="help-text">
-                      Health: {healthLabel(provider)} · Last error {provider.health.last_error_kind}
-                      {provider.health.status_code ? ` (${provider.health.status_code})` : ""}
-                    </p>
-                  ) : (
-                    <p className="help-text">Health: {healthLabel(provider)}</p>
-                  )}
-                  <p className="help-text">
-                    Key source: {keySourceType}
-                    {keySourceName ? ` (${keySourceName})` : ""}
-                  </p>
-                  <p className="help-text">
-                    Models: {models.filter((model) => model.provider === provider.id).map((model) => model.id).join(", ") || "none"}
-                  </p>
-                </div>
-              );
-            })}
-          </section>
-        ) : null}
-
-        {activeTab === "telegram" ? (
-          <section className="grid">
-            <div className="card">
-              <h2>Telegram Bot</h2>
-              <p className="help-text">
-                Status: {telegramConfigured ? "configured" : "not configured"}
-              </p>
-              <label>
-                Bot token (stored securely)
-                <input
-                  type="password"
-                  value={telegramToken}
-                  onChange={(event) => setTelegramToken(event.target.value)}
-                  placeholder="123456789:AA..."
-                />
-              </label>
-              <div className="row-actions">
-                <button onClick={saveTelegramToken}>Save Token</button>
-                <button onClick={testTelegramToken}>Test Telegram</button>
-              </div>
-              <p className="status-line">{telegramStatus || "No Telegram checks run yet."}</p>
-            </div>
-          </section>
-        ) : null}
-
-        {activeTab === "permissions" ? (
-          <section className="grid two">
-            <div className="card">
-              <h2>ModelOps Permissions</h2>
-              <label>
-                Mode
-                <select
-                  value={permissionsConfig?.mode || "manual_confirm"}
-                  onChange={(event) => setPermissionsConfig((prev) => ({ ...(prev || {}), mode: event.target.value }))}
-                >
-                  <option value="manual_confirm">manual_confirm</option>
-                  <option value="auto">auto</option>
-                </select>
-              </label>
-
-              <div className="grid">
-                {MODELOPS_ACTIONS.map((actionName) => (
-                  <label key={actionName} className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={permissionsConfig?.actions?.[actionName] === true}
-                      onChange={(event) => updatePermissionAction(actionName, event.target.checked)}
-                    />
-                    {actionName}
-                  </label>
-                ))}
-              </div>
-
-              <label>
-                Max download GB
-                <input
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={permissionsConfig?.constraints?.max_download_gb ?? 5}
-                  onChange={(event) => updatePermissionConstraint("max_download_gb", Number(event.target.value || 0))}
-                />
-              </label>
-
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={permissionsConfig?.constraints?.allow_install_ollama === true}
-                  onChange={(event) => updatePermissionConstraint("allow_install_ollama", event.target.checked)}
-                />
-                allow_install_ollama
-              </label>
-
-              <label className="checkbox-row">
-                <input
-                  type="checkbox"
-                  checked={permissionsConfig?.constraints?.allow_remote_models !== false}
-                  onChange={(event) => updatePermissionConstraint("allow_remote_models", event.target.checked)}
-                />
-                allow_remote_models
-              </label>
-
-              <label>
-                Allowed providers (comma separated)
-                <input
-                  value={(permissionsConfig?.constraints?.allowed_providers || []).join(",")}
-                  onChange={(event) =>
-                    updatePermissionConstraint(
-                      "allowed_providers",
-                      event.target.value
-                        .split(",")
-                        .map((item) => item.trim().toLowerCase())
-                        .filter(Boolean)
-                    )
-                  }
-                />
-              </label>
-
-              <label>
-                Allowed model patterns (comma separated)
-                <input
-                  value={(permissionsConfig?.constraints?.allowed_model_patterns || []).join(",")}
-                  onChange={(event) =>
-                    updatePermissionConstraint(
-                      "allowed_model_patterns",
-                      event.target.value
-                        .split(",")
-                        .map((item) => item.trim())
-                        .filter(Boolean)
-                    )
-                  }
-                />
-              </label>
-
-              <div className="row-actions">
-                <button onClick={savePermissions}>Save Permissions</button>
-              </div>
-              <p className="status-line">{permissionsStatus || "Default is deny for all ModelOps actions."}</p>
-            </div>
-
-            <div className="card">
-              <h2>Recent Audit Events</h2>
-              <div className="model-list">
-                {auditEntries.length === 0 ? <p className="empty">No audit events yet.</p> : null}
-                {auditEntries.map((entry, index) => (
-                  <div className="model-row" key={`${entry.ts || "entry"}-${index}`}>
-                    <div className="model-head">
-                      <span>{entry.action}</span>
-                      <span className={`badge ${entry.decision === "allow" ? "health-ok" : "health-down"}`}>{entry.decision}</span>
-                    </div>
-                    <div className="meta-line">
-                      {entry.ts} · outcome {entry.outcome} · reason {entry.reason}
-                    </div>
-                    <div className="meta-line">dry_run {entry.dry_run ? "yes" : "no"} · duration {entry.duration_ms}ms</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </section>
-        ) : null}
-
-        {activeTab === "model_scout" ? (
-          <section className="grid">
-            <div className="card">
-              <h2>Model Scout</h2>
-              <p className="help-text">
-                Status: {modelScoutStatus?.last_run?.ok === false ? "degraded" : "ready"} · Backend: {modelScoutStatus?.backend || "unknown"}
-              </p>
-              <p className="help-text">
-                Suggestions: {modelScoutStatus?.total || 0} total · {(modelScoutStatus?.counts || {}).new || 0} new
-              </p>
-              <p className="help-text">
-                Sources: HF {modelScoutStatus?.sources?.huggingface?.available ? "ok" : "down"} · Ollama{" "}
-                {modelScoutStatus?.sources?.ollama?.available ? "ok" : "down"} · OpenRouter{" "}
-                {modelScoutStatus?.sources?.openrouter?.available ? "ok" : "down"}
-              </p>
-              <div className="row-actions">
-                <button disabled={modelScoutRunning} onClick={runModelScout}>
-                  {modelScoutRunning ? "Running..." : "Run Scout"}
-                </button>
-              </div>
-              <p className="status-line">{modelScoutMessage || "Scout recommends only. It never changes defaults automatically."}</p>
-            </div>
-
-            <div className="card">
-              <h2>Suggestions</h2>
-              <div className="model-list">
-                {modelScoutSuggestions.length === 0 ? <p className="empty">No suggestions yet.</p> : null}
-                {modelScoutSuggestions.map((item) => (
-                  <div key={item.id} className="model-row">
-                    <div className="model-head">
-                      <span>{item.kind === "local" ? item.repo_id : item.model_id}</span>
-                      <span className="badge">{item.kind}</span>
-                    </div>
-                    <div className="meta-line">score {Number(item.score || 0).toFixed(1)} · status {item.status}</div>
-                    <div className="meta-line">{item.rationale}</div>
-                    {item.install_cmd ? <div className="meta-line">Try: {item.install_cmd}</div> : null}
-                    <div className="row-actions">
-                      <button disabled={modelOpsBusy[item.id] === true} onClick={() => planModelOpForSuggestion(item)}>
-                        {modelOpsBusy[item.id] === true ? "Planning..." : "Try This Model"}
-                      </button>
-                      <button
-                        disabled={!modelOpsPlans[item.id]?.decision?.allow || modelOpsBusy[item.id] === true}
-                        onClick={() => executeModelOpForSuggestion(item)}
-                      >
-                        Confirm Execute
-                      </button>
-                      <button onClick={() => dismissScoutSuggestion(item.id)}>Dismiss</button>
-                      <button onClick={() => markScoutSuggestionInstalled(item.id)}>Mark Installed</button>
-                    </div>
-                    {modelOpsPlans[item.id] ? (
-                      <div className="meta-line">
-                        plan: {modelOpsPlans[item.id].decision?.allow ? "allow" : "deny"} · reason{" "}
-                        {modelOpsPlans[item.id].decision?.reason || "n/a"} · steps{" "}
-                        {(modelOpsPlans[item.id].plan?.steps || []).length}
-                      </div>
-                    ) : null}
-                  </div>
-                ))}
-              </div>
-              <p className="status-line">{modelOpsStatus || "Run plan first, then confirm execution."}</p>
-            </div>
-          </section>
-        ) : null}
-
-        {activeTab === "chat" ? (
-          <section className="grid chat-layout">
-            <div className="card chat-card">
-              <h2>Chat</h2>
-              <div className="chat-scroll">
-                {messages.length === 0 ? <p className="empty">Start a conversation.</p> : null}
-                {messages.map((message, index) => (
-                  <MessageBubble key={`${message.role}-${index}`} message={message} />
-                ))}
-              </div>
-              <div className="chat-controls">
-                <input
-                  value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      sendMessage();
-                    }
-                  }}
-                  placeholder="Ask your agent"
-                />
-                <button disabled={chatBusy} onClick={sendMessage}>
-                  {chatBusy ? "Sending..." : "Send"}
-                </button>
-              </div>
-              <div className="row-actions">
-                <button onClick={resetConversation}>Reset</button>
-                <button onClick={exportConversation}>Export</button>
-              </div>
-            </div>
-
-            <div className="card">
-              <h2>Chat Routing</h2>
-              <label>
-                Provider override
-                <select value={selectedProvider} onChange={(event) => setSelectedProvider(event.target.value)}>
-                  <option value="">(defaults)</option>
-                  {providerOptions.map((providerId) => (
-                    <option key={providerId} value={providerId}>
-                      {providerId}
-                    </option>
-                  ))}
-                </select>
-              </label>
-
-              <label>
-                Model override
-                <select value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)}>
-                  <option value="">(defaults)</option>
-                  {modelOptions.map((model) => (
-                    <option key={model.id} value={model.id}>
-                      {model.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </section>
-        ) : null}
-
-        {activeTab === "debug" ? (
-          <section className="card debug-card">
-            <h2>Recent Requests</h2>
-            <div className="debug-list">
-              {logs.length === 0 ? <p className="empty">No requests yet.</p> : null}
-              {logs.map((row, index) => (
-                <div key={`${row.time}-${index}`} className={`debug-item ${row.ok ? "ok" : "error"}`}>
-                  <div className="debug-head">
-                    <span>{row.time}</span>
-                    <span>{row.endpoint}</span>
-                    <span>{row.ok ? "OK" : "ERROR"}</span>
-                  </div>
-                  <p>{row.detail}</p>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
-      </main>
-    </div>
+    <>
+      <ChatExperience
+        chatBusy={chatBusy}
+        composerPlaceholder={composerPlaceholder}
+        draft={draft}
+        messages={messages}
+        onDraftChange={setDraft}
+        onExportConversation={exportConversation}
+        onOpenAdmin={() => setAdminOpen(true)}
+        onResetConversation={resetConversation}
+        onSendMessage={sendMessage}
+        onStarterPrompt={sendMessage}
+        starterPrompts={starterPrompts}
+        status={chatStatus}
+      />
+      <AdminPanel
+        activeSection={adminTab}
+        loading={adminBusy && !adminLoaded}
+        onClose={() => setAdminOpen(false)}
+        onRefresh={() => {
+          void refreshRuntimeState({ includeAdmin: true });
+        }}
+        onSelectSection={setAdminTab}
+        open={adminOpen}
+        sections={adminSections}
+        status={chatStatus}
+      />
+    </>
   );
 }

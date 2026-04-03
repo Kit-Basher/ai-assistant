@@ -4,29 +4,31 @@ import asyncio
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.audit_log import AuditLog
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
 from telegram_adapter.bot import (
     _handle_message,
     _handle_model,
-    classify_model_provider_intent,
 )
 
 
 class _FakeResponse:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, data: dict[str, object] | None = None) -> None:
         self.text = text
-        self.data = None
+        self.data = data
 
 
 class _FakeOrchestrator:
-    def __init__(self) -> None:
+    def __init__(self, reply_text: str = "chat fallback", data: dict[str, object] | None = None) -> None:
+        self.reply_text = reply_text
+        self.data = data
         self.calls: list[tuple[str, str]] = []
 
     def handle_message(self, text: str, *, user_id: str) -> _FakeResponse:
         self.calls.append((text, user_id))
-        return _FakeResponse("chat fallback")
+        return _FakeResponse(self.reply_text, self.data)
 
 
 class _FakeDB:
@@ -167,65 +169,144 @@ def _read_audit_rows(path: str) -> list[dict[str, object]]:
         return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
 
 
+def _read_log_rows(path: str) -> list[dict[str, object]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+
+
+class _ExplodingRuntime:
+    def chat(self, _payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+        raise AssertionError("Telegram ordinary chat should not call a local runtime")
+
+
+class _FakeChatApiBackend:
+    def __init__(self) -> None:
+        self.chat_calls: list[dict[str, object]] = []
+
+    def __call__(self, payload: dict[str, object]) -> dict[str, object]:
+        self.chat_calls.append(dict(payload))
+        messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+        text = str((messages[-1] or {}).get("content") if messages else "").strip().lower()
+        reply_text = "generic reply"
+        route = "generic_chat"
+        used_llm = True
+        used_runtime_state = False
+
+        if text == "hello, is the openrouter setup?":
+            reply_text = "OpenRouter is configured and ready to use."
+            route = "provider_status"
+            used_llm = False
+            used_runtime_state = True
+        elif text == "is the agent healthy right now?":
+            reply_text = "The agent is healthy and ready right now."
+            route = "runtime_status"
+            used_llm = False
+            used_runtime_state = True
+        elif text == "what model are you using?":
+            reply_text = "I’m using ollama / ollama:qwen3.5:4b."
+            route = "model_status"
+            used_llm = False
+            used_runtime_state = True
+        elif text == "check what model is currently enabled please":
+            reply_text = "The current chat model is ollama:qwen3.5:4b on Ollama."
+            route = "model_status"
+            used_llm = False
+            used_runtime_state = True
+        elif text == "is the agent healthy?":
+            reply_text = "The agent is healthy and ready right now."
+            route = "runtime_status"
+            used_llm = False
+            used_runtime_state = True
+        elif text == "is openrouter configured?":
+            reply_text = "Yes. OpenRouter is configured."
+            route = "provider_status"
+            used_llm = False
+            used_runtime_state = True
+        elif text in {
+            "setup openrouter",
+            "setup ollama",
+            "configure ollama",
+            "use ollama",
+            "switch to ollama",
+            "repair openrouter",
+            "openrouter unavailable",
+            "why isn't this working?",
+        }:
+            reply_text = "I can help repair provider setup. Tell me which provider you want to fix."
+            route = "setup_flow"
+            used_llm = False
+            used_runtime_state = True
+
+        return {
+            "ok": True,
+            "assistant": {"content": reply_text},
+            "message": reply_text,
+            "meta": {
+                "route": route,
+                "used_llm": used_llm,
+                "used_memory": False,
+                "used_runtime_state": used_runtime_state,
+                "used_tools": [],
+                "generic_fallback_used": False,
+                "generic_fallback_reason": None,
+            },
+        }
+
+
 class TestTelegramModelProviderRouter(unittest.TestCase):
-    def test_classify_model_provider_intent(self) -> None:
-        self.assertEqual("model_watch.run_now", classify_model_provider_intent("check for new models"))
-        self.assertEqual("provider.status", classify_model_provider_intent("what model are we using"))
-        self.assertEqual("none", classify_model_provider_intent("setup ollama"))
-        self.assertEqual("none", classify_model_provider_intent("setup openrouter"))
-        self.assertEqual("none", classify_model_provider_intent("repair openrouter"))
-        self.assertEqual("none", classify_model_provider_intent("openrouter unavailable"))
-        self.assertEqual("none", classify_model_provider_intent("setup"))
-        self.assertEqual("none", classify_model_provider_intent("write me a poem"))
-
-    def test_prerouter_model_status_text(self) -> None:
+    def test_exact_runtime_queries_use_canonical_telegram_router(self) -> None:
+        phrases = (
+            ("hello, is the openrouter setup?", "provider_status", "OpenRouter is configured and ready to use."),
+            ("is the agent healthy right now?", "runtime_status", "The agent is healthy and ready right now."),
+            ("what model are you using?", "model_status", "I’m using ollama / ollama:qwen3.5:4b."),
+            ("check what model is currently enabled please", "model_status", "The current chat model is ollama:qwen3.5:4b on Ollama."),
+            ("is the agent healthy?", "runtime_status", "The agent is healthy and ready right now."),
+            ("is openrouter configured?", "provider_status", "Yes. OpenRouter is configured."),
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _FakeRuntime()
+            api_backend = _FakeChatApiBackend()
             orchestrator = _FakeOrchestrator()
-            audit_log = AuditLog(path=f"{tmpdir}/audit.jsonl")
+            log_path = f"{tmpdir}/agent.log"
             context = _FakeContext(
                 {
-                    "runtime": runtime,
+                    "runtime": _ExplodingRuntime(),
                     "orchestrator": orchestrator,
                     "db": _FakeDB(),
-                    "log_path": f"{tmpdir}/agent.log",
-                    "audit_log": audit_log,
-                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
-                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
-                }
-            )
-            update = _FakeUpdate(12345, "what model are we using")
-            asyncio.run(_handle_message(update, context))
-
-            self.assertTrue(update.effective_message.replies)
-            reply = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Current provider/model:", reply)
-            self.assertIn("Configured providers:", reply)
-            self.assertEqual([], orchestrator.calls)
-
-    def test_prerouter_check_models_runs_model_watch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _FakeRuntime()
-            runtime._watch_payload = {"ok": True, "proposal": None}
-            orchestrator = _FakeOrchestrator()
-            context = _FakeContext(
-                {
-                    "runtime": runtime,
-                    "orchestrator": orchestrator,
-                    "db": _FakeDB(),
-                    "log_path": f"{tmpdir}/agent.log",
+                    "log_path": log_path,
                     "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
                     "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
                     "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
                 }
             )
-            update = _FakeUpdate(12345, "check for new/better models")
-            asyncio.run(_handle_message(update, context))
 
-            self.assertEqual(1, runtime.model_watch_calls)
-            reply = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("No new better models in configured providers.", reply)
+            with patch("telegram_adapter.bot._post_local_api_chat_json_async", side_effect=api_backend):
+                for phrase, expected_route, expected_text in phrases:
+                    update = _FakeUpdate(12345, phrase)
+                    asyncio.run(_handle_message(update, context))
+                    reply = str(update.effective_message.replies[-1]["text"] or "")
+                    self.assertEqual(expected_text, reply)
+                    self.assertNotIn("brief:", reply.lower())
+                    self.assertNotIn("response:", reply.lower())
+
             self.assertEqual([], orchestrator.calls)
+            self.assertEqual([item[0] for item in phrases], [str(((call.get("messages") or [{}])[-1]).get("content") or "") for call in api_backend.chat_calls])
+
+            log_rows = _read_log_rows(log_path)
+            telegram_rows = [
+                row.get("payload")
+                for row in log_rows
+                if str(row.get("type")) == "telegram_message" and isinstance(row.get("payload"), dict)
+            ]
+            self.assertEqual(len(phrases), len(telegram_rows))
+            selected_routes = [str(row.get("selected_route") or "") for row in telegram_rows]
+            self.assertEqual(
+                ["provider_status", "runtime_status", "model_status", "model_status", "runtime_status", "provider_status"],
+                selected_routes,
+            )
+            for row in telegram_rows:
+                self.assertEqual("api_chat_proxy", row.get("handler_name"))
+                self.assertTrue(bool(row.get("used_runtime_state")))
+                self.assertFalse(bool(row.get("legacy_compatibility")))
 
     def test_rotate_token_text_routes_to_setup_response(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -613,70 +694,51 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertNotIn("Reply 1, 2, or 3.", reply)
             self.assertEqual([], orchestrator.calls)
 
-    def test_why_not_working_routes_to_setup_guidance(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _FakeRuntime()
-            runtime._status_payload = {
-                "ok": True,
-                "default_provider": "ollama",
-                "default_model": None,
-                "resolved_default_model": None,
-                "allow_remote_fallback": False,
-                "active_provider_health": {"status": "down"},
-                "active_model_health": {"status": "down"},
-                "providers": [{"id": "ollama", "enabled": True, "health": {"status": "down"}}],
-                "models": [],
-            }
-            orchestrator = _FakeOrchestrator()
-            context = _FakeContext(
-                {
-                    "runtime": runtime,
-                    "orchestrator": orchestrator,
-                    "db": _FakeDB(),
-                    "log_path": f"{tmpdir}/agent.log",
-                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
-                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
-                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
-                }
-            )
-            update = _FakeUpdate(12345, "why isn't this working?")
-            asyncio.run(_handle_message(update, context))
-            reply = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Setup state:", reply)
-            self.assertIn("Next:", reply)
-            self.assertEqual([], orchestrator.calls)
-
-    def test_provider_specific_setup_phrases_route_to_canonical_setup(self) -> None:
+    def test_setup_language_routes_through_canonical_runtime_chat(self) -> None:
         phrases = (
+            "why isn't this working?",
             "setup openrouter",
             "setup ollama",
+            "configure ollama",
+            "use ollama",
+            "switch to ollama",
             "repair openrouter",
             "openrouter unavailable",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _FakeRuntime()
+            api_backend = _FakeChatApiBackend()
             orchestrator = _FakeOrchestrator()
+            log_path = f"{tmpdir}/agent.log"
             context = _FakeContext(
                 {
-                    "runtime": runtime,
+                    "runtime": _ExplodingRuntime(),
                     "orchestrator": orchestrator,
                     "db": _FakeDB(),
-                    "log_path": f"{tmpdir}/agent.log",
+                    "log_path": log_path,
                     "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
                     "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
                     "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
                 }
             )
 
-            for phrase in phrases:
-                update = _FakeUpdate(12345, phrase)
-                asyncio.run(_handle_message(update, context))
-                reply = str(update.effective_message.replies[-1]["text"] or "")
-                self.assertNotIn("OpenRouter setup", reply)
-                self.assertNotIn("ollama pull", reply)
-                self.assertNotIn("ollama list", reply)
-                self.assertIn("Setup", reply)
+            with patch("telegram_adapter.bot._post_local_api_chat_json_async", side_effect=api_backend):
+                for phrase in phrases:
+                    update = _FakeUpdate(12345, phrase)
+                    asyncio.run(_handle_message(update, context))
+                    reply = str(update.effective_message.replies[-1]["text"] or "")
+                    self.assertIn("repair provider setup", reply.lower())
+                    self.assertNotIn("ollama pull", reply)
+                    self.assertNotIn("ollama list", reply)
+
             self.assertEqual([], orchestrator.calls)
+            log_rows = _read_log_rows(log_path)
+            telegram_rows = [
+                row.get("payload")
+                for row in log_rows
+                if str(row.get("type")) == "telegram_message" and isinstance(row.get("payload"), dict)
+            ]
+            self.assertEqual(["setup_flow"] * len(phrases), [str(row.get("selected_route") or "") for row in telegram_rows])
+            self.assertTrue(all(str(row.get("handler_name") or "") == "api_chat_proxy" for row in telegram_rows))
 
     def test_numeric_without_active_wizard_returns_no_active_choice(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -704,67 +766,35 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
             self.assertEqual("numeric_no_wizard", params.get("route"))
 
-    def test_unknown_text_clarifies_when_llm_available(self) -> None:
+    def test_generic_text_uses_api_backed_generic_chat(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _FakeRuntime()
-            runtime._llm_available = True
-            orchestrator = _FakeOrchestrator()
+            api_backend = _FakeChatApiBackend()
+            orchestrator = _FakeOrchestrator(
+                reply_text="chat fallback",
+                data={
+                    "route": "generic_chat",
+                    "used_llm": True,
+                    "used_memory": True,
+                    "used_runtime_state": False,
+                    "used_tools": [],
+                },
+            )
             context = _FakeContext(
                 {
-                    "runtime": runtime,
                     "orchestrator": orchestrator,
                     "db": _FakeDB(),
                     "log_path": f"{tmpdir}/agent.log",
                     "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
-                    "llm_fixit_fn": lambda _payload: (True, {"ok": True}),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
                     "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
+                    "runtime": _ExplodingRuntime(),
                 }
             )
             update = _FakeUpdate(12345, "fix it")
-            asyncio.run(_handle_message(update, context))
+            with patch("telegram_adapter.bot._post_local_api_chat_json_async", side_effect=api_backend):
+                asyncio.run(_handle_message(update, context))
             reply = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Do you mean:", reply)
-            self.assertIn("A)", reply)
-            self.assertIn("B)", reply)
-            self.assertEqual([], orchestrator.calls)
-
-    def test_unknown_text_suggests_and_numeric_choice_is_intercepted_when_llm_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            runtime = _FakeRuntime()
-            runtime._llm_available = False
-            runtime._status_payload = {
-                "ok": True,
-                "default_provider": "ollama",
-                "default_model": None,
-                "resolved_default_model": None,
-                "allow_remote_fallback": False,
-                "active_provider_health": {"status": "down"},
-                "active_model_health": {"status": "down"},
-                "providers": [{"id": "ollama", "enabled": True, "health": {"status": "down"}}],
-                "models": [],
-            }
-            orchestrator = _FakeOrchestrator()
-            context = _FakeContext(
-                {
-                    "runtime": runtime,
-                    "orchestrator": orchestrator,
-                    "db": _FakeDB(),
-                    "log_path": f"{tmpdir}/agent.log",
-                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
-                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "fixit prompt"}),
-                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/fixit.json"),
-                }
-            )
-            first = _FakeUpdate(12345, "fix it")
-            asyncio.run(_handle_message(first, context))
-            first_reply = str(first.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Setup state:", first_reply)
-            self.assertIn("Next:", first_reply)
-            self.assertNotIn("Reply 1, 2, or 3.", first_reply)
-            second = _FakeUpdate(12345, "1")
-            asyncio.run(_handle_message(second, context))
-            second_reply = str(second.effective_message.replies[-1]["text"] or "")
-            self.assertIn("No active choice right now", second_reply)
+            self.assertEqual("generic reply", reply)
             self.assertEqual([], orchestrator.calls)
 
     def test_transport_source_guard_has_no_setup_wizard_or_direct_pull_guidance(self) -> None:

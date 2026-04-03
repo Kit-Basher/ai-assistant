@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 from agent.secret_store import SecretStore
 from agent.secrets import main
@@ -54,6 +55,29 @@ class TestAgentSecretsCLI(unittest.TestCase):
         self.assertEqual(2, exit_code)
         self.assertEqual("", stdout.getvalue().strip())
         self.assertIn("format looks invalid", stderr.getvalue())
+
+    def test_file_secret_reads_are_cached_until_file_changes(self) -> None:
+        SecretStore(path=os.environ["AGENT_SECRET_STORE_PATH"]).set_secret(
+            "telegram:bot_token",
+            "1234567:abcdefghijklmnopqrstuvwxyz_123456",
+        )
+        store = SecretStore(path=os.environ["AGENT_SECRET_STORE_PATH"])
+        with patch.object(SecretStore, "_decrypt_payload", wraps=SecretStore._decrypt_payload) as decrypt_payload:
+            self.assertEqual(
+                "1234567:abcdefghijklmnopqrstuvwxyz_123456",
+                store.get_secret("telegram:bot_token"),
+            )
+            self.assertEqual(
+                "1234567:abcdefghijklmnopqrstuvwxyz_123456",
+                store.get_secret("telegram:bot_token"),
+            )
+            self.assertEqual(1, decrypt_payload.call_count)
+            store.set_secret("telegram:bot_token", "7654321:zyxwvutsrqponmlkjihgfedcba_654321")
+            self.assertEqual(
+                "7654321:zyxwvutsrqponmlkjihgfedcba_654321",
+                store.get_secret("telegram:bot_token"),
+            )
+            self.assertEqual(1, decrypt_payload.call_count)
 
 
 if __name__ == "__main__":

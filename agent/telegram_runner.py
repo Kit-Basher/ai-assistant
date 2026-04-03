@@ -177,8 +177,16 @@ class TelegramRunner:
                 app = self._app_factory(
                     config=self._runtime.config,
                     token=token,
-                    llm_fixit_fn=self._runtime.llm_fixit,
-                    llm_fixit_store=getattr(self._runtime, "_llm_fixit_store", None),
+                    operator_recovery_fn=(
+                        self._runtime.operator_recovery
+                        if callable(getattr(self._runtime, "operator_recovery", None))
+                        else self._runtime.llm_fixit
+                    ),
+                    operator_recovery_store=(
+                        self._runtime.operator_recovery_store()
+                        if callable(getattr(self._runtime, "operator_recovery_store", None))
+                        else getattr(self._runtime, "_llm_fixit_store", None)
+                    ),
                     audit_log=self._audit_log,
                     runtime=self._runtime,
                 )

@@ -2,7 +2,53 @@ from __future__ import annotations
 
 import unittest
 
+from agent.config import Config
 from agent.llm.autoconfig import build_autoconfig_plan
+
+
+def _config() -> Config:
+    return Config(
+        telegram_bot_token="token",
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
+        openai_model_worker=None,
+        agent_timezone="UTC",
+        db_path="/tmp/agent.db",
+        log_path="/tmp/agent.log",
+        skills_path="/tmp/skills",
+        ollama_host="http://127.0.0.1:11434",
+        ollama_model="llama3",
+        ollama_model_sentinel=None,
+        ollama_model_worker=None,
+        allow_cloud=True,
+        prefer_local=True,
+        llm_timeout_seconds=15,
+        llm_provider="none",
+        enable_llm_presentation=False,
+        openai_base_url=None,
+        ollama_base_url="http://127.0.0.1:11434",
+        anthropic_api_key=None,
+        llm_selector="single",
+        llm_broker_policy_path=None,
+        llm_allow_remote=True,
+        openrouter_api_key=None,
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        openrouter_model="openai/gpt-4o-mini",
+        openrouter_site_url=None,
+        openrouter_app_name=None,
+        llm_registry_path=None,
+        llm_routing_mode="auto",
+        llm_retry_attempts=1,
+        llm_retry_base_delay_ms=0,
+        llm_circuit_breaker_failures=2,
+        llm_circuit_breaker_window_seconds=60,
+        llm_circuit_breaker_cooldown_seconds=30,
+        llm_usage_stats_path="/tmp/usage.json",
+        llm_health_state_path="/tmp/health.json",
+        llm_automation_enabled=False,
+        model_scout_state_path="/tmp/scout.json",
+        autopilot_notify_store_path="/tmp/notify.json",
+    )
 
 
 def _registry_document() -> dict[str, object]:
@@ -40,6 +86,7 @@ def _registry_document() -> dict[str, object]:
                 "cost_rank": 3,
                 "enabled": True,
                 "available": True,
+                "pricing": {"input_per_million_tokens": 0.1, "output_per_million_tokens": 0.1},
             },
         },
         "defaults": {
@@ -66,6 +113,7 @@ class TestLLMAutoconfig(unittest.TestCase):
         plan = build_autoconfig_plan(
             _registry_document(),
             summary,
+            config=_config(),
             env={"OPENROUTER_API_KEY": "sk-test"},
         )
         proposed = plan["proposed_defaults"]
@@ -90,6 +138,7 @@ class TestLLMAutoconfig(unittest.TestCase):
         plan = build_autoconfig_plan(
             doc,
             summary,
+            config=_config(),
             env={"OPENROUTER_API_KEY": "sk-test"},
             disable_auth_failed_providers=True,
         )
@@ -115,6 +164,7 @@ class TestLLMAutoconfig(unittest.TestCase):
         plan = build_autoconfig_plan(
             _registry_document(),
             summary,
+            config=_config(),
             env={"OPENROUTER_API_KEY": "sk-test"},
         )
         proposed = plan["proposed_defaults"]
@@ -143,6 +193,7 @@ class TestLLMAutoconfig(unittest.TestCase):
         plan = build_autoconfig_plan(
             doc,
             summary,
+            config=_config(),
             env={"OPENROUTER_API_KEY": "sk-test"},
         )
         self.assertEqual([], plan["changes"])

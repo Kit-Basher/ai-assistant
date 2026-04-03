@@ -1,2 +1,3 @@
-python-telegram-bot>=22.6
-openai>=1.0.0
+# Canonical dependency metadata lives in pyproject.toml.
+# This file remains as a compatibility shim for repo-local installs.
+-e .

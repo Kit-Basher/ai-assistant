@@ -431,3 +431,50 @@ class SQLiteMemoryStore:
     def get_bool_state(self, key: str) -> bool:
         value = str(self.get_state(key) or "").strip().lower()
         return value in {"1", "true", "yes", "y", "on"}
+
+    def stats(self) -> dict[str, Any]:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM memory_items) AS memory_items_count,
+                    (SELECT COUNT(*) FROM memory_items WHERE level = ?) AS semantic_items_count,
+                    (SELECT COUNT(*) FROM memory_items WHERE level = ?) AS procedural_items_count,
+                    (SELECT COUNT(*) FROM memory_events) AS episodic_events_count,
+                    (SELECT COUNT(*) FROM bootstrap_state) AS bootstrap_state_count
+                """,
+                (
+                    MemoryLevel.SEMANTIC.value,
+                    MemoryLevel.PROCEDURAL.value,
+                ),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return {
+                "memory_items_count": 0,
+                "semantic_items_count": 0,
+                "procedural_items_count": 0,
+                "episodic_events_count": 0,
+                "bootstrap_state_count": 0,
+            }
+        return {
+            "memory_items_count": int(row["memory_items_count"]),
+            "semantic_items_count": int(row["semantic_items_count"]),
+            "procedural_items_count": int(row["procedural_items_count"]),
+            "episodic_events_count": int(row["episodic_events_count"]),
+            "bootstrap_state_count": int(row["bootstrap_state_count"]),
+        }
+
+    def clear_all(self) -> dict[str, int]:
+        before = self.stats()
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM memory_items")
+            conn.execute("DELETE FROM memory_events")
+            conn.execute("DELETE FROM bootstrap_state")
+            conn.commit()
+        finally:
+            conn.close()
+        return before

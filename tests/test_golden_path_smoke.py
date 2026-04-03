@@ -76,7 +76,32 @@ class TestGoldenPathSmoke(unittest.TestCase):
     def test_cli_smoke_commands(self) -> None:
         with patch("agent.cli.doctor_main", return_value=0):
             self.assertEqual(0, cli.main(["doctor"]))
-        with patch("agent.cli._http_json", return_value=(True, {"ready": True, "message": "Ready.", "telegram": {"state": "running"}})):
+        with patch(
+            "agent.cli._load_ready_status_payload",
+            return_value=(
+                True,
+                {
+                    "ok": True,
+                    "ready": True,
+                    "message": "Ready.",
+                    "runtime_mode": "READY",
+                    "runtime_status": {
+                        "runtime_mode": "READY",
+                        "summary": "Agent is ready.",
+                    },
+                    "telegram": {"state": "running"},
+                },
+            ),
+        ), patch(
+            "agent.cli._load_runtime_status_payload",
+            return_value=(False, "runtime_unavailable"),
+        ), patch(
+            "agent.cli._load_runtime_history_payload",
+            return_value=(False, "runtime_history_unavailable"),
+        ), patch(
+            "agent.cli.get_telegram_runtime_state",
+            return_value={"effective_state": "enabled_running", "next_action": "No action needed."},
+        ):
             self.assertEqual(0, cli.main(["status"]))
         with patch("agent.cli._resolve_git_commit", return_value="abc1234"):
             self.assertEqual(0, cli.main(["version"]))
@@ -109,6 +134,102 @@ class TestGoldenPathSmoke(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             orchestrator = _FakeOrchestrator(reply_text="LLM_CHAT_REPLY")
+
+            async def _fake_handle_telegram_text_via_local_api(**kwargs):  # type: ignore[no-untyped-def]
+                text = str(kwargs.get("text") or "").strip().lower()
+                chat_id = str(kwargs.get("chat_id") or "")
+                if text == "help":
+                    return {
+                        "ok": True,
+                        "text": "Available commands:\n\ndoctor\nsetup\nstatus\nhealth\nbrief\nmemory",
+                        "route": "help",
+                        "selected_route": "help",
+                        "handler_name": "test_bridge",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                        "legacy_compatibility": False,
+                        "generic_fallback_used": False,
+                        "generic_fallback_reason": None,
+                    }
+                if text == "doctor":
+                    return {
+                        "ok": True,
+                        "text": "Doctor: OK",
+                        "route": "doctor",
+                        "selected_route": "doctor",
+                        "handler_name": "test_bridge",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                        "legacy_compatibility": False,
+                        "generic_fallback_used": False,
+                        "generic_fallback_reason": None,
+                    }
+                if "show me the status" in text:
+                    return {
+                        "ok": True,
+                        "text": "Agent is ready.\nruntime_mode: READY\ntelegram: running",
+                        "route": "status",
+                        "selected_route": "status",
+                        "handler_name": "test_bridge",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                        "legacy_compatibility": False,
+                        "generic_fallback_used": False,
+                        "generic_fallback_reason": None,
+                    }
+                if "health" in text:
+                    orchestrator.handle_message("/health", user_id=chat_id)
+                    return {
+                        "ok": True,
+                        "text": "Health route ok",
+                        "route": "health",
+                        "selected_route": "health",
+                        "handler_name": "test_bridge",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                        "legacy_compatibility": False,
+                        "generic_fallback_used": False,
+                        "generic_fallback_reason": None,
+                    }
+                if "what changed on my pc" in text:
+                    orchestrator.handle_message("/brief", user_id=chat_id)
+                    return {
+                        "ok": True,
+                        "text": "Brief route ok",
+                        "route": "brief",
+                        "selected_route": "brief",
+                        "handler_name": "test_bridge",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                        "legacy_compatibility": False,
+                        "generic_fallback_used": False,
+                        "generic_fallback_reason": None,
+                    }
+                return {
+                    "ok": True,
+                    "text": "LLM_CHAT_REPLY",
+                    "route": "generic_chat",
+                    "selected_route": "generic_chat",
+                    "handler_name": "test_bridge",
+                    "used_llm": True,
+                    "used_memory": False,
+                    "used_runtime_state": False,
+                    "used_tools": [],
+                    "legacy_compatibility": False,
+                    "generic_fallback_used": False,
+                    "generic_fallback_reason": None,
+                }
+
             context = _FakeContext(
                 {
                     "orchestrator": orchestrator,
@@ -121,41 +242,45 @@ class TestGoldenPathSmoke(unittest.TestCase):
                 }
             )
 
-            hello = _FakeUpdate(42, "hello")
-            asyncio.run(_handle_message(hello, context))
-            self.assertIn("LLM_CHAT_REPLY", str(hello.effective_message.replies[-1]["text"] or ""))
+            with patch(
+                "telegram_adapter.bot._handle_telegram_text_via_local_api",
+                side_effect=_fake_handle_telegram_text_via_local_api,
+            ):
+                hello = _FakeUpdate(42, "hello")
+                asyncio.run(_handle_message(hello, context))
+                self.assertIn("LLM_CHAT_REPLY", str(hello.effective_message.replies[-1]["text"] or ""))
 
-            help_update = _FakeUpdate(42, "help")
-            asyncio.run(_handle_message(help_update, context))
-            self.assertIn("Available commands:", str(help_update.effective_message.replies[-1]["text"] or ""))
+                help_update = _FakeUpdate(42, "help")
+                asyncio.run(_handle_message(help_update, context))
+                self.assertIn("Available commands:", str(help_update.effective_message.replies[-1]["text"] or ""))
 
-            report = DoctorReport(
-                trace_id="doctor-1",
-                generated_at="2026-03-06T00:00:00+00:00",
-                summary_status="OK",
-                checks=[DoctorCheck("a", "OK", "ok")],
-                next_action=None,
-                fixes_applied=[],
-                support_bundle_path=None,
-            )
-            with patch("agent.telegram_bridge.run_doctor_report", return_value=report):
-                doctor = _FakeUpdate(42, "doctor")
-                asyncio.run(_handle_message(doctor, context))
-            self.assertIn("Doctor: OK", str(doctor.effective_message.replies[-1]["text"] or ""))
+                report = DoctorReport(
+                    trace_id="doctor-1",
+                    generated_at="2026-03-06T00:00:00+00:00",
+                    summary_status="OK",
+                    checks=[DoctorCheck("a", "OK", "ok")],
+                    next_action=None,
+                    fixes_applied=[],
+                    support_bundle_path=None,
+                )
+                with patch("agent.telegram_bridge.run_doctor_report", return_value=report):
+                    doctor = _FakeUpdate(42, "doctor")
+                    asyncio.run(_handle_message(doctor, context))
+                self.assertIn("Doctor: OK", str(doctor.effective_message.replies[-1]["text"] or ""))
 
-            status = _FakeUpdate(42, "show me the status")
-            asyncio.run(_handle_message(status, context))
-            status_text = str(status.effective_message.replies[-1]["text"] or "")
-            self.assertIn("runtime_mode: READY", status_text)
-            self.assertNotIn("ENABLE_WRITES", status_text)
+                status = _FakeUpdate(42, "show me the status")
+                asyncio.run(_handle_message(status, context))
+                status_text = str(status.effective_message.replies[-1]["text"] or "")
+                self.assertIn("runtime_mode: READY", status_text)
+                self.assertNotIn("ENABLE_WRITES", status_text)
 
-            health = _FakeUpdate(42, "how is the bot health")
-            asyncio.run(_handle_message(health, context))
-            self.assertIn(("/health", "42"), orchestrator.calls)
+                health = _FakeUpdate(42, "how is the bot health")
+                asyncio.run(_handle_message(health, context))
+                self.assertIn(("/health", "42"), orchestrator.calls)
 
-            brief = _FakeUpdate(42, "what changed on my pc?")
-            asyncio.run(_handle_message(brief, context))
-            self.assertIn(("/brief", "42"), orchestrator.calls)
+                brief = _FakeUpdate(42, "what changed on my pc?")
+                asyncio.run(_handle_message(brief, context))
+                self.assertIn(("/brief", "42"), orchestrator.calls)
 
     def test_llm_unavailable_bootstrap_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

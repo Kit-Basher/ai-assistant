@@ -27,12 +27,63 @@ class TestNLRouterCards(unittest.TestCase):
     def test_intent_classification(self) -> None:
         self.assertEqual(classify_free_text("what changed on my disk?"), "EXPLAIN_PREVIOUS")
         self.assertEqual(classify_free_text("how is cpu and memory"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("what other pc stats can you find?"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("can you tell what CPU and GPU I have?"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("can you run a check and see if you can learn more?"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("can you dig deeper into my system?"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("run a system check"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("remember this for later"), "MEMORY_WRITE_REQUEST")
         self.assertEqual(classify_free_text("plan my day"), "PLAN_DAY")
+        self.assertEqual(classify_free_text("can you help me plan my day?"), "PLAN_DAY")
         self.assertEqual(classify_free_text("daily brief status"), "DAILY_BRIEF_STATUS")
         self.assertEqual(classify_free_text("what do you remember about me?"), "MEMORY_INSPECT")
+        self.assertEqual(classify_free_text("what are we working on?"), "MEMORY_INSPECT")
+        self.assertEqual(classify_free_text("what do you know about my system?"), "MEMORY_INSPECT")
         self.assertEqual(classify_free_text("hello"), "CHITCHAT")
         self.assertEqual(classify_free_text("lorem ipsum"), "UNKNOWN")
+
+    def test_machine_and_hardware_prompts_select_expected_skills(self) -> None:
+        broad = nl_route("what other pc stats can you find?")
+        hardware = nl_route("can you tell what CPU and GPU I have?")
+        gpu = nl_route("can you see the GPU?")
+        deeper = nl_route("can you run a check and see if you can learn more?")
+        deeper_system = nl_route("can you dig deeper into my system?")
+        system_check = nl_route("run a system check")
+
+        self.assertEqual(
+            broad["skills"],
+            [
+                {"skill": "hardware_report", "function": "hardware_report"},
+                {"skill": "resource_governor", "function": "resource_report"},
+                {"skill": "storage_governor", "function": "storage_report"},
+            ],
+        )
+        self.assertEqual(hardware["skills"], [{"skill": "hardware_report", "function": "hardware_report"}])
+        self.assertEqual(gpu["skills"], [{"skill": "hardware_report", "function": "hardware_report"}])
+        self.assertEqual(
+            deeper["skills"],
+            [
+                {"skill": "hardware_report", "function": "hardware_report"},
+                {"skill": "resource_governor", "function": "resource_report"},
+                {"skill": "storage_governor", "function": "storage_report"},
+            ],
+        )
+        self.assertEqual(
+            deeper_system["skills"],
+            [
+                {"skill": "hardware_report", "function": "hardware_report"},
+                {"skill": "resource_governor", "function": "resource_report"},
+                {"skill": "storage_governor", "function": "storage_report"},
+            ],
+        )
+        self.assertEqual(
+            system_check["skills"],
+            [
+                {"skill": "hardware_report", "function": "hardware_report"},
+                {"skill": "resource_governor", "function": "resource_report"},
+                {"skill": "storage_governor", "function": "storage_report"},
+            ],
+        )
 
     def test_card_schema_validation(self) -> None:
         payload = {
@@ -109,10 +160,12 @@ class TestNLRouterCards(unittest.TestCase):
         response = orchestrator.handle_message("what changed on my disk?", "user-1")
         self.assertEqual(called["storage"], 1)
         self.assertEqual(called["resource"], 0)
-        ok, err = validate_cards_payload(response.data or {})
+        data = response.data or {}
+        payload = data.get("runtime_payload") if isinstance(data.get("runtime_payload"), dict) else {}
+        ok, err = validate_cards_payload(payload)
         self.assertTrue(ok, msg=err)
 
-        rendered = render_cards_markdown(response.data or {})
+        rendered = render_cards_markdown(payload)
         self.assertEqual(response.text, rendered)
         self.assertIn("*Disk usage*", response.text)
 
@@ -182,7 +235,7 @@ class TestNLRouterCards(unittest.TestCase):
         )
         self.db.add_task(None, "Write report", 30, 4)
         response = orchestrator.handle_message("plan my day", "user-1")
-        self.assertIn("Today plan", response.text)
+        self.assertIn("Today priorities", response.text)
 
     def test_today_followups_quick_wins_and_top3(self) -> None:
         orchestrator = Orchestrator(
@@ -308,11 +361,18 @@ class TestNLRouterCards(unittest.TestCase):
             llm_client=None,
         )
         self.db.set_preference("max_cards", "4")
+        self.db.set_preference("response_style", "concise")
+        self.db.add_open_loop("finish the docs", "2026-03-20")
+        orchestrator._memory_runtime.set_current_topic("user-1", topic="safe mode stabilization")
         response = orchestrator.handle_message("what do you remember about me?", "user-1")
-        ok, err = validate_cards_payload(response.data or {})
-        self.assertTrue(ok, msg=err)
-        self.assertIn("What I remember about you", response.text)
-        self.assertIn("updated", response.text)
+        data = response.data or {}
+        payload = data.get("runtime_payload") if isinstance(data.get("runtime_payload"), dict) else {}
+        self.assertEqual("agent_memory", data.get("route"))
+        self.assertEqual("memory_summary", payload.get("kind"))
+        self.assertIn("useful memory", response.text.lower())
+        self.assertIn("preferences i know", response.text.lower())
+        self.assertIn("open loops i am tracking", response.text.lower())
+        self.assertNotIn("database", response.text.lower())
 
 
 if __name__ == "__main__":

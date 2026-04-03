@@ -8,7 +8,7 @@ from agent.llm.policy import RoutingPolicy
 from agent.llm.providers.base import Provider
 from agent.llm.registry import DefaultsConfig, ModelConfig, ProviderConfig, Registry
 from agent.llm.router import LLMRouter
-from agent.llm.types import LLMError, Request, Response, Usage
+from agent.llm.types import EmbeddingResponse, LLMError, Request, Response, Usage
 from agent.llm.usage_stats import UsageStatsStore
 
 
@@ -36,6 +36,12 @@ class FakeProvider(Provider):
         if isinstance(value, LLMError):
             raise value
         return value
+
+    def embed_texts(self, texts: tuple[str, ...], *, model: str, timeout_seconds: float) -> EmbeddingResponse:
+        _ = texts
+        _ = timeout_seconds
+        self.calls += 1
+        return EmbeddingResponse(provider=self._name, model=model, vectors=((0.1, 0.2, 0.3),), usage=Usage(3, 0, 3))
 
 
 def _config(**overrides) -> Config:
@@ -123,6 +129,7 @@ def _registry() -> Registry:
             provider="local",
             model="chat",
             capabilities=frozenset({"chat"}),
+            task_types=("chat",),
             quality_rank=2,
             cost_rank=0,
             default_for=("chat",),
@@ -136,6 +143,7 @@ def _registry() -> Registry:
             provider="remote_a",
             model="cheap",
             capabilities=frozenset({"chat", "vision"}),
+            task_types=("chat",),
             quality_rank=5,
             cost_rank=2,
             default_for=("chat",),
@@ -149,6 +157,7 @@ def _registry() -> Registry:
             provider="remote_b",
             model="expensive",
             capabilities=frozenset({"chat", "vision"}),
+            task_types=("chat",),
             quality_rank=6,
             cost_rank=4,
             default_for=("chat",),
@@ -162,6 +171,7 @@ def _registry() -> Registry:
             provider="remote_b",
             model="tool",
             capabilities=frozenset({"chat", "tools", "json"}),
+            task_types=("chat",),
             quality_rank=7,
             cost_rank=3,
             default_for=("chat",),

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from agent.llm.providers.base import Provider
-from agent.llm.types import LLMError, Message, Request, Response, ToolCall, Usage
+from agent.llm.types import EmbeddingResponse, LLMError, Message, Request, Response, ToolCall, Usage
 
 
 def _as_text(value: Any) -> str:
@@ -192,6 +192,66 @@ class OpenAIProvider(Provider):
             model=model,
             usage=self._extract_usage(raw),
             tool_calls=self._extract_tool_calls(raw),
+            raw=raw,
+        )
+
+    @staticmethod
+    def _extract_embeddings(raw: Any) -> tuple[tuple[float, ...], ...]:
+        data = getattr(raw, "data", None)
+        if not isinstance(data, list):
+            return ()
+        vectors: list[tuple[float, ...]] = []
+        for item in data:
+            embedding = getattr(item, "embedding", None)
+            if not isinstance(embedding, list):
+                continue
+            vector: list[float] = []
+            for value in embedding:
+                try:
+                    vector.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            if vector:
+                vectors.append(tuple(vector))
+        return tuple(vectors)
+
+    def embed_texts(self, texts: tuple[str, ...], *, model: str, timeout_seconds: float) -> EmbeddingResponse:
+        if not self.available():
+            raise LLMError(
+                kind="auth_error",
+                retriable=False,
+                provider=self.name,
+                status_code=None,
+                message="Provider is not configured.",
+                raw=None,
+            )
+
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": [str(text) for text in texts] if texts else ["ping"],
+        }
+        client = self._client()
+        try:
+            raw = client.embeddings.create(timeout=timeout_seconds, **payload)
+        except Exception as exc:
+            raise self._normalize_exception(exc) from exc
+
+        usage = self._extract_usage(raw)
+        vectors = self._extract_embeddings(raw)
+        if not vectors:
+            raise LLMError(
+                kind="provider_error",
+                retriable=False,
+                provider=self.name,
+                status_code=None,
+                message="Embedding response did not include vectors.",
+                raw=raw,
+            )
+        return EmbeddingResponse(
+            provider=self.name,
+            model=model,
+            vectors=vectors,
+            usage=usage,
             raw=raw,
         )
 

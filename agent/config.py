@@ -6,6 +6,53 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+_APP_NAME = "personal-agent"
+
+
+def repo_root_path() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def canonical_state_dir() -> Path:
+    return Path.home() / ".local" / "share" / _APP_NAME
+
+
+def canonical_config_dir() -> Path:
+    return Path.home() / ".config" / _APP_NAME
+
+
+def canonical_db_path() -> Path:
+    return canonical_state_dir() / "agent.db"
+
+
+def canonical_log_path() -> Path:
+    return canonical_state_dir() / "agent.jsonl"
+
+
+def legacy_repo_db_path() -> Path:
+    return repo_root_path() / "memory" / "agent.db"
+
+
+def legacy_repo_log_path() -> Path:
+    return repo_root_path() / "logs" / "agent.jsonl"
+
+
+def resolved_default_db_path() -> str:
+    canonical = canonical_db_path()
+    legacy = legacy_repo_db_path()
+    if canonical.exists() or not legacy.exists():
+        return str(canonical)
+    return str(legacy)
+
+
+def resolved_default_log_path() -> str:
+    canonical = canonical_log_path()
+    legacy = legacy_repo_log_path()
+    if canonical.exists() or not legacy.exists():
+        return str(canonical)
+    return str(legacy)
+
+
 @dataclass(frozen=True)
 class Config:
     telegram_bot_token: str
@@ -31,7 +78,8 @@ class Config:
     openai_base_url: str | None = None
     ollama_base_url: str | None = None
     anthropic_api_key: str | None = None
-    # Deprecated compatibility knobs; runtime always uses the canonical LLMRouter path.
+    # Deprecated compatibility knobs; runtime chat selection goes through the canonical
+    # inference-router + model-selector stack, not the legacy standalone LLMRouter ordering path.
     llm_selector: str = "single"
     llm_broker_policy_path: str | None = None
     llm_allow_remote: bool = False
@@ -95,7 +143,16 @@ class Config:
             "instability_weight": 0.45,
         }
     )
+    default_switch_cheap_remote_cap_per_1m: float = 0.5
     memory_v2_enabled: bool = False
+    semantic_memory_enabled: bool = False
+    semantic_memory_conversations_enabled: bool = True
+    semantic_memory_notes_enabled: bool = True
+    semantic_memory_documents_enabled: bool = True
+    semantic_memory_max_candidates: int = 6
+    semantic_memory_max_prompt_chars: int = 4000
+    semantic_memory_chunk_size: int = 1200
+    semantic_memory_query_limit: int = 200
     intent_llm_rerank_enabled: bool = False
     perception_enabled: bool = True
     perception_roots: tuple[str, ...] = ("/home", "/data/projects")
@@ -143,6 +200,10 @@ class Config:
     llm_autopilot_bootstrap_allow_apply: bool | None = None
     llm_autopilot_ledger_path: str | None = None
     llm_autopilot_ledger_max_items: int = 400
+    safe_mode_enabled: bool = False
+    safe_mode_chat_model: str | None = None
+    assistant_name: str | None = None
+    user_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,8 +214,7 @@ class ObserveConfig:
 def load_observe_config() -> ObserveConfig:
     db_path = os.environ.get("AGENT_DB_PATH")
     if not db_path:
-        repo_root = Path(__file__).resolve().parents[1]
-        db_path = str(repo_root / "memory" / "agent.db")
+        db_path = resolved_default_db_path()
     return ObserveConfig(db_path=db_path)
 
 
@@ -177,9 +237,9 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     openai_model_worker = os.getenv("OPENAI_MODEL_WORKER", "").strip() or None
     agent_timezone = os.getenv("AGENT_TIMEZONE", "America/Regina")
 
-    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    db_path = os.getenv("AGENT_DB_PATH", os.path.join(base_dir, "memory", "agent.db"))
-    log_path = os.getenv("AGENT_LOG_PATH", os.path.join(base_dir, "logs", "agent.jsonl"))
+    base_dir = str(repo_root_path())
+    db_path = os.getenv("AGENT_DB_PATH", resolved_default_db_path())
+    log_path = os.getenv("AGENT_LOG_PATH", resolved_default_log_path())
     skills_path = os.getenv("AGENT_SKILLS_PATH", os.path.join(base_dir, "skills"))
 
     llm_provider = os.getenv("LLM_PROVIDER", "none").strip().lower() or "none"
@@ -236,7 +296,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("LLM_PROVIDER=anthropic requires ANTHROPIC_API_KEY.")
 
     if llm_selector == "broker":
-        raise RuntimeError("LLM_SELECTOR=broker is no longer supported; runtime always uses LLMRouter.")
+        raise RuntimeError("LLM_SELECTOR=broker is no longer supported; runtime always uses the inference-router stack.")
     if llm_selector != "single":
         raise RuntimeError(f"Unsupported LLM_SELECTOR: {llm_selector}")
 
@@ -437,6 +497,10 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
             "instability_weight": 0.45,
         },
     )
+    default_switch_cheap_remote_cap_per_1m = max(
+        0.0,
+        float(os.getenv("AGENT_DEFAULT_SWITCH_CHEAP_REMOTE_CAP_PER_1M", "0.5") or 0.5),
+    )
     memory_v2_enabled = os.getenv("AGENT_MEMORY_V2_ENABLED", "0").strip().lower() in {
         "1",
         "true",
@@ -444,6 +508,38 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         "y",
         "on",
     }
+    semantic_memory_enabled = os.getenv("AGENT_SEMANTIC_MEMORY_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    semantic_memory_conversations_enabled = os.getenv("AGENT_SEMANTIC_MEMORY_CONVERSATIONS_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    semantic_memory_notes_enabled = os.getenv("AGENT_SEMANTIC_MEMORY_NOTES_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    semantic_memory_documents_enabled = os.getenv("AGENT_SEMANTIC_MEMORY_DOCUMENTS_ENABLED", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    semantic_memory_max_candidates = max(1, int(os.getenv("AGENT_SEMANTIC_MEMORY_MAX_CANDIDATES", "6") or 6))
+    semantic_memory_max_prompt_chars = max(200, int(os.getenv("AGENT_SEMANTIC_MEMORY_MAX_PROMPT_CHARS", "4000") or 4000))
+    semantic_memory_chunk_size = max(200, int(os.getenv("AGENT_SEMANTIC_MEMORY_CHUNK_SIZE", "1200") or 1200))
+    semantic_memory_query_limit = max(1, int(os.getenv("AGENT_SEMANTIC_MEMORY_QUERY_LIMIT", "200") or 200))
     intent_llm_rerank_enabled = os.getenv("AGENT_INTENT_LLM_RERANK_ENABLED", "0").strip().lower() in {
         "1",
         "true",
@@ -611,6 +707,27 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY must be true/false when set.")
     llm_autopilot_ledger_path = os.getenv("LLM_AUTOPILOT_LEDGER_PATH", "").strip() or None
     llm_autopilot_ledger_max_items = int(os.getenv("LLM_AUTOPILOT_LEDGER_MAX_ITEMS", "400") or 400)
+    safe_mode_enabled = os.getenv("AGENT_SAFE_MODE", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    safe_mode_chat_model = os.getenv("AGENT_SAFE_MODE_CHAT_MODEL", "").strip() or None
+    assistant_name = os.getenv("AGENT_ASSISTANT_NAME", "").strip() or None
+    user_name = os.getenv("AGENT_USER_NAME", "").strip() or None
+    if safe_mode_enabled and not safe_mode_chat_model and ollama_model:
+        safe_mode_chat_model = f"ollama:{ollama_model}"
+    if safe_mode_enabled:
+        llm_automation_enabled = False
+        model_scout_enabled = False
+        model_watch_enabled = False
+        autopilot_notify_enabled = False
+        llm_notifications_allow_send = False
+        llm_self_heal_allow_apply = False
+        llm_autopilot_bootstrap_allow_apply = False
+        llm_autoconfig_run_on_startup = False
 
     if llm_routing_mode not in {
         "auto",
@@ -651,6 +768,12 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("AGENT_DEFAULT_POLICY_COST_CAP_PER_1M must be >= 0.")
     if float(premium_policy.get("cost_cap_per_1m", 0.0)) < 0:
         raise RuntimeError("AGENT_PREMIUM_POLICY_COST_CAP_PER_1M must be >= 0.")
+    if default_switch_cheap_remote_cap_per_1m < 0:
+        raise RuntimeError("AGENT_DEFAULT_SWITCH_CHEAP_REMOTE_CAP_PER_1M must be >= 0.")
+    if default_switch_cheap_remote_cap_per_1m > float(default_policy.get("cost_cap_per_1m", 0.0)):
+        raise RuntimeError(
+            "AGENT_DEFAULT_SWITCH_CHEAP_REMOTE_CAP_PER_1M must be <= AGENT_DEFAULT_POLICY_COST_CAP_PER_1M."
+        )
     if perception_interval_seconds < 1:
         raise RuntimeError("PERCEPTION_INTERVAL_SECONDS must be >= 1.")
     if llm_health_interval_seconds < 1:
@@ -764,7 +887,16 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         model_watch_hf_download_base_path=model_watch_hf_download_base_path,
         default_policy=default_policy,
         premium_policy=premium_policy,
+        default_switch_cheap_remote_cap_per_1m=default_switch_cheap_remote_cap_per_1m,
         memory_v2_enabled=memory_v2_enabled,
+        semantic_memory_enabled=semantic_memory_enabled,
+        semantic_memory_conversations_enabled=semantic_memory_conversations_enabled,
+        semantic_memory_notes_enabled=semantic_memory_notes_enabled,
+        semantic_memory_documents_enabled=semantic_memory_documents_enabled,
+        semantic_memory_max_candidates=semantic_memory_max_candidates,
+        semantic_memory_max_prompt_chars=semantic_memory_max_prompt_chars,
+        semantic_memory_chunk_size=semantic_memory_chunk_size,
+        semantic_memory_query_limit=semantic_memory_query_limit,
         intent_llm_rerank_enabled=intent_llm_rerank_enabled,
         perception_enabled=perception_enabled,
         perception_roots=perception_roots,
@@ -812,4 +944,8 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         llm_autopilot_bootstrap_allow_apply=llm_autopilot_bootstrap_allow_apply,
         llm_autopilot_ledger_path=llm_autopilot_ledger_path,
         llm_autopilot_ledger_max_items=llm_autopilot_ledger_max_items,
+        safe_mode_enabled=safe_mode_enabled,
+        safe_mode_chat_model=safe_mode_chat_model,
+        assistant_name=assistant_name,
+        user_name=user_name,
     )

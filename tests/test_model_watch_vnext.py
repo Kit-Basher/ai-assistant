@@ -8,7 +8,7 @@ from unittest.mock import patch
 from agent.api_server import AgentRuntime
 from agent.config import Config
 from agent.model_watch import buzz_scan, map_buzz_leads_to_catalog
-from telegram_adapter.bot import maybe_handle_llm_fixit_reply
+from telegram_adapter.bot import maybe_handle_operator_recovery_reply
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -101,6 +101,20 @@ def _registry_for_diff() -> dict[str, object]:
     }
 
 
+def _catalog_delta(*model_ids: str) -> object:
+    return type(
+        "_Delta",
+        (),
+        {
+            "provider_model_count": len(model_ids),
+            "new_models": tuple({"model_id": model_id} for model_id in model_ids),
+            "changed_models": tuple(),
+            "providers_considered": ("openrouter",),
+            "last_run_ts": 1_700_000_123,
+        },
+    )()
+
+
 class TestModelWatchVNext(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -119,8 +133,23 @@ class TestModelWatchVNext(unittest.TestCase):
     def test_catalog_diff_creates_fixit_proposal_when_threshold_met(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.registry_document = _registry_for_diff()
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-testsecret123"
+        health_summary = {
+            "providers": [{"id": "openrouter", "status": "ok"}, {"id": "ollama", "status": "ok"}],
+            "models": [
+                {"id": "openrouter:tiny-chat", "status": "ok"},
+                {"id": "openrouter:better-chat", "status": "ok"},
+            ],
+        }
 
-        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 2}), patch.object(
+        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 2}), patch(
+            "agent.api_server.scan_provider_catalogs",
+            return_value=_catalog_delta("openrouter:better-chat"),
+        ), patch.object(
+            runtime._health_monitor,
+            "summary",
+            return_value=health_summary,
+        ), patch.object(
             runtime,
             "telegram_status",
             return_value={"state": "running"},
@@ -143,15 +172,17 @@ class TestModelWatchVNext(unittest.TestCase):
         self.assertIn("Expected cost delta per 1M tokens:", str(proposal.get("details") or ""))
         delta = body.get("catalog_delta") if isinstance(body.get("catalog_delta"), dict) else {}
         self.assertGreaterEqual(len(delta.get("new_models") or []), 1)
-        send_mock.assert_called_once()
+        self.assertFalse(bool(body.get("proposal_notification_emitted")))
+        self.assertEqual("suppressed_by_control_plane_policy", str(body.get("proposal_notification_reason") or ""))
+        send_mock.assert_not_called()
 
         wizard_state = runtime._llm_fixit_store.state  # type: ignore[attr-defined]
         self.assertTrue(bool(wizard_state.get("active")))
         self.assertEqual("model_watch.proposal", wizard_state.get("issue_code"))
 
-        message = maybe_handle_llm_fixit_reply(
-            llm_fixit_fn=lambda payload: runtime.llm_fixit(payload),
-            wizard_store=runtime._llm_fixit_store,  # type: ignore[attr-defined]
+        message = maybe_handle_operator_recovery_reply(
+            operator_recovery_fn=lambda payload: runtime.operator_recovery(payload),
+            recovery_store=runtime.operator_recovery_store(),
             audit_log=None,
             chat_id="123456789",
             text="1",
@@ -164,8 +195,23 @@ class TestModelWatchVNext(unittest.TestCase):
     def test_catalog_diff_no_proposal_when_below_threshold(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, model_watch_min_improvement=3.0))
         runtime.registry_document = _registry_for_diff()
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-testsecret123"
+        health_summary = {
+            "providers": [{"id": "openrouter", "status": "ok"}, {"id": "ollama", "status": "ok"}],
+            "models": [
+                {"id": "openrouter:tiny-chat", "status": "ok"},
+                {"id": "openrouter:better-chat", "status": "ok"},
+            ],
+        }
 
-        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 2}), patch.object(
+        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 2}), patch(
+            "agent.api_server.scan_provider_catalogs",
+            return_value=_catalog_delta("openrouter:better-chat"),
+        ), patch.object(
+            runtime._health_monitor,
+            "summary",
+            return_value=health_summary,
+        ), patch.object(
             runtime,
             "telegram_status",
             return_value={"state": "running"},
@@ -199,8 +245,23 @@ class TestModelWatchVNext(unittest.TestCase):
             )
         )
         runtime.registry_document = _registry_for_diff()
+        os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-testsecret123"
+        health_summary = {
+            "providers": [{"id": "openrouter", "status": "ok"}, {"id": "ollama", "status": "ok"}],
+            "models": [
+                {"id": "openrouter:tiny-chat", "status": "ok"},
+                {"id": "openrouter:better-chat", "status": "ok"},
+            ],
+        }
 
-        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 2}), patch.object(
+        with patch("agent.api_server.run_watch_once_for_config", return_value={"ok": True, "fetched_candidates": 2}), patch(
+            "agent.api_server.scan_provider_catalogs",
+            return_value=_catalog_delta("openrouter:better-chat"),
+        ), patch.object(
+            runtime._health_monitor,
+            "summary",
+            return_value=health_summary,
+        ), patch.object(
             runtime,
             "telegram_status",
             return_value={"state": "running"},
@@ -217,6 +278,63 @@ class TestModelWatchVNext(unittest.TestCase):
         self.assertEqual("no_allowed_delta_candidate", eval_payload.get("reason"))
         self.assertIn("cost_cap_exceeded", eval_payload.get("policy_rejections") or [])
         send_mock.assert_not_called()
+
+    def test_model_watch_proposal_respects_live_health_and_auth(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.registry_document = {
+            "defaults": {
+                "routing_mode": "auto",
+                "default_provider": "ollama",
+                "default_model": "ollama:qwen3.5:4b",
+                "allow_remote_fallback": True,
+            },
+            "providers": {
+                "ollama": {"enabled": True, "local": True, "available": True},
+                "openrouter": {"enabled": True, "local": False, "available": True},
+            },
+            "models": {
+                "ollama:qwen3.5:4b": {
+                    "provider": "ollama",
+                    "model": "qwen3.5:4b",
+                    "capabilities": ["chat"],
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "max_context_tokens": 8192,
+                },
+                "openrouter:better-chat": {
+                    "provider": "openrouter",
+                    "model": "better-chat",
+                    "capabilities": ["chat", "json"],
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "max_context_tokens": 131072,
+                    "pricing": {
+                        "input_per_million_tokens": 0.1,
+                        "output_per_million_tokens": 0.2,
+                    },
+                },
+            },
+        }
+        with patch.object(
+            runtime._health_monitor,
+            "summary",
+            return_value={
+                "providers": [{"id": "ollama", "status": "ok"}, {"id": "openrouter", "status": "down"}],
+                "models": [
+                    {"id": "ollama:qwen3.5:4b", "status": "ok"},
+                    {"id": "openrouter:better-chat", "status": "down"},
+                ],
+            },
+        ):
+            proposal = runtime._build_model_watch_proposal(delta_rows=[{"model_id": "openrouter:better-chat"}])
+
+        self.assertIsNone(proposal)
+        evaluation = runtime._model_watch_last_proposal_evaluation
+        self.assertFalse(bool(proposal))
+        self.assertTrue(evaluation.get("reason") in {"no_allowed_delta_candidate", "improvement_below_threshold"})
+        self.assertTrue(evaluation.get("policy_rejections") or evaluation.get("rejected_candidates"))
 
     def test_buzz_scan_is_deterministic_with_allowlist(self) -> None:
         def _fetch(url: str) -> object:

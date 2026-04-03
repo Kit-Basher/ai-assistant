@@ -127,7 +127,10 @@ class TestLLMNotificationsUserGrade(unittest.TestCase):
             "attempts": [],
             "duration_ms": 1,
         }
-        with patch("agent.api_server.route_inference", return_value=router_result), patch(
+        with patch.object(runtime._router, "enabled", return_value=True), patch(
+            "agent.orchestrator.route_inference",
+            return_value=router_result,
+        ), patch(
             "agent.api_server.time.time", return_value=1_000
         ):
             ok, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})

@@ -11,7 +11,7 @@ from typing import Any
 
 from agent.llm.providers.base import Provider
 from agent.llm.registry import APIKeySource, ProviderConfig
-from agent.llm.types import LLMError, Message, Request, Response, ToolCall, Usage
+from agent.llm.types import EmbeddingResponse, LLMError, Message, Request, Response, ToolCall, Usage
 from agent.secret_store import SecretStore
 
 
@@ -181,6 +181,17 @@ class OpenAICompatProvider(Provider):
         rebuilt = parsed._replace(query=query)
         return urllib.parse.urlunparse(rebuilt)
 
+    def _embedding_url(self) -> str:
+        base_url = self.config.base_url.rstrip("/")
+        chat_path = self.config.chat_path if self.config.chat_path.startswith("/") else f"/{self.config.chat_path}"
+        if chat_path.endswith("/chat/completions"):
+            embedding_path = f"{chat_path[: -len('/chat/completions')]}/embeddings"
+        elif chat_path.endswith("/completions"):
+            embedding_path = f"{chat_path[: -len('/completions')]}/embeddings"
+        else:
+            embedding_path = "/v1/embeddings"
+        return base_url + embedding_path
+
     def _build_headers(self) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
@@ -338,5 +349,88 @@ class OpenAICompatProvider(Provider):
             model=model,
             usage=self._parse_usage(parsed),
             tool_calls=tool_calls,
+            raw=parsed,
+        )
+
+    def embed_texts(self, texts: tuple[str, ...], *, model: str, timeout_seconds: float) -> EmbeddingResponse:
+        if not self.available():
+            raise LLMError(
+                kind="provider_unavailable",
+                retriable=False,
+                provider=self.name,
+                status_code=None,
+                message="Provider is unavailable or missing credentials.",
+                raw=None,
+            )
+
+        body: dict[str, Any] = {
+            "model": model,
+            "input": [str(item) for item in texts] if texts else ["ping"],
+        }
+        data = json.dumps(body, ensure_ascii=True).encode("utf-8")
+        req = urllib.request.Request(self._embedding_url(), data=data, headers=self._build_headers(), method="POST")
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_seconds) as response:
+                raw_text = response.read().decode("utf-8")
+                status_code = int(getattr(response, "status", 200) or 200)
+        except urllib.error.HTTPError as exc:
+            body_bytes = exc.read() if hasattr(exc, "read") else b""
+            body_text = body_bytes.decode("utf-8", errors="replace") if body_bytes else ""
+            raise self._normalize_status_error(
+                self.name,
+                int(getattr(exc, "code", 500) or 500),
+                body_text or str(exc),
+                raw={"body": body_text},
+            ) from exc
+        except Exception as exc:
+            raise self._normalize_other_error(self.name, exc) from exc
+
+        if status_code >= 400:
+            raise self._normalize_status_error(self.name, status_code, f"HTTP {status_code}")
+
+        try:
+            parsed = json.loads(raw_text or "{}")
+        except Exception as exc:
+            raise LLMError(
+                kind="provider_error",
+                retriable=False,
+                provider=self.name,
+                status_code=status_code,
+                message="Invalid JSON response from provider.",
+                raw={"body": raw_text[:500]},
+            ) from exc
+
+        rows = parsed.get("data") if isinstance(parsed.get("data"), list) else []
+        vectors: list[tuple[float, ...]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            embedding = row.get("embedding")
+            if not isinstance(embedding, list):
+                continue
+            vector: list[float] = []
+            for value in embedding:
+                try:
+                    vector.append(float(value))
+                except (TypeError, ValueError):
+                    continue
+            if vector:
+                vectors.append(tuple(vector))
+        if not vectors:
+            raise LLMError(
+                kind="provider_error",
+                retriable=False,
+                provider=self.name,
+                status_code=status_code,
+                message="Embedding response did not include vectors.",
+                raw=parsed,
+            )
+        usage = self._parse_usage(parsed)
+        return EmbeddingResponse(
+            provider=self.name,
+            model=model,
+            vectors=tuple(vectors),
+            usage=usage,
             raw=parsed,
         )

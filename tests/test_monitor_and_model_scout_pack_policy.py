@@ -153,22 +153,11 @@ class TestMonitorAndModelScoutPackPolicy(unittest.TestCase):
 
     def test_model_scout_endpoints_smoke_no_network(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, self.skills_path))
-        with patch.object(runtime.model_scout, "status", return_value={"ok": True, "last_run": {"ok": True}}), patch.object(
-            runtime.model_scout,
-            "list_suggestions",
-            return_value=[],
-        ), patch.object(
+        with patch.object(
             runtime.model_scout,
             "run",
             return_value={"ok": True, "suggestions": [], "new_suggestions": []},
         ):
-            status = runtime.model_scout_status()
-            self.assertTrue(status.get("ok"))
-
-            suggestions = runtime.model_scout_suggestions()
-            self.assertTrue(suggestions.get("ok"))
-            self.assertEqual([], suggestions.get("suggestions"))
-
             run_ok, run_body = runtime.run_model_scout()
             self.assertTrue(run_ok)
             self.assertTrue(run_body.get("ok"))

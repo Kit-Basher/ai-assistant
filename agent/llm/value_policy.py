@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
+
+from agent.llm.model_latency import resolve_speed_class, telegram_latency_penalty
 
 
 _DEFAULT_WEIGHTS = {
@@ -92,6 +94,7 @@ class UtilityScore:
     model_id: str
     provider: str
     local: bool
+    speed_class: str
     allowed: bool
     rejected_by: str | None
     quality: float
@@ -127,7 +130,12 @@ def _effective_cost_per_1m(candidate: dict[str, Any]) -> float:
     return max(0.0, _safe_float(price_in, 0.0) + (2.0 * _safe_float(price_out, 0.0)))
 
 
-def _latency_estimate(candidate: dict[str, Any]) -> float:
+def _latency_estimate(
+    candidate: dict[str, Any],
+    *,
+    channel: str | None,
+    latency_fallback: bool,
+) -> tuple[float, str]:
     local = bool(candidate.get("local", False))
     context_tokens = int(candidate.get("context_tokens") or 0)
     base = 0.25 if local else 0.6
@@ -135,7 +143,19 @@ def _latency_estimate(candidate: dict[str, Any]) -> float:
         base += 0.15
     elif context_tokens >= 32000:
         base += 0.08
-    return round(base, 6)
+    speed_class = resolve_speed_class(
+        model_id=candidate.get("model_id"),
+        model_name=candidate.get("model_name"),
+        size_label=candidate.get("size"),
+        params_b=_safe_float(candidate.get("params_b"), 0.0) or None,
+    )
+    normalized_channel = str(channel or "").strip().lower()
+    if normalized_channel == "telegram":
+        base += telegram_latency_penalty(
+            speed_class=speed_class,
+            latency_fallback=bool(latency_fallback),
+        )
+    return round(base, 6), speed_class
 
 
 def _instability_risk(candidate: dict[str, Any]) -> float:
@@ -164,6 +184,8 @@ def score_candidate_utility(
     *,
     policy: ValuePolicy,
     allow_remote_fallback: bool,
+    channel: str | None = None,
+    latency_fallback: bool = False,
 ) -> UtilityScore:
     model_id = str(candidate.get("model_id") or "").strip()
     provider = str(candidate.get("provider") or "").strip().lower()
@@ -171,7 +193,11 @@ def score_candidate_utility(
     routable = bool(candidate.get("routable", False))
     expected_cost = _effective_cost_per_1m(candidate)
     quality = _quality_score(candidate)
-    latency = _latency_estimate(candidate)
+    latency, speed_class = _latency_estimate(
+        candidate,
+        channel=channel,
+        latency_fallback=latency_fallback,
+    )
     risk = _instability_risk(candidate)
 
     rejected_by: str | None = None
@@ -194,6 +220,7 @@ def score_candidate_utility(
         model_id=model_id,
         provider=provider,
         local=local,
+        speed_class=speed_class,
         allowed=rejected_by is None,
         rejected_by=rejected_by,
         quality=round(quality, 6),
@@ -202,32 +229,6 @@ def score_candidate_utility(
         risk=round(risk, 6),
         utility=round(utility, 6),
     )
-
-
-def rank_candidates_by_utility(
-    candidates: Iterable[dict[str, Any]],
-    *,
-    policy: ValuePolicy,
-    allow_remote_fallback: bool,
-) -> tuple[list[UtilityScore], list[UtilityScore]]:
-    scored = [
-        score_candidate_utility(
-            candidate,
-            policy=policy,
-            allow_remote_fallback=allow_remote_fallback,
-        )
-        for candidate in candidates
-        if isinstance(candidate, dict)
-    ]
-    allowed = sorted(
-        [row for row in scored if row.allowed],
-        key=lambda row: (-float(row.utility), str(row.model_id)),
-    )
-    rejected = sorted(
-        [row for row in scored if not row.allowed],
-        key=lambda row: (str(row.rejected_by or ""), str(row.model_id)),
-    )
-    return allowed, rejected
 
 
 def detect_premium_escalation_triggers(
@@ -262,4 +263,3 @@ def utility_delta(
     if current is None or candidate is None:
         return 0.0
     return round(float(candidate.utility) - float(current.utility), 6)
-

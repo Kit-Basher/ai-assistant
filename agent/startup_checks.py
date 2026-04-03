@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from agent.config import Config, load_config
+from agent.config import Config, canonical_config_dir, canonical_state_dir, load_config
 from agent.golden_path import next_step_for_failure
 from agent.secret_store import SecretStore
 from agent.telegram_runtime_state import read_telegram_enablement
@@ -44,19 +44,20 @@ def _secret_store_path() -> Path:
     configured = str(os.getenv("AGENT_SECRET_STORE_PATH", "")).strip()
     if configured:
         return Path(configured).expanduser()
-    return Path.home() / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+    return canonical_state_dir() / "secrets.enc.json"
 
 
 def _required_dirs() -> list[Path]:
     return [
-        Path.home() / ".local" / "share" / "personal-agent",
+        canonical_state_dir(),
+        canonical_config_dir(),
         Path.home() / ".config" / "systemd" / "user",
     ]
 
 
 def _telegram_lock_path() -> Path:
     env_dir = str(os.getenv("AGENT_TELEGRAM_POLL_LOCK_DIR", "")).strip()
-    root = Path(env_dir).expanduser() if env_dir else (Path.home() / ".local" / "share" / "personal-agent")
+    root = Path(env_dir).expanduser() if env_dir else canonical_state_dir()
     return root / "telegram_poll.default.lock"
 
 
@@ -107,7 +108,7 @@ def _check_secret_store() -> StartupCheck:
         )
     try:
         store = SecretStore(path=str(path))
-        _ = store.get_secret("telegram:bot_token")
+        store.validate()
     except Exception:
         return StartupCheck(
             "secret_store.readable",

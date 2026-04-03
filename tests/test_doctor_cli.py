@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from agent.doctor import (
     DoctorCheck,
+    DoctorReport,
     _telegram_enabled_for_doctor,
     _doctor_checks,
     _check_llm_availability,
@@ -18,6 +19,7 @@ from agent.doctor import (
     _check_telegram_dropin,
     _check_telegram_token,
     _check_write_mode_safe,
+    _render_text_report,
     main,
     run_doctor_report,
 )
@@ -79,6 +81,30 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertEqual("FAIL", check.status)
         self.assertTrue(bool(check.next_action))
 
+    def test_llm_availability_prefers_ready_embedded_llm_payload(self) -> None:
+        def _fetch(url: str, timeout_seconds: float = 0.8) -> tuple[bool, dict[str, object] | str]:
+            _ = timeout_seconds
+            if url.endswith("/ready"):
+                return True, {
+                    "ok": True,
+                    "llm": {
+                        "default_provider": "ollama",
+                        "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                        "allow_remote_fallback": False,
+                        "active_provider_health": {"status": "ok"},
+                        "active_model_health": {"status": "ok"},
+                    },
+                }
+            if url.endswith("/llm/status"):
+                raise AssertionError("_check_llm_availability should use /ready llm before /llm/status")
+            raise AssertionError(url)
+
+        with patch("agent.doctor._api_get_json", side_effect=_fetch):
+            check = _check_llm_availability("http://127.0.0.1:8765")
+
+        self.assertEqual("OK", check.status)
+        self.assertIn("provider=ollama", check.detail_short)
+
     def test_enable_writes_off_is_safe_mode_pass(self) -> None:
         with patch.dict(os.environ, {"ENABLE_WRITES": "0"}, clear=False):
             check = _check_write_mode_safe()
@@ -103,6 +129,91 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertIsInstance(parsed, dict)
         self.assertIn("trace_id", parsed)
         self.assertIn("checks", parsed)
+
+    def test_collect_diagnostics_writes_redacted_bundle_with_recovery_manifest(self) -> None:
+        token = "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ12345"
+        openai_key = "sk-abc12345678901234567890"
+        checks = [
+            DoctorCheck(
+                "telegram.token",
+                "WARN",
+                f"token={token}",
+                next_action=f"Visit https://example.invalid/reset?token={token}",
+            )
+        ]
+
+        def _fetch(url: str, timeout_seconds: float = 0.8) -> tuple[bool, dict[str, object] | str]:
+            _ = timeout_seconds
+            if url.endswith("/health"):
+                return True, {"ok": True, "authorization": f"Bearer {openai_key}", "query": f"?token={token}"}
+            return False, "unavailable"
+
+        with (
+            patch("agent.doctor._doctor_checks", return_value=checks),
+            patch("agent.doctor._api_get_json", side_effect=_fetch),
+            patch(
+                "agent.doctor.run_startup_checks",
+                side_effect=[
+                    {"status": "PASS", "checks": [], "next_action": None},
+                    {"status": "WARN", "checks": [], "next_action": "Run: python -m agent doctor"},
+                ],
+            ),
+            patch("agent.doctor.load_config", side_effect=RuntimeError("config missing")),
+        ):
+            report = run_doctor_report(now_epoch=1_700_000_000, collect_diagnostics=True)
+
+        self.assertTrue(str(report.support_bundle_path or "").strip())
+        bundle_dir = Path(str(report.support_bundle_path))
+        bundle_path = bundle_dir / "doctor_support_bundle.json"
+        summary_path = bundle_dir / "SUMMARY.txt"
+        self.assertTrue(bundle_path.is_file())
+        self.assertTrue(summary_path.is_file())
+
+        raw = bundle_path.read_text(encoding="utf-8")
+        self.assertNotIn(token, raw)
+        self.assertNotIn(openai_key, raw)
+        self.assertIn("[REDACTED]", raw)
+        payload = json.loads(raw)
+        self.assertIn("recovery", payload)
+        self.assertIn("backup_targets", payload["recovery"])
+        self.assertIn("collect_diagnostics", payload["recovery"]["canonical_commands"])
+
+    def test_main_collect_diagnostics_json_returns_bundle_path(self) -> None:
+        checks = [DoctorCheck("x", "OK", "ok")]
+        output = io.StringIO()
+        with patch("agent.doctor._doctor_checks", return_value=checks), redirect_stdout(output):
+            code = main(["--json", "--collect-diagnostics"])
+        self.assertEqual(0, code)
+        parsed = json.loads(output.getvalue())
+        self.assertTrue(str(parsed.get("support_bundle_path") or "").strip())
+        self.assertTrue((Path(str(parsed["support_bundle_path"])) / "doctor_support_bundle.json").is_file())
+
+    def test_fix_still_generates_support_bundle_path(self) -> None:
+        checks = [DoctorCheck("x", "OK", "ok")]
+        with (
+            patch("agent.doctor._doctor_checks", return_value=checks),
+            patch("agent.doctor._apply_safe_fixes", return_value=[]),
+        ):
+            report = run_doctor_report(now_epoch=1_700_000_000, fix=True)
+        self.assertTrue(str(report.support_bundle_path or "").strip())
+        self.assertTrue((Path(str(report.support_bundle_path)) / "doctor_support_bundle.json").is_file())
+
+    def test_render_text_report_shows_per_check_next_steps(self) -> None:
+        custom = DoctorReport(
+            trace_id="doctor-1700000000-1",
+            generated_at="2023-11-14T22:13:20+00:00",
+            summary_status="WARN",
+            checks=[
+                DoctorCheck("env.repo", "OK", "repo ok"),
+                DoctorCheck("systemd.api_service", "WARN", "service inactive", next_action="Run: systemctl --user restart personal-agent-api.service"),
+            ],
+            next_action="Run: systemctl --user restart personal-agent-api.service",
+            fixes_applied=[],
+            support_bundle_path=None,
+        )
+        rendered = _render_text_report(custom)
+        self.assertIn("systemd.api_service", rendered)
+        self.assertIn("next: Run: systemctl --user restart personal-agent-api.service", rendered)
 
     def test_doctor_checks_skip_telegram_failures_when_optional_disabled(self) -> None:
         ok = DoctorCheck("ok", "OK", "ok")

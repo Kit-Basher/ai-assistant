@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -19,11 +20,19 @@ from typing import Any, Callable
 from memory.db import MemoryDB
 from skills.observe_now.handler import observe_now
 from agent.audit_log import redact
+from agent.diagnostics import redact_secrets
 from agent.golden_path import next_step_for_failure
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.secret_store import SecretStore
+from agent.startup_checks import run_startup_checks
 from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
-from agent.config import load_config
+from agent.config import (
+    canonical_config_dir,
+    canonical_log_path,
+    canonical_state_dir,
+    load_config,
+    resolved_default_db_path,
+)
 
 
 @dataclass(frozen=True)
@@ -319,7 +328,8 @@ def default_db_path(repo_root: str) -> str:
     env_path = os.getenv("AGENT_DB_PATH", "").strip()
     if env_path:
         return env_path
-    return os.path.join(repo_root, "memory", "agent.db")
+    _ = repo_root
+    return resolved_default_db_path()
 
 
 # New deterministic doctor report engine.
@@ -411,11 +421,22 @@ def _safe_now_iso(now_epoch: int | None = None) -> str:
     return datetime.fromtimestamp(int(now_epoch if now_epoch is not None else time.time()), tz=timezone.utc).isoformat()
 
 
+def _redact_bundle_value(value: Any) -> Any:
+    redacted = redact(value)
+    if isinstance(redacted, dict):
+        return {str(key): _redact_bundle_value(item) for key, item in redacted.items()}
+    if isinstance(redacted, list):
+        return [_redact_bundle_value(item) for item in redacted]
+    if isinstance(redacted, str):
+        return redact_secrets(redacted)
+    return redacted
+
+
 def _effective_secret_store_path() -> str:
     configured = os.getenv("AGENT_SECRET_STORE_PATH", "").strip()
     if configured:
         return configured
-    return str(Path.home() / ".local" / "share" / "personal-agent" / "secrets.enc.json")
+    return str(canonical_state_dir() / "secrets.enc.json")
 
 
 def _is_truthy(value: Any) -> bool:
@@ -481,7 +502,7 @@ def _check_secret_store_path() -> DoctorCheck:
         )
     try:
         store = SecretStore(path=str(path))
-        _ = store.get_secret("telegram:bot_token")
+        store.validate()
     except Exception as exc:  # pragma: no cover - defensive
         return DoctorCheck(
             check_id="env.secret_store",
@@ -498,18 +519,19 @@ def _check_secret_store_path() -> DoctorCheck:
 
 def _check_required_dirs() -> DoctorCheck:
     required = [
-        Path.home() / ".local" / "share" / "personal-agent",
+        canonical_state_dir(),
+        canonical_config_dir(),
         Path.home() / ".config" / "systemd" / "user",
     ]
     missing = [str(path) for path in required if not path.is_dir()]
     if not missing:
         return DoctorCheck(check_id="env.required_dirs", status="OK", detail_short="required dirs present")
-        return DoctorCheck(
-            check_id="env.required_dirs",
-            status="WARN",
-            detail_short="missing dirs: " + ", ".join(missing),
-            next_action="Run: python -m agent doctor --fix",
-        )
+    return DoctorCheck(
+        check_id="env.required_dirs",
+        status="WARN",
+        detail_short="missing dirs: " + ", ".join(missing),
+        next_action="Run: python -m agent doctor --fix",
+    )
 
 
 def _check_telegram_dropin() -> DoctorCheck:
@@ -642,15 +664,19 @@ def _api_get_json(url: str, timeout_seconds: float = 0.8) -> tuple[bool, dict[st
 
 
 def _check_llm_availability(api_base: str) -> DoctorCheck:
-    status_ok, payload_or_error = _api_get_json(f"{api_base.rstrip('/')}/llm/status", timeout_seconds=0.8)
-    if not status_ok:
-        return DoctorCheck(
-            check_id="llm.availability",
-            status="WARN",
-            detail_short=f"/llm/status unavailable: {payload_or_error}",
-            next_action="Run: systemctl --user restart personal-agent-api.service",
-        )
-    payload = payload_or_error if isinstance(payload_or_error, dict) else {}
+    ready_ok, ready_payload_or_error = _api_get_json(f"{api_base.rstrip('/')}/ready", timeout_seconds=0.8)
+    ready_payload = ready_payload_or_error if ready_ok and isinstance(ready_payload_or_error, dict) else {}
+    payload = ready_payload.get("llm") if isinstance(ready_payload.get("llm"), dict) else {}
+    if not payload:
+        status_ok, payload_or_error = _api_get_json(f"{api_base.rstrip('/')}/llm/status", timeout_seconds=0.8)
+        if not status_ok:
+            return DoctorCheck(
+                check_id="llm.availability",
+                status="WARN",
+                detail_short=f"/llm/status unavailable: {payload_or_error}",
+                next_action="Run: systemctl --user restart personal-agent-api.service",
+            )
+        payload = payload_or_error if isinstance(payload_or_error, dict) else {}
     provider = str(payload.get("default_provider") or "unknown").strip() or "unknown"
     model = str(payload.get("resolved_default_model") or payload.get("default_model") or "unknown").strip() or "unknown"
     provider_health = payload.get("active_provider_health") if isinstance(payload.get("active_provider_health"), dict) else {}
@@ -773,7 +799,8 @@ def _is_pid_running(pid: int) -> bool:
 def _safe_fix_dirs() -> list[str]:
     changed: list[str] = []
     paths = [
-        Path.home() / ".local" / "share" / "personal-agent",
+        canonical_state_dir(),
+        canonical_config_dir(),
         Path.home() / ".config" / "systemd" / "user",
         Path.home() / ".config" / "systemd" / "user" / "personal-agent-telegram.service.d",
     ]
@@ -810,7 +837,7 @@ def _safe_fix_telegram_dropin() -> list[str]:
 
 def _safe_fix_stale_locks() -> list[str]:
     changed: list[str] = []
-    root = Path.home() / ".local" / "share" / "personal-agent"
+    root = canonical_state_dir()
     if not root.is_dir():
         return changed
     patterns = ["telegram_poll*.lock", "telegram_poll.lock"]
@@ -836,33 +863,179 @@ def _safe_fix_stale_locks() -> list[str]:
     return changed
 
 
-def _safe_support_bundle(report: DoctorReport) -> str | None:
+def _safe_fix_runtime_storage_upgrade(repo_root: Path) -> list[str]:
+    changed: list[str] = []
+    migrations = [
+        (repo_root / "memory" / "agent.db", canonical_state_dir() / "agent.db", "copied_legacy_db"),
+        (repo_root / "logs" / "agent.jsonl", canonical_log_path(), "copied_legacy_log"),
+    ]
+    for source, target, label in migrations:
+        if target.exists() or not source.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+        changed.append(f"{label}:{source}->{target}")
+    return changed
+
+
+def _backup_targets_manifest() -> list[dict[str, str]]:
+    return [
+        {
+            "label": "operator_config",
+            "path": str(canonical_config_dir()),
+        },
+        {
+            "label": "state_dir",
+            "path": str(canonical_state_dir()),
+        },
+        {
+            "label": "log_file",
+            "path": str(canonical_log_path()),
+        },
+        {
+            "label": "systemd_user_dir",
+            "path": str(Path.home() / ".config" / "systemd" / "user"),
+        },
+    ]
+
+
+def _recovery_manifest() -> dict[str, Any]:
+    return {
+        "canonical_commands": {
+            "doctor": "python -m agent doctor",
+            "collect_diagnostics": "python -m agent doctor --collect-diagnostics",
+            "safe_fix": "python -m agent doctor --fix",
+            "setup": "python -m agent setup",
+        },
+        "backup_targets": _backup_targets_manifest(),
+        "backup_notes": [
+            "Stop user services before copying state for backup or restore.",
+            "Configured discovery sources and policies live under the canonical config/state directories and are included by copying those paths.",
+        ],
+        "restore_steps": [
+            "Stop personal-agent-api.service and personal-agent-telegram.service if they are running.",
+            "Restore the copied operator config and state files to their canonical paths.",
+            "Run: python -m agent doctor --fix",
+            "Restart the user services and confirm /ready and /health are healthy.",
+        ],
+        "corrupt_state_recovery": [
+            "If a state file is corrupt, move the broken file aside instead of editing it in place.",
+            "Restore from backup when available, then run: python -m agent doctor --fix",
+        ],
+        "failed_upgrade_recovery": [
+            "Reinstall the supported build or repo checkout.",
+            "Run: python -m agent doctor --fix to recreate missing local directories, drop-ins, and migrated state.",
+        ],
+    }
+
+
+def _diagnostics_paths_manifest(repo_root: Path) -> dict[str, str]:
+    return {
+        "repo_root": str(repo_root),
+        "config_dir": str(canonical_config_dir()),
+        "state_dir": str(canonical_state_dir()),
+        "db_path": str(resolved_default_db_path()),
+        "log_path": str(canonical_log_path()),
+        "secret_store_path": _effective_secret_store_path(),
+    }
+
+
+def _diagnostics_fetch(url: str) -> dict[str, Any]:
+    ok, payload_or_error = _api_get_json(url, timeout_seconds=0.8)
+    if not ok:
+        return {
+            "ok": False,
+            "error": str(payload_or_error),
+        }
+    return {
+        "ok": True,
+        "payload": payload_or_error if isinstance(payload_or_error, dict) else {},
+    }
+
+
+def _diagnostics_runtime_payloads(api_base_url: str) -> dict[str, Any]:
+    base = str(api_base_url or "http://127.0.0.1:8765").rstrip("/")
+    return {
+        "health": _diagnostics_fetch(f"{base}/health"),
+        "ready": _diagnostics_fetch(f"{base}/ready"),
+        "runtime": _diagnostics_fetch(f"{base}/runtime"),
+        "llm_status": _diagnostics_fetch(f"{base}/llm/status"),
+        "memory": _diagnostics_fetch(f"{base}/memory"),
+    }
+
+
+def _startup_diagnostics_payload() -> dict[str, Any]:
+    config: Any | None
+    try:
+        config = load_config(require_telegram_token=False)
+    except Exception as exc:
+        return {
+            "api": {
+                "trace_id": None,
+                "component": "api.startup",
+                "status": "FAIL",
+                "failure_code": "config_load_failed",
+                "next_action": next_step_for_failure("config_load_failed"),
+                "checks": [],
+                "message": f"config load failed: {exc.__class__.__name__}",
+            },
+            "telegram": {
+                "trace_id": None,
+                "component": "telegram.startup",
+                "status": "WARN",
+                "failure_code": "config_load_failed",
+                "next_action": next_step_for_failure("config_load_failed"),
+                "checks": [],
+                "message": f"config load failed: {exc.__class__.__name__}",
+            },
+        }
+    token = ""
+    try:
+        store = SecretStore(path=_effective_secret_store_path())
+        token = str(store.get_secret("telegram:bot_token") or "").strip() or str(os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    except Exception:
+        token = str(os.getenv("TELEGRAM_BOT_TOKEN") or "").strip()
+    return {
+        "api": run_startup_checks(service="api", config=config),
+        "telegram": run_startup_checks(service="telegram", config=config, token=token or None),
+    }
+
+
+def _safe_support_bundle(
+    report: DoctorReport,
+    *,
+    repo_root: Path,
+    api_base_url: str,
+) -> str | None:
     try:
         bundle_dir = Path(tempfile.mkdtemp(prefix="agent-support-"))
         bundle_path = bundle_dir / "doctor_support_bundle.json"
+        summary_path = bundle_dir / "SUMMARY.txt"
         payload = {
             "trace_id": report.trace_id,
             "generated_at": report.generated_at,
             "summary_status": report.summary_status,
-            "checks": [item.to_dict() for item in report.checks],
-            "next_action": report.next_action,
+            "doctor_report": report.to_dict(),
+            "startup_checks": _startup_diagnostics_payload(),
+            "runtime_api": _diagnostics_runtime_payloads(api_base_url),
+            "paths": _diagnostics_paths_manifest(repo_root),
+            "recovery": _recovery_manifest(),
         }
-        safe_payload = redact(payload)
+        safe_payload = _redact_bundle_value(payload)
         bundle_path.write_text(json.dumps(safe_payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        summary_path.write_text(_render_text_report(report) + "\n", encoding="utf-8")
         return str(bundle_dir)
     except Exception:
         return None
 
 
-def _apply_safe_fixes(report: DoctorReport) -> tuple[list[str], str | None]:
+def _apply_safe_fixes(report: DoctorReport, *, repo_root: Path) -> list[str]:
     changes: list[str] = []
     changes.extend(_safe_fix_dirs())
     changes.extend(_safe_fix_telegram_dropin())
     changes.extend(_safe_fix_stale_locks())
-    bundle_path = _safe_support_bundle(report)
-    if bundle_path:
-        changes.append(f"support_bundle:{bundle_path}")
-    return sorted(changes), bundle_path
+    changes.extend(_safe_fix_runtime_storage_upgrade(repo_root))
+    return sorted(changes)
 
 
 def run_doctor_report(
@@ -870,6 +1043,7 @@ def run_doctor_report(
     repo_root: str | None = None,
     online: bool = False,
     fix: bool = False,
+    collect_diagnostics: bool = False,
     api_base_url: str = "http://127.0.0.1:8765",
     now_epoch: int | None = None,
 ) -> DoctorReport:
@@ -891,20 +1065,42 @@ def run_doctor_report(
         support_bundle_path=None,
     )
     if not fix:
-        return preliminary
-    changes, bundle_path = _apply_safe_fixes(preliminary)
+        support_bundle_path = None
+        if collect_diagnostics:
+            support_bundle_path = _safe_support_bundle(preliminary, repo_root=root, api_base_url=api_base_url)
+        return DoctorReport(
+            trace_id=preliminary.trace_id,
+            generated_at=preliminary.generated_at,
+            summary_status=preliminary.summary_status,
+            checks=preliminary.checks,
+            next_action=preliminary.next_action,
+            fixes_applied=preliminary.fixes_applied,
+            support_bundle_path=support_bundle_path,
+        )
+    changes = _apply_safe_fixes(preliminary, repo_root=root)
     post_checks = _doctor_checks(repo_root=root, online=bool(online), api_base_url=api_base_url)
     for item in post_checks:
         _log_check(trace_id, item)
-    return DoctorReport(
+    final_report = DoctorReport(
         trace_id=trace_id,
         generated_at=_safe_now_iso(now_epoch=now_epoch),
         summary_status=_status_from_checks(post_checks),
         checks=post_checks,
         next_action=_first_next_action(post_checks),
         fixes_applied=changes,
-        support_bundle_path=bundle_path,
+        support_bundle_path=None,
     )
+    if fix or collect_diagnostics:
+        return DoctorReport(
+            trace_id=final_report.trace_id,
+            generated_at=final_report.generated_at,
+            summary_status=final_report.summary_status,
+            checks=final_report.checks,
+            next_action=final_report.next_action,
+            fixes_applied=final_report.fixes_applied,
+            support_bundle_path=_safe_support_bundle(final_report, repo_root=root, api_base_url=api_base_url),
+        )
+    return final_report
 
 
 def _render_text_report(report: DoctorReport) -> str:
@@ -915,6 +1111,8 @@ def _render_text_report(report: DoctorReport) -> str:
     ]
     for item in report.checks:
         lines.append(f"- [{item.status}] {item.check_id}: {item.detail_short}")
+        if item.status in {"WARN", "FAIL"} and item.next_action:
+            lines.append(f"  next: {item.next_action}")
     if report.summary_status in {"WARN", "FAIL"}:
         lines.append(f"Next action: {report.next_action or next_step_for_failure('llm_unavailable')}")
     else:
@@ -933,6 +1131,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Personal Agent doctor checks")
     parser.add_argument("--json", action="store_true", help="emit JSON output")
     parser.add_argument("--fix", action="store_true", help="apply deterministic safe fixes")
+    parser.add_argument(
+        "--collect-diagnostics",
+        action="store_true",
+        help="write one redacted local diagnostics bundle and print its path",
+    )
     parser.add_argument("--online", action="store_true", help="allow online Telegram token validation")
     parser.add_argument("--api-base-url", default="http://127.0.0.1:8765", help="local API base URL")
     parser.add_argument("--repo-root", default=None, help="override repo root")
@@ -942,6 +1145,7 @@ def main(argv: list[str] | None = None) -> int:
         repo_root=args.repo_root,
         online=bool(args.online),
         fix=bool(args.fix),
+        collect_diagnostics=bool(args.collect_diagnostics),
         api_base_url=str(args.api_base_url),
     )
 

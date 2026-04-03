@@ -4,9 +4,53 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
+
+import io
+import zipfile
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.packs.remote_fetch import RemotePackFetcher
+
+
+def _zip_bytes(files: dict[str, bytes]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as handle:
+        for name, data in files.items():
+            handle.writestr(name, data)
+    return buf.getvalue()
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes, *, url: str) -> None:
+        self._body = io.BytesIO(body)
+        self._url = url
+        self.headers = {"Content-Length": str(len(body))}
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def geturl(self) -> str:
+        return self._url
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeOpener:
+    def __init__(self, mapping: dict[str, _FakeResponse]) -> None:
+        self.mapping = mapping
+
+    def open(self, request, timeout: int = 15):  # noqa: ANN001
+        url = getattr(request, "full_url", str(request))
+        response = self.mapping.get(url)
+        if response is None:
+            raise RuntimeError(f"unexpected url: {url}")
+        return response
 
 
 def _config(registry_path: str, db_path: str, skills_path: str) -> Config:
@@ -105,57 +149,45 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
-    def test_install_approve_and_list_pack_endpoints(self) -> None:
+    def test_install_and_list_portable_text_pack_endpoints(self) -> None:
         pack_dir = os.path.join(self.tmpdir.name, "pack_one")
         os.makedirs(pack_dir, exist_ok=True)
-        with open(os.path.join(pack_dir, "pack.json"), "w", encoding="utf-8") as handle:
-            json.dump(
-                {
-                    "pack_id": "pack_one",
-                    "version": "0.1.0",
-                    "title": "Pack One",
-                    "description": "test pack",
-                    "entrypoints": ["skills.pack_one:handler"],
-                    "trust": "trusted",
-                    "permissions": {"ifaces": ["pack_one.run"]},
-                },
-                handle,
-                ensure_ascii=True,
+        with open(os.path.join(pack_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write(
+                "---\n"
+                "id: portable-pack\n"
+                "name: Portable Pack\n"
+                "version: 0.1.0\n"
+                "description: safe text skill\n"
+                "---\n"
+                "# Portable Pack\n\n"
+                "Use the reference notes only.\n"
             )
+        os.makedirs(os.path.join(pack_dir, "references"), exist_ok=True)
+        with open(os.path.join(pack_dir, "references", "guide.md"), "w", encoding="utf-8") as handle:
+            handle.write("# Guide\n\nHelpful notes.\n")
 
         install_handler = _HandlerForTest(
             self.runtime,
             "/packs/install",
-            {"source": pack_dir, "enable": True},
+            {"source": pack_dir},
         )
         install_handler.do_POST()
         install_payload = json.loads(install_handler.body.decode("utf-8"))
         self.assertEqual(200, install_handler.status_code)
         self.assertTrue(install_payload["ok"])
-        self.assertEqual("pack_one", install_payload["pack"]["pack_id"])
-        self.assertTrue(install_payload["requires_approval"])
-
-        clarify_handler = _HandlerForTest(
-            self.runtime,
-            "/packs/approve",
-            {"pack_id": "pack_one", "approve": False},
+        self.assertEqual(install_payload["pack"]["canonical_id"], install_payload["pack"]["pack_id"])
+        self.assertEqual(
+            "portable-pack",
+            install_payload["pack"]["canonical_pack"]["audit"]["declared_id"],
         )
-        clarify_handler.do_POST()
-        clarify_payload = json.loads(clarify_handler.body.decode("utf-8"))
-        self.assertEqual(200, clarify_handler.status_code)
-        self.assertTrue(clarify_payload["ok"])
-        self.assertEqual("needs_clarification", clarify_payload["error_kind"])
-
-        approve_handler = _HandlerForTest(
-            self.runtime,
-            "/packs/approve",
-            {"pack_id": "pack_one", "approve": True, "enable": True},
-        )
-        approve_handler.do_POST()
-        approve_payload = json.loads(approve_handler.body.decode("utf-8"))
-        self.assertEqual(200, approve_handler.status_code)
-        self.assertTrue(approve_payload["ok"])
-        self.assertTrue(str(approve_payload["pack"]["approved_permissions_hash"]))
+        self.assertFalse(install_payload["requires_approval"])
+        self.assertTrue(install_payload["review_required"])
+        self.assertEqual("portable_text_skill", install_payload["normalization_result"]["classification"])
+        self.assertEqual("normalized", install_payload["normalization_result"]["status"])
+        self.assertTrue(install_payload["pack"]["non_executable"])
+        self.assertTrue(install_payload["pack"]["normalized_path"])
+        self.assertEqual("Portable Pack", install_payload["review"]["pack_name"])
 
         list_handler = _HandlerForTest(self.runtime, "/packs")
         list_handler.do_GET()
@@ -163,7 +195,118 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertEqual(200, list_handler.status_code)
         self.assertTrue(list_payload["ok"])
         pack_ids = [row["pack_id"] for row in list_payload["packs"]]
-        self.assertIn("pack_one", pack_ids)
+        self.assertIn(install_payload["pack"]["pack_id"], pack_ids)
+
+    def test_install_native_code_pack_is_blocked_but_recorded(self) -> None:
+        pack_dir = os.path.join(self.tmpdir.name, "plugin_pack")
+        os.makedirs(pack_dir, exist_ok=True)
+        with open(os.path.join(pack_dir, "package.json"), "w", encoding="utf-8") as handle:
+            json.dump({"name": "plugin-pack", "version": "1.0.0"}, handle, ensure_ascii=True)
+        with open(os.path.join(pack_dir, "handler.js"), "w", encoding="utf-8") as handle:
+            handle.write("export function run() { return true; }\n")
+
+        install_handler = _HandlerForTest(self.runtime, "/packs/install", {"source": pack_dir})
+        install_handler.do_POST()
+        install_payload = json.loads(install_handler.body.decode("utf-8"))
+
+        self.assertEqual(200, install_handler.status_code)
+        self.assertTrue(install_payload["ok"])
+        self.assertEqual("native_code_pack", install_payload["normalization_result"]["classification"])
+        self.assertEqual("blocked", install_payload["normalization_result"]["status"])
+        self.assertIn(
+            "native_code_pack_requires_execution",
+            install_payload["normalization_result"]["blocked_reasons"],
+        )
+        self.assertTrue(install_payload["review_required"])
+        self.assertTrue(install_payload["pack"]["non_executable"])
+        self.assertIn("blocked", str(install_payload["message"] or "").lower())
+        self.assertIn("current safe import policy", str(install_payload["why"] or "").lower())
+        self.assertTrue(str(install_payload["next_action"] or "").strip())
+
+    def test_remote_install_persists_and_returns_provenance(self) -> None:
+        archive = _zip_bytes(
+            {
+                "repo-main/SKILL.md": b"# Remote Skill\n\nUse the repository notes.\n",
+                "repo-main/references/guide.md": b"# Guide\n\nReference text.\n",
+            }
+        )
+        remote_url = "https://github.com/example/repo/archive/main.zip"
+        fake_fetcher = RemotePackFetcher(
+            self.runtime.pack_store.external_storage_root(),
+            opener=_FakeOpener({remote_url: _FakeResponse(archive, url=remote_url)}),
+        )
+        with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=fake_fetcher):
+            install_handler = _HandlerForTest(
+                self.runtime,
+                "/packs/install",
+                {"source": remote_url, "source_kind": "github_archive", "ref": "main"},
+            )
+            install_handler.do_POST()
+            install_payload = json.loads(install_handler.body.decode("utf-8"))
+
+        self.assertEqual(200, install_handler.status_code)
+        self.assertTrue(install_payload["ok"])
+        self.assertEqual("portable_text_skill", install_payload["normalization_result"]["classification"])
+        self.assertEqual("normalized", install_payload["normalization_result"]["status"])
+        self.assertEqual("github_archive", install_payload["pack"]["source"]["origin"])
+        self.assertEqual(remote_url, install_payload["pack"]["source"]["url"])
+        self.assertEqual("main", install_payload["pack"]["source"]["ref"])
+        self.assertTrue(install_payload["pack"]["source"]["archive_sha256"])
+        self.assertTrue(install_payload["pack"]["quarantine_path"])
+        self.assertTrue(install_payload["pack"]["normalized_path"])
+        self.assertIn("I fetched a snapshot", install_payload["review"]["summary"])
+
+    def test_remote_install_returns_changed_upstream_review_when_source_mutates(self) -> None:
+        remote_url = "https://github.com/example/repo/archive/main.zip"
+        first_archive = _zip_bytes(
+            {
+                "repo-main/SKILL.md": b"# Remote Skill\n\nUse the first instructions.\n",
+                "repo-main/references/original.md": b"# Original\n\nKeep this reference.\n",
+            }
+        )
+        second_archive = _zip_bytes(
+            {
+                "repo-main/SKILL.md": b"# Remote Skill\n\nUse the changed instructions.\n",
+                "repo-main/references/updated.md": b"# Updated\n\nNew reference.\n",
+            }
+        )
+
+        first_fetcher = RemotePackFetcher(
+            self.runtime.pack_store.external_storage_root(),
+            opener=_FakeOpener({remote_url: _FakeResponse(first_archive, url=remote_url)}),
+        )
+        with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=first_fetcher):
+            first_handler = _HandlerForTest(
+                self.runtime,
+                "/packs/install",
+                {"source": remote_url, "source_kind": "github_archive", "ref": "main"},
+            )
+            first_handler.do_POST()
+            first_payload = json.loads(first_handler.body.decode("utf-8"))
+
+        second_fetcher = RemotePackFetcher(
+            self.runtime.pack_store.external_storage_root(),
+            opener=_FakeOpener({remote_url: _FakeResponse(second_archive, url=remote_url)}),
+        )
+        with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=second_fetcher):
+            second_handler = _HandlerForTest(
+                self.runtime,
+                "/packs/install",
+                {"source": remote_url, "source_kind": "github_archive", "ref": "main"},
+            )
+            second_handler.do_POST()
+            second_payload = json.loads(second_handler.body.decode("utf-8"))
+
+        self.assertEqual(200, first_handler.status_code)
+        self.assertEqual(200, second_handler.status_code)
+        self.assertNotEqual(first_payload["pack"]["canonical_id"], second_payload["pack"]["canonical_id"])
+        self.assertIn("upstream_content_changed", second_payload["pack"]["risk_flags"])
+        self.assertIn("changed since the last time it was seen", second_payload["review"]["summary"])
+        self.assertEqual(
+            first_payload["pack"]["canonical_id"],
+            second_payload["review"]["previous_version"]["canonical_id"],
+        )
+        self.assertIn("SKILL.md", second_payload["review"]["change_summary"]["changed_instructions"])
 
 
 if __name__ == "__main__":

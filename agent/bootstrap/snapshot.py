@@ -7,8 +7,8 @@ from pathlib import Path
 import platform
 from typing import Any
 
+from agent.bootstrap.routes import METHOD_ORDER, extract_routes_from_api_server
 from agent.perception import collect_snapshot
-from tools.dump_routes import METHOD_ORDER, extract_routes_from_api_server
 
 
 @dataclass(frozen=True)

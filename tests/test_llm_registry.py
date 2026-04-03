@@ -72,6 +72,24 @@ class TestLLMRegistry(unittest.TestCase):
             default_doc["defaults"]["routing_mode"],
         )
 
+    def test_default_document_enriches_known_gpt_4_1_metadata(self) -> None:
+        default_doc = load_registry_document(path=None)
+        gpt_41 = default_doc["models"]["openai:gpt-4.1"]
+        gpt_41_mini = default_doc["models"]["openai:gpt-4.1-mini"]
+        gpt_4o_mini = default_doc["models"]["openrouter:openai/gpt-4o-mini"]
+
+        self.assertCountEqual(
+            ["coding", "general_chat", "reasoning"],
+            gpt_41["task_types"],
+        )
+        self.assertEqual(1047576, gpt_41["max_context_tokens"])
+        self.assertCountEqual(
+            ["coding", "general_chat"],
+            gpt_41_mini["task_types"],
+        )
+        self.assertEqual(1047576, gpt_41_mini["max_context_tokens"])
+        self.assertEqual(["general_chat"], gpt_4o_mini["task_types"])
+
 
 if __name__ == "__main__":
     unittest.main()

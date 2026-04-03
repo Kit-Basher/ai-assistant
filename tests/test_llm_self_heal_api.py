@@ -121,8 +121,8 @@ def _registry_doc_with_drift() -> dict[str, object]:
 def _healthy_snapshot() -> dict[str, object]:
     return {
         "providers": [
-            {"id": "ollama", "available": True, "health": {"status": "ok"}},
-            {"id": "openrouter", "available": True, "health": {"status": "ok"}},
+            {"id": "ollama", "available": True, "local": True, "health": {"status": "ok"}},
+            {"id": "openrouter", "available": True, "local": False, "health": {"status": "ok"}},
         ],
         "models": [
             {
@@ -132,6 +132,7 @@ def _healthy_snapshot() -> dict[str, object]:
                 "enabled": True,
                 "capabilities": ["chat"],
                 "routable": True,
+                "max_context_tokens": 8192,
                 "health": {"status": "ok"},
             },
             {
@@ -141,6 +142,7 @@ def _healthy_snapshot() -> dict[str, object]:
                 "enabled": True,
                 "capabilities": ["chat"],
                 "routable": True,
+                "max_context_tokens": 128000,
                 "health": {"status": "ok"},
             },
         ],
@@ -213,16 +215,15 @@ class TestLLMSelfHealAPI(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
-    def test_scheduler_loopback_auto_apply_allows_self_heal_without_permission(self) -> None:
+    def test_scheduler_loopback_no_longer_auto_applies_self_heal_without_permission(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_self_heal_allow_apply=None))
         runtime.set_listening("127.0.0.1", 8765)
         with patch.object(runtime._health_monitor, "summary", return_value=_healthy_summary()), patch.object(
             runtime._router, "doctor_snapshot", return_value=_healthy_snapshot()
         ):
             ok, body = runtime.llm_self_heal_apply({"actor": "scheduler"}, trigger="scheduler")
-        self.assertTrue(ok)
-        self.assertTrue(body["applied"])
-        self.assertEqual("ollama:qwen2.5:3b-instruct", body["defaults"]["default_model"])
+        self.assertFalse(ok)
+        self.assertEqual("action_not_permitted", body["error"])
 
     def test_scheduler_non_loopback_denies_without_permission(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_self_heal_allow_apply=None))
@@ -372,7 +373,7 @@ class TestLLMSelfHealAPI(unittest.TestCase):
         self.assertIn("missing_from_catalog", notify_calls[0]["reasons"])
         self.assertIn("refreshed_model_catalog", notify_calls[0]["reasons"])
 
-    def test_autoconfig_noops_after_self_heal_apply(self) -> None:
+    def test_self_heal_repair_clears_missing_default_drift_before_autoconfig(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.set_listening("127.0.0.1", 8765)
         runtime.update_permissions({"mode": "auto", "actions": {"llm.self_heal.apply": True}})
@@ -385,7 +386,13 @@ class TestLLMSelfHealAPI(unittest.TestCase):
 
         ok_plan, plan_payload = runtime.llm_autoconfig_plan({"actor": "test"})
         self.assertTrue(ok_plan)
-        self.assertEqual(0, int((plan_payload.get("plan") or {}).get("impact", {}).get("changes_count") or 0))
+        plan = plan_payload.get("plan") if isinstance(plan_payload.get("plan"), dict) else {}
+        reasons = plan.get("reasons") if isinstance(plan.get("reasons"), list) else []
+        self.assertNotIn("default_model_missing", " ".join(str(item) for item in reasons))
+        self.assertEqual(
+            "ollama:qwen2.5:3b-instruct",
+            str(runtime.get_defaults().get("default_model") or ""),
+        )
 
     def test_notification_reason_includes_drift_and_rationale(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

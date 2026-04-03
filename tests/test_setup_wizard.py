@@ -36,10 +36,20 @@ class TestSetupWizard(unittest.TestCase):
         def _fetch(**_kwargs: object) -> tuple[bool, dict[str, object] | str]:
             return False, "URLError:connection refused"
 
-        result = run_setup_wizard(fetch_json=_fetch, dry_run=True)
+        result = run_setup_wizard(
+            fetch_json=_fetch,
+            dry_run=True,
+            service_probe_fn=lambda: {
+                "checked": True,
+                "available": True,
+                "active_state": "inactive",
+                "confidence": "confirmed",
+            },
+        )
         self.assertFalse(result.api_reachable)
         self.assertEqual("API_DOWN", result.recovery_mode)
         self.assertEqual("SERVICES_DOWN", result.onboarding_state)
+        self.assertEqual("API service is down.", result.why)
         self.assertIn("personal-agent-api.service", result.next_action)
 
     def test_run_setup_wizard_uses_telegram_runtime_state_when_enabled_but_stopped(self) -> None:
@@ -74,6 +84,34 @@ class TestSetupWizard(unittest.TestCase):
         self.assertEqual("SERVICES_DOWN", result.onboarding_state)
         self.assertEqual("TELEGRAM_DOWN", result.recovery_mode)
         self.assertIn("personal-agent-telegram.service", result.next_action)
+
+    def test_run_setup_wizard_prefers_embedded_ready_llm_payload(self) -> None:
+        calls: list[str] = []
+
+        def _fetch(**kwargs: object) -> tuple[bool, dict[str, object] | str]:
+            path = str(kwargs.get("path") or "")
+            calls.append(path)
+            if path == "/ready":
+                return True, {
+                    "ready": True,
+                    "phase": "ready",
+                    "telegram": {"enabled": False, "configured": False, "state": "disabled_optional"},
+                    "runtime_status": {"runtime_mode": "READY", "failure_code": None},
+                    "llm": {
+                        "default_provider": "ollama",
+                        "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                        "active_provider_health": {"status": "ok"},
+                        "active_model_health": {"status": "ok"},
+                    },
+                }
+            if path == "/llm/status":
+                raise AssertionError("run_setup_wizard should use embedded ready.llm before /llm/status")
+            raise AssertionError(f"unexpected path: {path}")
+
+        result = run_setup_wizard(fetch_json=_fetch, dry_run=True)
+
+        self.assertTrue(result.api_reachable)
+        self.assertEqual(["/ready"], calls)
 
     def test_no_contradictory_next_action_for_token_missing(self) -> None:
         status = normalize_user_facing_status(
@@ -123,6 +161,58 @@ class TestSetupWizard(unittest.TestCase):
         )
         self.assertEqual("READY", result.onboarding_state)
         self.assertEqual([], result.suggestions)
+
+    def test_build_setup_result_runtime_truth_beats_failed_probe(self) -> None:
+        result = build_setup_result(
+            ready_payload={
+                "ready": True,
+                "phase": "ready",
+                "telegram": {"enabled": True, "configured": True, "state": "running"},
+                "runtime_status": {"runtime_mode": "READY", "failure_code": None},
+            },
+            llm_status={
+                "default_provider": "ollama",
+                "resolved_default_model": "ollama:qwen3.5:4b",
+                "active_provider_health": {"status": "ok"},
+                "active_model_health": {"status": "ok"},
+            },
+            api_reachable=False,
+            transport_error="URLError:timed out",
+            dry_run=True,
+            trace_id="setup-test-runtime-truth",
+            service_probe_fn=lambda: {
+                "checked": True,
+                "available": True,
+                "active_state": "active",
+                "confidence": "confirmed",
+            },
+        )
+        self.assertEqual("READY", result.onboarding_state)
+        self.assertEqual("runtime_truth", result.diagnosis_source)
+        self.assertEqual("confirmed", result.diagnosis_confidence)
+        self.assertNotIn("API service is down", result.why)
+
+    def test_build_setup_result_transport_failure_with_active_service_is_uncertain(self) -> None:
+        result = build_setup_result(
+            ready_payload={},
+            llm_status={},
+            api_reachable=False,
+            transport_error="URLError:timed out",
+            dry_run=True,
+            trace_id="setup-test-uncertain",
+            service_probe_fn=lambda: {
+                "checked": True,
+                "available": True,
+                "active_state": "active",
+                "confidence": "confirmed",
+            },
+        )
+        self.assertEqual("DEGRADED", result.onboarding_state)
+        self.assertEqual("UNKNOWN_FAILURE", result.recovery_mode)
+        self.assertEqual("Run: python -m agent status", result.next_action)
+        self.assertEqual("service_check", result.diagnosis_source)
+        self.assertEqual("uncertain", result.diagnosis_confidence)
+        self.assertEqual("The API may be restarting or temporarily unavailable.", result.why)
 
 
 if __name__ == "__main__":

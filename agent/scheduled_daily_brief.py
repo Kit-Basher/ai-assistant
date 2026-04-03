@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 from agent.daily_brief import should_send_daily_brief
 from memory.db import MemoryDB
+from agent.config import resolved_default_db_path
 
 
 _TRUE_VALUES = {"on", "true", "1", "yes"}
@@ -210,7 +211,7 @@ def run_once(now_utc: datetime | None = None) -> int:
     db: MemoryDB | None = None
     try:
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        db_path = os.getenv("AGENT_DB_PATH", os.path.join(repo_root, "memory", "agent.db"))
+        db_path = os.getenv("AGENT_DB_PATH", resolved_default_db_path())
         timezone_name = os.getenv("AGENT_TIMEZONE", "UTC")
         schema_path = os.path.join(repo_root, "memory", "schema.sql")
 

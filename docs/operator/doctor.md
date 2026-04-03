@@ -4,7 +4,13 @@ Canonical local diagnostics entrypoint:
 
 - `python -m agent doctor`
 - `python -m agent doctor --json`
+- `python -m agent doctor --collect-diagnostics`
 - `python -m agent doctor --fix` (safe local fixes only)
+
+Canonical release gate:
+
+- `python scripts/release_smoke.py`
+- heavier follow-up validation: `python scripts/release_validation_extended.py`
 
 ## Guarantees
 
@@ -16,12 +22,63 @@ Canonical local diagnostics entrypoint:
 - stdout/journald visibility is part of the supported runtime model; `logging.stdout` should pass unless logging is explicitly misconfigured
 - aligns with runtime permission semantics: read-only diagnostics are always preferred
 
+## Canonical Collect-Diagnostics Path
+
+Use this when you need one operator-safe support bundle without changing local state:
+
+- `python -m agent doctor --collect-diagnostics`
+
+It writes one redacted local bundle in a temp directory and prints the bundle path.
+The bundle includes:
+
+- the doctor report and a plain-text summary
+- startup/self-check snapshots for API and Telegram
+- redacted local API snapshots (`/health`, `/ready`, `/runtime`, `/llm/status`, `/memory`) when available
+- canonical paths, backup targets, and restore guidance
+
+If the local API is down, diagnostics collection still succeeds and records that
+the fetch failed instead of pretending the runtime is healthy.
+
 ## Safe Fix Scope (`--fix`)
 
 - creates missing local agent/systemd user directories
+- creates missing `~/.config/personal-agent` operator config directory
 - writes Telegram drop-in with `AGENT_SECRET_STORE_PATH` when safe
 - removes stale Telegram lock files only when PID is not running
+- copies legacy repo-local `memory/agent.db` and `logs/agent.jsonl` into
+  `~/.local/share/personal-agent` when the canonical state files are missing
 - generates local support bundle in a temp directory
+
+## Backup / Restore Story
+
+Supported today is a manual export/restore story, not a full backup subsystem.
+
+Backup/export:
+
+- stop the user services first
+- copy:
+  - `~/.config/personal-agent`
+  - `~/.local/share/personal-agent`
+  - `~/.config/systemd/user`
+
+Restore/import:
+
+- restore those copied paths to the same locations
+- run `python -m agent doctor --fix`
+- restart the user services
+- verify `python -m agent status` and `/ready`
+
+## Failed Upgrade / Corrupt State Recovery
+
+- failed upgrade:
+  - reinstall the supported repo checkout or wheel
+  - run `python -m agent doctor --fix`
+  - restart the user services
+- corrupt state:
+  - collect diagnostics first: `python -m agent doctor --collect-diagnostics`
+  - move the corrupt file aside instead of editing it in place
+  - restore from backup when available
+  - run `python -m agent doctor --fix`
 
 ## Telegram
 

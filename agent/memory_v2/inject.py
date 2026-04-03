@@ -58,10 +58,3 @@ def build_memory_context(selection: MemorySelection) -> str:
 def with_built_context(selection: MemorySelection) -> MemorySelection:
     context = build_memory_context(selection)
     return replace(selection, merged_context_text=context)
-
-
-def attach_memory_context_to_messages(messages: list[dict[str, str]], context_text: str) -> list[dict[str, str]]:
-    text = str(context_text or "").strip()
-    if not text:
-        return list(messages)
-    return [{"role": "system", "content": text}, *list(messages)]

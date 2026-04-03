@@ -276,14 +276,14 @@ def build_runtime_model_snapshot(
         )
         health_raw = dict(row.get("health") or {}) if isinstance(row.get("health"), Mapping) else {}
         raw_status = _health_status(health_raw.get("status"))
+        last_error_kind = str(health_raw.get("last_error_kind") or "").strip().lower() or None
+        not_installed_failure = last_error_kind in {"not_installed", "model_not_installed"}
         explicit_local_install_evidence = local and (
             bool(row.get("routable", False))
-            or bool(row.get("available", False))
             or raw_status == "ok"
             or (
                 _health_has_runtime_evidence(health_raw)
-                and str(health_raw.get("last_error_kind") or "").strip().lower()
-                not in {"not_installed", "model_not_installed"}
+                and not not_installed_failure
             )
         )
         installed = bool(not local or model_name in installed_local_names or explicit_local_install_evidence)
@@ -339,6 +339,10 @@ def build_runtime_model_snapshot(
             "available": available,
             "routable": routable,
             "capabilities": capabilities,
+            "task_types": list(registry_model.task_types) if registry_model is not None else [],
+            "architecture_modality": registry_model.architecture_modality if registry_model is not None else None,
+            "input_modalities": list(registry_model.input_modalities) if registry_model is not None else [],
+            "output_modalities": list(registry_model.output_modalities) if registry_model is not None else [],
             "capability_source": capability_source,
             "capability_provenance": capability_provenance,
             "runtime_known": True,

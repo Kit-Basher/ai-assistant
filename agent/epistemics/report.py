@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 from collections import Counter
-from pathlib import Path
 from typing import Any
 
 from memory.db import MemoryDB
+from agent.config import resolved_default_db_path
 
 
 def _safe_env_int(name: str, default: int, low: int, high: int) -> int:
@@ -76,8 +76,7 @@ def build_epistemics_report(
 
 
 def _default_db_path() -> str:
-    repo_root = Path(__file__).resolve().parents[2]
-    return str(repo_root / "memory" / "agent.db")
+    return resolved_default_db_path()
 
 
 def _schema_path() -> str:

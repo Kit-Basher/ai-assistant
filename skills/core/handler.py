@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from typing import Any
-
 from agent.time_utils import parse_local_datetime, to_utc_iso
 
 
@@ -22,6 +21,7 @@ def _parse_tags_and_project(text: str) -> tuple[str, list[str], str | None]:
 
 def remember_note(context: dict[str, Any], text: str) -> dict[str, Any]:
     db = context["db"]
+    semantic_memory = context.get("semantic_memory")
     cleaned, tags, project_name = _parse_tags_and_project(text)
     project_id = None
     if project_name:
@@ -30,6 +30,25 @@ def remember_note(context: dict[str, Any], text: str) -> dict[str, Any]:
             project_id = project.id
     tag_str = ",".join(tags) if tags else None
     note_id = db.add_note(cleaned or text, project_id, tag_str)
+    if semantic_memory is not None:
+        try:
+            scope = f"project:{project_name}" if project_name else "global"
+            ingest = getattr(semantic_memory, "ingest_note_text", None)
+            if callable(ingest):
+                ingest(
+                    source_ref=f"note:{note_id}",
+                    text=cleaned or text,
+                    scope=scope,
+                    project_id=str(project_id) if project_id is not None else None,
+                    pinned=True,
+                    metadata={
+                        "tags": tags,
+                        "project": project_name,
+                        "note_id": note_id,
+                    },
+                )
+        except Exception:
+            pass
     return {
         "status": "ok",
         "note_id": note_id,

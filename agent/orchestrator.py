@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import partial
+import platform
 import re
 from typing import Any
 import os
@@ -12,8 +13,11 @@ import uuid
 import subprocess
 import sqlite3
 from datetime import datetime, timezone, timedelta
+import time
+from zoneinfo import ZoneInfo
 
 from agent.intent_router import route_message
+from agent.intent.low_confidence import detect_low_confidence
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
 from agent.doctor import run_doctor_report
@@ -39,24 +43,57 @@ from agent.cards import render_cards_markdown
 from agent.nl_router import build_cards_payload, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
-from agent.identity import get_public_identity
+from agent.identity import (
+    assistant_identity_label,
+    get_public_identity,
+    normalize_identity_name,
+    user_identity_label,
+)
+from agent.llm.chat_preflight import build_chat_selection_policy_meta
 from agent.llm.inference_router import route_inference
 from agent.onboarding_contract import onboarding_next_action, onboarding_summary
 from agent.recovery_contract import recovery_next_action, recovery_summary
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
-from agent.error_response_ux import deterministic_error_message
+from agent.error_response_ux import compose_actionable_message, deterministic_error_message
+from agent.runtime_truth_service import RuntimeTruthService
+from agent.skill_governance import (
+    ALLOWED_EXECUTION_MODES,
+    DECLARABLE_CAPABILITIES,
+    DEFAULT_EXECUTION_MODE,
+    evaluate_skill_execution_request,
+)
+from agent.skill_governance_store import SkillGovernanceStore
+from agent.setup_chat_flow import (
+    _looks_like_current_model_query,
+    _looks_like_local_model_inventory_query,
+    _looks_like_model_availability_query,
+    _looks_like_model_lifecycle_query,
+    _looks_like_setup_explanation_query,
+    _looks_like_runtime_status_query,
+    classify_runtime_chat_route,
+    normalize_setup_text,
+)
 from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.tool_contract import normalize_tool_request
 from agent.tool_executor import ToolExecutor
 from agent.memory_runtime import MemoryRuntime
+from agent.working_memory import (
+    append_turn as append_working_memory_turn,
+    build_hot_messages,
+    build_working_memory_context_text,
+    default_budget as default_working_memory_budget,
+    manage_working_memory,
+    rebuild_state_from_messages,
+)
 from agent.memory_contract import (
     PENDING_STATUS_ABORTED,
     PENDING_STATUS_DONE,
     PENDING_STATUS_EXPIRED,
     PENDING_STATUS_READY_TO_RESUME,
     PENDING_STATUS_WAITING_FOR_USER,
+    deterministic_memory_snapshot,
 )
 from agent.anchors import create_anchor, list_anchors, parse_anchor_input, reset_anchors
 from agent.prefs import (
@@ -86,6 +123,8 @@ from memory.db import MemoryDB
 
 
 AUDIT_HARD_FAIL_MSG = "Audit logging failed. Operation aborted."
+_TELEGRAM_LATENCY_ROUTE_TIMEOUT_SECONDS = 5.0
+_TELEGRAM_LATENCY_FALLBACK_TIMEOUT_SECONDS = 4.0
 _ASK_ADVICE_PHRASES = (
     "should i",
     "what should i do",
@@ -191,6 +230,229 @@ _VENDOR_IDENTITY_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("openai", ("created by openai", "i am openai", "i'm openai", "as an openai")),
     ("google", ("created by google", "i am google", "i'm google")),
 )
+_ASSISTANT_IDENTITY_REWRITE_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"(?i)\bI\s+(?:am|'m|’m)\s+"
+            r"(?:an?\s+)?(?:AI\s+assistant\s+)?(?:from\s+)?"
+            r"(?:OpenAI|Anthropic|Google|DeepSeek|OpenRouter|Ollama|"
+            r"GPT[-\w.]*|Claude[-\w.]*|Gemini[-\w.]*|Qwen[-\w.]*|Llama[-\w.]*|Mistral[-\w.]*)\b"
+        ),
+        "I am your Personal Agent assistant",
+    ),
+    (
+        re.compile(r"(?i)\bcreated by\s+(?:OpenAI|Anthropic|Google)\b"),
+        "running inside your Personal Agent",
+    ),
+    (
+        re.compile(r"(?i)\b(?:created|built|made|developed)\s+by\s+[^.]{1,80}\.?"),
+        "running locally in your Personal Agent runtime.",
+    ),
+    (
+        re.compile(
+            r"(?i)\bas\s+an?\s+"
+            r"(?:OpenAI|Anthropic|Google|DeepSeek|OpenRouter|Ollama|"
+            r"GPT[-\w.]*|Claude[-\w.]*|Gemini[-\w.]*|Qwen[-\w.]*|Llama[-\w.]*|Mistral[-\w.]*)"
+            r"[^,]*,\s*"
+        ),
+        "",
+    ),
+    (
+        re.compile(
+            r"(?i)\bI\s+(?:am|'m|’m)\s+running\s+in\s+an?\s+environment\s+managed\s+by\s+"
+            r"(?:Alibaba\s+Cloud|AWS|Amazon|Azure|Google\s+Cloud|GCP|OpenAI|Anthropic)\b[^.]*\.?"
+        ),
+        "I am your Personal Agent assistant running locally in your Personal Agent runtime.",
+    ),
+    (
+        re.compile(
+            r"(?i)\b(?:managed|hosted|run|operated)\s+by\s+"
+            r"(?:Alibaba\s+Cloud|AWS|Amazon|Azure|Google\s+Cloud|GCP|OpenAI|Anthropic)\b[^.]*\.?"
+        ),
+        "running locally in your Personal Agent runtime",
+    ),
+)
+_ASSISTANT_IDENTITY_LEAK_RE = re.compile(
+    r"(?i)\b(?:i\s+(?:am|'m|’m)|created by|as\s+an?|as\s+a)\b.*\b"
+    r"(?:openai|anthropic|google|gemini|claude|deepseek|openrouter|ollama|"
+    r"gpt[-\w.]*|qwen[-\w.]*|llama[-\w.]*|mistral[-\w.]*)\b"
+)
+_ASSISTANT_GENERIC_ORIGIN_LEAK_RE = re.compile(
+    r"(?i)\b(?:created|built|made|developed|provided|powered)\s+by\b.{0,80}"
+)
+_ASSISTANT_ORIGIN_LEAK_RE = re.compile(
+    r"(?i)\b(?:running\s+in\s+an?\s+environment\s+managed\s+by|"
+    r"managed\s+by|hosted\s+by|operated\s+by|run\s+by)\b.*\b"
+    r"(?:alibaba\s+cloud|aws|amazon|azure|google\s+cloud|gcp|openai|anthropic|cloud|vendor|platform|company)\b"
+)
+_GROUNDED_QUERY_ESCAPE_RE = re.compile(
+    r"(?i)(?:"
+    r"i\s+do\s+not\s+have\s+real[- ]time\s+access|"
+    r"i\s+don'?t\s+have\s+real[- ]time\s+access|"
+    r"running\s+in\s+an\s+environment\s+managed\s+by|"
+    r"managed\s+by\s+alibaba\s+cloud|"
+    r"alibaba\s+cloud"
+    r")"
+)
+_INTERPRETATION_FOLLOWUP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("top_memory", re.compile(r"\b(what is using(?: up)? my memory the most|using the most memory|using up my memory|memory the most)\b", re.IGNORECASE)),
+    ("explain", re.compile(r"\b(explain it to me|explain that|what does that mean|summari[sz]e that|what'?s the important part)\b", re.IGNORECASE)),
+    ("concern", re.compile(r"\b(should i worry|do i need to worry|is that bad|is that normal|anything unusual|is there anything to be concerned about there)\b", re.IGNORECASE)),
+    ("action", re.compile(r"\b(what should i do)\b", re.IGNORECASE)),
+)
+_DEEP_SYSTEM_FOLLOWUP_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\b(can you learn more|learn more|show me more|what else can you find|dig deeper)\b", re.IGNORECASE),
+    re.compile(r"\b(run a check and see if you can learn more)\b", re.IGNORECASE),
+)
+_MODEL_SCOUT_FOLLOWUP_RE = re.compile(
+    r"\b(run it|check them|check it|evaluate them|test them|look into them|try them|compare them|see if they(?: re|'re)? good)\b",
+    re.IGNORECASE,
+)
+_DIRECT_MODEL_SWITCH_TOKEN_RE = re.compile(
+    r"\b(?:[a-z0-9._-]+:)?[a-z0-9][a-z0-9./_-]*:[a-z0-9][a-z0-9./_-]*\b",
+    re.IGNORECASE,
+)
+_INTERPRETATION_DEBUG_REFLEX_RE = re.compile(
+    r"(?i)(?:^|\b)(?:run|use|check|try)\s+"
+    r"(?:`[^`]+`|free\b|top\b|htop\b|ps\b|ps\s+aux\b|vmstat\b|smem\b|iotop\b|df\b|du\b)"
+)
+_INTERPRETATION_SHELL_SNIPPET_RE = re.compile(
+    r"(?i)(`[^`]+`|\b(?:free|top|htop|ps|vmstat|smem|iotop|df|du)\s+-[a-z])"
+)
+_INTERPRETABLE_RESULT_TTL_SECONDS = 900
+_RUNTIME_SETUP_STATE_TTL_SECONDS = 900
+_MODEL_TRIAL_STATE_TTL_SECONDS = 86400
+_MODEL_SCOUT_ACTION_VERBS = (
+    "run",
+    "check",
+    "scan",
+    "inspect",
+    "evaluate",
+    "test",
+    "try",
+    "compare",
+    "look into",
+    "see if",
+)
+_MODEL_SCOUT_QUALITY_HINTS = (
+    "good for us",
+    "any good",
+    "worth trying",
+    "worth using",
+    "useful",
+    "compare",
+    "evaluate",
+)
+_MODEL_SCOUT_STRATEGY_PHRASES = (
+    "is there a better model i should use",
+    "should we switch to a better model",
+    "try a better model",
+    "use a better model",
+    "should i use a better model",
+    "better model should use",
+    "what better local models could i try",
+    "better local models could i try",
+)
+_MODEL_SCOUT_REMOTE_ROLE_PHRASES = (
+    "cheap cloud",
+    "low cost cloud",
+    "budget cloud",
+    "cheap remote",
+    "low cost remote",
+    "budget remote",
+    "premium model",
+    "premium coding model",
+    "premium research model",
+)
+_MODEL_SCOUT_DISCOVERY_PHRASES = (
+    "better model we should download",
+    "look on hugging face for a better model",
+    "look on huggingface for a better model",
+    "find promising local models",
+    "find promising models to download",
+    "check for a better model we should download",
+    "look for new better models",
+    "find new models",
+    "find new local models",
+    "find small models",
+    "find smol models",
+    "find tiny models",
+    "find lightweight models",
+    "show me smol models",
+    "show me small models",
+    "show me tiny models",
+    "show me lightweight models",
+    "look for smol models",
+    "look for small models",
+    "look for tiny models",
+    "look for lightweight models",
+    "search hugging face for models",
+    "search huggingface for models",
+)
+_MODEL_SCOUT_SWITCH_BACK_PHRASES = (
+    "switch back",
+    "switch back to the previous model",
+    "go back to the previous model",
+    "use the previous model again",
+    "switch back to the last model",
+)
+_RUNTIME_REPAIR_ACTION_PHRASES = (
+    "repair it",
+    "fix it",
+    "repair ollama",
+    "fix ollama",
+    "repair openrouter",
+    "fix openrouter",
+    "get it working",
+    "get this working",
+    "help me get it working",
+    "help me get this working",
+    "help me fix that",
+    "help me fix it",
+)
+_MODEL_READY_NOW_PHRASES = (
+    "what models are ready now",
+    "which models are ready now",
+    "what models are usable right now",
+    "which models are usable right now",
+)
+_MODEL_CONTROLLER_TEST_PHRASES = (
+    "test this model without adopting it",
+    "test that model without adopting it",
+    "test this model without switching",
+    "test that model without switching",
+)
+_MODEL_CONTROLLER_TRIAL_SWITCH_PHRASES = (
+    "switch temporarily",
+    "switch to it temporarily",
+    "use it temporarily",
+    "try it temporarily",
+)
+_MODEL_CONTROLLER_PROMOTE_PHRASES = (
+    "make this model the default",
+    "make that model the default",
+    "make this the default",
+    "make that the default",
+)
+_MODEL_SCOUT_TERM_STOPWORDS = {
+    "the",
+    "any",
+    "that",
+    "those",
+    "these",
+    "other",
+    "available",
+    "actual",
+    "actually",
+    "good",
+    "models",
+    "model",
+    "chat",
+    "local",
+    "remote",
+    "provider",
+    "providers",
+}
 
 
 def _normalize_authoritative_text(text: str) -> str:
@@ -256,9 +518,16 @@ class Orchestrator:
         perception_enabled: bool = True,
         perception_roots: tuple[str, ...] | None = None,
         perception_interval_seconds: int = 5,
+        runtime_truth_service: RuntimeTruthService | None = None,
+        chat_runtime_adapter: Any | None = None,
+        semantic_memory_service: Any | None = None,
     ) -> None:
         self.db = db
-        self.skills = SkillLoader(skills_path).load_all()
+        self._skill_loader = SkillLoader(skills_path)
+        self.skills = self._skill_loader.load_all()
+        self._skill_governance_store = SkillGovernanceStore(db.db_path)
+        self._skill_governance_decisions: dict[str, dict[str, Any]] = {}
+        self._blocked_skill_governance: dict[str, dict[str, Any]] = {}
         self._pack_store = PackStore(db.db_path)
         for skill in self.skills.values():
             if str(skill.pack_trust).strip().lower() != "native":
@@ -270,6 +539,7 @@ class Orchestrator:
                 permissions=permissions,
                 manifest_path=skill.pack_manifest_path,
             )
+        self._refresh_skill_governance_state()
         self.log_path = log_path
         self.timezone = timezone
         self.llm_client = llm_client
@@ -291,6 +561,17 @@ class Orchestrator:
         self._epistemic_history: dict[tuple[str, str], list[MessageTurn]] = {}
         self._epistemic_thread_state: dict[str, dict[str, str | None]] = {}
         self._memory_runtime = MemoryRuntime(db)
+        self._runtime_truth_service = runtime_truth_service
+        self._chat_runtime_adapter = chat_runtime_adapter
+        self._semantic_memory_service = semantic_memory_service
+        if self._semantic_memory_service is not None:
+            try:
+                setattr(self.db, "_semantic_memory_service", self._semantic_memory_service)
+            except Exception:
+                pass
+        self._runtime_setup_state: dict[str, dict[str, Any]] = {}
+        self._model_trial_state: dict[str, dict[str, Any]] = {}
+        self._last_interpretable_result: dict[str, dict[str, Any]] = {}
         self._tool_executor = ToolExecutor(
             handlers={
                 "brief": self._tool_handler_brief,
@@ -307,7 +588,110 @@ class Orchestrator:
     def _emit_tool_log(self, event: str, payload: dict[str, Any]) -> None:
         log_event(self.log_path, event, payload)
 
+    def _refresh_skill_governance_state(self) -> None:
+        self._skill_governance_decisions = {}
+        self._blocked_skill_governance = {}
+        for row in self._skill_loader.blocked_skills:
+            skill_id = str(row.get("skill_id") or "").strip()
+            if not skill_id:
+                continue
+            recorded = self._skill_governance_store.record_skill_governance(
+                skill_id=skill_id,
+                skill_type=str(row.get("skill_type") or "general"),
+                requested_execution_mode=str(row.get("requested_execution_mode") or DEFAULT_EXECUTION_MODE),
+                requested_capabilities=[
+                    str(item).strip()
+                    for item in (row.get("requested_capabilities") if isinstance(row.get("requested_capabilities"), list) else [])
+                    if str(item).strip()
+                ],
+                persistence_requested=bool(row.get("persistence_requested", False)),
+                allowed=False,
+                requires_user_approval=False,
+                reason=str(row.get("reason") or "forbidden_persistence_pattern"),
+                source_issues=[
+                    str(item).strip()
+                    for item in (row.get("source_issues") if isinstance(row.get("source_issues"), list) else [])
+                    if str(item).strip()
+                ],
+                source_pack=str(row.get("source_pack") or "").strip() or None,
+            )
+            self._blocked_skill_governance[skill_id] = recorded
+
+        for skill in self.skills.values():
+            request = skill.execution_request
+            if request is None:
+                continue
+            decision = evaluate_skill_execution_request(
+                request,
+                source_issues=skill.governance_source_issues,
+                managed_background_task_approved=self._skill_governance_store.has_approved_background_task_for_skill(skill.name),
+                managed_adapter_approved=self._skill_governance_store.has_approved_adapter_for_skill(skill.name),
+            )
+            recorded = self._skill_governance_store.record_skill_governance(
+                skill_id=skill.name,
+                skill_type=skill.skill_type,
+                requested_execution_mode=request.requested_execution_mode,
+                requested_capabilities=list(request.requested_capabilities),
+                persistence_requested=bool(request.persistence_requested),
+                allowed=bool(decision.allowed),
+                requires_user_approval=bool(decision.requires_user_approval),
+                reason=str(decision.reason or "unknown"),
+                source_issues=list(decision.source_issues),
+                source_pack=str(skill.pack_id or skill.name).strip() or None,
+            )
+            self._skill_governance_decisions[skill.name] = recorded
+
+    def skill_governance_status(self) -> dict[str, Any]:
+        return {
+            "policy": {
+                "allowed_execution_modes": sorted(ALLOWED_EXECUTION_MODES),
+                "default_execution_mode": DEFAULT_EXECUTION_MODE,
+                "declarable_capabilities": sorted(DECLARABLE_CAPABILITIES),
+                "persistent_execution_default": "deny",
+            },
+            "skills": self._skill_governance_store.list_skill_governance(),
+            "managed_adapters": self._skill_governance_store.list_managed_adapters(),
+            "background_tasks": self._skill_governance_store.list_background_tasks(),
+        }
+
+    def register_managed_adapter(self, **kwargs: Any) -> dict[str, Any]:
+        return self._skill_governance_store.register_managed_adapter(**kwargs)
+
+    def register_background_task(self, **kwargs: Any) -> dict[str, Any]:
+        return self._skill_governance_store.register_background_task(**kwargs)
+
+    def _skill_governance_denied_response(self, skill_id: str, governance: dict[str, Any]) -> OrchestratorResponse:
+        mode = str(governance.get("requested_execution_mode") or DEFAULT_EXECUTION_MODE).strip().lower() or DEFAULT_EXECUTION_MODE
+        reason = str(governance.get("reason") or "execution_governance_denied").strip().lower() or "execution_governance_denied"
+        if bool(governance.get("requires_user_approval", False)):
+            if mode == "managed_background_task":
+                message = (
+                    f"Skill {skill_id} requested managed background task execution and needs platform approval first."
+                )
+            elif mode == "managed_adapter":
+                message = f"Skill {skill_id} requested managed adapter execution and needs platform approval first."
+            else:
+                message = f"Skill {skill_id} needs platform approval before it can run."
+        else:
+            message = f"Skill {skill_id} is blocked by execution governance ({reason})."
+        issues = governance.get("source_issues") if isinstance(governance.get("source_issues"), list) else []
+        data = {
+            "skill_governance": governance,
+            "source_issues": [str(item).strip() for item in issues if str(item).strip()],
+        }
+        return OrchestratorResponse(message, data)
+
     def _llm_chat_available(self) -> bool:
+        adapter = self._chat_runtime_adapter
+        if (
+            callable(getattr(adapter, "_safe_mode_enabled", None))
+            and adapter._safe_mode_enabled()
+            and callable(getattr(adapter, "assistant_chat_available", None))
+        ):
+            try:
+                return bool(adapter.assistant_chat_available())
+            except Exception:
+                pass
         client = self.llm_client
         if not client:
             return False
@@ -486,8 +870,34 @@ class Orchestrator:
         return OrchestratorResponse("\n".join(lines))
 
     def _memory_summary_response(self, user_id: str) -> OrchestratorResponse:
-        thread_id = self._active_thread_id_for_user(user_id)
-        snapshot = self._memory_runtime.deterministic_snapshot(user_id, thread_id=thread_id)
+        continuity_health = self._memory_runtime.inspect_user_state(user_id)
+        if bool(continuity_health.get("healthy", True)):
+            thread_id = self._active_thread_id_for_user(user_id)
+            snapshot = self._memory_runtime.deterministic_snapshot(user_id, thread_id=thread_id)
+        else:
+            runtime_state = self._memory_runtime.get_thread_state(user_id)
+            active_state = self._epistemic_thread_state.get(user_id) or {}
+            thread_id = (
+                str(active_state.get("active_thread_id") or "").strip()
+                or str(continuity_health.get("active_thread_id") or "").strip()
+                or str(runtime_state.get("thread_id") or "").strip()
+                or self._default_thread_id(user_id)
+            )
+            pending_items = self._memory_runtime.list_pending_items(
+                user_id,
+                thread_id=thread_id,
+                include_expired=True,
+            )
+            snapshot = deterministic_memory_snapshot(
+                thread_state=runtime_state,
+                pending_items=pending_items,
+                last_meaningful_user_request=self.db.get_user_pref(
+                    self._memory_runtime._last_request_key(user_id)
+                ),
+                last_agent_action=self.db.get_user_pref(
+                    self._memory_runtime._last_action_key(user_id)
+                ),
+            )
         summary = snapshot.get("memory_summary") if isinstance(snapshot.get("memory_summary"), dict) else {}
         pending_items = snapshot.get("pending_items") if isinstance(snapshot.get("pending_items"), list) else []
         lines = [
@@ -497,6 +907,23 @@ class Orchestrator:
             f"Last tool: {str(summary.get('last_tool') or 'none')}",
             f"Resumable: {'yes' if bool(summary.get('resumable', False)) else 'no'}",
         ]
+        if not bool(continuity_health.get("healthy", True)):
+            corrupt_entries = (
+                continuity_health.get("corrupt_entries")
+                if isinstance(continuity_health.get("corrupt_entries"), list)
+                else []
+            )
+            corrupt_count = len(corrupt_entries)
+            lines.append(
+                (
+                    "Continuity memory is degraded right now, so resume state may be incomplete."
+                    if corrupt_count <= 0
+                    else (
+                        f"Continuity memory is degraded right now ({corrupt_count} corrupted "
+                        f"{'entry' if corrupt_count == 1 else 'entries'} ignored), so resume state may be incomplete."
+                    )
+                )
+            )
         last_request = str(summary.get("last_meaningful_user_request") or "").strip()
         if last_request:
             lines.append(f"Last request: {last_request}")
@@ -513,8 +940,8132 @@ class Orchestrator:
             {
                 "memory_snapshot": snapshot,
                 "thread_id": thread_id,
+                "skip_runtime_thread_persist": not bool(continuity_health.get("healthy", True)),
                 "skip_friction_formatting": True,
             },
+        )
+
+    @staticmethod
+    def _assistant_memory_focus(query_text: str | None) -> str:
+        normalized = " ".join(str(query_text or "").strip().lower().split())
+        if any(
+            phrase in normalized
+            for phrase in (
+                "what are we working on",
+                "what were we working on",
+                "what were we doing before",
+                "thing we were doing before",
+            )
+        ):
+            return "working_context"
+        if any(
+            phrase in normalized
+            for phrase in (
+                "what do you know about my system",
+                "what do you know about this system",
+                "what do you know about my machine",
+                "what do you know about this machine",
+            )
+        ):
+            return "system_context"
+        return "memory_summary"
+
+    def _assistant_memory_state(self, user_id: str) -> dict[str, Any]:
+        thread_id = self._active_thread_id_for_user(user_id)
+        prefs = self.db.list_preferences()
+        anchors = self.db.list_thread_anchors(thread_id, limit=5)
+        open_loops = self.db.list_open_loops(status="open", limit=5, order="due")
+        tasks = [
+            row
+            for row in self.db.list_tasks(limit=8)
+            if str(row.get("status") or "").strip().lower() in {"todo", "doing"}
+        ]
+        projects = self.db.list_projects()[:5]
+        continuity_health = self._memory_runtime.inspect_user_state(user_id)
+        snapshot = self._memory_runtime.deterministic_snapshot(user_id, thread_id=thread_id)
+        summary = snapshot.get("memory_summary") if isinstance(snapshot.get("memory_summary"), dict) else {}
+        truth = self._runtime_truth()
+        target_truth = (
+            truth.chat_target_truth()
+            if truth is not None and callable(getattr(truth, "chat_target_truth", None))
+            else {}
+        )
+        return {
+            "thread_id": thread_id,
+            "preferences": prefs,
+            "anchors": anchors,
+            "open_loops": open_loops,
+            "tasks": tasks,
+            "projects": projects,
+            "snapshot": snapshot,
+            "summary": summary,
+            "continuity_health": continuity_health if isinstance(continuity_health, dict) else {},
+            "target_truth": target_truth if isinstance(target_truth, dict) else {},
+        }
+
+    @staticmethod
+    def _assistant_preference_hints(preferences: list[dict[str, Any]]) -> list[str]:
+        hints: list[str] = []
+        for row in preferences:
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("key") or "").strip().lower()
+            value = str(row.get("value") or "").strip()
+            if not key or not value:
+                continue
+            if key == "response_style":
+                hints.append(f"you prefer {value} replies")
+                continue
+            if key == "daily_brief_enabled":
+                hints.append("daily brief is on" if value.lower() in {"on", "true", "1"} else "daily brief is off")
+                continue
+            if key == "default_compare":
+                hints.append(f"default compare mode is {value}")
+                continue
+            if key == "show_confidence":
+                hints.append("confidence display is on" if value.lower() in {"on", "true", "1"} else "confidence display is off")
+                continue
+            hints.append(f"there is a saved preference for {key.replace('_', ' ')}")
+        return hints[:3]
+
+    def _assistant_memory_overview_response(
+        self,
+        user_id: str,
+        *,
+        query_text: str | None = None,
+    ) -> OrchestratorResponse:
+        focus = self._assistant_memory_focus(query_text)
+        state = self._assistant_memory_state(user_id)
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        continuity_health = state.get("continuity_health") if isinstance(state.get("continuity_health"), dict) else {}
+        preferences = state.get("preferences") if isinstance(state.get("preferences"), list) else []
+        anchors = state.get("anchors") if isinstance(state.get("anchors"), list) else []
+        open_loops = state.get("open_loops") if isinstance(state.get("open_loops"), list) else []
+        tasks = state.get("tasks") if isinstance(state.get("tasks"), list) else []
+        projects = state.get("projects") if isinstance(state.get("projects"), list) else []
+        target_truth = state.get("target_truth") if isinstance(state.get("target_truth"), dict) else {}
+
+        preference_hints = self._assistant_preference_hints(
+            [row for row in preferences if isinstance(row, dict)]
+        )
+        anchor_titles = [
+            str(row.get("title") or "").strip()
+            for row in anchors
+            if isinstance(row, dict) and str(row.get("title") or "").strip()
+        ][:2]
+        open_loop_titles = [
+            str(row.get("title") or "").strip()
+            for row in open_loops
+            if isinstance(row, dict) and str(row.get("title") or "").strip()
+        ][:3]
+        task_titles = [
+            str(row.get("title") or "").strip()
+            for row in tasks
+            if isinstance(row, dict) and str(row.get("title") or "").strip()
+        ][:3]
+        project_names = [
+            str(getattr(row, "name", "") or "").strip()
+            for row in projects
+            if str(getattr(row, "name", "") or "").strip()
+        ][:2]
+        current_topic = str(summary.get("current_topic") or "").strip()
+        last_request = str(summary.get("last_meaningful_user_request") or "").strip()
+        last_action = str(summary.get("last_agent_action") or "").strip()
+        effective_model = str(target_truth.get("effective_model") or "").strip()
+        effective_provider = str(target_truth.get("effective_provider") or "").strip().lower()
+        os_name = str(platform.system() or "").strip()
+        arch = str(platform.machine() or "").strip()
+        os_label = " ".join(part for part in (os_name, arch) if part)
+
+        has_saved_memory = bool(
+            preference_hints
+            or anchor_titles
+            or open_loop_titles
+            or task_titles
+            or project_names
+            or (current_topic and current_topic != "none")
+        )
+        has_work_context = bool(has_saved_memory or last_request or last_action)
+        continuity_warning = ""
+        if not bool(continuity_health.get("healthy", True)):
+            corrupt_entries = (
+                continuity_health.get("corrupt_entries")
+                if isinstance(continuity_health.get("corrupt_entries"), list)
+                else []
+            )
+            corrupt_count = len(corrupt_entries)
+            if corrupt_count > 0:
+                continuity_warning = (
+                    f"Continuity memory is degraded right now ({corrupt_count} corrupted "
+                    f"{'entry' if corrupt_count == 1 else 'entries'} ignored), so resume state may be incomplete."
+                )
+            else:
+                continuity_warning = (
+                    "Continuity memory is degraded right now, so resume state may be incomplete."
+                )
+
+        if focus == "working_context":
+            if not has_work_context:
+                message = (
+                    "I do not have a strong saved working context yet. "
+                    "I can remember preferences, open loops, and active tasks as we go."
+                )
+                if continuity_warning:
+                    message = f"{continuity_warning} {message}"
+            else:
+                lines: list[str] = []
+                if continuity_warning:
+                    lines.append(continuity_warning)
+                if current_topic and current_topic != "none":
+                    lines.append(f"It looks like we were focused on {current_topic}.")
+                if last_request:
+                    lines.append(f"The last concrete request I have saved is: {last_request}.")
+                if open_loop_titles:
+                    lines.append(f"Open loops I am tracking include {', '.join(open_loop_titles)}.")
+                if task_titles:
+                    lines.append(f"Active tasks I can see include {', '.join(task_titles)}.")
+                elif project_names:
+                    lines.append(f"Related project context I can see includes {', '.join(project_names)}.")
+                if not lines and last_action:
+                    lines.append(f"The last notable action I recorded was: {last_action}.")
+                lines.append("If you want, I can pick up from that context.")
+                message = " ".join(lines)
+        elif focus == "system_context":
+            lines = []
+            if continuity_warning:
+                lines.append(continuity_warning)
+            if os_label:
+                lines.append(f"I know this assistant is running locally on {os_label}.")
+            if effective_model and effective_provider:
+                lines.append(f"Right now chat is using {effective_model} on {effective_provider}.")
+            if preference_hints:
+                lines.append(f"I also remember preferences like {', '.join(preference_hints)}.")
+            if not has_saved_memory:
+                lines.append("I do not have a richer saved system profile beyond the live runtime context yet.")
+            else:
+                if anchor_titles:
+                    lines.append(f"Saved thread context includes {', '.join(anchor_titles)}.")
+                if open_loop_titles:
+                    lines.append(f"Relevant open loops include {', '.join(open_loop_titles)}.")
+            message = " ".join(lines).strip() or "I do not have a richer saved system profile yet."
+        else:
+            if not has_saved_memory:
+                message = (
+                    "I do not have much saved about you yet. "
+                    "Right now I can see the live runtime context, but I do not have saved preferences, open loops, or project notes to summarize."
+                )
+                if continuity_warning:
+                    message = f"{continuity_warning} {message}"
+            else:
+                lines = ["Here is the useful memory I have right now."]
+                if continuity_warning:
+                    lines.insert(0, continuity_warning)
+                if preference_hints:
+                    lines.append(f"Preferences I know: {', '.join(preference_hints)}.")
+                if current_topic and current_topic != "none":
+                    lines.append(f"Current working context: {current_topic}.")
+                if open_loop_titles:
+                    lines.append(f"Open loops I am tracking: {', '.join(open_loop_titles)}.")
+                if task_titles:
+                    lines.append(f"Active tasks I can see: {', '.join(task_titles)}.")
+                elif project_names:
+                    lines.append(f"Project context I can see: {', '.join(project_names)}.")
+                if anchor_titles:
+                    lines.append(f"Saved thread anchors include {', '.join(anchor_titles)}.")
+                if not any(item.endswith(".") for item in lines[-1:]):
+                    lines[-1] = f"{lines[-1]}."
+                lines.append("If you want, I can unpack any of those areas next.")
+                message = " ".join(lines)
+
+        return self._runtime_truth_response(
+            text=message,
+            route="agent_memory",
+            used_runtime_state=False,
+            used_memory=True,
+            used_tools=["memory_store"],
+            payload={
+                "type": "agent_memory",
+                "kind": focus,
+                "summary": message,
+                "preferences_count": len(preferences),
+                "anchor_count": len(anchors),
+                "open_loop_count": len(open_loops),
+                "task_count": len(tasks),
+                "project_count": len(projects),
+                "current_topic": current_topic or None,
+                "last_request": last_request or None,
+                "effective_model": effective_model or None,
+                "effective_provider": effective_provider or None,
+            },
+        )
+
+    def _selective_chat_memory_context(self, user_id: str, text: str) -> str:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return ""
+        wants_context = any(
+            token in normalized
+            for token in (
+                "before",
+                "again",
+                "continue",
+                "next step",
+                "working on",
+                "prefer",
+                "preference",
+                "same thing",
+                "that task",
+            )
+        )
+        if not wants_context:
+            return ""
+        state = self._assistant_memory_state(user_id)
+        summary = state.get("summary") if isinstance(state.get("summary"), dict) else {}
+        preferences = state.get("preferences") if isinstance(state.get("preferences"), list) else []
+        open_loops = state.get("open_loops") if isinstance(state.get("open_loops"), list) else []
+        preference_hints = self._assistant_preference_hints(
+            [row for row in preferences if isinstance(row, dict)]
+        )
+        lines: list[str] = []
+        current_topic = str(summary.get("current_topic") or "").strip()
+        last_request = str(summary.get("last_meaningful_user_request") or "").strip()
+        if current_topic and current_topic != "none":
+            lines.append(f"Current topic: {current_topic}")
+        if last_request:
+            lines.append(f"Recent request: {last_request}")
+        if preference_hints:
+            lines.append(f"Preferences: {', '.join(preference_hints)}")
+        open_loop_titles = [
+            str(row.get("title") or "").strip()
+            for row in open_loops
+            if isinstance(row, dict) and str(row.get("title") or "").strip()
+        ][:2]
+        if open_loop_titles:
+            lines.append(f"Open loops: {', '.join(open_loop_titles)}")
+        return "\n".join(lines[:4]).strip()
+
+    def _working_memory_budget(self, payload: dict[str, Any]) -> Any:
+        max_context_tokens = int(payload.get("max_context_tokens") or payload.get("min_context_tokens") or 0) or 0
+        adapter = self._chat_runtime_adapter
+        if max_context_tokens <= 0 and adapter is not None:
+            try:
+                defaults = (
+                    dict(adapter.get_defaults())
+                    if callable(getattr(adapter, "get_defaults", None))
+                    else {}
+                )
+            except Exception:
+                defaults = {}
+            model_id = (
+                str(payload.get("model") or "").strip()
+                or str(defaults.get("chat_model") or defaults.get("default_model") or "").strip()
+            )
+            registry = getattr(getattr(adapter, "_router", None), "registry", None)
+            models = getattr(registry, "models", None)
+            model_row = models.get(model_id) if isinstance(models, dict) and model_id else None
+            max_context_tokens = int(getattr(model_row, "max_context_tokens", 0) or 0) or 0
+        return default_working_memory_budget(max_context_tokens or None)
+
+    def _working_memory_durable_ingestor(self, *, user_id: str, thread_id: str | None) -> Any:
+        def _ingest(payload: dict[str, Any]) -> None:
+            service = self._semantic_memory_service
+            if service is None:
+                return
+            source_ref = str(payload.get("source_ref") or "").strip() or f"working-memory:{user_id}"
+            scope = f"thread:{thread_id}" if str(thread_id or "").strip() else f"user:{user_id}"
+            metadata = {
+                "user_id": str(user_id or "").strip() or "unknown",
+                "thread_id": str(thread_id or "").strip() or None,
+                "working_memory": True,
+                "source_ref": source_ref,
+            }
+            raw_text = str(payload.get("raw_text") or "").strip()
+            note_text = str(payload.get("text") or "").strip()
+            if raw_text:
+                try:
+                    service.ingest_conversation_text(
+                        source_ref=source_ref,
+                        text=raw_text,
+                        scope=scope,
+                        thread_id=str(thread_id or "").strip() or None,
+                        pinned=False,
+                        metadata={**metadata, "ingest_kind": "working_memory_chunk"},
+                    )
+                except Exception:
+                    pass
+            if note_text:
+                try:
+                    service.ingest_note_text(
+                        source_ref=f"{source_ref}:durable",
+                        text=note_text,
+                        scope=scope,
+                        pinned=True,
+                        metadata={**metadata, "ingest_kind": "working_memory_summary"},
+                    )
+                except Exception:
+                    pass
+
+        return _ingest
+
+    def _record_chat_working_memory_turn(
+        self,
+        *,
+        user_id: str,
+        role: str,
+        text: str,
+        chat_context: dict[str, Any] | None,
+    ) -> None:
+        if not isinstance(chat_context, dict):
+            return
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return
+        state, issue = self._memory_runtime.load_working_memory_state(user_id)
+        if issue is not None:
+            return
+        thread_state = self._memory_runtime.get_thread_state(user_id)
+        append_working_memory_turn(
+            state,
+            role=str(role or "assistant").strip().lower() or "assistant",
+            text=cleaned,
+            topic_hint=str(thread_state.get("current_topic") or "").strip() or None,
+        )
+        self._memory_runtime.save_working_memory_state(
+            user_id,
+            state,
+            refuse_if_corrupt=True,
+        )
+
+    def _prepare_working_memory_for_chat(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        payload: dict[str, Any],
+        thread_id: str | None,
+        messages: list[dict[str, str]],
+        memory_context_text: str,
+    ) -> dict[str, Any]:
+        system_messages = [
+            {"role": "system", "content": str(row.get("content") or "").strip()}
+            for row in messages
+            if isinstance(row, dict)
+            and str(row.get("role") or "").strip().lower() == "system"
+            and str(row.get("content") or "").strip()
+        ]
+        transcript_messages = [
+            {"role": str(row.get("role") or "").strip().lower(), "content": str(row.get("content") or "").strip()}
+            for row in messages
+            if isinstance(row, dict)
+            and str(row.get("role") or "").strip().lower() in {"user", "assistant"}
+            and str(row.get("content") or "").strip()
+        ]
+        state, issue = self._memory_runtime.load_working_memory_state(user_id)
+        if len(transcript_messages) > 1:
+            state = rebuild_state_from_messages(transcript_messages, previous_state=state)
+        elif transcript_messages:
+            thread_state = self._memory_runtime.get_thread_state(user_id)
+            for row in transcript_messages:
+                append_working_memory_turn(
+                    state,
+                    role=str(row.get("role") or "user").strip().lower() or "user",
+                    text=str(row.get("content") or "").strip(),
+                    topic_hint=str(thread_state.get("current_topic") or "").strip() or None,
+                )
+        elif str(text or "").strip():
+            thread_state = self._memory_runtime.get_thread_state(user_id)
+            append_working_memory_turn(
+                state,
+                role="user",
+                text=str(text or "").strip(),
+                topic_hint=str(thread_state.get("current_topic") or "").strip() or None,
+            )
+        budget = self._working_memory_budget(payload)
+        manage_working_memory(
+            state,
+            budget=budget,
+            user_id=user_id,
+            thread_id=thread_id,
+            durable_ingestor=self._working_memory_durable_ingestor(user_id=user_id, thread_id=thread_id),
+        )
+        effective_memory_context_text = build_working_memory_context_text(
+            state,
+            current_query=str(text or ""),
+            extra_context_text=memory_context_text,
+        )
+        hot_messages = build_hot_messages(state)
+        effective_messages = [*system_messages, *hot_messages] if hot_messages else [*system_messages, *transcript_messages]
+        if issue is None:
+            self._memory_runtime.save_working_memory_state(
+                user_id,
+                state,
+                refuse_if_corrupt=True,
+            )
+        return {
+            "messages": effective_messages,
+            "memory_context_text": effective_memory_context_text,
+            "issue": issue,
+            "used_working_memory": bool(state.warm_summaries or state.cold_state_blocks or state.hot_turns),
+        }
+
+    def _runtime_truth(self) -> RuntimeTruthService | None:
+        return self._runtime_truth_service
+
+    @staticmethod
+    def _response_data(response: OrchestratorResponse) -> dict[str, Any]:
+        return dict(response.data) if isinstance(response.data, dict) else {}
+
+    @staticmethod
+    def _merge_response_data(response: OrchestratorResponse, **updates: Any) -> OrchestratorResponse:
+        data = Orchestrator._response_data(response)
+        for key, value in updates.items():
+            if value is None and key not in data:
+                continue
+            data[key] = value
+        return OrchestratorResponse(response.text, data)
+
+    @staticmethod
+    def _chat_channel(source_surface: str | None) -> str:
+        normalized = str(source_surface or "").strip().lower()
+        if normalized in {"telegram", "api", "cli"}:
+            return normalized
+        return "api"
+
+    def _record_runtime_event(self, event_name: str, **fields: Any) -> None:
+        adapter = self._chat_runtime_adapter
+        record = getattr(adapter, "record_runtime_event", None)
+        if callable(record):
+            try:
+                record(event_name, **fields)
+                return
+            except Exception:
+                pass
+        try:
+            log_event(self.log_path, event_name, fields)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _router_error_kind(result: dict[str, Any]) -> str | None:
+        if not isinstance(result, dict):
+            return None
+        return str(result.get("error_kind") or result.get("error_class") or "").strip().lower() or None
+
+    @staticmethod
+    def _router_attempt_model(result: dict[str, Any]) -> str | None:
+        if not isinstance(result, dict):
+            return None
+        direct = str(result.get("model") or "").strip()
+        if direct:
+            return direct
+        attempts = result.get("attempts") if isinstance(result.get("attempts"), list) else []
+        for row in attempts:
+            if not isinstance(row, dict):
+                continue
+            model = str(row.get("model") or "").strip()
+            if model:
+                return model
+        return None
+
+    def _runtime_truth_response(
+        self,
+        *,
+        text: str,
+        route: str,
+        payload: dict[str, Any] | None = None,
+        used_memory: bool = False,
+        used_runtime_state: bool = True,
+        used_llm: bool = False,
+        used_tools: list[str] | None = None,
+        error_kind: str | None = None,
+        ok: bool = True,
+        next_question: str | None = None,
+    ) -> OrchestratorResponse:
+        data: dict[str, Any] = {
+            "route": str(route or "runtime_status").strip().lower() or "runtime_status",
+            "used_runtime_state": bool(used_runtime_state),
+            "used_llm": bool(used_llm),
+            "used_memory": bool(used_memory),
+            "used_tools": [str(item).strip() for item in (used_tools or []) if str(item).strip()],
+            "skip_friction_formatting": True,
+            "skip_epistemic_gate": True,
+            "ok": bool(ok),
+        }
+        if error_kind:
+            data["error_kind"] = str(error_kind).strip()
+        if next_question:
+            data["next_question"] = str(next_question).strip()
+        if isinstance(payload, dict):
+            data["runtime_payload"] = dict(payload)
+        return OrchestratorResponse(str(text or "").strip() or "Done.", data)
+
+    def _runtime_state_unavailable_response(
+        self,
+        *,
+        route: str,
+        used_memory: bool = False,
+        reason: str | None = None,
+    ) -> OrchestratorResponse:
+        message = "I couldn't read that from the runtime state."
+        return self._runtime_truth_response(
+            text=message,
+            route=route,
+            used_memory=used_memory,
+            error_kind="runtime_state_unavailable",
+            payload={
+                "type": "runtime_state_unavailable",
+                "summary": message,
+                "reason": str(reason or "runtime_state_unavailable").strip() or "runtime_state_unavailable",
+            },
+        )
+
+    def _clear_pending_confirmation(
+        self,
+        user_id: str,
+        *,
+        status: str,
+    ) -> PendingAction | None:
+        pending = self.confirmations.pop(user_id)
+        if pending is None:
+            return None
+        pending_id = str((pending.action if isinstance(pending.action, dict) else {}).get("pending_id") or "").strip()
+        if pending_id:
+            self._memory_runtime.set_pending_status(user_id, pending_id, status)
+        return pending
+
+    def _confirmation_preview_response(
+        self,
+        user_id: str,
+        *,
+        route: str,
+        question: str,
+        used_tools: list[str],
+        action: dict[str, Any],
+        title: str,
+        preview_payload: dict[str, Any] | None = None,
+        used_memory: bool = False,
+        used_runtime_state: bool = True,
+    ) -> OrchestratorResponse:
+        self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
+        action_payload = {
+            **dict(action),
+            "kind": "native_mutation",
+            "pending_id": pending_id,
+        }
+        pending = PendingAction(
+            user_id=user_id,
+            action=action_payload,
+            message=question,
+        )
+        self.confirmations.set(pending)
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "confirmation",
+                "origin_tool": (used_tools[0] if used_tools else str(action.get("operation") or "native_mutation")),
+                "question": question,
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_WAITING_FOR_USER,
+                "context": {
+                    "operation": str(action.get("operation") or "").strip() or None,
+                },
+            },
+        )
+        payload = dict(preview_payload) if isinstance(preview_payload, dict) else {}
+        payload.update(
+            {
+                "type": "action_confirmation_required",
+                "title": title,
+                "summary": question,
+                "requires_confirmation": True,
+                "confirmation_token": pending_id,
+                "confirm_command": "yes",
+                "cancel_command": "no",
+                "mutating": True,
+                "action": str(action.get("operation") or "").strip() or None,
+            }
+        )
+        return self._runtime_truth_response(
+            text=question,
+            route=route,
+            used_tools=used_tools,
+            used_memory=used_memory,
+            used_runtime_state=used_runtime_state,
+            next_question=question,
+            payload=payload,
+        )
+
+    def _execute_confirmed_native_mutation(self, user_id: str, action: dict[str, Any]) -> OrchestratorResponse:
+        operation = str(action.get("operation") or "").strip().lower()
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if operation == "shell_install_package":
+            return self._shell_install_package_response(
+                user_id=user_id,
+                manager=str(params.get("manager") or "").strip() or None,
+                package=str(params.get("package") or "").strip() or None,
+                scope=str(params.get("scope") or "").strip() or None,
+                dry_run=bool(params.get("dry_run", False)),
+                confirmed=True,
+            )
+        if operation == "shell_create_directory":
+            return self._shell_create_directory_response(
+                user_id,
+                str(params.get("path") or "").strip() or None,
+                confirmed=True,
+            )
+        if operation == "model_trial_switch":
+            return self._execute_model_controller_trial_switch(
+                user_id,
+                model_id=str(params.get("model_id") or "").strip() or None,
+                provider_id=str(params.get("provider_id") or "").strip().lower() or None,
+            )
+        if operation == "model_set_target":
+            return self._execute_model_set_target(
+                user_id,
+                model_id=str(params.get("model_id") or "").strip() or None,
+                provider_id=str(params.get("provider_id") or "").strip().lower() or None,
+                promote_default=bool(params.get("promote_default", False)),
+                used_memory=bool(params.get("used_memory", False)),
+            )
+        if operation == "model_acquire":
+            return self._execute_model_acquire(
+                model_id=str(params.get("model_id") or "").strip() or None,
+                provider_id=str(params.get("provider_id") or "").strip().lower() or None,
+            )
+        if operation == "switch_better_local_model":
+            return self._execute_switch_better_local_model(
+                user_id,
+                model_id=str(params.get("model_id") or "").strip() or None,
+            )
+        if operation == "model_switch_back":
+            return self._execute_model_controller_switch_back(user_id)
+        return self._runtime_truth_response(
+            text="That pending confirmation target is no longer available.",
+            route="action_tool",
+            used_runtime_state=False,
+            ok=False,
+            error_kind="resumable_missing",
+            payload={
+                "type": "runtime_state_unavailable",
+                "summary": "That pending confirmation target is no longer available.",
+                "reason": "resumable_missing",
+            },
+        )
+
+    def _assistant_capabilities_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        adapter = self._chat_runtime_adapter
+        safe_mode_enabled = bool(
+            callable(getattr(adapter, "_safe_mode_enabled", None))
+            and adapter._safe_mode_enabled()
+        )
+        areas: list[dict[str, Any]] = [
+            {
+                "key": "system_inspection",
+                "title": "System inspection",
+                "summary": "I can inspect current memory, RAM, storage, and run an agent doctor check on this machine.",
+                "available": True,
+            },
+            {
+                "key": "local_memory",
+                "title": "Local memory",
+                "summary": "I can read and update your local memory, preferences, anchors, and open loops.",
+                "available": True,
+            },
+        ]
+        if truth is not None:
+            target_truth = (
+                truth.chat_target_truth()
+                if callable(getattr(truth, "chat_target_truth", None))
+                else {}
+            )
+            effective_model = str(target_truth.get("effective_model") or "").strip()
+            effective_provider = str(target_truth.get("effective_provider") or "").strip().lower()
+            current_target = (
+                f"{effective_model} on {effective_provider}"
+                if effective_model and effective_provider
+                else "the current chat target"
+            )
+            areas.extend(
+                [
+                    {
+                        "key": "runtime_status",
+                        "title": "Runtime and model status",
+                        "summary": (
+                            f"I can tell you which model and provider are active, like {current_target}, "
+                            "and whether the runtime is healthy."
+                        ),
+                        "available": True,
+                    },
+                    {
+                        "key": "provider_setup",
+                        "title": "Provider repair and switching",
+                        "summary": "I can help repair, configure, or switch chat providers such as Ollama and OpenRouter.",
+                        "available": True,
+                    },
+                    {
+                        "key": "scheduler_status",
+                        "title": "Scheduler and daily brief",
+                        "summary": "I can inspect scheduler, daily brief, and managed background-task status.",
+                        "available": True,
+                    },
+                ]
+            )
+        else:
+            areas.append(
+                {
+                    "key": "runtime_status",
+                    "title": "Runtime and model status",
+                    "summary": "Runtime and provider inspection is limited right now because I cannot read the control-plane state.",
+                    "available": False,
+                }
+            )
+
+        lines = ["Here is what I can help with right now:"]
+        for row in areas:
+            title = str(row.get("title") or "Capability").strip()
+            summary = str(row.get("summary") or "").strip()
+            if not summary:
+                continue
+            lines.append(f"- {title}: {summary}")
+        if safe_mode_enabled:
+            lines.append("- Safe mode: background automation and remote fallback are currently paused on purpose.")
+        lines.append("")
+        lines.append("If you want, I can check the runtime or inspect your system resources now.")
+        return self._runtime_truth_response(
+            text="\n".join(lines).strip(),
+            route="assistant_capabilities",
+            payload={
+                "type": "assistant_capabilities",
+                "areas": [dict(row) for row in areas],
+                "safe_mode": safe_mode_enabled,
+            },
+        )
+
+    def _assistant_frontdoor_engaged(self, text: str) -> bool:
+        adapter = self._chat_runtime_adapter
+        frontdoor = getattr(adapter, "should_use_assistant_frontdoor", None)
+        if not callable(frontdoor):
+            return False
+        try:
+            return bool(
+                frontdoor(
+                    text=text,
+                    route_decision=None,
+                    is_user_chat=True,
+                )
+            )
+        except Exception:
+            return False
+
+    def _configured_identity_names(self) -> tuple[str | None, str | None]:
+        assistant_name = None
+        user_name = None
+        try:
+            assistant_name = normalize_identity_name(self.db.get_preference("assistant_name"))
+        except Exception:
+            assistant_name = None
+        try:
+            user_name = normalize_identity_name(self.db.get_preference("user_name"))
+        except Exception:
+            user_name = None
+        config = getattr(self._chat_runtime_adapter, "config", None)
+        if assistant_name is None:
+            assistant_name = normalize_identity_name(getattr(config, "assistant_name", None))
+        if user_name is None:
+            user_name = normalize_identity_name(getattr(config, "user_name", None))
+        return assistant_name, user_name
+
+    def _assistant_identity_prompt_lines(self) -> list[str]:
+        assistant_name, user_name = self._configured_identity_names()
+        assistant_label = assistant_identity_label(assistant_name=assistant_name)
+        user_label = user_identity_label(user_name=user_name)
+        lines = [
+            f"You are {assistant_label}, the user's local-first personal assistant.",
+            "Identity rule: you run locally inside the user's Personal Agent runtime.",
+            "Always identify as the local Personal Agent.",
+            "Never claim you were created by a company, vendor, model maker, or external platform.",
+            "Never claim to be hosted, managed, or operated by any cloud or vendor environment.",
+            "Do not invent a name, persona, company, or origin story.",
+            f"If asked who you are, answer as {assistant_label} only.",
+            "If no explicit user name is configured, refer to the user as 'you'.",
+            "Keep the tone practical, direct, calm, and non-corporate.",
+        ]
+        if user_label != "you":
+            lines.append(f"You may refer to the user as {user_label} sparingly when it helps clarity.")
+        return lines
+
+    @staticmethod
+    def _assistant_identity_leaked(text: str) -> bool:
+        prefix = "\n".join(
+            line.strip()
+            for line in str(text or "").strip().splitlines()[:3]
+            if line.strip()
+        )[:400]
+        return bool(
+            _ASSISTANT_IDENTITY_LEAK_RE.search(prefix)
+            or _ASSISTANT_GENERIC_ORIGIN_LEAK_RE.search(prefix)
+            or _ASSISTANT_ORIGIN_LEAK_RE.search(prefix)
+        )
+
+    def _translate_assistant_internal_error(
+        self,
+        text: str,
+        *,
+        response_data: dict[str, Any],
+    ) -> str:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return normalized
+        lowered = normalized.lower()
+        route = str(response_data.get("route") or "").strip().lower()
+        error_kind = str(response_data.get("error_kind") or "").strip().lower()
+        if "i couldn't read that from the runtime state." in lowered:
+            return "I'm having trouble reading the current runtime state right now."
+        if "chat llm is unavailable." in lowered or "run: python -m agent setup" in lowered:
+            return "Something went wrong while answering that. I'm having trouble accessing my language model right now."
+        if all(marker in normalized for marker in ("trace_id:", "component:", "next_action:")):
+            if route in {
+                "generic_chat",
+                "runtime_status",
+                "provider_status",
+                "model_status",
+                "setup_flow",
+                "operational_status",
+            } or error_kind:
+                return "Something went wrong while handling that request. I'm having trouble accessing that right now."
+        return normalized
+
+    def _apply_assistant_response_guard(
+        self,
+        *,
+        user_id: str,
+        user_text: str,
+        response: OrchestratorResponse,
+    ) -> OrchestratorResponse:
+        response_data = self._response_data(response)
+        route = str(response_data.get("route") or "").strip().lower()
+        used_llm = bool(response_data.get("used_llm", False))
+        error_kind = str(response_data.get("error_kind") or "").strip().lower()
+        guarded_text = str(response.text or "")
+        if used_llm or route == "generic_chat":
+            provider = str(response_data.get("provider") or "").strip() or None
+            model = str(response_data.get("model") or "").strip() or None
+            guarded_text = self._sanitize_vendor_identity_claim(
+                guarded_text,
+                provider=provider,
+                model=model,
+            )
+        if self._assistant_frontdoor_engaged(user_text):
+            lowered_guarded_text = str(guarded_text or "").strip().lower()
+            bootstrap_recovery_text = any(
+                marker in lowered_guarded_text
+                for marker in (
+                    "start ollama locally",
+                    "install a local chat model",
+                    "no chat model available right now",
+                )
+            )
+            generic_fallback_used = bool(response_data.get("generic_fallback_used", False))
+            generic_chat_like = route in {"", "generic_chat"}
+            preserve_raw_recovery = bool(
+                generic_chat_like
+                and not used_llm
+                and not error_kind
+                and (
+                    generic_fallback_used
+                    or not self._llm_chat_available()
+                    or bootstrap_recovery_text
+                )
+            )
+            guarded_text = self._translate_assistant_internal_error(
+                guarded_text if not preserve_raw_recovery else str(response.text or ""),
+                response_data=response_data,
+            ) if not preserve_raw_recovery else str(response.text or "")
+            if not preserve_raw_recovery and (
+                (used_llm or route == "generic_chat")
+                and self._looks_like_grounded_system_query(user_text)
+                and _GROUNDED_QUERY_ESCAPE_RE.search(str(guarded_text or ""))
+            ):
+                fallback = self._grounded_system_fallback_response(
+                    user_id,
+                    user_text,
+                    allow_actions=False,
+                )
+                if fallback is not None:
+                    return fallback
+                guarded_text = "I couldn't verify that from the current runtime state."
+        if guarded_text == response.text:
+            return response
+        return OrchestratorResponse(guarded_text, response_data)
+
+    @staticmethod
+    def _mentioned_provider_id(text: str) -> str | None:
+        normalized = normalize_setup_text(text)
+        for provider_id in ("ollama", "openrouter", "openai"):
+            if provider_id in normalized:
+                return provider_id
+        return None
+
+    def _looks_like_grounded_system_query(self, text: str) -> bool:
+        normalized = normalize_setup_text(text)
+        if not normalized:
+            return False
+        normalized_space = normalized.replace("/", " ")
+        if _looks_like_current_model_query(normalized):
+            return True
+        if _looks_like_model_availability_query(normalized):
+            return True
+        if _looks_like_model_lifecycle_query(normalized):
+            return True
+        if _looks_like_local_model_inventory_query(normalized):
+            return True
+        if _looks_like_runtime_status_query(normalized):
+            return True
+        if self._mentioned_provider_id(normalized) and any(
+            token in normalized_space
+            for token in (
+                "status",
+                "health",
+                "configured",
+                "working",
+                "ready",
+                "models",
+                "model",
+                "downloaded",
+                "installed",
+                "local",
+            )
+        ):
+            return True
+        if any(token in normalized_space for token in ("switch back", "go back", "revert that", "previous model")):
+            return True
+        if any(phrase in normalized_space for phrase in ("switch to ", "switch chat to ", "change to ", "use ")):
+            if ":" in normalized_space or any(
+                token in normalized_space for token in ("ollama", "openrouter", "openai", "model", "models")
+            ):
+                return True
+        if any(token in normalized_space for token in ("model", "models")) and any(
+            token in normalized_space
+            for token in ("downloaded", "installed", "local", "available", "usable", "switch to")
+        ):
+            return True
+        return False
+
+    @staticmethod
+    def _interpretation_followup_kind(text: str) -> str | None:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return None
+        for kind, pattern in _INTERPRETATION_FOLLOWUP_PATTERNS:
+            if pattern.search(normalized):
+                return kind
+        return None
+
+    def _current_interpretable_result(self, user_id: str) -> dict[str, Any]:
+        state = self._last_interpretable_result.get(user_id)
+        if not isinstance(state, dict):
+            return {}
+        created_ts = int(state.get("created_ts") or 0)
+        if created_ts and int(time.time()) - created_ts > _INTERPRETABLE_RESULT_TTL_SECONDS:
+            self._last_interpretable_result.pop(user_id, None)
+            return {}
+        return dict(state)
+
+    @staticmethod
+    def _result_card_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        cards = payload.get("cards") if isinstance(payload.get("cards"), list) else []
+        return [dict(card) for card in cards if isinstance(card, dict)]
+
+    def _remember_interpretable_result(
+        self,
+        *,
+        user_id: str,
+        user_text: str,
+        response: OrchestratorResponse,
+    ) -> None:
+        response_data = self._response_data(response)
+        route = str(response_data.get("route") or "").strip().lower()
+        payload = response_data.get("runtime_payload") if isinstance(response_data.get("runtime_payload"), dict) else {}
+        payload_type = str(payload.get("type") or "").strip().lower()
+        remember_setup_flow = route == "setup_flow" and payload_type in {"provider_repair", "provider_repair_options"}
+        if route not in {"operational_status", "runtime_status", "provider_status", "model_status"} and not remember_setup_flow and not (
+            route == "action_tool" and payload_type in {"model_scout", "model_controller"}
+        ):
+            return
+        used_tools = [str(item).strip() for item in (response_data.get("used_tools") if isinstance(response_data.get("used_tools"), list) else []) if str(item).strip()]
+        summary = str(payload.get("summary") or response.text or "").strip()
+        if not summary:
+            return
+        self._last_interpretable_result[user_id] = {
+            "created_ts": int(time.time()),
+            "route": route,
+            "kind": str(payload.get("kind") or payload.get("type") or "").strip() or None,
+            "user_text": str(user_text or "").strip(),
+            "response_text": str(response.text or "").strip(),
+            "summary": summary,
+            "payload": dict(payload),
+            "used_tools": used_tools,
+        }
+
+    @staticmethod
+    def _context_fact_lines(context: dict[str, Any]) -> list[str]:
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        lines: list[str] = []
+        summary = str(context.get("summary") or payload.get("summary") or "").strip()
+        if summary:
+            lines.append(f"Summary: {summary}")
+        for card in Orchestrator._result_card_rows(payload)[:3]:
+            title = str(card.get("title") or "").strip() or "Detail"
+            card_lines = [
+                str(item).strip()
+                for item in (card.get("lines") if isinstance(card.get("lines"), list) else [])
+                if str(item).strip()
+            ][:4]
+            if card_lines:
+                lines.append(f"{title}: {' | '.join(card_lines)}")
+        response_text = str(context.get("response_text") or "").strip()
+        if response_text and not lines:
+            first_block = response_text.split("\n\n", 1)[0].strip()
+            if first_block:
+                lines.append(first_block)
+        return lines
+
+    @staticmethod
+    def _top_memory_items_from_context(context: dict[str, Any]) -> list[str]:
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        candidates: list[str] = []
+        for card in Orchestrator._result_card_rows(payload):
+            for line in (card.get("lines") if isinstance(card.get("lines"), list) else []):
+                text = str(line or "").strip()
+                lowered = text.lower()
+                if not text:
+                    continue
+                if "rss" in lowered or "memory" in lowered or "ram" in lowered or "gib" in lowered or "mib" in lowered:
+                    candidates.append(text.lstrip("- ").strip())
+        if candidates:
+            return candidates[:3]
+        response_text = str(context.get("response_text") or "").strip()
+        lines = [line.strip().lstrip("- ").strip() for line in response_text.splitlines() if line.strip()]
+        return [line for line in lines if any(token in line.lower() for token in ("rss", "memory", "ram", "gib", "mib"))][:3]
+
+    @staticmethod
+    def _memory_usage_pct_from_context(context: dict[str, Any]) -> float | None:
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        candidate_lines: list[str] = []
+        for card in Orchestrator._result_card_rows(payload):
+            candidate_lines.extend(
+                str(item).strip()
+                for item in (card.get("lines") if isinstance(card.get("lines"), list) else [])
+                if str(item).strip()
+            )
+        candidate_lines.append(str(context.get("summary") or "").strip())
+        for line in candidate_lines:
+            match = re.search(r"(\d+(?:\.\d+)?)%\s+of\s+(?:ram|memory)", line, re.IGNORECASE)
+            if match:
+                try:
+                    return float(match.group(1))
+                except (TypeError, ValueError):
+                    return None
+        return None
+
+    @staticmethod
+    def _memory_process_meaning(process_label: str) -> str:
+        lowered = str(process_label or "").strip().lower()
+        if any(token in lowered for token in ("chrome", "firefox", "browser", "edge", "brave")):
+            return "That is likely your web browser, so heavy tabs, media, or extensions are the usual cause."
+        if any(token in lowered for token in ("postgres", "mysql", "mariadb", "redis", "mongod")):
+            return "That looks like a database process, which usually means cached data or active queries are holding memory."
+        if any(token in lowered for token in ("python", "node", "java", "code", "electron")):
+            return "That is likely an application runtime, so the memory use is usually coming from the app workload rather than the operating system itself."
+        return "That looks like an application process rather than a low-level system component."
+
+    @staticmethod
+    def _parse_process_line(line: str) -> tuple[str, str] | None:
+        text = str(line or "").strip().lstrip("- ").strip()
+        if not text or ":" not in text:
+            return None
+        name, value = text.split(":", 1)
+        process_name = str(name or "").strip()
+        metric = str(value or "").strip()
+        if not process_name or not metric:
+            return None
+        return process_name, metric
+
+    @staticmethod
+    def _interpretation_has_assessment(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        return any(
+            token in lowered
+            for token in (
+                "normal",
+                "mildly high",
+                "worth watching",
+                "concerning",
+                "not urgent",
+                "pay attention",
+                "should worry",
+                "shouldn't worry",
+                "not automatically an emergency",
+            )
+        )
+
+    @staticmethod
+    def _interpretation_has_meaning(text: str) -> bool:
+        lowered = str(text or "").strip().lower()
+        return any(
+            token in lowered
+            for token in (
+                "likely",
+                "usually",
+                "means",
+                "main driver",
+                "coming from",
+                "rather than",
+            )
+        )
+
+    @staticmethod
+    def _context_warns(context: dict[str, Any]) -> bool:
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        for card in Orchestrator._result_card_rows(payload):
+            severity = str(card.get("severity") or "").strip().lower()
+            if severity in {"warn", "error", "critical"}:
+                return True
+        summary = str(context.get("summary") or "").strip().lower()
+        return any(token in summary for token in ("warn", "high", "elevated", "pressure", "low free", "attention"))
+
+    def _grounded_interpretation_summary(self, context: dict[str, Any], followup_kind: str) -> str:
+        top_memory = [
+            parsed
+            for parsed in (
+                self._parse_process_line(line)
+                for line in self._top_memory_items_from_context(context)
+            )
+            if parsed is not None
+        ]
+        memory_pct = self._memory_usage_pct_from_context(context)
+        summary = str(context.get("summary") or "I still have the last system result.").strip()
+        assessment = "normal"
+        if memory_pct is not None:
+            if memory_pct >= 90:
+                assessment = "concerning"
+            elif memory_pct >= 80:
+                assessment = "mildly high"
+            else:
+                assessment = "normal"
+        elif self._context_warns(context):
+            assessment = "mildly high"
+        if top_memory:
+            top_name, top_value = top_memory[0]
+            compare = ""
+            if len(top_memory) > 1:
+                compare_name, compare_value = top_memory[1]
+                compare = f" That is clearly above {compare_name} at {compare_value}, so it is the main driver of the current memory load."
+            meaning = self._memory_process_meaning(top_name)
+            if followup_kind == "top_memory":
+                action = ""
+                if assessment in {"mildly high", "concerning"}:
+                    action = f" If the machine feels slow, the single most useful next step is to trim the workload in {top_name} first."
+                return (
+                    f"The biggest memory user right now is {top_name} at {top_value}.{compare} "
+                    f"{meaning} I would describe this as {assessment}.{action}"
+                )
+            if followup_kind == "concern":
+                action = ""
+                if assessment in {"mildly high", "concerning"}:
+                    action = f" If you want to act on one thing, start with {top_name}."
+                return (
+                    f"The main issue is that {top_name} is using {top_value}, which is driving most of the memory pressure.{compare} "
+                    f"{meaning} Based on this snapshot, I would call that {assessment}, not automatically a crisis.{action}"
+                )
+            if followup_kind == "action":
+                return (
+                    f"The key point is that {top_name} is the main memory consumer at {top_value}.{compare} "
+                    f"{meaning} I would describe the current state as {assessment}. "
+                    f"If you take one action, start with {top_name}."
+                )
+            return (
+                f"The important part is that {top_name} is using {top_value}, so most of the pressure is concentrated there rather than spread evenly across the system."
+                f"{compare} {meaning} I would describe the current state as {assessment}."
+            )
+        if followup_kind == "action":
+            return (
+                f"The important part is: {summary} I would describe the current state as {assessment}. "
+                "If you take one action, focus on the largest workload mentioned in the report."
+            )
+        return f"The important part is: {summary} I would describe the current state as {assessment}."
+
+    def _fallback_interpretation_summary(self, context: dict[str, Any], followup_kind: str) -> str:
+        grounded = self._grounded_interpretation_summary(context, followup_kind)
+        return f"I can still tell you the basics from the data I already gathered. {grounded}"
+
+    def _interpretation_response_needs_fallback(self, text: str, context: dict[str, Any]) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return True
+        lowered = normalized.lower()
+        if _INTERPRETATION_DEBUG_REFLEX_RE.search(normalized) or _INTERPRETATION_SHELL_SNIPPET_RE.search(normalized):
+            return True
+        if "*resource report*" in lowered or "*storage report*" in lowered or "memory snapshot ready" in lowered:
+            return True
+        top_memory_lines = [line.lower() for line in self._top_memory_items_from_context(context)]
+        if top_memory_lines:
+            raw_matches = sum(1 for line in top_memory_lines if line and line in lowered)
+            if raw_matches >= min(2, len(top_memory_lines)) and not self._interpretation_has_meaning(normalized):
+                return True
+        if not self._interpretation_has_assessment(normalized):
+            return True
+        if not self._interpretation_has_meaning(normalized):
+            return True
+        return False
+
+    def _explanation_chat_target(self) -> tuple[str | None, str | None]:
+        truth = self._runtime_truth()
+        configured_provider: str | None = None
+        configured_model: str | None = None
+        if truth is not None:
+            try:
+                target_truth = (
+                    truth.chat_target_truth()
+                    if callable(getattr(truth, "chat_target_truth", None))
+                    else {}
+                )
+            except Exception:
+                target_truth = {}
+            configured_provider = str(target_truth.get("effective_provider") or target_truth.get("configured_provider") or "").strip().lower() or None
+            configured_model = str(target_truth.get("effective_model") or target_truth.get("configured_model") or "").strip() or None
+        adapter = self._chat_runtime_adapter
+        registry = adapter.registry_document if isinstance(getattr(adapter, "registry_document", None), dict) else {}
+        models_doc = registry.get("models") if isinstance(registry.get("models"), dict) else {}
+        providers_doc = registry.get("providers") if isinstance(registry.get("providers"), dict) else {}
+        health_monitor = getattr(adapter, "_health_monitor", None)
+        health_state = health_monitor.state if isinstance(getattr(health_monitor, "state", None), dict) else {}
+        provider_health = health_state.get("providers") if isinstance(health_state.get("providers"), dict) else {}
+        model_health = health_state.get("models") if isinstance(health_state.get("models"), dict) else {}
+        current_rank = 0
+        if configured_model and isinstance(models_doc.get(configured_model), dict):
+            current_rank = int(models_doc[configured_model].get("quality_rank") or 0)
+        candidates: list[tuple[int, str, str]] = []
+        for model_id, model_payload in models_doc.items():
+            if not isinstance(model_payload, dict):
+                continue
+            provider_id = str(model_payload.get("provider") or "").strip().lower()
+            if not provider_id:
+                continue
+            provider_payload = providers_doc.get(provider_id) if isinstance(providers_doc.get(provider_id), dict) else {}
+            if not bool(provider_payload.get("local", provider_id == "ollama")):
+                continue
+            capabilities = {
+                str(item).strip().lower()
+                for item in (model_payload.get("capabilities") if isinstance(model_payload.get("capabilities"), list) else [])
+                if str(item).strip()
+            }
+            if "chat" not in capabilities:
+                continue
+            if not bool(model_payload.get("enabled", True)) or not bool(model_payload.get("available", True)):
+                continue
+            provider_status = str((provider_health.get(provider_id) if isinstance(provider_health.get(provider_id), dict) else {}).get("status") or "unknown").strip().lower()
+            model_status = str((model_health.get(model_id) if isinstance(model_health.get(model_id), dict) else {}).get("status") or "unknown").strip().lower()
+            if provider_status not in {"", "ok", "unknown"} or model_status not in {"", "ok", "unknown"}:
+                continue
+            quality_rank = int(model_payload.get("quality_rank") or 0)
+            candidates.append((quality_rank, provider_id, str(model_id)))
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+        for quality_rank, provider_id, model_id in candidates:
+            if configured_model and model_id == configured_model:
+                continue
+            if quality_rank > current_rank:
+                return provider_id, model_id
+        return configured_provider, configured_model
+
+    def _interpret_previous_result_followup(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse | None:
+        followup_kind = self._interpretation_followup_kind(text)
+        if not followup_kind:
+            return None
+        context = self._current_interpretable_result(user_id)
+        if not context:
+            return None
+        fact_lines = self._context_fact_lines(context)
+        fallback_text = self._fallback_interpretation_summary(context, followup_kind)
+        if not self._llm_chat_available():
+            return self._merge_response_data(
+                OrchestratorResponse(fallback_text),
+                route="interpretation_followup",
+                used_runtime_state=False,
+                used_llm=False,
+                used_memory=True,
+                used_tools=[],
+                ok=True,
+            )
+        provider_override, model_override = self._explanation_chat_target()
+        source_surface = str((chat_context or {}).get("source_surface") or "api").strip().lower() or "api"
+        channel = self._chat_channel(source_surface)
+        trace_id = self._trace_id("interp")
+        prompt_facts = "\n".join(f"- {line}" for line in fact_lines) or f"- {fallback_text}"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are Personal Agent, a local-first assistant.\n"
+                    "Interpret the prior tool-backed result in plain English.\n"
+                    "Use only the supplied facts. Do not invent values. If the facts are insufficient, say that clearly.\n"
+                    "Do not identify yourself as a model or vendor.\n"
+                    "Do not suggest shell commands, rerunning tools, or generic Linux debugging steps.\n"
+                    "Assume the existing data is enough for this answer.\n"
+                    "Structure the answer as: key finding, brief comparison, plain-English meaning, light assessment, and at most one gentle next action if useful.\n"
+                    "Answer directly and briefly."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"Previous request: {str(context.get('user_text') or 'unknown').strip()}\n"
+                    f"Previous result summary: {str(context.get('summary') or '').strip()}\n"
+                    f"Known facts:\n{prompt_facts}\n\n"
+                    f"Follow-up request: {str(text or '').strip()}"
+                ),
+            },
+        ]
+        try:
+            result = route_inference(
+                messages=messages,
+                user_text=str(text or "").strip(),
+                purpose="chat",
+                task_hint="interpret previous tool result",
+                trace_id=trace_id,
+                provider_override=provider_override,
+                model_override=model_override,
+                metadata={
+                    "trace_id": trace_id,
+                    "source_surface": source_surface,
+                    "channel": channel,
+                    "interpretation_followup": True,
+                },
+            )
+        except Exception:
+            result = {"ok": False, "error_kind": "interpretation_exception"}
+        if not bool(result.get("ok")):
+            return self._merge_response_data(
+                OrchestratorResponse(fallback_text),
+                route="interpretation_followup",
+                used_runtime_state=False,
+                used_llm=False,
+                used_memory=True,
+                used_tools=[],
+                ok=True,
+                error_kind=str(result.get("error_kind") or "").strip() or None,
+            )
+        explanation_text = str(result.get("text") or "").strip()
+        if not explanation_text or self._interpretation_response_needs_fallback(explanation_text, context):
+            explanation_text = fallback_text
+        return self._merge_response_data(
+            OrchestratorResponse(explanation_text),
+            route="interpretation_followup",
+            used_runtime_state=False,
+            used_llm=True,
+            used_memory=True,
+            used_tools=[],
+            ok=True,
+            provider=str(result.get("provider") or provider_override or "").strip() or None,
+            model=str(result.get("model") or model_override or "").strip() or None,
+        )
+
+    @staticmethod
+    def _deep_system_followup_requested(text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        return any(pattern.search(normalized) for pattern in _DEEP_SYSTEM_FOLLOWUP_PATTERNS)
+
+    @staticmethod
+    def _is_machine_observe_context(context: dict[str, Any]) -> bool:
+        if not isinstance(context, dict):
+            return False
+        if str(context.get("route") or "").strip().lower() != "operational_status":
+            return False
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        kind = str(payload.get("kind") or "").strip().lower()
+        used_tools = {
+            str(item).strip().lower()
+            for item in (context.get("used_tools") if isinstance(context.get("used_tools"), list) else [])
+            if str(item).strip()
+        }
+        if used_tools & {"hardware_report", "resource_report", "storage_report", "disk_pressure_report", "observe_system_health"}:
+            return True
+        if kind in {"observe_pc", "observe_system_health", "deep_system_observe"}:
+            return True
+        user_text = str(context.get("user_text") or "").strip().lower()
+        return any(token in user_text for token in ("pc", "cpu", "gpu", "ram", "storage", "machine", "system"))
+
+    def _deep_system_followup_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if not self._deep_system_followup_requested(text):
+            return None
+        context = self._current_interpretable_result(user_id)
+        if not self._is_machine_observe_context(context):
+            return None
+        decision = {
+            "intent": "OBSERVE_PC",
+            "skills": [
+                {"skill": "hardware_report", "function": "hardware_report"},
+                {"skill": "resource_governor", "function": "resource_report"},
+                {"skill": "storage_governor", "function": "storage_report"},
+            ],
+        }
+        response = self._handle_nl_observe(user_id, text, decision)
+        payload = dict(response.data) if isinstance(response.data, dict) else {}
+        summary = str(payload.get("summary") or response.text or "").strip() or "Deeper system inspection is ready."
+        return self._runtime_truth_response(
+            text=str(response.text or "").strip() or summary,
+            route="operational_status",
+            used_runtime_state=False,
+            used_tools=["hardware_report", "resource_report", "storage_report"],
+            payload={
+                "type": "operational_status",
+                "kind": "deep_system_observe",
+                "summary": summary,
+                **payload,
+            },
+        )
+
+    @staticmethod
+    def _time_date_intent_kind(text: str) -> str | None:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return None
+        time_phrases = (
+            "what time is it",
+            "what time is it right now",
+            "what s the current time",
+            "what is the current time",
+            "what time is it here",
+            "current time",
+        )
+        date_phrases = (
+            "what day is it",
+            "what day is it today",
+            "what s today s date",
+            "what is today s date",
+            "what s the date",
+            "what is the date",
+            "today s date",
+        )
+        if any(phrase in normalized for phrase in time_phrases):
+            return "local_time"
+        if any(phrase in normalized for phrase in date_phrases):
+            return "local_date"
+        if "time" in normalized and "timeframe" not in normalized:
+            if any(phrase in normalized for phrase in ("check the time", "tell me the time", "the time right now", "time right now")):
+                return "local_time"
+            if "current time" in normalized:
+                return "local_time"
+        if "date" in normalized or "day" in normalized:
+            if any(phrase in normalized for phrase in ("today s date", "today date", "day is it today")):
+                return "local_date"
+        return None
+
+    def _assistant_local_now(self) -> datetime:
+        timezone_name = str(self.timezone or "UTC").strip() or "UTC"
+        try:
+            tzinfo = ZoneInfo(timezone_name)
+        except Exception:
+            tzinfo = timezone.utc
+        return datetime.now(tzinfo)
+
+    @staticmethod
+    def _format_local_clock(now: datetime) -> str:
+        hour = int(now.strftime("%I") or "0")
+        minute = now.strftime("%M")
+        suffix = now.strftime("%p")
+        return f"{hour}:{minute} {suffix}"
+
+    def _local_time_response(self, kind: str) -> OrchestratorResponse:
+        now = self._assistant_local_now()
+        timezone_label = (
+            str(getattr(now.tzinfo, "key", "") or "").strip()
+            or str(now.tzname() or "").strip()
+            or str(self.timezone or "").strip()
+            or "local time"
+        )
+        date_label = f"{now.strftime('%A')}, {now.strftime('%B')} {now.day}, {now.year}"
+        if str(kind or "").strip().lower() == "local_date":
+            message = f"Today is {date_label} in {timezone_label}."
+        else:
+            message = f"It's {self._format_local_clock(now)} in {timezone_label} on {date_label}."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_tools=["local_time"],
+            payload={
+                "type": "local_time",
+                "kind": str(kind or "local_time").strip().lower() or "local_time",
+                "summary": message,
+                "timezone": timezone_label,
+                "timestamp": now.isoformat(),
+            },
+        )
+
+    @staticmethod
+    def _is_model_context(context: dict[str, Any]) -> bool:
+        if not isinstance(context, dict):
+            return False
+        route = str(context.get("route") or "").strip().lower()
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        payload_type = str(payload.get("type") or "").strip().lower()
+        if route == "model_status":
+            return True
+        return route == "action_tool" and payload_type in {"model_scout", "model_controller"}
+
+    @staticmethod
+    def _model_ready_now_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in _MODEL_READY_NOW_PHRASES):
+            return True
+        return bool(
+            any(token in normalized for token in ("model", "models"))
+            and "ready" in normalized
+            and "right now" in normalized
+        )
+
+    @staticmethod
+    def _model_controller_test_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in _MODEL_CONTROLLER_TEST_PHRASES):
+            return True
+        has_explicit_target = _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
+        return bool(
+            "test" in normalized
+            and any(token in normalized for token in ("without adopting", "without switching", "without using"))
+            and ("model" in normalized or has_explicit_target)
+        )
+
+    @staticmethod
+    def _model_controller_trial_switch_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in _MODEL_CONTROLLER_TRIAL_SWITCH_PHRASES):
+            return True
+        has_explicit_target = _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
+        return bool(
+            "temporarily" in normalized
+            and any(token in normalized for token in ("switch", "use", "try"))
+            and ("model" in normalized or has_explicit_target)
+        )
+
+    @staticmethod
+    def _model_controller_promote_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in _MODEL_CONTROLLER_PROMOTE_PHRASES):
+            return True
+        return bool(
+            normalized.startswith("make ")
+            and " default" in normalized
+            and (_DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None or "model" in normalized)
+        )
+
+    @staticmethod
+    def _parse_control_mode_intent(text: str) -> dict[str, str] | None:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return None
+        mentions_mode = bool(re.search(r"\bmode\b", normalized)) or any(
+            re.search(rf"\b{token}\b", normalized) is not None
+            for token in ("controlled", "safe", "baseline")
+        )
+        if not mentions_mode:
+            return None
+        if re.search(r"^\s*(what|which|why|how)\b", normalized):
+            return {"kind": "get_mode"}
+        if re.search(r"^\s*(are|is)\s+(we|you)\b", normalized):
+            return {"kind": "get_mode"}
+        if re.search(r"^\s*should\s+i\b", normalized):
+            return {"kind": "get_mode"}
+        if re.search(r"^\s*(tell me about|explain|can you explain)\b", normalized):
+            return {"kind": "get_mode"}
+        if re.search(r"\bwhat does (?:this|your) mode allow\b", normalized):
+            return {"kind": "get_mode"}
+        if re.search(r"\bwhat (?:requires|would need) my approval\b", normalized):
+            return {"kind": "get_mode"}
+
+        request_prefix = r"^\s*(?:please\s+)?(?:(?:can|could|would)\s+you\s+|let'?s\s+)?"
+
+        def _matches(pattern: str) -> bool:
+            return re.search(pattern, normalized) is not None
+
+        if _matches(request_prefix + r"(?:exit|leave|disable|turn off|stop using)\b.*\bcontrolled mode\b"):
+            return {"kind": "set_mode", "mode": "baseline"}
+        if _matches(request_prefix + r"(?:return|go back|switch|use|follow|revert)\b.*\bbaseline(?: mode)?\b"):
+            return {"kind": "set_mode", "mode": "baseline"}
+        if _matches(request_prefix + r"(?:switch|go|enter|return|turn|enable|use)\b.*\bsafe mode\b"):
+            return {"kind": "set_mode", "mode": "safe"}
+        if _matches(request_prefix + r"(?:switch|go|enter|put|set|turn|enable|use)\b.*\bcontrolled mode\b"):
+            return {"kind": "set_mode", "mode": "controlled"}
+        return None
+
+    def _control_mode_intent_response(self, text: str) -> OrchestratorResponse | None:
+        intent = self._parse_control_mode_intent(text)
+        if not isinstance(intent, dict):
+            return None
+        kind = str(intent.get("kind") or "").strip().lower()
+        if kind == "get_mode":
+            return self._model_controller_policy_response()
+        if kind == "set_mode":
+            requested_mode = str(intent.get("mode") or "").strip().lower()
+            if requested_mode in {"safe", "controlled", "baseline"}:
+                return self._control_mode_change_response(requested_mode)
+        return None
+
+    @staticmethod
+    def _repair_followup_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in _RUNTIME_REPAIR_ACTION_PHRASES):
+            return True
+        return bool(
+            any(token in normalized for token in ("repair", "fix", "working"))
+            and any(token in normalized for token in ("ollama", "openrouter", "provider", "model", "that", "it"))
+        )
+
+    @staticmethod
+    def _repair_context_handoff_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if Orchestrator._repair_followup_requested(text):
+            return True
+        if normalized in {"needs attention", "what needs attention"}:
+            return True
+        return _looks_like_setup_explanation_query(normalized)
+
+    def _repair_option_choice_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if normalized not in {"1", "2"}:
+            return None
+        context = self._current_interpretable_result(user_id)
+        if not isinstance(context, dict) or not context:
+            return None
+        if str(context.get("route") or "").strip().lower() != "setup_flow":
+            return None
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        if str(payload.get("type") or "").strip().lower() != "provider_repair_options":
+            return None
+        if normalized == "1":
+            return self._repair_followup_response(user_id, "repair it")
+        option_kind = str(payload.get("option_2_kind") or "").strip().lower()
+        if option_kind == "switch_back":
+            return self._model_controller_switch_back_response(user_id)
+        if option_kind != "switch_model":
+            return None
+        target_model = str(payload.get("option_2_model_id") or "").strip() or None
+        target_provider = str(payload.get("option_2_provider") or "").strip().lower() or None
+        if not target_model:
+            return None
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="setup_flow",
+                used_memory=True,
+                reason="runtime_truth_service_unavailable",
+            )
+        current_target = truth.current_chat_target_status()
+        previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
+        prompt = f"I can switch chat to {target_model} now. Do you want me to do that?"
+        self._save_runtime_setup_state(
+            user_id,
+            {
+                "step": "awaiting_switch_confirm",
+                "action_type": "confirm_model_switch",
+                "provider": target_provider,
+                "model_id": target_model,
+                "previous_provider": previous_provider,
+                "previous_model": previous_model,
+            },
+        )
+        return self._runtime_truth_response(
+            text=prompt,
+            route="setup_flow",
+            used_memory=True,
+            next_question=prompt,
+            payload={
+                "type": "confirm_switch_model",
+                "provider": target_provider,
+                "model_id": target_model,
+                "title": "Use this model for chat?",
+                "prompt": prompt,
+                "approve_label": "Switch model",
+                "approve_command": "yes",
+                "cancel_label": "Keep current",
+                "cancel_command": "no",
+                "summary": prompt,
+            },
+        )
+
+    def _recent_unhealthy_runtime_context(self, user_id: str) -> dict[str, Any]:
+        context = self._current_interpretable_result(user_id)
+        if not isinstance(context, dict) or not context:
+            return {}
+        route = str(context.get("route") or "").strip().lower()
+        if route not in {"model_status", "provider_status", "runtime_status", "setup_flow"}:
+            return {}
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        provider = (
+            str(payload.get("provider") or payload.get("configured_provider") or "").strip().lower()
+            or None
+        )
+        model_id = (
+            str(payload.get("model_id") or payload.get("configured_model") or "").strip()
+            or None
+        )
+        provider_health_status = (
+            str(payload.get("provider_health_status") or "").strip().lower()
+            or (
+                str(payload.get("health_status") or "").strip().lower()
+                if route == "provider_status"
+                else None
+            )
+        )
+        model_health_status = (
+            str(payload.get("model_health_status") or "").strip().lower()
+            or (
+                str(payload.get("health_status") or "").strip().lower()
+                if route == "model_status"
+                else None
+            )
+        )
+        if provider_health_status not in {"down", "degraded"} and model_health_status not in {"down", "degraded"}:
+            return {}
+        return {
+            "route": route,
+            "provider": provider,
+            "model_id": model_id,
+            "provider_health_status": provider_health_status,
+            "model_health_status": model_health_status,
+        }
+
+    def assistant_followup_hint(self, user_id: str, text: str) -> dict[str, Any]:
+        thread_id = self._active_thread_id_for_user(user_id)
+        followup = self._memory_runtime.resolve_followup(user_id, text, thread_id)
+        followup_type = str(followup.get("type") or "").strip().lower()
+        if followup_type in {"match", "ambiguous", "expired"}:
+            pending_item = followup.get("pending_item") if isinstance(followup.get("pending_item"), dict) else {}
+            pending_kind = str(pending_item.get("kind") or "").strip().lower() or None
+            return {
+                "kind": f"pending_{pending_kind or 'followup'}",
+                "followup_type": followup_type,
+                "followup_intent": str(followup.get("intent") or "").strip().lower() or None,
+                "pending_kind": pending_kind,
+            }
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if self._model_trial_switch_back_requested(normalized):
+            return {"kind": "model_switch_back"}
+        if self._repair_context_handoff_requested(text):
+            context = self._recent_unhealthy_runtime_context(user_id)
+            if context:
+                return {
+                    "kind": "runtime_repair_followup",
+                    **context,
+                }
+        return {}
+
+    def _repair_context_handoff_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if not self._repair_context_handoff_requested(text):
+            return None
+        context = self._recent_unhealthy_runtime_context(user_id)
+        if not context:
+            return None
+        if self._repair_followup_requested(text):
+            return self._repair_followup_response(user_id, text)
+        provider_hint = str(context.get("provider") or "").strip().lower()
+        synthetic_text = f"repair {provider_hint}" if provider_hint else "repair it"
+        return self._repair_followup_response(user_id, synthetic_text)
+
+    @staticmethod
+    def _model_context_terms(context: dict[str, Any]) -> list[str]:
+        if not isinstance(context, dict):
+            return []
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        rows: list[dict[str, Any]] = []
+        for key in (
+            "usable_models",
+            "other_usable_models",
+            "ready_now_models",
+            "other_ready_now_models",
+            "local_installed_models",
+            "not_ready_models",
+            "suggestions",
+            "better_candidates",
+            "candidate_rows",
+        ):
+            value = payload.get(key) if isinstance(payload.get(key), list) else []
+            rows.extend(row for row in value if isinstance(row, dict))
+        raw_terms = [
+            str(payload.get("active_model") or "").strip(),
+            str(payload.get("configured_model") or "").strip(),
+            str(payload.get("model_id") or "").strip(),
+            str(payload.get("effective_model_id") or "").strip(),
+        ]
+        for row in rows:
+            raw_terms.extend(
+                [
+                    str(row.get("model_id") or "").strip(),
+                    str(row.get("repo_id") or "").strip(),
+                    str(row.get("provider_id") or "").strip(),
+                ]
+            )
+        seen: set[str] = set()
+        terms: list[str] = []
+        for item in raw_terms:
+            candidate = str(item or "").strip().lower()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            terms.append(candidate)
+        return terms[:12]
+
+    @staticmethod
+    def _model_scout_focus_terms(text: str, context: dict[str, Any] | None = None) -> list[str]:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        terms: list[str] = []
+        for match in re.finditer(r"\b([a-z0-9._:-]{3,})\s+models?\b", normalized):
+            candidate = str(match.group(1) or "").strip().lower()
+            if candidate and candidate not in _MODEL_SCOUT_TERM_STOPWORDS:
+                terms.append(candidate)
+        if not terms and any(token in normalized for token in ("them", "those", "they")) and isinstance(context, dict):
+            terms.extend(Orchestrator._model_context_terms(context))
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for term in terms:
+            normalized_term = str(term or "").strip().lower()
+            if not normalized_term or normalized_term in seen:
+                continue
+            seen.add(normalized_term)
+            deduped.append(normalized_term)
+        return deduped[:12]
+
+    @staticmethod
+    def _preferred_model_context_target(context: dict[str, Any]) -> tuple[str | None, str | None]:
+        if not isinstance(context, dict):
+            return None, None
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+
+        preferred_rows: list[dict[str, Any]] = []
+        for key in ("recommended_candidate",):
+            row = payload.get(key)
+            if isinstance(row, dict):
+                preferred_rows.append(dict(row))
+        for key in ("better_candidates", "candidate_rows", "ready_now_models", "other_ready_now_models", "usable_models", "other_usable_models"):
+            rows = payload.get(key) if isinstance(payload.get(key), list) else []
+            preferred_rows.extend(dict(row) for row in rows if isinstance(row, dict))
+
+        seen: set[str] = set()
+        for row in preferred_rows:
+            model_id = str(row.get("model_id") or "").strip() or None
+            provider_id = str(row.get("provider_id") or "").strip().lower() or None
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            if bool(row.get("active", False)):
+                continue
+            return model_id, provider_id
+
+        direct_model = str(payload.get("model_id") or payload.get("active_model") or "").strip() or None
+        direct_provider = str(payload.get("provider") or payload.get("active_provider") or "").strip().lower() or None
+        return direct_model, direct_provider
+
+    @staticmethod
+    def _model_scout_row_search_text(row: dict[str, Any]) -> str:
+        fields = (
+            row.get("id"),
+            row.get("kind"),
+            row.get("repo_id"),
+            row.get("provider_id"),
+            row.get("model_id"),
+            row.get("rationale"),
+        )
+        return " ".join(str(value or "").strip().lower() for value in fields if str(value or "").strip())
+
+    @staticmethod
+    def _model_scout_row_label(row: dict[str, Any]) -> str:
+        return (
+            str(row.get("model_id") or "").strip()
+            or str(row.get("repo_id") or "").strip()
+            or str(row.get("id") or "").strip()
+            or "model"
+        )
+
+    def _model_scout_inventory_response(self, *, focus_terms: list[str]) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = self._canonical_model_inventory_snapshot(truth)
+        rows = [
+            dict(row)
+            for row in (payload.get("models") if isinstance(payload.get("models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        active_model = str(payload.get("active_model") or "").strip() or None
+        active_provider = str(payload.get("active_provider") or "").strip().lower() or None
+        installed_rows = [dict(row) for row in rows if bool(row.get("available", False))]
+        usable_rows = [dict(row) for row in rows if bool(row.get("usable_now", False))]
+        suggested_rows = [dict(row) for row in usable_rows if not bool(row.get("active", False))][:2]
+        not_ready_rows = [dict(row) for row in rows if not bool(row.get("usable_now", False))][:2]
+
+        visible_rows = rows
+        if focus_terms:
+            visible_rows = [
+                row
+                for row in rows
+                if any(term in self._model_scout_row_search_text(row) for term in focus_terms)
+            ]
+        if not rows:
+            message = (
+                "I do not currently see any chat-capable models in the runtime registry. "
+                "If you want, I can help you configure a provider or add a local model."
+            )
+        elif focus_terms and not visible_rows:
+            focus_label = ", ".join(term for term in focus_terms[:3] if term)
+            active_label = active_model or "the current chat target"
+            message = (
+                f"I do not currently see any installed or registered chat models matching {focus_label}. "
+                f"Right now chat is using {active_label}. If you want, I can still list the models that are available now."
+            )
+        else:
+            visible_installed = [dict(row) for row in visible_rows if bool(row.get("available", False))]
+            visible_usable = [dict(row) for row in visible_rows if bool(row.get("usable_now", False))]
+            labels = [self._model_scout_row_label(row) for row in visible_installed[:4]]
+            suggested_labels = [self._model_scout_row_label(row) for row in suggested_rows if not focus_terms or row in visible_rows]
+            active_label = active_model or "no active chat model"
+            if focus_terms:
+                focus_label = ", ".join(term for term in focus_terms[:3] if term)
+                if visible_usable:
+                    message_parts = [
+                        f"For {focus_label}, I can currently see {', '.join(labels[:3])}. "
+                        f"The best usable match right now is {self._model_scout_row_label(visible_usable[0])}."
+                    ]
+                    if active_label and active_label not in labels:
+                        message_parts.append(f"Right now chat is using {active_label}.")
+                    alternative_labels = [
+                        self._model_scout_row_label(row)
+                        for row in suggested_rows
+                        if self._model_scout_row_label(row) not in labels and self._model_scout_row_label(row) != active_label
+                    ][:2]
+                    if alternative_labels:
+                        message_parts.append(
+                            f"Other usable models I can see right now are {', '.join(alternative_labels)}."
+                        )
+                    message = " ".join(message_parts)
+                else:
+                    reasons = ", ".join(
+                        f"{self._model_scout_row_label(row)} ({str(row.get('availability_reason') or '').strip()})"
+                        for row in visible_rows[:2]
+                    )
+                    message = f"For {focus_label}, I can see {reasons}."
+                    if active_label:
+                        message = f"{message} Right now chat is using {active_label}."
+            elif labels:
+                message = f"Right now chat is using {active_label}. Other chat models I can currently see are {', '.join(labels)}."
+                if suggested_labels:
+                    message = f"{message} The most useful alternatives right now are {', '.join(suggested_labels[:2])}."
+            else:
+                message = f"Right now chat is using {active_label}, but I do not see any other installed chat models."
+            if not focus_terms and not_ready_rows:
+                not_ready = ", ".join(
+                    f"{self._model_scout_row_label(row)} ({str(row.get('availability_reason') or '').strip()})"
+                    for row in not_ready_rows
+                )
+                if not_ready:
+                    message = f"{message} I can also see models that are present but not ready yet: {not_ready}."
+
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=True,
+            used_tools=["model_scout"],
+            payload={
+                "type": "model_scout",
+                "summary": message,
+                "focus_terms": focus_terms,
+                "active_model": active_model,
+                "active_provider": active_provider,
+                "installed_models": installed_rows,
+                "usable_models": usable_rows,
+                "suggested_models": suggested_rows,
+                "source": "runtime_truth.model_inventory_status+model_readiness_status",
+            },
+        )
+
+    @staticmethod
+    def _model_scout_strategy_requested(normalized_text: str) -> bool:
+        normalized = str(normalized_text or "").strip().lower()
+        if not normalized:
+            return False
+        recommendation_hints = (
+            "should i use",
+            "should we use",
+            "would you use",
+            "would you choose",
+            "do you recommend",
+            "recommend",
+        )
+        if any(phrase in normalized for phrase in _MODEL_SCOUT_STRATEGY_PHRASES):
+            return True
+        if any(
+            phrase in normalized
+            for phrase in ("premium model", "use premium", "best model", "upgrade model", "stronger model")
+        ):
+            return True
+        if Orchestrator._model_scout_remote_role_requested(normalized):
+            return bool(
+                re.search(r"\bmodels?\b", normalized)
+                and any(phrase in normalized for phrase in recommendation_hints)
+            )
+        if re.search(r"\bmodels?\b", normalized) and any(phrase in normalized for phrase in recommendation_hints):
+            if any(token in normalized for token in ("coding", "code", "debug", "refactor", "review")):
+                return True
+            if any(token in normalized for token in ("research", "reasoning", "analysis", "analyze")):
+                return True
+        if re.search(r"\blocal models?\b", normalized) and any(
+            phrase in normalized
+            for phrase in (
+                "recommend",
+                "do you recommend",
+                "should i use",
+                "should we use",
+                "would you choose",
+            )
+        ):
+            return True
+        if "better model" in normalized and any(token in normalized for token in ("use", "switch", "should", "try")):
+            return True
+        return False
+
+    @staticmethod
+    def _model_scout_remote_role_requested(normalized_text: str) -> str | None:
+        normalized = str(normalized_text or "").strip().lower().replace("-", " ")
+        if not normalized:
+            return None
+        if re.search(r"\blocal models?\b", normalized) and any(
+            phrase in normalized
+            for phrase in (
+                "recommend",
+                "do you recommend",
+                "should i use",
+                "should we use",
+                "would you choose",
+            )
+        ):
+            return "best_local"
+        if any(phrase in normalized for phrase in _MODEL_SCOUT_REMOTE_ROLE_PHRASES):
+            if "coding" in normalized:
+                return "premium_coding" if "premium" in normalized else "cheap_cloud"
+            if "research" in normalized or "reasoning" in normalized or "analysis" in normalized:
+                return "premium_research" if "premium" in normalized else "cheap_cloud"
+            if "premium" in normalized:
+                return "premium_general"
+            return "cheap_cloud"
+        return None
+
+    @staticmethod
+    def _model_scout_discovery_requested(normalized_text: str) -> bool:
+        normalized = str(normalized_text or "").strip().lower()
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in _MODEL_SCOUT_DISCOVERY_PHRASES):
+            return True
+        if ("hugging face" in normalized or "huggingface" in normalized) and (
+            "model" in normalized or "models" in normalized
+        ):
+            return True
+        if any(token in normalized for token in ("smol", "small", "tiny", "lightweight")) and (
+            "model" in normalized or "models" in normalized
+        ):
+            return True
+        if any(token in normalized for token in ("find", "look", "search", "discover", "show")) and (
+            "new model" in normalized
+            or "new models" in normalized
+            or "downloadable model" in normalized
+            or "downloadable models" in normalized
+        ):
+            return True
+        return "download" in normalized and "model" in normalized
+
+    @staticmethod
+    def _model_trial_switch_back_requested(normalized_text: str) -> bool:
+        normalized = str(normalized_text or "").strip().lower()
+        return any(phrase in normalized for phrase in _MODEL_SCOUT_SWITCH_BACK_PHRASES)
+
+    @staticmethod
+    def _model_switch_advisory_requested(normalized_text: str) -> bool:
+        normalized = str(normalized_text or "").strip().lower().replace("/", " ")
+        return bool(re.search(r"\bshould (?:i|we) switch models?\b", normalized))
+
+    @staticmethod
+    def _model_acquisition_requested(normalized_text: str) -> bool:
+        normalized = str(normalized_text or "").strip().lower()
+        if not normalized:
+            return False
+        if normalized.startswith("please "):
+            normalized = normalized[len("please "):].strip()
+        if any(
+            normalized.startswith(prefix)
+            for prefix in ("install ", "download ", "pull ", "acquire ", "import ")
+        ):
+            return True
+        return any(
+            phrase in normalized
+            for phrase in (
+                "install it first",
+                "download it first",
+                "pull it first",
+                "acquire it first",
+                "import it first",
+                "install this model",
+                "download this model",
+                "pull this model",
+                "acquire this model",
+                "import this model",
+            )
+        )
+
+    @staticmethod
+    def _model_acquisition_candidate(
+        rows: list[dict[str, Any]],
+        *,
+        exclude_model: str | None = None,
+    ) -> dict[str, Any] | None:
+        state_priority = {
+            "acquirable": 0,
+            "installed_not_ready": 1,
+            "queued": 2,
+            "downloading": 3,
+            "blocked_by_policy": 4,
+        }
+        candidates = [
+            dict(row)
+            for row in rows
+            if isinstance(row, dict)
+            and str(row.get("model_id") or "").strip()
+            and str(row.get("model_id") or "").strip() != str(exclude_model or "").strip()
+            and str(row.get("acquisition_state") or "").strip().lower() in state_priority
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda row: (
+                state_priority.get(str(row.get("acquisition_state") or "").strip().lower(), 99),
+                0 if bool(row.get("local", False)) else 1,
+                -int(row.get("quality_rank") or 0),
+                str(row.get("model_id") or ""),
+            )
+        )
+        return candidates[0]
+
+    @staticmethod
+    def _model_scout_tier_human(candidate: dict[str, Any]) -> str:
+        tier = str(candidate.get("tier") or "").strip().lower()
+        if tier == "free_remote":
+            return "a free remote model"
+        if tier == "cheap_remote":
+            return "a very cheap remote model"
+        if bool(candidate.get("local", False)):
+            return "a local model"
+        return "a usable model"
+
+    @staticmethod
+    def _model_scout_task_request(text: str) -> dict[str, Any]:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if any(token in normalized for token in ("code", "coding", "debug", "refactor", "review")):
+            return {
+                "task_type": "coding",
+                "requirements": ["chat"],
+                "preferred_local": True,
+            }
+        if any(token in normalized for token in ("research", "deeper", "deep analysis", "reasoning", "analyze")):
+            return {
+                "task_type": "reasoning",
+                "requirements": ["chat", "long_context"],
+                "preferred_local": True,
+            }
+        return {
+            "task_type": "chat",
+            "requirements": ["chat"],
+            "preferred_local": True,
+        }
+
+    @staticmethod
+    def _model_scout_task_label(task_type: str) -> str:
+        normalized = str(task_type or "chat").strip().lower() or "chat"
+        if normalized == "coding":
+            return "coding work"
+        if normalized == "reasoning":
+            return "deeper analysis"
+        return "everyday chat"
+
+    @staticmethod
+    def _model_scout_role_line(title: str, candidate: dict[str, Any] | None) -> str | None:
+        if not isinstance(candidate, dict):
+            return None
+        model_id = str(candidate.get("model_id") or "").strip()
+        if not model_id:
+            return None
+        return f"{title}: {model_id}."
+
+    @staticmethod
+    def _model_scout_role_blocked_line(
+        title: str,
+        candidate: dict[str, Any] | None,
+        *,
+        mode_label: str,
+    ) -> str | None:
+        if not isinstance(candidate, dict):
+            return None
+        model_id = str(candidate.get("model_id") or "").strip()
+        if not model_id:
+            return None
+        return f"{title}: {model_id} ({mode_label} does not allow it right now)."
+
+    @staticmethod
+    def _model_scout_acquisition_line(
+        candidate: dict[str, Any] | None,
+        *,
+        mode_label: str,
+    ) -> tuple[str | None, str | None]:
+        if not isinstance(candidate, dict):
+            return None, None
+        model_id = str(candidate.get("model_id") or "").strip()
+        if not model_id:
+            return None, None
+        acquisition_state = str(candidate.get("acquisition_state") or "").strip().lower()
+        acquisition_reason = str(
+            candidate.get("acquisition_reason")
+            or candidate.get("availability_reason")
+            or ""
+        ).strip()
+        if acquisition_state == "acquirable":
+            return (
+                f"Available to acquire first: {model_id}. It is not ready yet, but I can get it if you approve.",
+                model_id,
+            )
+        if acquisition_state == "installed_not_ready":
+            return f"Installed but not ready yet: {model_id}.", None
+        if acquisition_state == "queued":
+            return f"Waiting for approval: {model_id}.", None
+        if acquisition_state == "downloading":
+            return f"Downloading now: {model_id}.", None
+        if acquisition_state == "blocked_by_policy":
+            return f"Not available in this mode: {model_id}. {mode_label} is blocking install/download/import right now.", None
+        if acquisition_reason:
+            return f"Not ready yet: {model_id}. {acquisition_reason}.", None
+        return None, None
+
+    @staticmethod
+    def _model_scout_mode_line(
+        *,
+        control_mode: str,
+        mode_label: str,
+        allow_install_pull: bool,
+        local_only: bool,
+    ) -> str:
+        if control_mode == "safe":
+            return "Mode: SAFE MODE. Local-only right now; cloud suggestions are advisory only."
+        if local_only:
+            if allow_install_pull:
+                return f"Mode: {mode_label}. Recommendations are local-only right now. I only act after you approve."
+            return f"Mode: {mode_label}. Recommendations are local-only right now, and installs are paused by policy. I only act after you approve."
+        if allow_install_pull:
+            return f"Mode: {mode_label}. I can recommend local and cloud options. I only act after you approve."
+        return f"Mode: {mode_label}. I can recommend local and cloud options, but installs are paused by policy. I only act after you approve."
+
+    @staticmethod
+    def _model_scout_action_note(
+        *,
+        advisory_actions: dict[str, Any] | None,
+    ) -> str:
+        prefix = "No change has been made."
+        if not isinstance(advisory_actions, dict):
+            return prefix
+
+        labels = {
+            "test": "test it",
+            "switch_temporarily": "switch to it temporarily",
+            "make_default": "make it the default",
+            "acquire": "acquire/install it first",
+        }
+        ordered_names = ("test", "switch_temporarily", "make_default", "acquire")
+        available = [
+            labels[name]
+            for name in ordered_names
+            if isinstance(advisory_actions.get(name), dict)
+            and str((advisory_actions.get(name) or {}).get("state") or "").strip().lower() == "available"
+        ]
+        if available:
+            if len(available) == 1:
+                actions_text = available[0]
+            elif len(available) == 2:
+                actions_text = f"{available[0]} or {available[1]}"
+            else:
+                actions_text = f"{', '.join(available[:-1])}, or {available[-1]}"
+            return f"{prefix} You can {actions_text} if you want."
+
+        blocked_reasons = {
+            str((advisory_actions.get(name) or {}).get("reason_code") or "").strip().lower()
+            for name in ordered_names
+            if isinstance(advisory_actions.get(name), dict)
+            and str((advisory_actions.get(name) or {}).get("state") or "").strip().lower() == "blocked"
+        }
+        blocked_reasons.discard("")
+        if blocked_reasons == {"safe_mode_remote_block"}:
+            return f"{prefix} In SAFE MODE, remote actions are blocked."
+        if blocked_reasons <= {"remote_switch_disabled", "remote_recommendation_disabled"} and blocked_reasons:
+            return f"{prefix} Remote actions are blocked by policy right now."
+        if blocked_reasons <= {"safe_mode_install_block", "install_disabled_by_policy"} and blocked_reasons:
+            return f"{prefix} Install/download actions are blocked in this mode."
+        return prefix
+
+    @staticmethod
+    def _model_scout_requested_role_title(requested_remote_role: str | None) -> str | None:
+        normalized = str(requested_remote_role or "").strip().lower()
+        if normalized == "best_local":
+            return "Best local option"
+        if normalized == "cheap_cloud":
+            return "Cheap cloud recommendation"
+        if normalized == "premium_coding":
+            return "Premium coding recommendation"
+        if normalized == "premium_research":
+            return "Premium research recommendation"
+        if normalized == "premium_general":
+            return "Premium remote recommendation"
+        return None
+
+    @staticmethod
+    def _model_scout_requested_role_reason(requested_remote_role: str | None) -> str | None:
+        normalized = str(requested_remote_role or "").strip().lower()
+        if normalized == "best_local":
+            return "no usable local model is currently available."
+        if normalized == "cheap_cloud":
+            return "no usable low-cost remote model is currently available."
+        if normalized == "premium_research":
+            return "no remote model currently meets the required premium quality and context thresholds."
+        if normalized in {"premium_coding", "premium_general"}:
+            return "no remote model currently meets the required premium quality threshold."
+        return None
+
+    @staticmethod
+    def _model_scout_requested_role_candidate(
+        requested_remote_role: str | None,
+        *,
+        local_primary_candidate: dict[str, Any] | None,
+        cheap_cloud_candidate: dict[str, Any] | None,
+        premium_coding_candidate: dict[str, Any] | None,
+        premium_research_candidate: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        normalized = str(requested_remote_role or "").strip().lower()
+        if normalized == "best_local":
+            return (
+                {
+                    **dict(local_primary_candidate),
+                    "recommendation_basis": str(local_primary_candidate.get("recommendation_basis") or "best_local"),
+                    "recommendation_explanation": (
+                        str(local_primary_candidate.get("recommendation_explanation") or "").strip()
+                        or "strongest local option currently available"
+                    ),
+                }
+                if isinstance(local_primary_candidate, dict)
+                else None
+            )
+        if normalized == "cheap_cloud":
+            return dict(cheap_cloud_candidate) if isinstance(cheap_cloud_candidate, dict) else None
+        if normalized == "premium_coding":
+            return dict(premium_coding_candidate) if isinstance(premium_coding_candidate, dict) else None
+        if normalized == "premium_research":
+            return dict(premium_research_candidate) if isinstance(premium_research_candidate, dict) else None
+        if normalized == "premium_general":
+            if isinstance(premium_research_candidate, dict):
+                return dict(premium_research_candidate)
+            if isinstance(premium_coding_candidate, dict):
+                return dict(premium_coding_candidate)
+        return None
+
+    @staticmethod
+    def _model_scout_primary_role_resolution(
+        *,
+        recommendation_roles: dict[str, Any],
+        requested_remote_role: str | None,
+        task_type: str,
+        primary_candidate: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(recommendation_roles, dict):
+            return None
+        model_id = str((primary_candidate or {}).get("model_id") or "").strip()
+        normalized_request = str(requested_remote_role or "").strip().lower()
+        normalized_task = str(task_type or "chat").strip().lower() or "chat"
+        preferred_keys: list[str] = []
+        if normalized_request == "best_local":
+            preferred_keys = ["best_local"]
+        elif normalized_request == "cheap_cloud":
+            preferred_keys = ["cheap_cloud"]
+        elif normalized_request == "premium_coding":
+            preferred_keys = ["premium_coding"]
+        elif normalized_request == "premium_research":
+            preferred_keys = ["premium_research"]
+        elif normalized_request == "premium_general":
+            preferred_keys = ["premium_research", "premium_coding"]
+        elif normalized_task == "coding":
+            preferred_keys = ["best_task_coding"]
+        elif normalized_task == "reasoning":
+            preferred_keys = ["best_task_research"]
+        else:
+            preferred_keys = ["best_task_chat"]
+        for key in preferred_keys:
+            resolution = recommendation_roles.get(key)
+            if not isinstance(resolution, dict):
+                continue
+            resolution_model = str(resolution.get("model_id") or "").strip()
+            if not model_id or not resolution_model or resolution_model == model_id:
+                return dict(resolution)
+        if model_id:
+            for resolution in recommendation_roles.values():
+                if not isinstance(resolution, dict):
+                    continue
+                if str(resolution.get("state") or "").strip().lower() != "selected":
+                    continue
+                if str(resolution.get("model_id") or "").strip() == model_id:
+                    return dict(resolution)
+        return None
+
+    @staticmethod
+    def _model_scout_default_heading(task_type: str) -> str:
+        normalized = str(task_type or "chat").strip().lower() or "chat"
+        if normalized == "coding":
+            return "Best coding option"
+        if normalized == "reasoning":
+            return "Best research option"
+        return "Best chat option"
+
+    @staticmethod
+    def _model_scout_included_role_keys(
+        *,
+        task_type: str,
+        requested_remote_role: str | None,
+    ) -> list[str] | None:
+        normalized_task = str(task_type or "chat").strip().lower() or "chat"
+        normalized_request = str(requested_remote_role or "").strip().lower()
+        if normalized_request == "cheap_cloud":
+            return ["best_local", "cheap_cloud"]
+        if normalized_request == "premium_coding":
+            return ["best_local", "cheap_cloud", "premium_coding"]
+        if normalized_request == "premium_research":
+            return ["best_local", "cheap_cloud", "premium_research"]
+        if normalized_request == "best_local":
+            return ["best_local"]
+        if normalized_task == "coding":
+            return ["best_local", "cheap_cloud", "premium_coding", "best_task_coding"]
+        if normalized_task == "reasoning":
+            return ["best_local", "cheap_cloud", "premium_research", "best_task_research"]
+        return None
+
+    @staticmethod
+    def _model_scout_secondary_role_lines(
+        *,
+        task_type: str,
+        requested_remote_role: str | None,
+        active_model: str | None,
+        primary_model: str | None,
+        local_only: bool,
+        mode_label: str,
+        local_primary_candidate: dict[str, Any] | None,
+        cheap_cloud_candidate: dict[str, Any] | None,
+        premium_coding_candidate: dict[str, Any] | None,
+        premium_research_candidate: dict[str, Any] | None,
+    ) -> list[str]:
+        titles = {
+            "best_local": "Best local option (fast, no cost)",
+            "cheap_cloud": "Cheap cloud option",
+            "premium_coding": "Premium coding option",
+            "premium_research": "Premium research option",
+        }
+        candidates = {
+            "best_local": local_primary_candidate,
+            "cheap_cloud": cheap_cloud_candidate,
+            "premium_coding": premium_coding_candidate,
+            "premium_research": premium_research_candidate,
+        }
+        normalized_task = str(task_type or "chat").strip().lower() or "chat"
+        normalized_request = str(requested_remote_role or "").strip().lower()
+        if normalized_request in {"cheap_cloud", "premium_coding", "premium_research", "premium_general"}:
+            order = ["best_local", "cheap_cloud"]
+        elif normalized_task == "coding":
+            order = ["best_local", "cheap_cloud", "premium_coding"]
+        elif normalized_task == "reasoning":
+            order = ["best_local", "cheap_cloud", "premium_research"]
+        else:
+            order = ["best_local", "cheap_cloud"]
+        seen_models = {str(primary_model or "").strip()}
+        lines: list[str] = []
+        for key in order:
+            candidate = candidates.get(key)
+            if not isinstance(candidate, dict):
+                continue
+            model_id = str(candidate.get("model_id") or "").strip()
+            if not model_id:
+                continue
+            if model_id in seen_models:
+                continue
+            if key == "best_local" and model_id == str(active_model or "").strip():
+                continue
+            if local_only and key != "best_local":
+                line = Orchestrator._model_scout_role_blocked_line(
+                    titles[key],
+                    candidate,
+                    mode_label=mode_label,
+                )
+            elif not local_only:
+                line = Orchestrator._model_scout_role_line(titles[key], candidate)
+            else:
+                line = None
+            if line:
+                lines.append(line)
+                seen_models.add(model_id)
+        return lines
+
+    def _model_scout_strategy_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        requested_role_override: str | None = None,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload_fn = getattr(truth, "model_scout_v2_status", None)
+        if not callable(payload_fn):
+            return self._model_scout_inventory_response(focus_terms=[])
+        task_request = self._model_scout_task_request(text)
+        requested_remote_role = str(requested_role_override or "").strip().lower() or self._model_scout_remote_role_requested(
+            normalize_setup_text(text).replace("/", " ")
+        )
+        included_role_keys = self._model_scout_included_role_keys(
+            task_type=str(task_request.get("task_type") or "chat").strip().lower() or "chat",
+            requested_remote_role=requested_remote_role,
+        )
+        try:
+            payload = payload_fn(task_request=task_request, included_role_keys=included_role_keys)
+        except TypeError:
+            payload = payload_fn(task_request=task_request)
+        active_model = str(payload.get("active_model") or "").strip() or None
+        active_provider = str(payload.get("active_provider") or "").strip().lower() or None
+        current_candidate = payload.get("current_candidate") if isinstance(payload.get("current_candidate"), dict) else None
+        recommended_candidate = payload.get("recommended_candidate") if isinstance(payload.get("recommended_candidate"), dict) else None
+        task_recommendation = payload.get("task_recommendation") if isinstance(payload.get("task_recommendation"), dict) else None
+        better_candidates = [
+            dict(row)
+            for row in (payload.get("better_candidates") if isinstance(payload.get("better_candidates"), list) else [])
+            if isinstance(row, dict)
+        ]
+        candidate_rows = [
+            dict(row)
+            for row in (payload.get("candidate_rows") if isinstance(payload.get("candidate_rows"), list) else [])
+            if isinstance(row, dict)
+        ]
+        recommendation_roles = (
+            payload.get("recommendation_roles") if isinstance(payload.get("recommendation_roles"), dict) else {}
+        )
+        not_ready_rows = [
+            dict(row)
+            for row in (payload.get("not_ready_models") if isinstance(payload.get("not_ready_models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
+        role_candidates = payload.get("role_candidates") if isinstance(payload.get("role_candidates"), dict) else {}
+        advisory_only = bool(payload.get("advisory_only", False))
+        control_mode = str(policy.get("mode") or ("safe" if advisory_only else "controlled")).strip().lower() or ("safe" if advisory_only else "controlled")
+        mode_label = str(policy.get("mode_label") or ("SAFE MODE" if control_mode == "safe" else "Controlled Mode")).strip() or ("SAFE MODE" if control_mode == "safe" else "Controlled Mode")
+        task_type = str((payload.get("task_request") if isinstance(payload.get("task_request"), dict) else {}).get("task_type") or task_request.get("task_type") or "chat").strip().lower() or "chat"
+        allow_remote_recommendation = bool(
+            policy.get("allow_remote_recommendation", policy.get("allow_remote_fallback", True))
+        )
+        local_only = bool(policy.get("safe_mode", False) or not allow_remote_recommendation)
+        if local_only:
+            candidate_rows = [dict(row) for row in candidate_rows if bool(row.get("local", False))]
+            better_candidates = [dict(row) for row in better_candidates if bool(row.get("local", False))]
+            not_ready_rows = [dict(row) for row in not_ready_rows if bool(row.get("local", False))]
+            if isinstance(recommended_candidate, dict) and not bool(recommended_candidate.get("local", False)):
+                recommended_candidate = None
+            if isinstance(task_recommendation, dict) and not bool(task_recommendation.get("local", False)):
+                task_recommendation = None
+
+        if not candidate_rows and not active_model:
+            message = (
+                "I do not currently see any ready chat models to scout. "
+                "If you want, I can help you configure a provider or add a local model."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "strategy",
+                    "summary": message,
+                    "active_model": active_model,
+                    "active_provider": active_provider,
+                    "candidate_rows": candidate_rows,
+                    "better_candidates": better_candidates,
+                    "source": "runtime_truth.model_scout_v2",
+                },
+            )
+
+        active_label = active_model or "the current chat target"
+        cheap_cloud_candidate = role_candidates.get("cheap_cloud") if isinstance(role_candidates.get("cheap_cloud"), dict) else None
+        premium_coding_candidate = (
+            role_candidates.get("premium_coding_cloud")
+            if isinstance(role_candidates.get("premium_coding_cloud"), dict)
+            else None
+        )
+        premium_research_candidate = (
+            role_candidates.get("premium_research_cloud")
+            if isinstance(role_candidates.get("premium_research_cloud"), dict)
+            else None
+        )
+        local_primary_candidate = (
+            role_candidates.get("comfortable_local_default")
+            if isinstance(role_candidates.get("comfortable_local_default"), dict)
+            else None
+        )
+        acquisition_candidate = self._model_acquisition_candidate(
+            not_ready_rows,
+            exclude_model=active_model,
+        )
+        allow_install_pull = bool(policy.get("allow_install_pull", True))
+        acquisition_line, acquisition_model = self._model_scout_acquisition_line(
+            acquisition_candidate,
+            mode_label=mode_label,
+        )
+        mode_line = self._model_scout_mode_line(
+            control_mode=control_mode,
+            mode_label=mode_label,
+            allow_install_pull=allow_install_pull,
+            local_only=local_only,
+        )
+        requested_role_title = self._model_scout_requested_role_title(requested_remote_role)
+        requested_role_reason = self._model_scout_requested_role_reason(requested_remote_role)
+        requested_role_candidate = (
+            self._model_scout_requested_role_candidate(
+                requested_remote_role,
+                local_primary_candidate=local_primary_candidate,
+                cheap_cloud_candidate=cheap_cloud_candidate,
+                premium_coding_candidate=premium_coding_candidate,
+                premium_research_candidate=premium_research_candidate,
+            )
+            if not local_only
+            else (
+                self._model_scout_requested_role_candidate(
+                    requested_remote_role,
+                    local_primary_candidate=local_primary_candidate,
+                    cheap_cloud_candidate=None,
+                    premium_coding_candidate=None,
+                    premium_research_candidate=None,
+                )
+                if str(requested_remote_role or "").strip().lower() == "best_local"
+                else None
+            )
+        )
+        primary_heading = requested_role_title or self._model_scout_default_heading(task_type)
+        explicit_requested_role = bool(requested_role_title)
+        primary_candidate = (
+            requested_role_candidate
+            if explicit_requested_role
+            else (task_recommendation if isinstance(task_recommendation, dict) else recommended_candidate)
+        )
+        primary_resolution = self._model_scout_primary_role_resolution(
+            recommendation_roles=recommendation_roles,
+            requested_remote_role=requested_remote_role,
+            task_type=task_type,
+            primary_candidate=primary_candidate,
+        )
+        secondary_lines = self._model_scout_secondary_role_lines(
+            task_type=task_type,
+            requested_remote_role=requested_remote_role,
+            active_model=active_model,
+            primary_model=(primary_candidate.get("model_id") if isinstance(primary_candidate, dict) else None),
+            local_only=local_only,
+            mode_label=mode_label,
+            local_primary_candidate=local_primary_candidate,
+            cheap_cloud_candidate=cheap_cloud_candidate,
+            premium_coding_candidate=premium_coding_candidate,
+            premium_research_candidate=premium_research_candidate,
+        )
+        if isinstance(primary_candidate, dict):
+            target_model = str(primary_candidate.get("model_id") or "").strip() or "that model"
+            reason = str(primary_candidate.get("recommendation_explanation") or "").strip() or "it looks like the strongest practical option right now"
+            comparison = (
+                primary_resolution.get("comparison")
+                if isinstance(primary_resolution, dict) and isinstance(primary_resolution.get("comparison"), dict)
+                else None
+            )
+            advisory_actions = (
+                primary_resolution.get("advisory_actions")
+                if isinstance(primary_resolution, dict) and isinstance(primary_resolution.get("advisory_actions"), dict)
+                else None
+            )
+            comparison_text = str((comparison or {}).get("explanation") or "").strip()
+            lines = [
+                f"Current model: {active_label}.",
+                f"{primary_heading}: {target_model}.",
+                f"Why: {reason}.",
+            ]
+            if comparison_text:
+                lines.append(f"Compared with current: {comparison_text}.")
+            lines.extend(secondary_lines)
+            if acquisition_line:
+                lines.append(acquisition_line)
+            lines.append(mode_line)
+            lines.append(self._model_scout_action_note(advisory_actions=advisory_actions))
+            prompt = "\n".join(lines)
+            return self._runtime_truth_response(
+                text=prompt,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "strategy",
+                    "summary": prompt,
+                    "active_model": active_model,
+                    "active_provider": active_provider,
+                    "current_candidate": current_candidate,
+                    "recommended_candidate": recommended_candidate,
+                    "task_recommendation": task_recommendation,
+                    "better_candidates": better_candidates,
+                    "candidate_rows": candidate_rows,
+                    "role_candidates": role_candidates,
+                    "recommendation_roles": recommendation_roles,
+                    "policy": dict(policy),
+                    "advisory_only": advisory_only,
+                    "source": "runtime_truth.model_scout_v2",
+                },
+            )
+
+        if requested_role_title and local_only:
+            lines = [
+                f"Current model: {active_label}.",
+                f"{primary_heading}: not available in {mode_label} right now.",
+            ]
+            lines.append("Reason: remote recommendations are not usable in this mode.")
+            lines.extend(secondary_lines)
+            if acquisition_line:
+                lines.append(acquisition_line)
+            lines.append(mode_line)
+            lines.append(
+                self._model_scout_action_note(
+                    advisory_actions=(
+                        primary_resolution.get("advisory_actions")
+                        if isinstance(primary_resolution, dict) and isinstance(primary_resolution.get("advisory_actions"), dict)
+                        else None
+                    ),
+                )
+            )
+            message = "\n".join(lines)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "strategy",
+                    "summary": message,
+                    "active_model": active_model,
+                    "active_provider": active_provider,
+                    "current_candidate": current_candidate,
+                    "recommended_candidate": recommended_candidate,
+                    "task_recommendation": task_recommendation,
+                    "better_candidates": better_candidates,
+                    "candidate_rows": candidate_rows,
+                    "role_candidates": role_candidates,
+                    "recommendation_roles": recommendation_roles,
+                    "policy": dict(policy),
+                    "advisory_only": advisory_only,
+                    "source": "runtime_truth.model_scout_v2",
+                },
+            )
+
+        if explicit_requested_role and not local_only:
+            lines = [
+                f"Current model: {active_label}.",
+                f"{primary_heading}: none currently qualifies.",
+            ]
+            if requested_role_reason:
+                lines.append(f"Reason: {requested_role_reason}")
+            lines.extend(secondary_lines)
+            if acquisition_line:
+                lines.append(acquisition_line)
+            lines.append(mode_line)
+            lines.append(
+                self._model_scout_action_note(
+                    advisory_actions=(
+                        primary_resolution.get("advisory_actions")
+                        if isinstance(primary_resolution, dict) and isinstance(primary_resolution.get("advisory_actions"), dict)
+                        else None
+                    ),
+                )
+            )
+            message = "\n".join(lines)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "strategy",
+                    "summary": message,
+                    "active_model": active_model,
+                    "active_provider": active_provider,
+                    "current_candidate": current_candidate,
+                    "recommended_candidate": recommended_candidate,
+                    "task_recommendation": task_recommendation,
+                    "better_candidates": better_candidates,
+                    "candidate_rows": candidate_rows,
+                    "role_candidates": role_candidates,
+                    "recommendation_roles": recommendation_roles,
+                    "policy": dict(policy),
+                    "advisory_only": advisory_only,
+                    "source": "runtime_truth.model_scout_v2",
+                },
+            )
+
+        lines = [
+            f"Current model: {active_label}.",
+            f"{primary_heading}: your current model looks fine right now.",
+        ]
+        lines.extend(secondary_lines)
+        if acquisition_line:
+            lines.append(acquisition_line)
+        lines.append(mode_line)
+        lines.append(
+            self._model_scout_action_note(
+                advisory_actions=(
+                    primary_resolution.get("advisory_actions")
+                    if isinstance(primary_resolution, dict) and isinstance(primary_resolution.get("advisory_actions"), dict)
+                    else None
+                ),
+            )
+        )
+        message = "\n".join(lines)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=True,
+            used_tools=["model_scout"],
+            payload={
+                "type": "model_scout",
+                "mode": "strategy",
+                "summary": message,
+                "active_model": active_model,
+                "active_provider": active_provider,
+                "current_candidate": current_candidate,
+                "recommended_candidate": recommended_candidate,
+                "task_recommendation": task_recommendation,
+                "better_candidates": better_candidates,
+                "candidate_rows": candidate_rows,
+                "role_candidates": role_candidates,
+                "policy": dict(policy),
+                "advisory_only": advisory_only,
+                "source": "runtime_truth.model_scout_v2",
+            },
+        )
+
+    def _model_scout_discovery_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="runtime_truth_service_unavailable",
+            )
+        status_fn = getattr(truth, "model_watch_hf_status", None)
+        scan_fn = getattr(truth, "model_watch_hf_scan", None)
+        if not callable(status_fn) or not callable(scan_fn):
+            message = (
+                "I do not have a Hugging Face discovery path available in this runtime yet. "
+                "I can still compare the models that are already available right now."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "external_discovery",
+                    "summary": message,
+                    "source": "runtime_truth.hf_unavailable",
+                },
+            )
+        status = status_fn()
+        if not bool(status.get("enabled", False)):
+            message = (
+                "The Hugging Face discovery path is not enabled right now, so I can't check for downloadable model candidates automatically. "
+                "If you want, I can still compare the models that are already available right now."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                payload={
+                    "type": "model_scout",
+                    "mode": "external_discovery",
+                    "summary": message,
+                    "hf_status": dict(status),
+                    "source": "runtime_truth.model_watch_hf_status",
+                },
+            )
+        scan_ok, scan_body = scan_fn(
+            trigger="manual",
+            notify_proposal=False,
+            persist_proposal=False,
+        )
+        if not scan_ok:
+            message = (
+                "I tried the Hugging Face discovery path, but it did not complete cleanly just now. "
+                "I can still compare the models that are already available right now."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["model_scout"],
+                ok=False,
+                error_kind=str(scan_body.get("error") or "hf_scan_failed").strip() or "hf_scan_failed",
+                payload={
+                    "type": "model_scout",
+                    "mode": "external_discovery",
+                    "summary": message,
+                    "hf_status": dict(status),
+                    "hf_scan": dict(scan_body),
+                    "source": "runtime_truth.model_watch_hf_scan",
+                },
+            )
+        proposal = scan_body.get("proposal") if isinstance(scan_body.get("proposal"), dict) else None
+        scan_payload = scan_body.get("scan") if isinstance(scan_body.get("scan"), dict) else {}
+        updates = [
+            dict(row)
+            for row in (scan_payload.get("updates") if isinstance(scan_payload.get("updates"), list) else [])
+            if isinstance(row, dict)
+        ]
+        if isinstance(proposal, dict):
+            repo_id = str(proposal.get("repo_id") or "").strip() or "that model"
+            installability = str(proposal.get("installability") or "download_only").strip().lower()
+            action_text = "download and install locally through Ollama" if installability == "installable_ollama" else "download for offline inspection"
+            message = (
+                f"I found a promising downloadable candidate: {repo_id}. "
+                f"It is not installed yet. Right now the best next step would be to {action_text}. "
+                "If you want, I can help you prepare that next."
+            )
+        elif updates:
+            repo_preview = ", ".join(str(row.get("repo_id") or "").strip() for row in updates[:3] if str(row.get("repo_id") or "").strip())
+            message = (
+                f"I found some promising downloadable candidates: {repo_preview}. "
+                "None of them is installed yet."
+            )
+        else:
+            message = (
+                "I checked the Hugging Face discovery path and did not find a better downloadable model candidate right now."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=True,
+            used_tools=["model_scout"],
+            payload={
+                "type": "model_scout",
+                "mode": "external_discovery",
+                "summary": message,
+                "hf_status": dict(status),
+                "hf_scan": dict(scan_body),
+                "source": "runtime_truth.model_watch_hf_scan",
+            },
+        )
+
+    def _model_ready_now_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload_fn = getattr(truth, "model_readiness_status", None)
+        if not callable(payload_fn):
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="model_readiness_unavailable",
+            )
+        payload = payload_fn()
+        active_model = str(payload.get("active_model") or "").strip() or None
+        active_label = active_model or "no active chat model"
+        ready_rows = [
+            dict(row)
+            for row in (payload.get("ready_now_models") if isinstance(payload.get("ready_now_models"), list) else payload.get("usable_models") if isinstance(payload.get("usable_models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        other_ready_rows = [
+            dict(row)
+            for row in (payload.get("other_ready_now_models") if isinstance(payload.get("other_ready_now_models"), list) else payload.get("other_usable_models") if isinstance(payload.get("other_usable_models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        not_ready_rows = [
+            dict(row)
+            for row in (payload.get("not_ready_models") if isinstance(payload.get("not_ready_models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        ready_preview = self._inventory_preview(other_ready_rows if active_model else ready_rows)
+        not_ready_preview = self._inventory_reason_preview(not_ready_rows)
+        if ready_preview:
+            message = f"Right now chat is using {active_label}. Other models ready to use now: {ready_preview}."
+        elif active_model and ready_rows:
+            message = f"Right now chat is using {active_label}, and it is the only model that looks ready now."
+        elif ready_rows:
+            message = f"Models ready to use right now: {self._inventory_preview(ready_rows)}."
+        else:
+            message = "I do not see a chat model that is ready to use right now."
+        if not_ready_preview:
+            message = f"{message} Present but not ready: {not_ready_preview}."
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            payload={
+                **dict(payload),
+                "type": "model_readiness_inventory",
+                "title": "Ready chat models",
+                "summary": message,
+            },
+        )
+
+    def _execute_model_acquire(
+        self,
+        *,
+        model_id: str | None,
+        provider_id: str | None,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="runtime_truth_service_unavailable",
+            )
+        matched_model = str(model_id or "").strip() or None
+        normalized_provider = str(provider_id or "").strip().lower() or None
+        if not matched_model:
+            message = "I need one exact model before I can acquire it."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                payload={
+                    "type": "model_acquisition",
+                    "action": "acquire_target",
+                    "ok": False,
+                    "summary": message,
+                },
+            )
+        acquire_fn = getattr(truth, "acquire_chat_model_target", None)
+        if not callable(acquire_fn):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="model_acquisition_unavailable",
+            )
+        ok, body = acquire_fn(matched_model, provider_id=normalized_provider)
+        response_body = body if isinstance(body, dict) else {}
+        message = str(response_body.get("message") or "").strip()
+        if not message:
+            if ok:
+                message = f"I started acquiring {matched_model} through the canonical model manager."
+            else:
+                message = f"I couldn't acquire {matched_model} right now."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            ok=bool(ok),
+            error_kind=None if ok else str(response_body.get("error_kind") or response_body.get("error") or "model_acquisition_failed").strip() or "model_acquisition_failed",
+            used_runtime_state=True,
+            used_tools=["model_manager"],
+            payload={
+                "type": "model_acquisition",
+                "action": "acquire_target",
+                "provider": str(response_body.get("provider") or normalized_provider).strip().lower() or normalized_provider,
+                "model_id": str(response_body.get("model_id") or matched_model).strip() or matched_model,
+                "ok": bool(ok),
+                "summary": message,
+                "result": dict(response_body),
+            },
+        )
+
+    def _model_acquire_response(self, user_id: str, text: str, *, confirmed: bool = False) -> OrchestratorResponse:
+        resolution = self._resolve_controller_model_target(user_id, text)
+        status = str(resolution.get("status") or "").strip().lower()
+        if status == "ambiguous":
+            matches = [
+                str(item).strip()
+                for item in (resolution.get("matches") if isinstance(resolution.get("matches"), list) else [])
+                if str(item).strip()
+            ]
+            requested = str(resolution.get("requested") or "that model").strip() or "that model"
+            message = f"I can acquire more than one match for {requested}: {', '.join(matches[:3])}. Which exact model do you want?"
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                next_question=message,
+                payload={
+                    "type": "model_acquisition",
+                    "action": "acquire_target",
+                    "ok": False,
+                    "summary": message,
+                    "matches": matches,
+                },
+            )
+        matched_model = str(resolution.get("model_id") or "").strip() or None
+        provider_id = str(resolution.get("provider_id") or "").strip().lower() or None
+        if not matched_model:
+            return self._execute_model_acquire(model_id=None, provider_id=None)
+        if not confirmed:
+            question = (
+                f"I will ask the canonical model manager to acquire {matched_model}. "
+                "This mutates the available model inventory. Reply yes to proceed or no to cancel."
+            )
+            return self._confirmation_preview_response(
+                user_id,
+                route="action_tool",
+                question=question,
+                used_tools=["model_manager"],
+                action={
+                    "operation": "model_acquire",
+                    "params": {
+                        "model_id": matched_model,
+                        "provider_id": provider_id,
+                    },
+                },
+                title="Model acquisition confirmation",
+                preview_payload={
+                    "provider": provider_id,
+                    "model_id": matched_model,
+                    "preview": {
+                        "provider": provider_id,
+                        "model_id": matched_model,
+                    },
+                },
+            )
+        return self._execute_model_acquire(model_id=matched_model, provider_id=provider_id)
+
+    def _model_controller_test_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="runtime_truth_service_unavailable",
+            )
+        resolution = self._resolve_controller_model_target(user_id, text)
+        status = str(resolution.get("status") or "").strip().lower()
+        if status == "ambiguous":
+            matches = [
+                str(item).strip()
+                for item in (resolution.get("matches") if isinstance(resolution.get("matches"), list) else [])
+                if str(item).strip()
+            ]
+            requested = str(resolution.get("requested") or "that model").strip() or "that model"
+            message = f"I can test more than one match for {requested}: {', '.join(matches[:3])}. Which exact model do you want me to test?"
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                next_question=message,
+                payload={
+                    "type": "model_controller",
+                    "action": "test_target",
+                    "ok": False,
+                    "summary": message,
+                    "matches": matches,
+                },
+            )
+        model_id = str(resolution.get("model_id") or "").strip() or None
+        provider_id = str(resolution.get("provider_id") or "").strip().lower() or None
+        if not model_id:
+            message = "I need one exact model to test. If you want, I can show the ready models or the local installed models first."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                payload={
+                    "type": "model_controller",
+                    "action": "test_target",
+                    "ok": False,
+                    "summary": message,
+                },
+            )
+        test_fn = getattr(truth, "test_chat_model_target", None)
+        if not callable(test_fn):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="model_controller_test_unavailable",
+            )
+        ok, body = test_fn(model_id, provider_id=provider_id)
+        provider_label = self._setup_provider_label(str((body if isinstance(body, dict) else {}).get("provider") or provider_id or "").strip().lower() or None)
+        reason = str((body if isinstance(body, dict) else {}).get("reason") or (body if isinstance(body, dict) else {}).get("error") or "").strip()
+        if ok:
+            message = f"I tested {model_id} without switching. It responded successfully on {provider_label}."
+        else:
+            message = f"I tested {model_id} without switching, and it is not ready right now."
+            if reason:
+                message = f"{message.rstrip('.')} Reason: {reason}."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            ok=bool(ok),
+            error_kind=None if ok else str((body if isinstance(body, dict) else {}).get("error") or "model_test_failed").strip() or "model_test_failed",
+            used_runtime_state=True,
+            used_tools=["model_controller"],
+            payload={
+                "type": "model_controller",
+                "action": "test_target",
+                "provider": str((body if isinstance(body, dict) else {}).get("provider") or provider_id).strip().lower() or provider_id,
+                "model_id": str((body if isinstance(body, dict) else {}).get("model_id") or model_id).strip() or model_id,
+                "ok": bool(ok),
+                "summary": message,
+            },
+        )
+
+    def _execute_model_controller_trial_switch(
+        self,
+        user_id: str,
+        *,
+        model_id: str | None,
+        provider_id: str | None,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        matched_model = str(model_id or "").strip() or None
+        normalized_provider = str(provider_id or "").strip().lower() or None
+        if not matched_model:
+            message = "I need one exact model before I can switch temporarily."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_controller",
+                    "action": "trial_switch",
+                    "ok": False,
+                    "summary": message,
+                },
+            )
+        current_target = truth.current_chat_target_status()
+        previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
+        explicit_setter = getattr(truth, "set_temporary_chat_model_target", None)
+        if callable(explicit_setter):
+            switch_ok, switch_body = explicit_setter(matched_model, provider_id=normalized_provider)
+        else:
+            fallback_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+            if callable(fallback_setter):
+                switch_ok, switch_body = fallback_setter(matched_model, provider_id=normalized_provider)
+            else:
+                switch_ok, switch_body = truth.set_default_chat_model(matched_model)
+        applied_provider = str((switch_body if isinstance(switch_body, dict) else {}).get("provider") or normalized_provider).strip().lower() or None
+        applied_model = str((switch_body if isinstance(switch_body, dict) else {}).get("model_id") or matched_model).strip() or None
+        if bool(switch_ok):
+            self._record_model_trial_switch(
+                user_id,
+                previous_provider=previous_provider,
+                previous_model=previous_model,
+                applied_provider=applied_provider,
+                applied_model=applied_model,
+                source="temporary_switch",
+            )
+        return self._post_switch_response(
+            truth=truth,
+            route="model_status",
+            used_memory=False,
+            used_tools=["model_controller"],
+            ok=bool(switch_ok),
+            body=switch_body if isinstance(switch_body, dict) else {},
+            applied_provider=applied_provider,
+            applied_model=applied_model,
+            success_type="model_controller",
+            success_title="Temporary model switch",
+            failure_title="Temporary switch failed",
+        )
+
+    def _model_controller_trial_switch_response(self, user_id: str, text: str, *, confirmed: bool = False) -> OrchestratorResponse:
+        resolution = self._resolve_controller_model_target(user_id, text)
+        status = str(resolution.get("status") or "").strip().lower()
+        if status == "ambiguous":
+            matches = [
+                str(item).strip()
+                for item in (resolution.get("matches") if isinstance(resolution.get("matches"), list) else [])
+                if str(item).strip()
+            ]
+            requested = str(resolution.get("requested") or "that model").strip() or "that model"
+            message = f"I can switch temporarily to more than one match for {requested}: {', '.join(matches[:3])}. Which exact model do you want?"
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                next_question=message,
+                payload={
+                    "type": "model_controller",
+                    "action": "trial_switch",
+                    "ok": False,
+                    "summary": message,
+                    "matches": matches,
+                },
+            )
+        matched_model = str(resolution.get("model_id") or "").strip() or None
+        provider_id = str(resolution.get("provider_id") or "").strip().lower() or None
+        if not matched_model:
+            return self._execute_model_controller_trial_switch(user_id, model_id=None, provider_id=None)
+        if not confirmed:
+            question = (
+                f"I will switch chat temporarily to {matched_model}. "
+                "This mutates the active chat target. Reply yes to proceed or no to cancel."
+            )
+            return self._confirmation_preview_response(
+                user_id,
+                route="model_status",
+                question=question,
+                used_tools=["model_controller"],
+                action={
+                    "operation": "model_trial_switch",
+                    "params": {
+                        "model_id": matched_model,
+                        "provider_id": provider_id,
+                    },
+                },
+                title="Temporary switch confirmation",
+                preview_payload={
+                    "provider": provider_id,
+                    "model_id": matched_model,
+                    "preview": {
+                        "provider": provider_id,
+                        "model_id": matched_model,
+                        "switch_kind": "temporary",
+                    },
+                },
+            )
+        return self._execute_model_controller_trial_switch(user_id, model_id=matched_model, provider_id=provider_id)
+
+    def _execute_model_set_target(
+        self,
+        user_id: str,
+        *,
+        model_id: str | None,
+        provider_id: str | None,
+        promote_default: bool,
+        used_memory: bool,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                used_memory=used_memory,
+                reason="runtime_truth_service_unavailable",
+            )
+        matched_model = str(model_id or "").strip() or None
+        normalized_provider = str(provider_id or "").strip().lower() or None
+        if not matched_model:
+            message = (
+                "I couldn't find that model in the current runtime registry. "
+                "If you want, I can list the models that are ready now or the local installed models."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                used_memory=used_memory,
+                next_question=message,
+                payload={
+                    "type": "action_required",
+                    "title": "Which model?",
+                    "summary": message,
+                },
+            )
+        current_target = truth.current_chat_target_status()
+        previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
+        if promote_default:
+            policy_status = (
+                truth.model_controller_policy_status()
+                if callable(getattr(truth, "model_controller_policy_status", None))
+                else {}
+            )
+            use_explicit_controller = not bool(policy_status.get("safe_mode", False))
+            explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+            default_setter = getattr(truth, "set_default_chat_model", None)
+            if use_explicit_controller and callable(explicit_setter):
+                default_ok, default_body = explicit_setter(
+                    matched_model,
+                    provider_id=normalized_provider,
+                )
+            elif callable(default_setter):
+                default_ok, default_body = default_setter(matched_model)
+            elif callable(explicit_setter):
+                default_ok, default_body = explicit_setter(
+                    matched_model,
+                    provider_id=normalized_provider,
+                )
+            else:
+                default_ok, default_body = truth.set_default_chat_model(matched_model)
+        else:
+            explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+            if callable(explicit_setter):
+                default_ok, default_body = explicit_setter(
+                    matched_model,
+                    provider_id=normalized_provider,
+                )
+            else:
+                default_ok, default_body = truth.set_default_chat_model(matched_model)
+        self._clear_runtime_setup_state(user_id)
+        if promote_default:
+            applied_provider = normalized_provider
+            applied_model = matched_model
+        else:
+            applied_provider = str((default_body if isinstance(default_body, dict) else {}).get("provider") or normalized_provider).strip().lower() or None
+            applied_model = str((default_body if isinstance(default_body, dict) else {}).get("model_id") or matched_model).strip() or None
+        if bool(default_ok):
+            if promote_default:
+                self._clear_model_trial_state(user_id)
+                if isinstance(default_body, dict):
+                    current_after = truth.current_chat_target_status()
+                    active_provider_after, active_model_after = self._target_snapshot_from_truth(current_after)
+                    if active_model_after == applied_model and (not applied_provider or active_provider_after == applied_provider):
+                        default_body["message"] = f"{applied_model} is now the default chat model, and chat is now using it."
+                    elif active_model_after:
+                        default_body["message"] = (
+                            f"{applied_model} is now the default chat model. "
+                            f"Chat is still using {active_model_after}."
+                        )
+                    else:
+                        default_body["message"] = f"{applied_model} is now the default chat model."
+            else:
+                self._record_model_trial_switch(
+                    user_id,
+                    previous_provider=previous_provider,
+                    previous_model=previous_model,
+                    applied_provider=applied_provider,
+                    applied_model=applied_model,
+                    source="direct_switch",
+                )
+        if promote_default:
+            body_dict = dict(default_body) if isinstance(default_body, dict) else {}
+            message = str(body_dict.get("message") or f"{applied_model or matched_model} is now the default chat model.").strip()
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                used_memory=used_memory,
+                used_tools=["model_controller"],
+                error_kind=None if default_ok else str(body_dict.get("error") or "set_default_failed").strip() or "set_default_failed",
+                ok=bool(default_ok),
+                payload={
+                    "type": "model_controller" if default_ok else "provider_test_result",
+                    "provider": applied_provider,
+                    "model_id": applied_model,
+                    "ok": bool(default_ok),
+                    "title": "Default model updated" if default_ok else "Default model update failed",
+                    "summary": message,
+                },
+            )
+        return self._post_switch_response(
+            truth=truth,
+            route="model_status",
+            used_memory=used_memory,
+            used_tools=["model_controller"],
+            ok=bool(default_ok),
+            body=default_body if isinstance(default_body, dict) else {},
+            applied_provider=applied_provider,
+            applied_model=applied_model,
+            success_type="setup_complete",
+            success_title="Default model updated",
+            failure_title="Model switch failed",
+        )
+
+    def _model_controller_promote_default_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        state = self._current_runtime_setup_state(user_id)
+        return self._set_default_model_response(user_id, text, state)
+
+    def _execute_model_controller_switch_back(self, user_id: str) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        state = self._current_model_trial_state(user_id)
+        previous_model = str(state.get("previous_model") or "").strip() or None
+        previous_provider = str(state.get("previous_provider") or "").strip().lower() or None
+        source = str(state.get("source") or "").strip().lower()
+        if not previous_model:
+            current = truth.current_chat_target_status()
+            current_model = str(current.get("model") or "").strip() or "the current model"
+            message = (
+                f"I do not have a recent trial model switch to roll back. Right now chat is using {current_model}. "
+                "Switch back only undoes a recent temporary trial switch. Changing the default alone does not create a trial rollback."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_switch",
+                    "ok": False,
+                    "title": "No previous model",
+                    "summary": message,
+                },
+            )
+        if source == "temporary_switch":
+            temporary_restorer = getattr(truth, "restore_temporary_chat_model_target", None)
+            if callable(temporary_restorer):
+                switch_ok, switch_body = temporary_restorer(previous_model, provider_id=previous_provider)
+            else:
+                explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+                if callable(explicit_setter):
+                    switch_ok, switch_body = explicit_setter(previous_model, provider_id=previous_provider)
+                else:
+                    switch_ok, switch_body = truth.set_default_chat_model(previous_model)
+        else:
+            explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+            if callable(explicit_setter):
+                switch_ok, switch_body = explicit_setter(previous_model, provider_id=previous_provider)
+            else:
+                switch_ok, switch_body = truth.set_default_chat_model(previous_model)
+        if switch_ok:
+            self._clear_model_trial_state(user_id)
+        message = str((switch_body if isinstance(switch_body, dict) else {}).get("message") or f"Now using {previous_model} for chat.")
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            used_tools=["model_controller"],
+            error_kind=None if switch_ok else str((switch_body if isinstance(switch_body, dict) else {}).get("error") or "switch_back_failed").strip() or "switch_back_failed",
+            ok=bool(switch_ok),
+            payload={
+                "type": "model_switch",
+                "provider": str((switch_body if isinstance(switch_body, dict) else {}).get("provider") or previous_provider).strip().lower() or previous_provider,
+                "model_id": str((switch_body if isinstance(switch_body, dict) else {}).get("model_id") or previous_model).strip() or previous_model,
+                "ok": bool(switch_ok),
+                "title": "Previous model restored" if switch_ok else "Switch back failed",
+                "summary": message,
+            },
+        )
+
+    @staticmethod
+    def _model_scout_followup_requested(normalized_text: str) -> bool:
+        return bool(_MODEL_SCOUT_FOLLOWUP_RE.search(str(normalized_text or "")))
+
+    def _looks_like_model_scout_action(self, text: str, *, context: dict[str, Any] | None = None) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if "model scout" in normalized:
+            return True
+        if self._model_scout_strategy_requested(normalized):
+            return True
+        if self._model_scout_discovery_requested(normalized):
+            return True
+        if self._model_scout_followup_requested(normalized):
+            return self._is_model_context(context or {})
+        has_action_verb = any(phrase in normalized for phrase in _MODEL_SCOUT_ACTION_VERBS)
+        has_model_noun = any(token in normalized for token in ("model", "models"))
+        has_quality_hint = any(phrase in normalized for phrase in _MODEL_SCOUT_QUALITY_HINTS)
+        return bool(has_action_verb and has_model_noun and has_quality_hint)
+
+    def _model_scout_action_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        context = self._current_interpretable_result(user_id)
+        if not self._looks_like_model_scout_action(text, context=context):
+            return None
+        normalized = normalize_setup_text(text).replace("/", " ")
+        focus_terms = self._model_scout_focus_terms(text, context)
+        if self._model_scout_discovery_requested(normalized):
+            return self._model_scout_discovery_response()
+        if self._model_scout_followup_requested(normalized) and not focus_terms and not self._is_model_context(context):
+            question = "Do you want me to run Model Scout on the models we were just discussing?"
+            return self._runtime_truth_response(
+                text=question,
+                route="action_tool",
+                used_runtime_state=False,
+                payload={
+                    "type": "action_clarification",
+                    "kind": "model_scout",
+                    "summary": question,
+                    "next_question": question,
+                },
+                next_question=question,
+            )
+        if self._model_scout_strategy_requested(normalized) or ("model scout" in normalized and not focus_terms):
+            return self._model_scout_strategy_response(user_id, text)
+        return self._model_scout_inventory_response(focus_terms=focus_terms)
+
+    def _handle_action_tool_intent(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        intent_kind = self._time_date_intent_kind(text)
+        if intent_kind is not None:
+            return self._local_time_response(intent_kind)
+        control_mode_response = self._control_mode_intent_response(text)
+        if control_mode_response is not None:
+            return control_mode_response
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if self._model_switch_advisory_requested(normalized):
+            return self._model_switch_advisory_response()
+        if self._model_trial_switch_back_requested(normalized):
+            return self._model_controller_switch_back_response(user_id)
+        if self._model_acquisition_requested(normalized):
+            return self._model_acquire_response(user_id, text)
+        if self._model_ready_now_requested(text):
+            return self._model_ready_now_response()
+        if self._model_controller_test_requested(text):
+            return self._model_controller_test_response(user_id, text)
+        if self._model_controller_trial_switch_requested(text):
+            return self._model_controller_trial_switch_response(user_id, text)
+        if self._model_controller_promote_requested(text):
+            return self._model_controller_promote_default_response(user_id, text)
+        model_scout_response = self._model_scout_action_response(user_id, text)
+        if model_scout_response is not None:
+            return model_scout_response
+        return None
+
+    def _grounded_system_fallback_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        allow_actions: bool,
+    ) -> OrchestratorResponse | None:
+        normalized = normalize_setup_text(text)
+        if not normalized or not self._looks_like_grounded_system_query(text):
+            return None
+        provider_hint = self._mentioned_provider_id(normalized)
+        state = self._current_runtime_setup_state(user_id)
+        if _looks_like_model_lifecycle_query(normalized):
+            return self._model_lifecycle_response(text)
+        if _looks_like_local_model_inventory_query(normalized):
+            return self._model_inventory_response(local_only=True, provider_id=provider_hint)
+        if _looks_like_model_availability_query(normalized):
+            normalized_space = normalized.replace("/", " ")
+            remote_only = any(token in normalized_space for token in ("cloud", "remote")) and any(
+                token in normalized_space for token in ("model", "models")
+            )
+            return self._model_inventory_response(local_only=False, remote_only=remote_only)
+        if _looks_like_current_model_query(normalized):
+            return self._current_model_response()
+        if _looks_like_runtime_status_query(normalized):
+            return self._runtime_status_response("runtime_status")
+        if provider_hint and any(
+            token in normalized
+            for token in ("status", "health", "configured", "working", "ready")
+        ):
+            return self._provider_status_response(provider_hint)
+        if allow_actions and self._model_trial_switch_back_requested(normalized.replace("/", " ")):
+            return self._model_controller_switch_back_response(user_id)
+        if allow_actions and any(
+            phrase in normalized.replace("/", " ")
+            for phrase in ("switch to ", "switch chat to ", "change to ", "use ")
+        ):
+            resolution = self._resolve_runtime_model_target(text)
+            if str(resolution.get("status") or "").strip().lower() in {"unique", "ambiguous"}:
+                return self._set_default_model_response(user_id, text, state)
+        return None
+
+    def _safe_mode_containment_response(
+        self,
+        user_id: str,
+        text: str,
+    ) -> OrchestratorResponse | None:
+        if str(text or "").strip().startswith("/"):
+            return None
+        if not self._assistant_frontdoor_engaged(text):
+            return None
+        if self._runtime_truth() is None:
+            return None
+
+        state = self._current_runtime_setup_state(user_id)
+        normalized = normalize_setup_text(text)
+
+        if self._repair_context_handoff_requested(text) and self._recent_unhealthy_runtime_context(user_id):
+            repair_response = self._repair_context_handoff_response(user_id, text)
+            if repair_response is not None:
+                return repair_response
+            return self._setup_explanation_response(used_memory=bool(state))
+
+        if self._repair_context_handoff_requested(text):
+            return self._setup_explanation_response(used_memory=bool(state))
+
+        if _looks_like_setup_explanation_query(normalized):
+            return self._setup_explanation_response(used_memory=bool(state))
+
+        if self._looks_like_grounded_system_query(text):
+            grounded = self._grounded_system_fallback_response(
+                user_id,
+                text,
+                allow_actions=True,
+            )
+            if grounded is not None:
+                return grounded
+            return self._runtime_state_unavailable_response(
+                route="runtime_status",
+                used_memory=bool(state),
+                reason="safe_mode_containment_blocked_generic_escape",
+            )
+        return None
+
+    @staticmethod
+    def _assistant_unmatched_words(text: str) -> list[str]:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        return [piece for piece in normalized.split(" ") if piece]
+
+    def _looks_like_runtime_overview_prompt(self, text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        words = set(self._assistant_unmatched_words(text))
+        if not normalized:
+            return False
+        if any(
+            phrase in normalized
+            for phrase in (
+                "what is happening",
+                "whats happening",
+                "what is going on",
+                "whats going on",
+            )
+        ):
+            return True
+        return bool(words & {"system", "runtime", "agent"} and words & {"status", "report", "health"})
+
+    def _looks_like_short_help_prompt(self, text: str) -> bool:
+        words = self._assistant_unmatched_words(text)
+        if not words or len(words) > 3:
+            return False
+        return bool(set(words) & {"help", "fix", "repair"})
+
+    def _looks_like_placeholder_action_prompt(self, text: str) -> bool:
+        words = set(self._assistant_unmatched_words(text))
+        if not words or len(words) > 4:
+            return False
+        placeholders = {"thing", "things", "this", "that", "it", "stuff", "something"}
+        action_verbs = {"do", "run", "make", "fix", "repair", "handle", "check"}
+        if "status" in words and words & placeholders:
+            return True
+        return bool(words & action_verbs and words & placeholders)
+
+    def _assistant_unmatched_clarification_response(
+        self,
+        *,
+        used_memory: bool,
+        reason: str,
+    ) -> OrchestratorResponse:
+        question = "Do you want runtime status, model status, setup help, or a direct task?"
+        return self._runtime_truth_response(
+            text=question,
+            route="assistant_clarification",
+            used_memory=used_memory,
+            used_runtime_state=False,
+            next_question=question,
+            payload={
+                "type": "assistant_unmatched_clarification",
+                "reason": str(reason or "unclear_input").strip() or "unclear_input",
+                "summary": question,
+            },
+        )
+
+    def _assistant_unmatched_fallback_response(
+        self,
+        *,
+        used_memory: bool,
+        reason: str,
+    ) -> OrchestratorResponse:
+        message = (
+            "I’m not sure what you want yet. Ask about runtime, models, setup, "
+            "system status, or tell me the task directly."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_fallback",
+            used_memory=used_memory,
+            used_runtime_state=False,
+            payload={
+                "type": "assistant_unmatched_fallback",
+                "reason": str(reason or "unclear_input").strip() or "unclear_input",
+                "summary": message,
+            },
+        )
+
+    def _assistant_unmatched_input_response(
+        self,
+        user_id: str,
+        text: str,
+    ) -> OrchestratorResponse | None:
+        if str(text or "").strip().startswith("/"):
+            return None
+        if not self._assistant_frontdoor_engaged(text):
+            return None
+        used_memory = bool(self._current_runtime_setup_state(user_id))
+        truth = self._runtime_truth()
+        normalized = normalize_setup_text(text).replace("/", " ")
+
+        if self._model_scout_strategy_requested(normalized):
+            return self._model_scout_strategy_response(user_id, text)
+
+        if self._looks_like_runtime_overview_prompt(text) and truth is not None:
+            return self._runtime_status_response("runtime_status")
+
+        if self._looks_like_short_help_prompt(text):
+            if truth is not None:
+                setup = truth.setup_status()
+                setup_state = str(setup.get("setup_state") or "").strip().lower() or "unavailable"
+                if setup_state != "ready":
+                    return self._setup_explanation_response(used_memory=used_memory)
+            return self._assistant_unmatched_clarification_response(
+                used_memory=used_memory,
+                reason="short_help_prompt",
+            )
+
+        if self._looks_like_placeholder_action_prompt(text):
+            return self._assistant_unmatched_clarification_response(
+                used_memory=used_memory,
+                reason="placeholder_action_prompt",
+            )
+
+        low_confidence = detect_low_confidence(text)
+        nl_intent = str((nl_route(text) or {}).get("intent") or "").strip().upper()
+        if low_confidence.is_low_confidence and nl_intent != "CHITCHAT":
+            if str(low_confidence.reason or "").strip().lower() in {"no_semantic_tokens", "repetition_spam"}:
+                return self._assistant_unmatched_fallback_response(
+                    used_memory=used_memory,
+                    reason=str(low_confidence.reason or "unclear_input"),
+                )
+            return self._assistant_unmatched_clarification_response(
+                used_memory=used_memory,
+                reason=str(low_confidence.reason or "unclear_input"),
+            )
+        return None
+
+    def _current_runtime_setup_state(self, user_id: str) -> dict[str, Any]:
+        state = self._runtime_setup_state.get(user_id)
+        if not isinstance(state, dict):
+            return {}
+        created_ts = int(state.get("created_ts") or 0)
+        if created_ts and int(time.time()) - created_ts > _RUNTIME_SETUP_STATE_TTL_SECONDS:
+            self._runtime_setup_state.pop(user_id, None)
+            return {}
+        return dict(state)
+
+    def _save_runtime_setup_state(self, user_id: str, state: dict[str, Any]) -> None:
+        self._runtime_setup_state[user_id] = {
+            **dict(state),
+            "created_ts": int(time.time()),
+        }
+
+    def _clear_runtime_setup_state(self, user_id: str) -> None:
+        self._runtime_setup_state.pop(user_id, None)
+
+    def _current_model_trial_state(self, user_id: str) -> dict[str, Any]:
+        state = self._model_trial_state.get(user_id)
+        if not isinstance(state, dict):
+            return {}
+        created_ts = int(state.get("created_ts") or 0)
+        if created_ts and int(time.time()) - created_ts > _MODEL_TRIAL_STATE_TTL_SECONDS:
+            self._model_trial_state.pop(user_id, None)
+            return {}
+        return dict(state)
+
+    def _save_model_trial_state(self, user_id: str, state: dict[str, Any]) -> None:
+        self._model_trial_state[user_id] = {
+            **dict(state),
+            "created_ts": int(time.time()),
+        }
+
+    def _clear_model_trial_state(self, user_id: str) -> None:
+        self._model_trial_state.pop(user_id, None)
+
+    @staticmethod
+    def _target_snapshot_from_truth(current: dict[str, Any] | None) -> tuple[str | None, str | None]:
+        payload = dict(current) if isinstance(current, dict) else {}
+        provider = (
+            str(payload.get("effective_provider") or payload.get("provider") or "").strip().lower()
+            or None
+        )
+        model = str(payload.get("effective_model") or payload.get("model") or "").strip() or None
+        return provider, model
+
+    def _record_model_trial_switch(
+        self,
+        user_id: str,
+        *,
+        previous_provider: str | None,
+        previous_model: str | None,
+        applied_provider: str | None,
+        applied_model: str | None,
+        source: str,
+    ) -> None:
+        previous_target = str(previous_model or "").strip() or None
+        applied_target = str(applied_model or "").strip() or None
+        if not previous_target or not applied_target or previous_target == applied_target:
+            return
+        self._save_model_trial_state(
+            user_id,
+            {
+                "trial_switch_active": True,
+                "previous_provider": str(previous_provider or "").strip().lower() or None,
+                "previous_model": previous_target,
+                "current_provider": str(applied_provider or "").strip().lower() or None,
+                "current_model": applied_target,
+                "source": source,
+            },
+        )
+
+    @staticmethod
+    def _post_switch_health_note(
+        *,
+        provider_label: str,
+        provider_health_status: str | None,
+        model_health_status: str | None,
+    ) -> str:
+        provider_state = str(provider_health_status or "").strip().lower()
+        model_state = str(model_health_status or "").strip().lower()
+        if provider_state == "down":
+            return f" {provider_label} is not responding right now."
+        if provider_state == "degraded":
+            return f" {provider_label} needs attention right now."
+        if model_state == "down":
+            return " That model is not responding properly right now."
+        if model_state == "degraded":
+            return " That model looks degraded right now."
+        return ""
+
+    def _post_switch_response(
+        self,
+        *,
+        truth: Any,
+        route: str,
+        used_memory: bool,
+        used_tools: list[str] | None = None,
+        ok: bool,
+        body: dict[str, Any] | None,
+        applied_provider: str | None,
+        applied_model: str | None,
+        success_type: str,
+        success_title: str,
+        failure_title: str,
+    ) -> OrchestratorResponse:
+        body_dict = dict(body) if isinstance(body, dict) else {}
+        message = str(body_dict.get("message") or "I switched the chat model.").strip() or "I switched the chat model."
+        error_kind = None if ok else str(body_dict.get("error") or "bad_request").strip() or "bad_request"
+        next_question = None
+        provider_health_status = None
+        model_health_status = None
+        if ok and applied_model:
+            current = truth.current_chat_target_status()
+            current_provider, current_model = self._target_snapshot_from_truth(current)
+            provider_health_status = str(current.get("provider_health_status") or "").strip().lower() or None
+            model_health_status = str(current.get("health_status") or "").strip().lower() or None
+            ready = bool(
+                current_model == applied_model
+                and (not applied_provider or current_provider == applied_provider)
+                and bool(current.get("ready", False))
+            )
+            if not ready:
+                provider_label = self._setup_provider_label(applied_provider)
+                message = (
+                    f"I switched to {applied_model}, but it isn't responding properly right now."
+                    f"{self._post_switch_health_note(provider_label=provider_label, provider_health_status=provider_health_status, model_health_status=model_health_status)} "
+                    "Do you want me to switch back?"
+                ).strip()
+                next_question = message
+                success_title = "Model switched but unhealthy"
+        return self._runtime_truth_response(
+            text=message,
+            route=route,
+            used_memory=used_memory,
+            used_tools=used_tools,
+            error_kind=error_kind,
+            ok=bool(ok),
+            next_question=next_question,
+            payload={
+                "type": success_type if ok else "provider_test_result",
+                "provider": applied_provider,
+                "model_id": applied_model,
+                "ok": bool(ok),
+                "title": success_title if ok else failure_title,
+                "summary": message,
+                "provider_health_status": provider_health_status,
+                "model_health_status": model_health_status,
+            },
+        )
+
+    def runtime_setup_state_hint(self, user_id: str) -> dict[str, Any]:
+        state = self._current_runtime_setup_state(user_id)
+        step = str(state.get("step") or "").strip().lower()
+        if not step:
+            return {}
+        awaiting_secret = step == "awaiting_openrouter_key"
+        awaiting_confirmation = step in {"awaiting_switch_confirm", "awaiting_openrouter_reuse_confirm"}
+        if not awaiting_secret and not awaiting_confirmation:
+            return {}
+        return {
+            "route": "setup_flow",
+            "step": step,
+            "awaiting_secret": awaiting_secret,
+            "awaiting_confirmation": awaiting_confirmation,
+        }
+
+    @staticmethod
+    def _setup_provider_label(provider_id: str | None) -> str:
+        normalized = str(provider_id or "").strip().lower()
+        if normalized == "openrouter":
+            return "OpenRouter"
+        if normalized == "openai":
+            return "OpenAI"
+        if normalized == "ollama":
+            return "Ollama"
+        if not normalized:
+            return "Unknown provider"
+        return normalized.replace("_", " ").title()
+
+    def _runtime_model_catalog(self) -> list[str]:
+        truth = self._runtime_truth()
+        if truth is None:
+            return []
+        model_ids: list[str] = []
+        seen: set[str] = set()
+        payload = self._canonical_model_inventory_snapshot(truth)
+        rows = payload.get("models") if isinstance(payload.get("models"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            candidate = str(row.get("model_id") or row.get("id") or "").strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            model_ids.append(candidate)
+        if model_ids:
+            return model_ids
+        status_payload = truth.providers_status()
+        rows = status_payload.get("providers") if isinstance(status_payload.get("providers"), list) else []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for model_id in (row.get("model_ids") if isinstance(row.get("model_ids"), list) else []):
+                candidate = str(model_id or "").strip()
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                model_ids.append(candidate)
+        return model_ids
+
+    def _resolve_runtime_model_target(self, text: str) -> dict[str, Any]:
+        normalized = normalize_setup_text(text)
+        if not normalized:
+            return {"status": "none", "requested": None, "model_id": None, "matches": []}
+        model_ids = self._runtime_model_catalog()
+        if not model_ids:
+            return {"status": "none", "requested": None, "model_id": None, "matches": []}
+
+        candidate_tokens: list[str] = []
+        seen_tokens: set[str] = set()
+        for match in _DIRECT_MODEL_SWITCH_TOKEN_RE.finditer(normalized):
+            candidate = str(match.group(0) or "").strip().lower()
+            if not candidate or candidate in seen_tokens:
+                continue
+            seen_tokens.add(candidate)
+            candidate_tokens.append(candidate)
+
+        def _unique(values: list[str]) -> list[str]:
+            seen_values: set[str] = set()
+            deduped: list[str] = []
+            for value in values:
+                candidate = str(value or "").strip()
+                if not candidate or candidate in seen_values:
+                    continue
+                seen_values.add(candidate)
+                deduped.append(candidate)
+            return deduped
+
+        for token in candidate_tokens:
+            exact_matches = _unique(
+                [model_id for model_id in model_ids if normalize_setup_text(model_id) == token]
+            )
+            if len(exact_matches) == 1:
+                provider_id = str(exact_matches[0].split(":", 1)[0]).strip().lower() if ":" in exact_matches[0] else None
+                return {
+                    "status": "unique",
+                    "requested": token,
+                    "model_id": exact_matches[0],
+                    "provider_id": provider_id,
+                    "matches": exact_matches,
+                }
+            bare_matches = _unique(
+                [
+                    model_id
+                    for model_id in model_ids
+                    if ":" in model_id and normalize_setup_text(model_id.split(":", 1)[1]) == token
+                ]
+            )
+            if len(bare_matches) == 1:
+                provider_id = str(bare_matches[0].split(":", 1)[0]).strip().lower() if ":" in bare_matches[0] else None
+                return {
+                    "status": "unique",
+                    "requested": token,
+                    "model_id": bare_matches[0],
+                    "provider_id": provider_id,
+                    "matches": bare_matches,
+                }
+            if len(bare_matches) > 1:
+                return {
+                    "status": "ambiguous",
+                    "requested": token,
+                    "model_id": None,
+                    "matches": bare_matches,
+                }
+
+        fallback = self._match_runtime_model_from_text(text)
+        if fallback:
+            provider_id = str(fallback.split(":", 1)[0]).strip().lower() if ":" in fallback else None
+            return {
+                "status": "unique",
+                "requested": None,
+                "model_id": fallback,
+                "provider_id": provider_id,
+                "matches": [fallback],
+            }
+        return {"status": "none", "requested": None, "model_id": None, "provider_id": None, "matches": []}
+
+    def _resolve_controller_model_target(self, user_id: str, text: str) -> dict[str, Any]:
+        resolution = self._resolve_runtime_model_target(text)
+        status = str(resolution.get("status") or "").strip().lower()
+        if status in {"unique", "ambiguous"}:
+            return resolution
+        context = self._current_interpretable_result(user_id)
+        if self._is_model_context(context):
+            model_id, provider_id = self._preferred_model_context_target(context)
+            if model_id:
+                return {
+                    "status": "unique",
+                    "requested": "context_model",
+                    "model_id": model_id,
+                    "provider_id": provider_id,
+                    "matches": [model_id],
+                    "source": "recent_model_context",
+                }
+        return resolution
+
+    def _match_runtime_model_from_text(self, text: str) -> str | None:
+        normalized = normalize_setup_text(text)
+        if not normalized:
+            return None
+        for candidate_id in self._runtime_model_catalog():
+            candidate_model = candidate_id.split(":", 1)[1] if ":" in candidate_id else candidate_id
+            for token in (candidate_id, candidate_model):
+                token_normalized = normalize_setup_text(token)
+                if token_normalized and token_normalized in normalized:
+                    return candidate_id
+        return None
+
+    def _provider_status_message(
+        self,
+        *,
+        provider_key: str,
+        provider_label: str,
+        provider_known: bool,
+        provider_enabled: bool,
+        model_id: str | None,
+        current_model_id: str | None,
+        configured: bool,
+        active: bool,
+        health_status: str,
+        health_reason: str | None,
+        secret_present: bool,
+        effective_provider: str | None,
+        effective_model_id: str | None,
+    ) -> str:
+        if provider_key == "ollama":
+            current_label = model_id or current_model_id or "none"
+            if health_status == "ok":
+                message = f"Ollama is reachable. Chat is configured for {current_label}, and it looks healthy."
+            elif health_status == "degraded":
+                message = (
+                    f"Ollama is reachable but degraded. Chat is configured for {current_label}, "
+                    "and it needs attention right now."
+                )
+            elif health_status == "down":
+                message = (
+                    f"Ollama is currently down. Chat is configured for {current_label}, "
+                    "but it is not responding right now."
+                )
+            elif configured:
+                message = (
+                    f"Ollama is configured for {current_label}, but I couldn't verify its health right now."
+                )
+            else:
+                message = f"Ollama is not set up for chat yet. Health status: {health_status}."
+            if health_reason:
+                message = f"{message.rstrip('.')} Reason: {health_reason}."
+            return message
+
+        if configured and active and model_id and health_status == "ok":
+            message = f"Yes. Chat is currently using {provider_label} with {model_id}."
+        elif configured and active and model_id and effective_model_id and effective_provider and effective_provider != provider_key:
+            effective_provider_label = self._setup_provider_label(effective_provider)
+            message = (
+                f"{provider_label} is configured for chat with {model_id}, but it is not healthy right now. "
+                f"The best healthy target would be {effective_model_id} on {effective_provider_label}."
+            )
+        elif configured and active and model_id:
+            message = f"{provider_label} is configured for chat with {model_id}, but it is not healthy right now."
+        elif configured and model_id and current_model_id:
+            message = f"{provider_label} is set up with {model_id}. Chat is currently using {current_model_id}."
+        elif configured and model_id:
+            message = f"{provider_label} is set up with {model_id}."
+        elif configured:
+            message = f"{provider_label} is set up for chat."
+        elif provider_key == "openrouter" and not secret_present:
+            message = "OpenRouter is not set up yet. I still need your API key."
+        elif provider_known and provider_enabled:
+            message = f"{provider_label} is partly set up, but I do not have a chat model ready for it yet."
+        else:
+            message = f"{provider_label} is not set up for chat yet."
+
+        if configured and health_status in {"down", "degraded"}:
+            health_note = (
+                f"{provider_label} is configured, but it is not responding right now."
+                if health_status == "down"
+                else f"{provider_label} is configured, but it needs attention right now."
+            )
+            if health_note not in message:
+                message = f"{message.rstrip('.')} {health_note}"
+        if health_reason and health_reason not in message:
+            message = f"{message.rstrip('.')} Reason: {health_reason}."
+        return message
+
+    def _repair_followup_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if not self._repair_followup_requested(text):
+            return None
+        context = self._recent_unhealthy_runtime_context(user_id)
+        if not context:
+            return None
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="setup_flow",
+                used_memory=True,
+                reason="runtime_truth_service_unavailable",
+            )
+        provider_hint = self._mentioned_provider_id(text) or str(context.get("provider") or "").strip().lower() or None
+        if not provider_hint:
+            return None
+
+        adapter = self._chat_runtime_adapter
+        current_snapshot = truth.provider_status(provider_hint)
+        current_target = truth.current_chat_target_status()
+        current_provider = str(current_target.get("provider") or "").strip().lower() or None
+        current_model_id = str(current_target.get("model") or "").strip() or None
+        current_model_health_status = str(current_target.get("health_status") or "").strip().lower() or "unknown"
+        model_id = str(
+            (current_model_id if current_provider == provider_hint and current_model_id else None)
+            or current_snapshot.get("model_id")
+            or current_snapshot.get("current_model_id")
+            or ""
+        ).strip() or None
+        repair_attempted = False
+        if callable(getattr(adapter, "test_provider", None)):
+            try:
+                repair_attempted = True
+                test_payload: dict[str, Any] = {}
+                if model_id:
+                    test_payload["model"] = model_id
+                adapter.test_provider(provider_hint, test_payload)
+            except Exception:
+                repair_attempted = True
+        snapshot = truth.provider_status(provider_hint)
+        provider_label = str(snapshot.get("provider_label") or self._setup_provider_label(provider_hint))
+        model_label = str(snapshot.get("model_id") or snapshot.get("current_model_id") or model_id or "none").strip() or "none"
+        provider_health_status = str(snapshot.get("health_status") or "unknown").strip().lower() or "unknown"
+        provider_health_reason = str(snapshot.get("health_reason") or "").strip() or None
+        current_target = truth.current_chat_target_status()
+        current_provider = str(current_target.get("provider") or "").strip().lower() or current_provider
+        current_model_id = str(current_target.get("model") or "").strip() or current_model_id
+        model_health_status = (
+            str(current_target.get("health_status") or "").strip().lower()
+            if current_provider == provider_hint and current_model_id
+            else current_model_health_status
+        ) or "unknown"
+        model_label = str(current_model_id or model_label or "none").strip() or "none"
+        inventory = self._canonical_model_inventory_snapshot(truth)
+        inventory_rows = inventory.get("models") if isinstance(inventory.get("models"), list) else []
+        local_installed_rows = [
+            dict(row)
+            for row in inventory_rows
+            if isinstance(row, dict)
+            and bool(row.get("local", False))
+            and bool(row.get("available", False))
+            and str(row.get("provider_id") or "").strip().lower() == provider_hint
+        ]
+        local_other_rows = [
+            dict(row)
+            for row in local_installed_rows
+            if str(row.get("model_id") or "").strip() != str(model_label or "")
+        ]
+        suggested_row = next(
+            (
+                row
+                for row in local_other_rows
+                if bool(row.get("usable_now", False))
+            ),
+            local_other_rows[0] if local_other_rows else None,
+        )
+        suggested_model = str((suggested_row or {}).get("model_id") or "").strip() or None
+        trial_state = self._current_model_trial_state(user_id)
+        previous_model = str(trial_state.get("previous_model") or "").strip() or None
+
+        if provider_health_status == "ok" and model_health_status in {"down", "degraded"}:
+            concern = (
+                "is not healthy right now"
+                if model_health_status == "down"
+                else "looks degraded right now"
+            )
+            message = f"{provider_label} is reachable, but the current chat model {model_label} {concern}."
+            if previous_model:
+                message = (
+                    f"{message.rstrip('.')} I can:\n"
+                    f"1) Recheck {model_label} now.\n"
+                    f"2) Switch back to {previous_model}.\n"
+                    "Reply 1 or 2."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="setup_flow",
+                    used_memory=True,
+                    used_runtime_state=True,
+                    used_tools=["provider_repair_check"] if repair_attempted else [],
+                    payload={
+                        "type": "provider_repair_options",
+                        "provider": provider_hint,
+                        "model_id": model_label,
+                        "provider_health_status": provider_health_status,
+                        "model_health_status": model_health_status,
+                        "summary": message,
+                        "option_1_kind": "recheck_model",
+                        "option_2_kind": "switch_back",
+                        "previous_model": previous_model,
+                    },
+                )
+            if suggested_model:
+                message = (
+                    f"{message.rstrip('.')} I can:\n"
+                    f"1) Recheck {model_label} now.\n"
+                    f"2) Switch to {suggested_model}.\n"
+                    "Reply 1 or 2."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="setup_flow",
+                    used_memory=True,
+                    used_runtime_state=True,
+                    used_tools=["provider_repair_check"] if repair_attempted else [],
+                    payload={
+                        "type": "provider_repair_options",
+                        "provider": provider_hint,
+                        "model_id": model_label,
+                        "provider_health_status": provider_health_status,
+                        "model_health_status": model_health_status,
+                        "summary": message,
+                        "option_1_kind": "recheck_model",
+                        "option_2_kind": "switch_model",
+                        "option_2_model_id": suggested_model,
+                        "option_2_provider": provider_hint,
+                    },
+                )
+            message = f"{message.rstrip('.')} I can explain the failure or help you choose another installed local model."
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=True,
+                used_runtime_state=True,
+                used_tools=["provider_repair_check"] if repair_attempted else [],
+                payload={
+                    "type": "provider_repair",
+                    "provider": provider_hint,
+                    "model_id": model_label,
+                    "provider_health_status": provider_health_status,
+                    "model_health_status": model_health_status,
+                    "summary": message,
+                    "repair_attempted": repair_attempted,
+                },
+            )
+
+        if provider_health_status == "ok":
+            message = f"{provider_label} is reachable again. Chat is configured for {model_label}, and it looks healthy now."
+        elif provider_health_status == "degraded":
+            message = f"{provider_label} is reachable, but it still needs attention. Chat is configured for {model_label}."
+        else:
+            message = f"{provider_label} is currently down. Chat is configured for {model_label}, but it is not responding right now."
+
+        if provider_health_reason and provider_health_status in {"down", "degraded"}:
+            message = f"{message.rstrip('.')} Reason: {provider_health_reason}."
+        if provider_health_status in {"down", "degraded"} and previous_model:
+            message = f"{message.rstrip('.')} I can switch back to {previous_model} if you want."
+        elif provider_health_status in {"down", "degraded"}:
+            message = f"{message.rstrip('.')} I can help you reconfigure {provider_label} if you want."
+        elif repair_attempted:
+            message = f"{message.rstrip('.')} I rechecked it just now."
+
+        return self._runtime_truth_response(
+            text=message,
+            route="setup_flow",
+            used_memory=True,
+            used_runtime_state=True,
+            used_tools=["provider_repair_check"] if repair_attempted else [],
+            payload={
+                "type": "provider_repair",
+                "provider": provider_hint,
+                "model_id": model_label,
+                "health_status": provider_health_status,
+                "health_reason": provider_health_reason,
+                "provider_health_status": provider_health_status,
+                "model_health_status": model_health_status,
+                "summary": message,
+                "repair_attempted": repair_attempted,
+                "switch_back_available": bool(previous_model),
+                "previous_model": previous_model,
+            },
+        )
+
+    def _provider_status_response(self, provider_id: str) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="provider_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        snapshot = truth.provider_status(provider_id)
+        target_truth = (
+            truth.chat_target_truth()
+            if callable(getattr(truth, "chat_target_truth", None))
+            else {}
+        )
+        provider_key = str(snapshot.get("provider") or "").strip().lower()
+        provider_label = str(snapshot.get("provider_label") or self._setup_provider_label(provider_key))
+        model_id = str(snapshot.get("model_id") or "").strip() or None
+        current_model_id = str(snapshot.get("current_model_id") or "").strip() or None
+        configured = bool(snapshot.get("configured", False))
+        active = bool(snapshot.get("active", False))
+        health_status = str(snapshot.get("health_status") or "unknown").strip().lower() or "unknown"
+        health_reason = str(snapshot.get("health_reason") or "").strip() or None
+        secret_present = bool(snapshot.get("secret_present", False))
+        effective_provider = str(snapshot.get("effective_provider") or target_truth.get("effective_provider") or "").strip().lower() or None
+        effective_model_id = str(snapshot.get("effective_model_id") or target_truth.get("effective_model") or "").strip() or None
+        message = self._provider_status_message(
+            provider_key=provider_key,
+            provider_label=provider_label,
+            provider_known=bool(snapshot.get("known", False)),
+            provider_enabled=bool(snapshot.get("enabled", False)),
+            model_id=model_id,
+            current_model_id=current_model_id,
+            configured=configured,
+            active=active,
+            health_status=health_status,
+            health_reason=health_reason,
+            secret_present=secret_present,
+            effective_provider=effective_provider,
+            effective_model_id=effective_model_id,
+        )
+
+        return self._runtime_truth_response(
+            text=message,
+            route="provider_status",
+            payload={
+                "type": "provider_status",
+                "provider": provider_key,
+                "configured": configured,
+                "active": active,
+                "model_id": model_id,
+                "current_model_id": current_model_id,
+                "health_status": health_status,
+                "health_reason": health_reason,
+                "title": f"{provider_label} status",
+                "summary": message,
+            },
+        )
+
+    def _providers_status_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="provider_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        status_payload = truth.providers_status()
+        rows = status_payload.get("providers") if isinstance(status_payload.get("providers"), list) else []
+        configured_rows = [row for row in rows if isinstance(row, dict) and bool(row.get("configured", False))]
+        active_row = next((row for row in rows if isinstance(row, dict) and bool(row.get("active", False))), None)
+        target_truth = (
+            truth.chat_target_truth()
+            if callable(getattr(truth, "chat_target_truth", None))
+            else {}
+        )
+        active_model_id = str(target_truth.get("effective_model") or (active_row or {}).get("model_id") or "").strip()
+        active_provider_label = str(
+            self._setup_provider_label(
+                str(target_truth.get("effective_provider") or (active_row or {}).get("provider") or "")
+            )
+        )
+        active_health_status = str((active_row or {}).get("health_status") or "unknown").strip().lower() or "unknown"
+        if active_model_id and (
+            str(target_truth.get("effective_provider") or "").strip().lower()
+            != str(target_truth.get("configured_provider") or "").strip().lower()
+        ):
+            message = (
+                f"Chat is configured to use {str(target_truth.get('configured_model') or 'the configured model')}, "
+                f"but the best healthy target would be {active_model_id} on {active_provider_label}."
+            )
+        elif active_row and active_model_id and active_health_status == "ok":
+            message = f"Chat is currently using {active_model_id}."
+        elif active_row and active_model_id:
+            message = f"Chat is configured to use {active_model_id}, but {active_provider_label} is not healthy right now."
+        else:
+            message = "I do not have a chat provider ready yet."
+        if configured_rows:
+            detail_rows = [
+                row
+                for row in configured_rows
+                if not active_row
+                or str(row.get("provider") or "").strip().lower()
+                != str(active_row.get("provider") or "").strip().lower()
+            ]
+            details = ", ".join(
+                f"{str(row.get('provider_label') or self._setup_provider_label(str(row.get('provider') or '')))}"
+                + (
+                    f" ({str(row.get('model_id') or '').strip()})"
+                    if str(row.get("model_id") or "").strip()
+                    else ""
+                )
+                for row in detail_rows
+            )
+            if active_row and str(active_row.get("model_id") or "").strip() and details:
+                message = f"{message.rstrip('.')} I also have {details} ready."
+            elif details:
+                message = f"I have {details} ready for chat."
+        return self._runtime_truth_response(
+            text=message,
+            route="provider_status",
+            payload={
+                "type": "providers_status",
+                "title": "Provider status",
+                "summary": message,
+                "providers": rows,
+            },
+        )
+
+    def _runtime_status_response(self, kind: str) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="runtime_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        status_payload = truth.runtime_status(kind)
+        message = str(status_payload.get("summary") or "").strip() or "I couldn't read that from the runtime state."
+        return self._runtime_truth_response(
+            text=message,
+            route="runtime_status",
+            payload={
+                "type": "runtime_status",
+                **dict(status_payload),
+                "title": "Runtime status",
+                "summary": message,
+            },
+        )
+
+    @staticmethod
+    def _governance_component_label(identifier: str | None) -> str:
+        normalized = str(identifier or "").strip()
+        if not normalized:
+            return "unknown"
+        if normalized == "runtime_scheduler":
+            return "runtime scheduler"
+        if normalized == "telegram":
+            return "Telegram"
+        return normalized.replace("_", " ")
+
+    def _governance_adapters_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.list_managed_adapters()
+        rows = payload.get("managed_adapters") if isinstance(payload.get("managed_adapters"), list) else []
+        active_rows = payload.get("active_adapters") if isinstance(payload.get("active_adapters"), list) else []
+        if not rows:
+            message = "I do not have any managed adapters registered right now."
+        else:
+            details = ", ".join(
+                f"{self._governance_component_label(str(row.get('adapter_id') or ''))}"
+                + (
+                    " (approved and enabled)"
+                    if bool(row.get("approved", False)) and bool(row.get("enabled", False))
+                    else " (not fully approved)"
+                )
+                for row in rows
+                if isinstance(row, dict)
+            )
+            if active_rows:
+                message = f"Managed adapters: {details}."
+            else:
+                message = f"I have managed adapters registered, but none are active right now: {details}."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_managed_adapters",
+                "title": "Managed adapters",
+                "summary": message,
+                **dict(payload),
+            },
+        )
+
+    def _governance_background_tasks_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.list_background_tasks()
+        rows = payload.get("background_tasks") if isinstance(payload.get("background_tasks"), list) else []
+        active_rows = payload.get("active_tasks") if isinstance(payload.get("active_tasks"), list) else []
+        if active_rows:
+            detail = ", ".join(
+                self._governance_component_label(str(row.get("task_id") or ""))
+                for row in active_rows
+                if isinstance(row, dict)
+            )
+            message = f"Active background tasks: {detail}."
+        elif rows:
+            detail = ", ".join(
+                self._governance_component_label(str(row.get("task_id") or ""))
+                for row in rows
+                if isinstance(row, dict)
+            )
+            message = f"I have background tasks registered, but none are active right now: {detail}."
+        else:
+            message = "I do not have any governed background tasks registered right now."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_background_tasks",
+                "title": "Background tasks",
+                "summary": message,
+                **dict(payload),
+            },
+        )
+
+    def _governance_blocks_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.list_governance_blocks()
+        rows = payload.get("blocked_skills") if isinstance(payload.get("blocked_skills"), list) else []
+        if not rows:
+            message = "No skills are currently blocked by execution governance."
+        else:
+            detail = ", ".join(
+                f"{str(row.get('skill_id') or '').strip()} ({str(row.get('reason') or 'blocked').strip().replace('_', ' ')})"
+                for row in rows
+                if isinstance(row, dict) and str(row.get("skill_id") or "").strip()
+            )
+            message = f"Execution governance blocked these skills: {detail}."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_blocks",
+                "title": "Blocked skills",
+                "summary": message,
+                **dict(payload),
+            },
+        )
+
+    def _governance_pending_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.list_pending_governance_requests()
+        pending_skills = payload.get("pending_skills") if isinstance(payload.get("pending_skills"), list) else []
+        pending_adapters = payload.get("pending_adapters") if isinstance(payload.get("pending_adapters"), list) else []
+        pending_tasks = payload.get("pending_background_tasks") if isinstance(payload.get("pending_background_tasks"), list) else []
+        parts: list[str] = []
+        if pending_skills:
+            parts.append(
+                "skills: "
+                + ", ".join(
+                    str(row.get("skill_id") or "").strip()
+                    for row in pending_skills
+                    if isinstance(row, dict) and str(row.get("skill_id") or "").strip()
+                )
+            )
+        if pending_adapters:
+            parts.append(
+                "adapters: "
+                + ", ".join(
+                    self._governance_component_label(str(row.get("adapter_id") or ""))
+                    for row in pending_adapters
+                    if isinstance(row, dict)
+                )
+            )
+        if pending_tasks:
+            parts.append(
+                "background tasks: "
+                + ", ".join(
+                    self._governance_component_label(str(row.get("task_id") or ""))
+                    for row in pending_tasks
+                    if isinstance(row, dict)
+                )
+            )
+        if parts:
+            message = "Waiting for governance approval: " + "; ".join(parts) + "."
+        else:
+            message = "Nothing is waiting for governance approval right now."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_pending",
+                "title": "Pending governance approvals",
+                "summary": message,
+                **dict(payload),
+            },
+        )
+
+    def _governance_overview_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        adapters_payload = truth.list_managed_adapters()
+        tasks_payload = truth.list_background_tasks()
+        pending_payload = truth.list_pending_governance_requests()
+        active_adapters = adapters_payload.get("active_adapters") if isinstance(adapters_payload.get("active_adapters"), list) else []
+        active_tasks = tasks_payload.get("active_tasks") if isinstance(tasks_payload.get("active_tasks"), list) else []
+        allowed_parts: list[str] = []
+        if active_adapters:
+            allowed_parts.append(
+                "managed adapters: "
+                + ", ".join(
+                    self._governance_component_label(str(row.get("adapter_id") or ""))
+                    for row in active_adapters
+                    if isinstance(row, dict)
+                )
+            )
+        if active_tasks:
+            allowed_parts.append(
+                "background tasks: "
+                + ", ".join(
+                    self._governance_component_label(str(row.get("task_id") or ""))
+                    for row in active_tasks
+                    if isinstance(row, dict)
+                )
+            )
+        pending_count = 0
+        for key in ("pending_skills", "pending_adapters", "pending_background_tasks"):
+            rows = pending_payload.get(key) if isinstance(pending_payload.get(key), list) else []
+            pending_count += len(rows)
+        if allowed_parts:
+            message = "Allowed persistent components right now: " + "; ".join(allowed_parts) + "."
+        else:
+            message = "No persistent background components are currently allowed beyond the main runtime."
+        if pending_count:
+            message = f"{message.rstrip('.')} {pending_count} governance request(s) still need approval."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_overview",
+                "title": "Execution governance",
+                "summary": message,
+                "managed_adapters": adapters_payload.get("managed_adapters") if isinstance(adapters_payload, dict) else [],
+                "background_tasks": tasks_payload.get("background_tasks") if isinstance(tasks_payload, dict) else [],
+                "pending": dict(pending_payload),
+            },
+        )
+
+    def _governance_skill_status_response(self, skill_id: str | None) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.get_skill_governance_status(skill_id)
+        if bool(payload.get("needs_skill_id", False)):
+            message = "Tell me the skill name you want me to inspect."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                next_question=message,
+                payload={
+                    "type": "governance_skill_status",
+                    "found": False,
+                    "needs_skill_id": True,
+                    "summary": message,
+                },
+            )
+        skill = payload.get("skill") if isinstance(payload.get("skill"), dict) else {}
+        if not skill:
+            missing_id = str(payload.get("skill_id") or skill_id or "").strip() or "that skill"
+            message = f"I couldn't find governance information for {missing_id}."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                payload={
+                    "type": "governance_skill_status",
+                    "found": False,
+                    "skill_id": missing_id,
+                    "summary": message,
+                },
+            )
+        execution_mode = str(skill.get("requested_execution_mode") or "in_process").strip().lower() or "in_process"
+        if bool(skill.get("allowed", False)):
+            message = f"{str(skill.get('skill_id') or 'That skill').strip()} uses {execution_mode} execution and is currently allowed."
+        elif bool(skill.get("requires_user_approval", False)):
+            message = f"{str(skill.get('skill_id') or 'That skill').strip()} requests {execution_mode} execution and is waiting for approval."
+        else:
+            message = f"{str(skill.get('skill_id') or 'That skill').strip()} is blocked by execution governance."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_skill_status",
+                "title": "Skill governance",
+                "summary": message,
+                **dict(payload),
+            },
+        )
+
+    def _governance_execution_mode_response(self, target_id: str | None) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        normalized_target = str(target_id or "").strip() or None
+        if not normalized_target:
+            message = "Tell me which skill or managed component you want me to inspect."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                next_question=message,
+                payload={
+                    "type": "governance_execution_mode",
+                    "found": False,
+                    "target_id": None,
+                    "summary": message,
+                },
+            )
+
+        adapter_payload = truth.get_managed_adapter_status(normalized_target)
+        adapter = adapter_payload.get("adapter") if isinstance(adapter_payload.get("adapter"), dict) else {}
+        if adapter:
+            adapter_label = self._governance_component_label(str(adapter.get("adapter_id") or normalized_target))
+            message = f"{adapter_label} uses managed_adapter mode."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                payload={
+                    "type": "governance_execution_mode",
+                    "title": "Execution mode",
+                    "summary": message,
+                    "found": True,
+                    "target_id": normalized_target,
+                    "component_kind": "managed_adapter",
+                    "execution_mode": "managed_adapter",
+                    "adapter": dict(adapter),
+                },
+            )
+
+        task_payload = truth.get_background_task_status(normalized_target)
+        task = task_payload.get("task") if isinstance(task_payload.get("task"), dict) else {}
+        if task:
+            task_label = self._governance_component_label(str(task.get("task_id") or normalized_target))
+            message = f"{task_label} uses managed_background_task mode."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                payload={
+                    "type": "governance_execution_mode",
+                    "title": "Execution mode",
+                    "summary": message,
+                    "found": True,
+                    "target_id": normalized_target,
+                    "component_kind": "background_task",
+                    "execution_mode": "managed_background_task",
+                    "background_task": dict(task),
+                },
+            )
+
+        skill_payload = truth.get_skill_governance_status(normalized_target)
+        skill = skill_payload.get("skill") if isinstance(skill_payload.get("skill"), dict) else {}
+        if skill:
+            execution_mode = (
+                str(skill.get("requested_execution_mode") or "in_process").strip().lower() or "in_process"
+            )
+            skill_label = self._governance_component_label(str(skill.get("skill_id") or normalized_target))
+            message = f"{skill_label} uses {execution_mode} mode."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                payload={
+                    "type": "governance_execution_mode",
+                    "title": "Execution mode",
+                    "summary": message,
+                    "found": True,
+                    "target_id": normalized_target,
+                    "component_kind": "skill",
+                    "execution_mode": execution_mode,
+                    "skill": dict(skill),
+                },
+            )
+
+        message = f"I couldn't find governance information for {normalized_target}."
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_execution_mode",
+                "title": "Execution mode",
+                "summary": message,
+                "found": False,
+                "target_id": normalized_target,
+            },
+        )
+
+    def _governance_adapter_detail_response(self, adapter_id: str | None) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="governance_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.get_managed_adapter_status(adapter_id)
+        adapter = payload.get("adapter") if isinstance(payload.get("adapter"), dict) else {}
+        if not adapter:
+            message = "Tell me which managed adapter you want me to explain."
+            return self._runtime_truth_response(
+                text=message,
+                route="governance_status",
+                next_question=message,
+                payload={
+                    "type": "governance_adapter_detail",
+                    "found": False,
+                    "adapter_id": str(adapter_id or "").strip() or None,
+                    "summary": message,
+                },
+            )
+        adapter_label = self._governance_component_label(str(adapter.get("adapter_id") or ""))
+        reason = str(adapter.get("reason") or "").strip() or "It is an explicit managed adapter owned by the runtime."
+        requested_by = str(adapter.get("requested_by") or "").strip() or None
+        owner = str(adapter.get("owner") or "").strip() or None
+        detail_parts = [reason]
+        if requested_by:
+            detail_parts.append(f"Requested by {requested_by}.")
+        if owner:
+            detail_parts.append(f"Owned by {owner}.")
+        message = f"{adapter_label} exists as a managed adapter. " + " ".join(detail_parts)
+        return self._runtime_truth_response(
+            text=message,
+            route="governance_status",
+            payload={
+                "type": "governance_adapter_detail",
+                "title": f"{adapter_label} adapter",
+                "summary": message,
+                **dict(payload),
+            },
+        )
+
+    def _current_model_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        current = truth.current_chat_target_status()
+        target_truth = (
+            truth.chat_target_truth()
+            if callable(getattr(truth, "chat_target_truth", None))
+            else {}
+        )
+        configured_provider = str(current.get("provider") or target_truth.get("configured_provider") or "").strip().lower() or None
+        configured_model = str(current.get("model") or target_truth.get("configured_model") or "").strip() or None
+        effective_provider = str(target_truth.get("effective_provider") or configured_provider or "").strip().lower() or None
+        effective_model = str(target_truth.get("effective_model") or configured_model or "").strip() or None
+        if not configured_model and not effective_model:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="current_model_missing",
+            )
+        provider_label = self._setup_provider_label(configured_provider)
+        effective_provider_label = self._setup_provider_label(effective_provider)
+        provider_health_status = str(current.get("provider_health_status") or "").strip().lower() or "unknown"
+        model_health_status = str(current.get("health_status") or "").strip().lower() or "unknown"
+        ready = bool(current.get("ready", False))
+        if ready:
+            message = f"Chat is currently using {configured_model} on {provider_label}."
+        elif effective_model and effective_provider and effective_model != configured_model:
+            message = (
+                f"Chat is configured to use {configured_model} on {provider_label}, but it is not healthy right now. "
+                f"The best healthy target would be {effective_model} on {effective_provider_label}."
+            )
+        elif provider_health_status == "down":
+            message = f"Chat is configured to use {configured_model} on {provider_label}, but {provider_label} is not responding right now."
+        elif provider_health_status == "degraded":
+            message = f"Chat is configured to use {configured_model} on {provider_label}, but {provider_label} needs attention right now."
+        elif model_health_status == "down":
+            message = f"Chat is configured to use {configured_model} on {provider_label}, but that model is not healthy right now."
+        else:
+            message = f"Chat is configured to use {configured_model or effective_model} on {provider_label}, but it is not ready right now."
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            payload={
+                "type": "model_status",
+                "provider": effective_provider or configured_provider,
+                "model_id": effective_model or configured_model,
+                "configured_provider": configured_provider,
+                "configured_model": configured_model,
+                "title": "Current model",
+                "ready": ready,
+                "health_status": model_health_status,
+                "provider_health_status": provider_health_status,
+                "summary": message,
+            },
+        )
+
+    @staticmethod
+    def _inventory_preview(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+        model_ids = [
+            str(row.get("model_id") or "").strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("model_id") or "").strip()
+        ]
+        if not model_ids:
+            return ""
+        preview = ", ".join(model_ids[:limit])
+        extra = max(0, len(model_ids) - min(len(model_ids), limit))
+        if extra > 0:
+            preview = f"{preview}, and {extra} more"
+        return preview
+
+    @staticmethod
+    def _inventory_reason_preview(rows: list[dict[str, Any]], *, limit: int = 3) -> str:
+        items: list[str] = []
+        for row in rows[:limit]:
+            model_id = str(row.get("model_id") or "").strip()
+            reason = str(row.get("availability_reason") or "").strip()
+            if not model_id:
+                continue
+            items.append(f"{model_id} ({reason})" if reason else model_id)
+        return ", ".join(items)
+
+    @staticmethod
+    def _lifecycle_row_label(row: dict[str, Any]) -> str:
+        for key in ("model_id", "repo_id", "artifact_id", "target_key"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                return value
+        return "unknown target"
+
+    @staticmethod
+    def _lifecycle_row_reason(row: dict[str, Any]) -> str | None:
+        message = str(row.get("message") or "").strip()
+        if message:
+            return message
+        acquisition_reason = str(row.get("acquisition_reason") or row.get("availability_reason") or "").strip()
+        if acquisition_reason:
+            return acquisition_reason
+        error_kind = str(row.get("error_kind") or "").strip()
+        if error_kind:
+            return error_kind.replace("_", " ")
+        return None
+
+    @staticmethod
+    def _lifecycle_rows_preview(
+        rows: list[dict[str, Any]],
+        *,
+        limit: int = 4,
+        include_reason: bool = False,
+    ) -> str:
+        items: list[str] = []
+        for row in rows[:limit]:
+            label = Orchestrator._lifecycle_row_label(row)
+            if not label:
+                continue
+            if include_reason:
+                reason = Orchestrator._lifecycle_row_reason(row)
+                items.append(f"{label} ({reason})" if reason else label)
+            else:
+                items.append(label)
+        preview = ", ".join(items)
+        extra = max(0, len(rows) - min(len(rows), limit))
+        if preview and extra > 0:
+            preview = f"{preview}, and {extra} more"
+        return preview
+
+    @staticmethod
+    def _lifecycle_row_search_terms(row: dict[str, Any]) -> list[str]:
+        raw_terms = [
+            str(row.get("model_id") or "").strip(),
+            (
+                str(str(row.get("model_id") or "").strip().split(":", 1)[1]).strip()
+                if ":" in str(row.get("model_id") or "").strip()
+                else ""
+            ),
+            str(row.get("repo_id") or "").strip(),
+            str(row.get("artifact_id") or "").strip(),
+            str(row.get("target_key") or "").strip(),
+        ]
+        terms: list[str] = []
+        seen: set[str] = set()
+        for item in raw_terms:
+            normalized = normalize_setup_text(item)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            terms.append(normalized)
+        return terms
+
+    def _resolve_lifecycle_target_row(self, text: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        resolution = self._resolve_runtime_model_target(text)
+        status = str(resolution.get("status") or "").strip().lower()
+        if status == "unique":
+            model_id = str(resolution.get("model_id") or "").strip()
+            match = next(
+                (
+                    dict(row)
+                    for row in rows
+                    if str(row.get("model_id") or "").strip() == model_id
+                ),
+                None,
+            )
+            if isinstance(match, dict):
+                return {
+                    "status": "unique",
+                    "requested": str(resolution.get("requested") or model_id).strip() or model_id,
+                    "row": match,
+                    "matches": [match],
+                }
+        normalized = normalize_setup_text(text)
+        matches: list[dict[str, Any]] = []
+        seen_keys: set[str] = set()
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not any(term and term in normalized for term in self._lifecycle_row_search_terms(row)):
+                continue
+            key = str(row.get("target_key") or row.get("model_id") or row.get("artifact_id") or "").strip()
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            matches.append(dict(row))
+        if len(matches) == 1:
+            return {
+                "status": "unique",
+                "requested": self._lifecycle_row_label(matches[0]),
+                "row": matches[0],
+                "matches": matches,
+            }
+        if len(matches) > 1:
+            return {
+                "status": "ambiguous",
+                "requested": None,
+                "row": None,
+                "matches": matches,
+            }
+        return {
+            "status": "none",
+            "requested": str(resolution.get("requested") or "").strip() or None,
+            "row": None,
+            "matches": [],
+        }
+
+    def _model_lifecycle_response(self, text: str) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload_fn = getattr(truth, "model_lifecycle_status", None)
+        if not callable(payload_fn):
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="model_lifecycle_status_unavailable",
+            )
+        payload = payload_fn()
+        rows = [
+            dict(row)
+            for row in (payload.get("models") if isinstance(payload.get("models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        downloading_rows = [
+            dict(row)
+            for row in (payload.get("downloading_targets") if isinstance(payload.get("downloading_targets"), list) else [])
+            if isinstance(row, dict)
+        ]
+        queued_rows = [
+            dict(row)
+            for row in (payload.get("queued_targets") if isinstance(payload.get("queued_targets"), list) else [])
+            if isinstance(row, dict)
+        ]
+        failed_rows = [
+            dict(row)
+            for row in (payload.get("failed_targets") if isinstance(payload.get("failed_targets"), list) else [])
+            if isinstance(row, dict)
+        ]
+        normalized = normalize_setup_text(text).replace("/", " ")
+        resolution = self._resolve_lifecycle_target_row(text, rows)
+        if str(resolution.get("status") or "").strip().lower() == "ambiguous":
+            matches = [
+                self._lifecycle_row_label(row)
+                for row in (resolution.get("matches") if isinstance(resolution.get("matches"), list) else [])
+                if isinstance(row, dict)
+            ]
+            message = f"I found more than one tracked install target that matches that request: {', '.join(matches[:4])}."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                next_question="Tell me the full model id you want me to check.",
+                payload={
+                    "type": "model_lifecycle_status",
+                    "query_kind": "ambiguous_target",
+                    "title": "Model lifecycle status",
+                    "summary": message,
+                    "matches": matches,
+                    "counts": dict(payload.get("counts") or {}),
+                },
+            )
+        if str(resolution.get("status") or "").strip().lower() == "unique":
+            row = resolution.get("row") if isinstance(resolution.get("row"), dict) else {}
+            label = self._lifecycle_row_label(row)
+            lifecycle_state = str(row.get("lifecycle_state") or "not_installed").strip().lower() or "not_installed"
+            if lifecycle_state == "ready":
+                message = f"{label} is ready to use now."
+            elif lifecycle_state == "installed_not_ready":
+                message = f"{label} is already installed, but it is not ready yet."
+            elif lifecycle_state == "installed":
+                message = f"{label} is installed."
+            elif lifecycle_state == "downloading":
+                message = f"{label} is downloading now."
+            elif lifecycle_state == "queued":
+                message = f"{label} is queued. I am waiting for approval before I start."
+            elif lifecycle_state == "failed":
+                message = f"The last attempt to get {label} failed."
+            else:
+                acquisition_state = str(row.get("acquisition_state") or "").strip().lower()
+                if acquisition_state == "acquirable":
+                    message = f"{label} is not installed yet, but I can get it for you if you approve."
+                elif acquisition_state == "blocked_by_policy":
+                    message = f"{label} is not installed yet, and this mode does not let me download or install it."
+                elif acquisition_state == "not_acquirable":
+                    message = f"{label} is not installed, and it is not on the supported acquire/install path."
+                else:
+                    message = f"{label} is not installed."
+            reason = self._lifecycle_row_reason(row)
+            if reason and reason.lower() not in message.lower():
+                message = f"{message.rstrip('.')} Reason: {reason}."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_lifecycle_status",
+                    "query_kind": "target",
+                    "title": "Model lifecycle status",
+                    "summary": message,
+                    "model_id": row.get("model_id"),
+                    "target_key": row.get("target_key"),
+                    "lifecycle_state": lifecycle_state,
+                    "row": dict(row),
+                    "counts": dict(payload.get("counts") or {}),
+                },
+            )
+        requested_target = str(resolution.get("requested") or "").strip() or None
+        if not requested_target:
+            explicit_target = re.search(
+                r"\b(?:[a-z0-9._-]+:)?[a-z0-9][a-z0-9./_-]*:[a-z0-9][a-z0-9./_-]*\b",
+                normalized,
+            )
+            if explicit_target is not None:
+                requested_target = str(explicit_target.group(0) or "").strip() or None
+        if requested_target and any(token in normalized for token in ("install", "download", "import", "pull")):
+            policy = (
+                truth.model_controller_policy_status()
+                if callable(getattr(truth, "model_controller_policy_status", None))
+                else {}
+            )
+            if not bool(policy.get("allow_install_pull", True)):
+                message = (
+                    f"{requested_target} is not installed. This mode does not let me download or install it here."
+                )
+            else:
+                message = (
+                    f"{requested_target} is not installed. I can only get it if it is on the supported acquire/install path."
+                )
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_lifecycle_status",
+                    "query_kind": "target_missing_acquisition",
+                    "title": "Model lifecycle status",
+                    "summary": message,
+                    "model_id": requested_target,
+                    "target_key": requested_target,
+                    "lifecycle_state": "not_installed",
+                    "row": None,
+                    "counts": dict(payload.get("counts") or {}),
+                },
+            )
+        if "fail" in normalized:
+            if failed_rows:
+                message = f"Failed model installs or downloads: {self._lifecycle_rows_preview(failed_rows, include_reason=True)}."
+            else:
+                message = "I do not see any failed model installs or downloads in the canonical manager state."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_lifecycle_status",
+                    "query_kind": "failed",
+                    "title": "Failed installs",
+                    "summary": message,
+                    "matches": failed_rows,
+                    "counts": dict(payload.get("counts") or {}),
+                },
+            )
+        if any(token in normalized for token in ("downloading", "installing", "in progress", "queued", "pending")):
+            if downloading_rows:
+                message = f"Models downloading right now: {self._lifecycle_rows_preview(downloading_rows)}."
+                if queued_rows:
+                    message = f"{message} Queued and waiting approval: {self._lifecycle_rows_preview(queued_rows)}."
+            elif queued_rows:
+                message = f"I do not see a download in progress right now. Queued and waiting approval: {self._lifecycle_rows_preview(queued_rows)}."
+            else:
+                message = "I do not see any model downloads in progress right now."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_lifecycle_status",
+                    "query_kind": "active_operations",
+                    "title": "Active installs",
+                    "summary": message,
+                    "matches": [*downloading_rows, *queued_rows],
+                    "counts": dict(payload.get("counts") or {}),
+                },
+            )
+        counts = dict(payload.get("counts") or {})
+        message = (
+            "Canonical model lifecycle status: "
+            f"{int(counts.get('ready', 0) or 0)} ready, "
+            f"{int(counts.get('downloading', 0) or 0)} downloading, "
+            f"{int(counts.get('queued', 0) or 0)} queued, and "
+            f"{int(counts.get('failed', 0) or 0)} failed."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            payload={
+                "type": "model_lifecycle_status",
+                "query_kind": "summary",
+                "title": "Model lifecycle status",
+                "summary": message,
+                "counts": counts,
+                "active_operations": [
+                    dict(row)
+                    for row in (payload.get("active_operations") if isinstance(payload.get("active_operations"), list) else [])
+                    if isinstance(row, dict)
+                ],
+                "failed_targets": failed_rows,
+            },
+        )
+
+    def _canonical_model_inventory_snapshot(self, truth: Any) -> dict[str, Any]:
+        inventory_fn = getattr(truth, "model_inventory_status", None)
+        readiness_fn = getattr(truth, "model_readiness_status", None)
+        inventory = inventory_fn() if callable(inventory_fn) else {}
+        readiness = readiness_fn() if callable(readiness_fn) else {}
+        inventory = dict(inventory) if isinstance(inventory, dict) else {}
+        readiness = dict(readiness) if isinstance(readiness, dict) else {}
+
+        if not inventory and not readiness:
+            return {
+                "active_provider": None,
+                "active_model": None,
+                "configured_provider": None,
+                "configured_model": None,
+                "models": [],
+                "ready_now_models": [],
+                "usable_models": [],
+                "other_ready_now_models": [],
+                "other_usable_models": [],
+                "not_ready_models": [],
+                "local_installed_models": [],
+                "remote_registered_models": [],
+                "inventory": {},
+                "readiness": {},
+                "source": "canonical_inventory+readiness",
+            }
+
+        inventory_rows = [
+            dict(row)
+            for row in (inventory.get("models") if isinstance(inventory.get("models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        readiness_rows = [
+            dict(row)
+            for row in (readiness.get("models") if isinstance(readiness.get("models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        readiness_by_model = {
+            str(row.get("model_id") or "").strip(): dict(row)
+            for row in readiness_rows
+            if str(row.get("model_id") or "").strip()
+        }
+
+        merged_rows: list[dict[str, Any]] = []
+        seen_model_ids: set[str] = set()
+        for inventory_row in inventory_rows:
+            model_id = str(inventory_row.get("model_id") or "").strip()
+            seen_model_ids.add(model_id)
+            merged_rows.append(
+                {
+                    **dict(inventory_row),
+                    **dict(readiness_by_model.get(model_id) or {}),
+                }
+            )
+        for readiness_row in readiness_rows:
+            model_id = str(readiness_row.get("model_id") or "").strip()
+            if model_id in seen_model_ids:
+                continue
+            merged_rows.append(dict(readiness_row))
+
+        ready_rows = [
+            dict(row)
+            for row in (
+                readiness.get("ready_now_models")
+                if isinstance(readiness.get("ready_now_models"), list)
+                else readiness.get("usable_models")
+                if isinstance(readiness.get("usable_models"), list)
+                else []
+            )
+            if isinstance(row, dict)
+        ]
+        not_ready_rows = [
+            dict(row)
+            for row in (readiness.get("not_ready_models") if isinstance(readiness.get("not_ready_models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        local_installed_rows = [
+            dict(row)
+            for row in (
+                inventory.get("local_installed_models")
+                if isinstance(inventory.get("local_installed_models"), list)
+                else []
+            )
+            if isinstance(row, dict)
+        ]
+        if not local_installed_rows:
+            local_installed_rows = [
+                dict(row)
+                for row in merged_rows
+                if bool(row.get("local", False))
+                and bool(row.get("installed_local", row.get("available", False)))
+            ]
+        remote_registered_rows = [
+            dict(row)
+            for row in (
+                inventory.get("remote_registered_models")
+                if isinstance(inventory.get("remote_registered_models"), list)
+                else []
+            )
+            if isinstance(row, dict)
+        ]
+        if not remote_registered_rows:
+            remote_registered_rows = [
+                dict(row)
+                for row in merged_rows
+                if not bool(row.get("local", False))
+            ]
+        return {
+            "active_provider": str(readiness.get("active_provider") or inventory.get("active_provider") or "").strip().lower() or None,
+            "active_model": str(readiness.get("active_model") or inventory.get("active_model") or "").strip() or None,
+            "configured_provider": str(readiness.get("configured_provider") or inventory.get("configured_provider") or "").strip().lower() or None,
+            "configured_model": str(readiness.get("configured_model") or inventory.get("configured_model") or "").strip() or None,
+            "models": merged_rows,
+            "ready_now_models": ready_rows,
+            "usable_models": [dict(row) for row in ready_rows],
+            "other_ready_now_models": [
+                dict(row) for row in ready_rows if not bool(row.get("active", False))
+            ],
+            "other_usable_models": [
+                dict(row) for row in ready_rows if not bool(row.get("active", False))
+            ],
+            "not_ready_models": not_ready_rows,
+            "local_installed_models": local_installed_rows,
+            "remote_registered_models": remote_registered_rows,
+            "inventory": dict(inventory),
+            "readiness": dict(readiness),
+            "source": "canonical_inventory+readiness",
+        }
+
+    def _model_inventory_response(
+        self,
+        *,
+        local_only: bool,
+        remote_only: bool = False,
+        provider_id: str | None = None,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = self._canonical_model_inventory_snapshot(truth)
+        provider_key = str(provider_id or "").strip().lower() or None
+        active_model = str(payload.get("active_model") or "").strip() or None
+        active_provider = str(payload.get("active_provider") or "").strip().lower() or None
+        active_label = active_model or "the current chat target"
+        if active_provider and active_model:
+            active_label = f"{active_model} on {self._setup_provider_label(active_provider)}"
+        rows = [
+            dict(row)
+            for row in (payload.get("models") if isinstance(payload.get("models"), list) else [])
+            if isinstance(row, dict)
+        ]
+        if provider_key:
+            rows = [
+                row
+                for row in rows
+                if str(row.get("provider_id") or "").strip().lower() == provider_key
+            ]
+        if local_only:
+            rows = [row for row in rows if bool(row.get("local", False))]
+        if remote_only:
+            rows = [row for row in rows if not bool(row.get("local", False))]
+        usable_rows = [row for row in rows if bool(row.get("usable_now", False))]
+        other_usable_rows = [row for row in usable_rows if not bool(row.get("active", False))]
+        not_ready_rows = [row for row in rows if not bool(row.get("usable_now", False))]
+        installed_preview = self._inventory_preview(rows)
+        usable_preview = self._inventory_preview(other_usable_rows if active_model else usable_rows)
+        not_ready_preview = self._inventory_reason_preview(not_ready_rows)
+        response_payload = {
+            "active_provider": payload.get("active_provider"),
+            "active_model": payload.get("active_model"),
+            "configured_provider": payload.get("configured_provider"),
+            "configured_model": payload.get("configured_model"),
+            "models": rows,
+            "usable_models": usable_rows,
+            "other_usable_models": other_usable_rows,
+            "not_ready_models": not_ready_rows,
+            "source": payload.get("source"),
+        }
+
+        if local_only:
+            scope_label = "Ollama local" if provider_key == "ollama" else "local"
+            if rows:
+                parts = [f"Right now chat is using {active_label}."]
+                parts.append(f"{scope_label} installed chat models: {installed_preview}.")
+                if usable_preview:
+                    parts.append(f"Other {scope_label.lower()} models ready to use now: {usable_preview}.")
+                if not_ready_preview:
+                    parts.append(f"Present but not ready: {not_ready_preview}.")
+                message = " ".join(parts)
+            else:
+                message = (
+                    "I do not currently see any installed Ollama chat models."
+                    if provider_key == "ollama"
+                    else "I do not currently see any installed local chat models."
+                )
+            payload_type = "local_model_inventory"
+            title = "Local chat models"
+        elif remote_only:
+            if rows:
+                parts: list[str] = []
+                if usable_preview:
+                    parts.append(f"Cloud models available to use now: {usable_preview}.")
+                else:
+                    parts.append("I do not currently see a cloud model that is usable right now.")
+                if not_ready_preview:
+                    parts.append(f"Cloud models present but not ready: {not_ready_preview}.")
+                message = " ".join(parts)
+            else:
+                message = "I do not currently see any cloud chat models in the runtime inventory."
+            payload_type = "model_availability"
+            title = "Available cloud models"
+        else:
+            if usable_preview:
+                message = f"Right now chat is using {active_label}. Other models available to use now: {usable_preview}."
+            elif active_model:
+                message = f"Right now chat is using {active_label}. I do not see another healthy model available to switch to right now."
+            else:
+                all_usable_preview = self._inventory_preview(usable_rows)
+                message = (
+                    f"The models I can use right now are {all_usable_preview}."
+                    if all_usable_preview
+                    else "I do not see a healthy usable chat model right now."
+                )
+            if not_ready_preview:
+                message = f"{message} Also present but not ready: {not_ready_preview}."
+            if usable_preview:
+                message = f"{message} If you want, I can switch you to one of those usable models."
+            payload_type = "model_availability"
+            title = "Available chat models"
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            payload={
+                **response_payload,
+                "type": payload_type,
+                "title": title,
+                "inventory_scope": "local" if local_only else "remote" if remote_only else "available",
+                "inventory_provider": provider_key,
+                "summary": message,
+            },
+        )
+
+    def _available_models_response(self) -> OrchestratorResponse:
+        return self._model_inventory_response(local_only=False)
+
+    @staticmethod
+    def _filesystem_entry_label(entry: dict[str, Any]) -> str:
+        name = str(entry.get("name") or "").strip()
+        entry_type = str(entry.get("type") or "").strip().lower()
+        if not name:
+            return "unknown"
+        if entry_type == "dir":
+            return f"{name}/"
+        if entry_type == "symlink":
+            return f"{name} [symlink]"
+        return name
+
+    @staticmethod
+    def _filesystem_target_label(payload: dict[str, Any]) -> str:
+        return str(payload.get("resolved_path") or payload.get("path") or "that path").strip() or "that path"
+
+    @staticmethod
+    def _filesystem_error_message(payload: dict[str, Any]) -> str:
+        target = Orchestrator._filesystem_target_label(payload)
+        error_kind = str(payload.get("error_kind") or "").strip().lower() or "filesystem_error"
+        if error_kind == "outside_allowed_roots":
+            return compose_actionable_message(
+                what_happened=f"I can't access {target}",
+                why="It is outside the allowed local file roots.",
+                next_action="Choose a path under the allowed local roots.",
+            )
+        if error_kind == "sensitive_path_blocked":
+            return compose_actionable_message(
+                what_happened=f"I can't access {target}",
+                why="That path is blocked by the local privacy policy.",
+                next_action="Choose a non-sensitive path instead.",
+            )
+        if error_kind == "binary_file_not_supported":
+            return compose_actionable_message(
+                what_happened=f"I can't read {target}",
+                why="It looks binary, and this skill only supports text files.",
+                next_action="Point me at a text file instead.",
+            )
+        if error_kind == "not_found":
+            return compose_actionable_message(
+                what_happened=f"I can't access {target}",
+                why="It does not exist.",
+                next_action="Check the path and try again.",
+            )
+        if error_kind == "not_readable":
+            return compose_actionable_message(
+                what_happened=f"I can't access {target}",
+                why="It is not readable.",
+                next_action="Choose a readable path instead.",
+            )
+        if error_kind == "not_directory":
+            return compose_actionable_message(
+                what_happened=f"I can't list {target}",
+                why="It is not a directory.",
+                next_action="Choose a directory path instead.",
+            )
+        if error_kind == "not_file":
+            return compose_actionable_message(
+                what_happened=f"I can't read {target}",
+                why="It is not a regular text file.",
+                next_action="Choose a regular text file instead.",
+            )
+        return str(payload.get("message") or "I couldn't complete that filesystem request.").strip() or "I couldn't complete that filesystem request."
+
+    def _filesystem_clarification_response(
+        self,
+        *,
+        kind: str,
+        question: str,
+    ) -> OrchestratorResponse:
+        return self._runtime_truth_response(
+            text=question,
+            route="action_tool",
+            used_tools=["filesystem"],
+            used_runtime_state=False,
+            next_question=question,
+            payload={
+                "type": "action_clarification",
+                "kind": kind,
+                "summary": question,
+                "next_question": question,
+            },
+        )
+
+    def _filesystem_list_directory_response(self, path_hint: str | None) -> OrchestratorResponse:
+        if not str(path_hint or "").strip():
+            return self._filesystem_clarification_response(
+                kind="filesystem_list_directory",
+                question="Tell me the exact directory path you want me to list.",
+            )
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "filesystem_list_directory", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_list_directory_unavailable",
+            )
+        payload = truth.filesystem_list_directory(path_hint)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        if not bool(payload.get("ok", False)):
+            message = self._filesystem_error_message(payload)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=str(payload.get("error_kind") or "filesystem_error").strip() or "filesystem_error",
+                payload={
+                    **payload,
+                    "title": "Directory listing",
+                    "summary": message,
+                },
+            )
+        entries = [
+            dict(row)
+            for row in (payload.get("entries") if isinstance(payload.get("entries"), list) else [])
+            if isinstance(row, dict)
+        ]
+        target = self._filesystem_target_label(payload)
+        if not entries:
+            message = f"{target} is empty."
+        else:
+            preview = ", ".join(self._filesystem_entry_label(row) for row in entries[:12])
+            message = f"{target} contains {len(entries)} entries: {preview}."
+            if bool(payload.get("truncated", False)):
+                message = f"{message} Showing the first {len(entries)} entries."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={
+                **payload,
+                "title": "Directory listing",
+                "summary": message,
+            },
+        )
+
+    def _filesystem_stat_path_response(self, path_hint: str | None) -> OrchestratorResponse:
+        if not str(path_hint or "").strip():
+            return self._filesystem_clarification_response(
+                kind="filesystem_stat_path",
+                question="Tell me the exact file or directory path you want me to inspect.",
+            )
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "filesystem_stat_path", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_stat_path_unavailable",
+            )
+        payload = truth.filesystem_stat_path(path_hint)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        if not bool(payload.get("ok", False)):
+            message = self._filesystem_error_message(payload)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=str(payload.get("error_kind") or "filesystem_error").strip() or "filesystem_error",
+                payload={
+                    **payload,
+                    "title": "Path status",
+                    "summary": message,
+                },
+            )
+        target = self._filesystem_target_label(payload)
+        modified_time = payload.get("modified_time")
+        modified_text = None
+        if modified_time is not None:
+            try:
+                modified_text = datetime.fromtimestamp(float(modified_time), tz=timezone.utc).isoformat()
+            except Exception:
+                modified_text = None
+        size_text = f"{int(payload.get('size') or 0)} bytes"
+        message = f"{target} is a {str(payload.get('type') or 'path').strip().lower()} with size {size_text}."
+        if modified_text:
+            message = f"{message} Modified: {modified_text}."
+        if not bool(payload.get("readable", False)):
+            message = f"{message} It is not readable."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={
+                **payload,
+                "title": "Path status",
+                "summary": message,
+            },
+        )
+
+    def _filesystem_read_text_file_response(self, path_hint: str | None) -> OrchestratorResponse:
+        if not str(path_hint or "").strip():
+            return self._filesystem_clarification_response(
+                kind="filesystem_read_text_file",
+                question="Tell me the exact text file path you want me to read.",
+            )
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "filesystem_read_text_file", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_read_text_file_unavailable",
+            )
+        payload = truth.filesystem_read_text_file(path_hint)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        if not bool(payload.get("ok", False)):
+            message = self._filesystem_error_message(payload)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=str(payload.get("error_kind") or "filesystem_error").strip() or "filesystem_error",
+                payload={
+                    **payload,
+                    "title": "Text file preview",
+                    "summary": message,
+                },
+            )
+        target = self._filesystem_target_label(payload)
+        bytes_read = int(payload.get("bytes_read") or 0)
+        total_size = int(payload.get("total_size") or bytes_read)
+        if bool(payload.get("truncated", False)):
+            header = f"Text preview from {target} ({bytes_read} bytes shown of {total_size})."
+        else:
+            header = f"Text from {target} ({bytes_read} bytes)."
+        text_body = str(payload.get("text") or "")
+        message = f"{header}\n{text_body}" if text_body else header
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={
+                **payload,
+                "title": "Text file preview",
+                "summary": header,
+            },
+        )
+
+    def _filesystem_search_filenames_response(
+        self,
+        *,
+        root_hint: str | None,
+        query: str | None,
+    ) -> OrchestratorResponse:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return self._filesystem_clarification_response(
+                kind="filesystem_search_filenames",
+                question="Tell me the filename you want me to search for.",
+            )
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "filesystem_search_filenames", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_search_filenames_unavailable",
+            )
+        payload = truth.filesystem_search_filenames(root_hint or ".", normalized_query)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        target = str(payload.get("resolved_root") or payload.get("root") or root_hint or ".").strip() or "."
+        if not bool(payload.get("ok", False)):
+            error_kind = str(payload.get("error_kind") or "filesystem_error").strip() or "filesystem_error"
+            if error_kind == "no_matches":
+                message = f"I didn't find any files or directories named like {normalized_query!r} under {target}."
+            else:
+                message = self._filesystem_error_message(payload)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=error_kind,
+                payload={
+                    **payload,
+                    "title": "Filename search",
+                    "summary": message,
+                },
+            )
+        results = [
+            dict(row)
+            for row in (payload.get("results") if isinstance(payload.get("results"), list) else [])
+            if isinstance(row, dict)
+        ]
+        preview = ", ".join(str(row.get("path") or "").strip() for row in results[:8] if str(row.get("path") or "").strip())
+        message = f"Filename matches for {normalized_query!r} under {target}: {preview}."
+        if bool(payload.get("truncated", False)):
+            message = f"{message} Showing the first {len(results)} matches."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={
+                **payload,
+                "title": "Filename search",
+                "summary": message,
+            },
+        )
+
+    def _filesystem_search_text_response(
+        self,
+        *,
+        root_hint: str | None,
+        query: str | None,
+    ) -> OrchestratorResponse:
+        normalized_query = str(query or "").strip()
+        if not normalized_query:
+            return self._filesystem_clarification_response(
+                kind="filesystem_search_text",
+                question="Tell me the text you want me to search for.",
+            )
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "filesystem_search_text", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="filesystem_search_text_unavailable",
+            )
+        payload = truth.filesystem_search_text(root_hint or ".", normalized_query)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        target = str(payload.get("resolved_root") or payload.get("root") or root_hint or ".").strip() or "."
+        if not bool(payload.get("ok", False)):
+            error_kind = str(payload.get("error_kind") or "filesystem_error").strip() or "filesystem_error"
+            if error_kind == "no_matches":
+                message = f"I didn't find any text matches for {normalized_query!r} under {target}."
+            else:
+                message = self._filesystem_error_message(payload)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["filesystem"],
+                ok=False,
+                error_kind=error_kind,
+                payload={
+                    **payload,
+                    "title": "Text search",
+                    "summary": message,
+                },
+            )
+        results = [
+            dict(row)
+            for row in (payload.get("results") if isinstance(payload.get("results"), list) else [])
+            if isinstance(row, dict)
+        ]
+        preview_lines: list[str] = []
+        for row in results[:4]:
+            path = str(row.get("path") or "").strip()
+            snippet = str(row.get("snippet") or "").strip()
+            line_number = row.get("line_number")
+            if not path:
+                continue
+            if line_number is not None:
+                preview_lines.append(f"{path}:{int(line_number)} {snippet}")
+            else:
+                preview_lines.append(f"{path} {snippet}")
+        message = f"Text matches for {normalized_query!r} under {target}:\n" + "\n".join(preview_lines)
+        if bool(payload.get("truncated", False)):
+            message = f"{message}\nShowing the first {len(results)} matches."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["filesystem"],
+            payload={
+                **payload,
+                "title": "Text search",
+                "summary": f"Text matches for {normalized_query!r} under {target}.",
+            },
+        )
+
+    @staticmethod
+    def _shell_blocked_message(payload: dict[str, Any]) -> str:
+        blocked_reason = str(payload.get("blocked_reason") or payload.get("error_kind") or "").strip().lower()
+        if blocked_reason == "shell_interpolation_blocked":
+            return compose_actionable_message(
+                what_happened="I can't run shell-style chaining, pipes, or interpolation through this bounded shell skill",
+                why="This shell surface only accepts validated structured operations.",
+                next_action="Ask for one supported shell action at a time.",
+            )
+        if blocked_reason == "unsupported_command":
+            return compose_actionable_message(
+                what_happened="I can't run that shell command here",
+                why="This skill only supports a small allowlisted set of native shell operations.",
+                next_action="Ask for a supported read-only shell command or a bounded install/create action.",
+            )
+        if blocked_reason == "destructive_operation_blocked":
+            return compose_actionable_message(
+                what_happened="I can't run that shell operation here",
+                why="This bounded shell skill blocks destructive and privilege-changing actions.",
+                next_action="Use a non-destructive path instead.",
+            )
+        if blocked_reason == "operation_not_supported":
+            return compose_actionable_message(
+                what_happened="I can't do that file-management action here",
+                why="This bounded shell skill does not support that operation.",
+                next_action="Use one of the supported shell or filesystem actions instead.",
+            )
+        if blocked_reason == "unsupported_manager":
+            return compose_actionable_message(
+                what_happened="I can't use that package manager here",
+                why="This bounded shell skill supports only a narrow allowlisted install path.",
+                next_action="Use a supported package manager instead.",
+            )
+        if blocked_reason == "unsupported_scope":
+            return compose_actionable_message(
+                what_happened="I can't use that install scope here",
+                why="This bounded shell skill only supports specific validated install scopes.",
+                next_action="Use a supported install scope instead.",
+            )
+        if blocked_reason == "invalid_package_name":
+            return compose_actionable_message(
+                what_happened="I can't start that install request",
+                why="The package name is not valid.",
+                next_action="Retry with a simple valid package name.",
+            )
+        if blocked_reason == "invalid_argument":
+            return compose_actionable_message(
+                what_happened="I can't run that shell request",
+                why="The argument is not valid for this bounded shell surface.",
+                next_action="Retry with a simple validated argument.",
+            )
+        if blocked_reason == "outside_allowed_roots":
+            return compose_actionable_message(
+                what_happened="I can't use that path here",
+                why="It is outside the allowed local roots.",
+                next_action="Choose a path under the allowed local roots.",
+            )
+        if blocked_reason == "sensitive_path_blocked":
+            return compose_actionable_message(
+                what_happened="I can't use that path here",
+                why="It is blocked by the local privacy policy.",
+                next_action="Choose a non-sensitive path instead.",
+            )
+        if blocked_reason == "not_directory":
+            return compose_actionable_message(
+                what_happened="I can't use that path for this request",
+                why="It is not a directory.",
+                next_action="Choose a directory path instead.",
+            )
+        if blocked_reason == "not_found":
+            return compose_actionable_message(
+                what_happened="I can't use that path for this request",
+                why="It does not exist.",
+                next_action="Check the path and try again.",
+            )
+        if blocked_reason == "path_exists":
+            return compose_actionable_message(
+                what_happened="I can't create that directory",
+                why="A non-directory path already exists there.",
+                next_action="Choose a different target path.",
+            )
+        if blocked_reason == "parent_not_directory":
+            return compose_actionable_message(
+                what_happened="I can't create that directory",
+                why="The parent directory does not exist or is not a directory.",
+                next_action="Create or choose a valid parent directory first.",
+            )
+        if blocked_reason == "not_writable":
+            return compose_actionable_message(
+                what_happened="I can't write there",
+                why="That path is not writable.",
+                next_action="Choose a writable directory instead.",
+            )
+        return str(payload.get("message") or "I couldn't complete that shell request.").strip() or "I couldn't complete that shell request."
+
+    @staticmethod
+    def _shell_command_label(payload: dict[str, Any]) -> str:
+        command_name = str(payload.get("command_name") or "").strip().lower()
+        labels = {
+            "python_version": "Python version",
+            "pip_version": "pip version",
+            "which": "Executable lookup",
+            "apt_search": "APT search",
+            "apt_cache_policy": "APT policy",
+            "ollama_list": "Ollama models",
+            "ollama_ps": "Ollama running models",
+            "ollama_show": "Ollama model details",
+            "pwd": "Working directory",
+            "uname": "System information",
+        }
+        return labels.get(command_name, "Shell command")
+
+    def _shell_command_payload_response(self, payload: dict[str, Any]) -> OrchestratorResponse:
+        ok = bool(payload.get("ok", False))
+        label = self._shell_command_label(payload)
+        stdout = str(payload.get("stdout") or "").strip()
+        stderr = str(payload.get("stderr") or "").strip()
+        if not ok:
+            error_kind = str(payload.get("error_kind") or payload.get("blocked_reason") or "shell_error").strip() or "shell_error"
+            if error_kind == "permission_denied":
+                message = compose_actionable_message(
+                    what_happened=f"{label} did not run",
+                    why="It needs more privileges than this bounded shell skill can use.",
+                    next_action="Use a supported non-privileged action instead.",
+                )
+            elif error_kind == "command_not_available":
+                message = compose_actionable_message(
+                    what_happened=f"{label} is not available in this environment",
+                    why="The required command is missing from this runtime.",
+                    next_action="Install it through a supported path, or choose another supported command.",
+                )
+            elif error_kind == "timeout":
+                message = compose_actionable_message(
+                    what_happened=f"{label} timed out",
+                    why="The bounded shell timeout was reached before it finished.",
+                    next_action="Retry with a smaller request or check the environment first.",
+                )
+            else:
+                message = self._shell_blocked_message(payload)
+            if stderr:
+                message = f"{message}\n{stderr}"
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["shell"],
+                ok=False,
+                error_kind=error_kind,
+                payload={
+                    **payload,
+                    "title": label,
+                    "summary": message.splitlines()[0],
+                },
+            )
+        output = stdout or stderr or "Command completed."
+        message = f"{label}:\n{output}"
+        if bool(payload.get("truncated", False)):
+            message = f"{message}\nOutput was truncated."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["shell"],
+            payload={
+                **payload,
+                "title": label,
+                "summary": label,
+            },
+        )
+
+    def _shell_blocked_request_response(self, *, blocked_reason: str, request_text: str | None = None) -> OrchestratorResponse:
+        payload = {
+            "ok": False,
+            "type": "shell_blocked_request",
+            "blocked_reason": str(blocked_reason or "unsupported_command").strip() or "unsupported_command",
+            "request_text": str(request_text or "").strip() or None,
+        }
+        message = self._shell_blocked_message(payload)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["shell"],
+            used_runtime_state=False,
+            ok=False,
+            error_kind=str(payload["blocked_reason"]),
+            payload={
+                **payload,
+                "title": "Shell request blocked",
+                "summary": message,
+            },
+        )
+
+    def _shell_execute_safe_command_response(
+        self,
+        *,
+        command_name: str | None,
+        subject: str | None = None,
+        query: str | None = None,
+        cwd: str | None = None,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None or not callable(getattr(truth, "shell_execute_safe_command", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="shell_execute_safe_command_unavailable",
+            )
+        payload = truth.shell_execute_safe_command(
+            command_name,
+            subject=subject,
+            query=query,
+            cwd=cwd,
+        )
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        return self._shell_command_payload_response(payload)
+
+    def _shell_install_package_response(
+        self,
+        user_id: str,
+        *,
+        manager: str | None,
+        package: str | None,
+        scope: str | None = None,
+        dry_run: bool = False,
+        confirmed: bool = False,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="shell_install_package_unavailable",
+            )
+        if not confirmed:
+            preview_fn = getattr(truth, "shell_preview_install_package", None)
+            if not callable(preview_fn):
+                return self._runtime_state_unavailable_response(
+                    route="action_tool",
+                    reason="shell_install_package_preview_unavailable",
+                )
+            preview = preview_fn(
+                manager=manager,
+                package=package,
+                scope=scope,
+                dry_run=dry_run,
+            )
+            preview = dict(preview) if isinstance(preview, dict) else {}
+            if not bool(preview.get("ok", False)):
+                return self._shell_command_payload_response(preview)
+            command_preview = " ".join(str(item) for item in (preview.get("argv") if isinstance(preview.get("argv"), list) else []) if str(item).strip())
+            package_label = str(preview.get("package") or package or "that package").strip() or "that package"
+            question = (
+                f"I will install {package_label} using {command_preview}. "
+                "This mutates the local system. Reply yes to proceed or no to cancel."
+            )
+            return self._confirmation_preview_response(
+                user_id=user_id,
+                route="action_tool",
+                question=question,
+                used_tools=["shell"],
+                action={
+                    "operation": "shell_install_package",
+                    "params": {
+                        "manager": preview.get("manager"),
+                        "package": preview.get("package"),
+                        "scope": preview.get("scope"),
+                        "dry_run": bool(preview.get("dry_run", False)),
+                    },
+                },
+                title="Install package confirmation",
+                preview_payload={
+                    **preview,
+                    "preview": {
+                        "command": command_preview,
+                        "manager": preview.get("manager"),
+                        "package": preview.get("package"),
+                        "scope": preview.get("scope"),
+                    },
+                },
+            )
+        if not callable(getattr(truth, "shell_install_package", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="shell_install_package_unavailable",
+            )
+        payload = truth.shell_install_package(
+            manager=manager,
+            package=package,
+            scope=scope,
+            dry_run=dry_run,
+        )
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        return self._shell_command_payload_response(payload)
+
+    def _model_controller_switch_back_response(self, user_id: str, *, confirmed: bool = False) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        state = self._current_model_trial_state(user_id)
+        previous_model = str(state.get("previous_model") or "").strip() or None
+        previous_provider = str(state.get("previous_provider") or "").strip().lower() or None
+        if not previous_model:
+            return self._execute_model_controller_switch_back(user_id)
+        if not confirmed:
+            question = (
+                f"I will switch chat back to {previous_model}. "
+                "This mutates the active chat target. Reply yes to proceed or no to cancel."
+            )
+            return self._confirmation_preview_response(
+                user_id,
+                route="model_status",
+                question=question,
+                used_tools=["model_controller"],
+                action={
+                    "operation": "model_switch_back",
+                    "params": {
+                        "model_id": previous_model,
+                        "provider_id": previous_provider,
+                    },
+                },
+                title="Switch back confirmation",
+                preview_payload={
+                    "provider": previous_provider,
+                    "model_id": previous_model,
+                    "preview": {
+                        "provider": previous_provider,
+                        "model_id": previous_model,
+                        "switch_kind": "restore_previous",
+                    },
+                },
+            )
+        return self._execute_model_controller_switch_back(user_id)
+        if not callable(getattr(truth, "shell_install_package", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="shell_install_package_unavailable",
+            )
+        payload = truth.shell_install_package(
+            manager=manager,
+            package=package,
+            scope=scope,
+            dry_run=dry_run,
+        )
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        return self._shell_command_payload_response(payload)
+
+    def _shell_create_directory_response(self, user_id: str, path_hint: str | None, *, confirmed: bool = False) -> OrchestratorResponse:
+        if not str(path_hint or "").strip():
+            return self._runtime_truth_response(
+                text="Tell me the exact directory path you want me to create.",
+                route="action_tool",
+                used_tools=["shell"],
+                used_runtime_state=False,
+                ok=False,
+                error_kind="missing_path",
+                next_question="Tell me the exact directory path you want me to create.",
+                payload={
+                    "type": "action_clarification",
+                    "kind": "shell_create_directory",
+                    "summary": "Tell me the exact directory path you want me to create.",
+                    "next_question": "Tell me the exact directory path you want me to create.",
+                },
+            )
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="shell_create_directory_unavailable",
+            )
+        if not confirmed:
+            preview_fn = getattr(truth, "shell_preview_create_directory", None)
+            if not callable(preview_fn):
+                return self._runtime_state_unavailable_response(
+                    route="action_tool",
+                    reason="shell_create_directory_preview_unavailable",
+                )
+            preview = preview_fn(path_hint)
+            preview = dict(preview) if isinstance(preview, dict) else {}
+            if not bool(preview.get("ok", False)):
+                message = self._shell_blocked_message(preview)
+                return self._runtime_truth_response(
+                    text=message,
+                    route="action_tool",
+                    used_tools=["shell"],
+                    ok=False,
+                    error_kind=str(preview.get("blocked_reason") or preview.get("error_kind") or "shell_error").strip() or "shell_error",
+                    payload={
+                        **preview,
+                        "title": "Create directory",
+                        "summary": message,
+                    },
+                )
+            target = str(preview.get("resolved_path") or preview.get("path") or path_hint).strip() or "that directory"
+            if not bool(preview.get("mutated", False)):
+                message = f"Directory {target} already exists."
+                return self._runtime_truth_response(
+                    text=message,
+                    route="action_tool",
+                    used_tools=["shell"],
+                    payload={
+                        **preview,
+                        "type": "shell_create_directory_preview",
+                        "title": "Create directory",
+                        "summary": message,
+                    },
+                )
+            question = (
+                f"I will create the directory {target}. "
+                "This mutates the local filesystem. Reply yes to proceed or no to cancel."
+            )
+            return self._confirmation_preview_response(
+                user_id=user_id,
+                route="action_tool",
+                question=question,
+                used_tools=["shell"],
+                action={
+                    "operation": "shell_create_directory",
+                    "params": {
+                        "path": str(preview.get("path") or path_hint).strip() or path_hint,
+                    },
+                },
+                title="Create directory confirmation",
+                preview_payload={
+                    **preview,
+                    "preview": {
+                        "path": str(preview.get("resolved_path") or preview.get("path") or path_hint).strip() or None,
+                    },
+                },
+            )
+        if not callable(getattr(truth, "shell_create_directory", None)):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="shell_create_directory_unavailable",
+            )
+        payload = truth.shell_create_directory(path_hint)
+        payload = dict(payload) if isinstance(payload, dict) else {}
+        if not bool(payload.get("ok", False)):
+            message = self._shell_blocked_message(payload)
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["shell"],
+                ok=False,
+                error_kind=str(payload.get("blocked_reason") or payload.get("error_kind") or "shell_error").strip() or "shell_error",
+                payload={
+                    **payload,
+                    "title": "Create directory",
+                    "summary": message,
+                },
+            )
+        target = str(payload.get("resolved_path") or payload.get("path") or path_hint).strip() or "that directory"
+        if bool(payload.get("created", False)):
+            message = f"Created directory {target}."
+        else:
+            message = f"Directory {target} already exists."
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=["shell"],
+            payload={
+                **payload,
+                "title": "Create directory",
+                "summary": message,
+            },
+        )
+
+    def _model_switch_advisory_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="runtime_truth_service_unavailable",
+            )
+        policy_selection = (
+            truth.model_policy_status()
+            if callable(getattr(truth, "model_policy_status", None))
+            else {}
+        )
+        candidate_payload = (
+            truth.model_policy_candidate(status=policy_selection)
+            if callable(getattr(truth, "model_policy_candidate", None))
+            else {}
+        )
+        policy_payload = (
+            truth.model_controller_policy_status(
+                target_truth={
+                    "effective_provider": (
+                        str((policy_selection if isinstance(policy_selection, dict) else {}).get("current_active_provider") or "").strip().lower()
+                        or None
+                    ),
+                    "effective_model": (
+                        str((policy_selection if isinstance(policy_selection, dict) else {}).get("current_active_model") or "").strip()
+                        or None
+                    ),
+                    "configured_provider": (
+                        str((policy_selection if isinstance(policy_selection, dict) else {}).get("current_default_provider") or "").strip().lower()
+                        or None
+                    ),
+                    "configured_model": (
+                        str((policy_selection if isinstance(policy_selection, dict) else {}).get("current_default_model") or "").strip()
+                        or None
+                    ),
+                }
+            )
+            if callable(getattr(truth, "model_controller_policy_status", None))
+            else {}
+        )
+        candidate_payload = dict(candidate_payload) if isinstance(candidate_payload, dict) else {}
+        policy_payload = dict(policy_payload) if isinstance(policy_payload, dict) else {}
+        selection = candidate_payload.get("selection") if isinstance(candidate_payload.get("selection"), dict) else {}
+        candidate = candidate_payload.get("candidate") if isinstance(candidate_payload.get("candidate"), dict) else None
+        current_label = self._model_policy_candidate_label(
+            selection.get("selected_candidate") if isinstance(selection.get("selected_candidate"), dict) else None
+        ) or "the current model"
+        candidate_label = self._model_policy_candidate_label(candidate)
+
+        if bool(candidate_payload.get("switch_recommended", False)) and candidate_label:
+            detail = str(candidate_payload.get("decision_detail") or "").strip()
+            message = f"I would recommend {candidate_label} right now."
+            if detail:
+                message = f"{message} Reason: {detail}"
+        else:
+            detail = str(candidate_payload.get("decision_detail") or "").strip().rstrip(".")
+            message = (
+                f"I would keep {current_label} right now because {detail.lower()}."
+                if detail
+                else f"I would keep {current_label} right now."
+            )
+
+        approval_line = (
+            "No change has been made. I still need your approval before I test a model, switch temporarily, or make a default change."
+        )
+        full_message = f"{message}\n{approval_line}"
+        return self._runtime_truth_response(
+            text=full_message,
+            route="action_tool",
+            used_runtime_state=True,
+            used_tools=["model_controller"],
+            payload={
+                "type": "model_controller",
+                "mode": "switch_advisory",
+                "title": "Switch advisory",
+                "summary": full_message,
+                "switch_recommended": bool(candidate_payload.get("switch_recommended", False)),
+                "candidate": dict(candidate) if isinstance(candidate, dict) else None,
+                "selection": dict(selection),
+                "policy": policy_payload,
+                "source": "runtime_truth.model_policy_candidate+model_controller_policy_status",
+            },
+        )
+
+    def _agent_memory_response(
+        self,
+        user_id: str,
+        kind: str,
+        *,
+        query_text: str | None = None,
+    ) -> OrchestratorResponse:
+        normalized_kind = str(kind or "").strip().lower() or "agent_memory_inspect"
+        if normalized_kind == "agent_memory_preferences":
+            payload = self._preferences_cards_payload()
+            response = self._cards_response(user_id, payload)
+            return self._merge_response_data(
+                response,
+                route="agent_memory",
+                used_runtime_state=False,
+                used_llm=False,
+                used_memory=True,
+                used_tools=["memory_store"],
+                ok=True,
+                skip_friction_formatting=True,
+                skip_epistemic_gate=True,
+                runtime_payload={
+                    "type": "agent_memory",
+                    "kind": "preferences",
+                    "summary": str(payload.get("summary") or "Current saved assistant preferences.").strip(),
+                    **dict(payload),
+                },
+            )
+        if normalized_kind == "agent_memory_open_loops":
+            payload = self._open_loops_payload(status="open", order="due")
+            response = self._cards_response(user_id, payload)
+            return self._merge_response_data(
+                response,
+                route="agent_memory",
+                used_runtime_state=False,
+                used_llm=False,
+                used_memory=True,
+                used_tools=["memory_store"],
+                ok=True,
+                skip_friction_formatting=True,
+                skip_epistemic_gate=True,
+                runtime_payload={
+                    "type": "agent_memory",
+                    "kind": "open_loops",
+                    "summary": str(payload.get("summary") or "Tracked open loops.").strip(),
+                    **dict(payload),
+                },
+            )
+        if normalized_kind == "agent_memory_inspect":
+            return self._assistant_memory_overview_response(user_id, query_text=query_text)
+        thread_id = self._active_thread_id_for_user(user_id)
+        prefs = self.db.list_preferences()
+        anchors = self.db.list_thread_anchors(thread_id, limit=5)
+        open_loops = self.db.list_open_loops(status="open", limit=5, order="due")
+        snapshot = self._memory_runtime.deterministic_snapshot(user_id, thread_id=thread_id)
+        summary = snapshot.get("memory_summary") if isinstance(snapshot.get("memory_summary"), dict) else {}
+        pref_keys = [str(row.get("key") or "").strip() for row in prefs if isinstance(row, dict) and str(row.get("key") or "").strip()][:3]
+        open_loop_titles = [str(row.get("title") or "").strip() for row in open_loops if isinstance(row, dict) and str(row.get("title") or "").strip()][:2]
+        anchor_titles = [str(row.get("title") or "").strip() for row in anchors if isinstance(row, dict) and str(row.get("title") or "").strip()][:2]
+        lines = ["When you say memory here, I mean my local saved memory rather than system RAM."]
+        if prefs:
+            lines.append(
+                f"I currently have {len(prefs)} saved preference entries"
+                + (f", including {', '.join(pref_keys)}." if pref_keys else ".")
+            )
+        else:
+            lines.append("I do not currently have saved preference entries.")
+        if anchor_titles:
+            lines.append(f"For this thread I also have anchors such as {', '.join(anchor_titles)}.")
+        if open_loops:
+            lines.append(
+                f"I am tracking {len(open_loops)} open loops"
+                + (f", including {', '.join(open_loop_titles)}." if open_loop_titles else ".")
+            )
+        else:
+            lines.append("I am not tracking any open loops right now.")
+        current_topic = str(summary.get("current_topic") or "").strip()
+        if current_topic and current_topic != "none":
+            lines.append(f"My current conversation topic is {current_topic}.")
+        lines.append("If you want, I can show your preferences or open loops next.")
+        message = " ".join(lines)
+        return self._runtime_truth_response(
+            text=message,
+            route="agent_memory",
+            used_runtime_state=False,
+            used_memory=True,
+            used_tools=["memory_store"],
+            payload={
+                "type": "agent_memory",
+                "kind": "memory_inspect",
+                "summary": message,
+                "preferences_count": len(prefs),
+                "anchor_count": len(anchors),
+                "open_loop_count": len(open_loops),
+                "thread_id": thread_id,
+            },
+        )
+
+    def _operational_status_response(self, user_id: str, text: str, kind: str) -> OrchestratorResponse:
+        normalized_kind = str(kind or "").strip().lower()
+        if normalized_kind == "operational_doctor":
+            result = self._tool_handler_doctor({}, user_id)
+            return self._runtime_truth_response(
+                text=str(result.get("user_text") or "").strip() or "Doctor report ready.",
+                route="operational_status",
+                used_runtime_state=False,
+                used_tools=["doctor"],
+                payload={
+                    "type": "operational_status",
+                    "kind": "doctor",
+                    "summary": str(result.get("user_text") or "").strip() or "Doctor report ready.",
+                },
+            )
+        if normalized_kind == "operational_agent_status":
+            result = self._tool_handler_status({}, user_id)
+            return self._runtime_truth_response(
+                text=str(result.get("user_text") or "").strip() or "Agent status ready.",
+                route="operational_status",
+                used_runtime_state=False,
+                used_tools=["status"],
+                payload={
+                    "type": "operational_status",
+                    "kind": "status",
+                    "summary": str(result.get("user_text") or "").strip() or "Agent status ready.",
+                },
+            )
+        nl_decision = nl_route(text)
+        if str(nl_decision.get("intent") or "") not in {"OBSERVE_PC", "EXPLAIN_PREVIOUS"}:
+            result = self._tool_handler_observe_system_health({}, user_id)
+            return self._runtime_truth_response(
+                text=str(result.get("user_text") or "").strip() or "System health report ready.",
+                route="operational_status",
+                used_runtime_state=False,
+                used_tools=["observe_system_health"],
+                payload={
+                    "type": "operational_status",
+                    "kind": "observe_system_health",
+                    "summary": str(result.get("user_text") or "").strip() or "System health report ready.",
+                },
+            )
+        response = self._handle_nl_observe(user_id, text, nl_decision)
+        payload = dict(response.data) if isinstance(response.data, dict) else {}
+        summary = str(payload.get("summary") or response.text or "").strip() or "Status snapshot ready."
+        return self._runtime_truth_response(
+            text=str(response.text or "").strip() or summary,
+            route="operational_status",
+            used_runtime_state=False,
+            used_tools=[
+                str(item.get("function") or "").strip()
+                for item in (nl_decision.get("skills") if isinstance(nl_decision.get("skills"), list) else [])
+                if isinstance(item, dict) and str(item.get("function") or "").strip()
+            ],
+            payload={
+                "type": "operational_status",
+                "kind": str(nl_decision.get("intent") or "OBSERVE_PC"),
+                "summary": summary,
+                **payload,
+            },
+        )
+
+    @staticmethod
+    def _format_cost_per_1m(value: Any) -> str:
+        return f"${float(value or 0.0):.2f} per 1M tokens"
+
+    @staticmethod
+    def _model_policy_candidate_label(candidate: dict[str, Any] | None) -> str | None:
+        if not isinstance(candidate, dict):
+            return None
+        model_id = str(candidate.get("model_id") or "").strip()
+        if model_id:
+            return model_id
+        provider_id = str(candidate.get("provider_id") or "").strip().lower()
+        if provider_id:
+            return provider_id
+        return None
+
+    @staticmethod
+    def _model_controller_policy_message(payload: dict[str, Any]) -> str:
+        mode = str(payload.get("mode") or "safe").strip().lower() or "safe"
+        mode_label = str(payload.get("mode_label") or ("SAFE MODE" if mode == "safe" else "Controlled Mode")).strip() or ("SAFE MODE" if mode == "safe" else "Controlled Mode")
+        mode_source = str(payload.get("mode_source") or "config_default").strip().lower() or "config_default"
+        allow_remote_recommendation = bool(payload.get("allow_remote_recommendation", payload.get("allow_remote_fallback", True)))
+        status_line = (
+            f"Status: {mode_label} is active because you explicitly turned it on."
+            if mode_source == "explicit_override"
+            else f"Status: {mode_label} is the current baseline."
+        )
+        if mode == "safe":
+            lines = [
+                "Mode: SAFE MODE.",
+                status_line,
+                "Allowed: I can inspect runtime, setup, and model status, and I can recommend local models.",
+                "Blocked: remote switching and install/download/import.",
+                "Transition: Controlled Mode only starts if you turn it on explicitly.",
+                "Approval: I still need your approval before I test a model, switch temporarily, make a default change, or switch back.",
+            ]
+        else:
+            allowed_line = (
+                "Allowed: I can recommend ready local models and usable cloud models when provider health and policy allow them."
+                if allow_remote_recommendation
+                else "Allowed: I can recommend ready local models. Cloud recommendations are paused by policy right now."
+            )
+            install_line = (
+                "Approval: I need your explicit approval before I test a model, switch temporarily, make a model the default, or acquire/install it through the canonical model manager."
+                if bool(payload.get("allow_install_pull", True))
+                else "Approval: I need your explicit approval before I test a model, switch temporarily, or make a model the default. Install/download is paused by policy right now."
+            )
+            lines = [
+                f"Mode: {mode_label}.",
+                status_line,
+                allowed_line,
+                "Automatic actions: none. I will not switch or install on my own.",
+                "Transition: You can return to SAFE MODE at any time.",
+                install_line,
+            ]
+        return "\n".join(lines)
+
+    def _model_controller_policy_payload_response(
+        self,
+        payload: dict[str, Any],
+        *,
+        route: str,
+        used_tools: list[str] | None = None,
+        ok: bool = True,
+        error_kind: str | None = None,
+        extra_payload: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse:
+        message = self._model_controller_policy_message(payload)
+        runtime_payload = {
+            **dict(payload),
+            "type": "model_controller_policy",
+            "title": "Model control mode",
+            "summary": message,
+        }
+        if isinstance(extra_payload, dict):
+            runtime_payload.update(extra_payload)
+        return self._runtime_truth_response(
+            text=message,
+            route=route,
+            payload=runtime_payload,
+            used_tools=used_tools,
+            ok=ok,
+            error_kind=error_kind,
+        )
+
+    def _model_controller_policy_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.model_controller_policy_status()
+        return self._model_controller_policy_payload_response(
+            dict(payload) if isinstance(payload, dict) else {},
+            route="model_policy_status",
+        )
+
+    def _control_mode_change_response(self, requested_mode: str) -> OrchestratorResponse:
+        adapter = self._chat_runtime_adapter
+        set_mode = getattr(adapter, "llm_control_mode_set", None)
+        if not callable(set_mode):
+            return self._runtime_state_unavailable_response(
+                route="action_tool",
+                reason="control_mode_unavailable",
+            )
+        ok, body = set_mode(
+            {
+                "mode": str(requested_mode or "").strip().lower(),
+                "confirm": True,
+                "actor": "assistant",
+            }
+        )
+        response_body = dict(body) if isinstance(body, dict) else {}
+        policy_payload = (
+            dict(response_body.get("policy"))
+            if isinstance(response_body.get("policy"), dict)
+            else {}
+        )
+        if not policy_payload and callable(getattr(adapter, "llm_control_mode_status", None)):
+            status_payload = adapter.llm_control_mode_status()
+            policy_payload = dict(status_payload) if isinstance(status_payload, dict) else {}
+        if not policy_payload:
+            truth = self._runtime_truth()
+            if truth is not None and callable(getattr(truth, "model_controller_policy_status", None)):
+                status_payload = truth.model_controller_policy_status()
+                policy_payload = dict(status_payload) if isinstance(status_payload, dict) else {}
+        if not ok:
+            message = str(response_body.get("message") or "").strip() or "I couldn't change the control mode right now."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                ok=False,
+                error_kind=str(response_body.get("error_kind") or response_body.get("error") or "control_mode_change_failed").strip() or "control_mode_change_failed",
+                used_tools=["model_controller"],
+                payload={
+                    "type": "model_controller_policy",
+                    "action": "control_mode_set",
+                    "requested_mode": str(requested_mode or "").strip().lower() or None,
+                    "summary": message,
+                    "ok": False,
+                    "result": response_body,
+                    **policy_payload,
+                },
+            )
+        return self._model_controller_policy_payload_response(
+            policy_payload,
+            route="action_tool",
+            used_tools=["model_controller"],
+            extra_payload={
+                "action": "control_mode_set",
+                "requested_mode": str(requested_mode or "").strip().lower() or None,
+                "result": response_body,
+            },
+        )
+
+    def _model_policy_status_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.model_policy_status()
+        cheap_cap = self._format_cost_per_1m(payload.get("cheap_remote_cap_per_1m"))
+        general_cap = self._format_cost_per_1m(payload.get("general_remote_cap_per_1m"))
+        selected = self._model_policy_candidate_label(
+            payload.get("selected_candidate") if isinstance(payload.get("selected_candidate"), dict) else None
+        )
+        if bool(payload.get("switch_recommended", False)):
+            recommended = self._model_policy_candidate_label(
+                payload.get("recommended_candidate") if isinstance(payload.get("recommended_candidate"), dict) else None
+            )
+            message = (
+                "Your model-selection policy is local first: I keep the strongest healthy approved local chat model "
+                f"when it is good enough, then free remote models, then cheap remote models under {cheap_cap}. "
+                f"Ordinary routing still uses the broader default cap of {general_cap}. "
+                f"Right now I would recommend {recommended or 'a different model'}, but I will not switch automatically."
+            )
+        else:
+            message = (
+                "Your model-selection policy is local first: I keep the strongest healthy approved local chat model "
+                f"when it is good enough, then free remote models, then cheap remote models under {cheap_cap}. "
+                f"Ordinary routing still uses the broader default cap of {general_cap}. "
+                f"Right now I would keep {selected or 'the current default'}."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="model_policy_status",
+            payload={
+                **dict(payload),
+                "type": "model_policy_status",
+                "title": "Model selection policy",
+                "summary": message,
+            },
+        )
+
+    def _model_policy_cap_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.model_policy_status()
+        cheap_cap = self._format_cost_per_1m(payload.get("cheap_remote_cap_per_1m"))
+        general_cap = self._format_cost_per_1m(payload.get("general_remote_cap_per_1m"))
+        message = (
+            f"Your cheap remote recommendation cap is {cheap_cap}. "
+            f"Ordinary routing still uses the broader default cap of {general_cap}."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="model_policy_status",
+            payload={
+                **dict(payload),
+                "type": "model_policy_status",
+                "title": "Cheap remote cap",
+                "summary": message,
+            },
+        )
+
+    def _model_policy_current_choice_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.model_policy_status()
+        current_candidate = payload.get("current_candidate") if isinstance(payload.get("current_candidate"), dict) else {}
+        selected_candidate = payload.get("selected_candidate") if isinstance(payload.get("selected_candidate"), dict) else {}
+        free_remote = (
+            payload.get("tier_candidates").get("free_remote")
+            if isinstance(payload.get("tier_candidates"), dict)
+            and isinstance(payload.get("tier_candidates").get("free_remote"), dict)
+            else None
+        )
+        current_label = self._model_policy_candidate_label(current_candidate) or self._model_policy_candidate_label(selected_candidate) or "the current model"
+        if bool(payload.get("switch_recommended", False)):
+            recommended_label = self._model_policy_candidate_label(
+                payload.get("recommended_candidate") if isinstance(payload.get("recommended_candidate"), dict) else None
+            )
+            message = (
+                f"I am still using {current_label} because it is the current default, but policy would recommend "
+                f"{recommended_label or 'another model'} because {str(payload.get('decision_detail') or '').strip().lower()}. "
+                "I still need your approval before I try that model."
+            )
+        else:
+            detail = str(payload.get("decision_detail") or "").strip().rstrip(".")
+            message = f"I am using {current_label} because {detail.lower()}."
+            if bool((current_candidate or selected_candidate).get("local", False)) and free_remote is not None:
+                message = f"{message.rstrip('.')} Free remote candidates were not preferred because local-first retained the current local model."
+        return self._runtime_truth_response(
+            text=message,
+            route="model_policy_status",
+            payload={
+                **dict(payload),
+                "type": "model_policy_explanation",
+                "title": "Current model choice",
+                "summary": message,
+            },
+        )
+
+    def _model_policy_provider_explanation_response(self, provider_id: str | None) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        provider_key = str(provider_id or "").strip().lower() or None
+        provider_payload = truth.model_policy_provider_candidate(provider_key)
+        provider_status = provider_payload.get("provider_status") if isinstance(provider_payload.get("provider_status"), dict) else {}
+        provider_label = self._setup_provider_label(provider_key)
+        selection = provider_payload.get("selection") if isinstance(provider_payload.get("selection"), dict) else {}
+        provider_selection = provider_payload.get("provider_selection") if isinstance(provider_payload.get("provider_selection"), dict) else {}
+        candidate = provider_payload.get("candidate") if isinstance(provider_payload.get("candidate"), dict) else None
+        current_label = self._model_policy_candidate_label(
+            selection.get("selected_candidate") if isinstance(selection.get("selected_candidate"), dict) else None
+        ) or "the current model"
+
+        if not bool(provider_status.get("configured", False)):
+            message = f"I didn't switch to {provider_label} because it is not configured for chat right now."
+        elif candidate is None:
+            rejected = next(
+                (
+                    row
+                    for row in (
+                        provider_selection.get("rejected_candidates")
+                        if isinstance(provider_selection.get("rejected_candidates"), list)
+                        else []
+                    )
+                    if isinstance(row, dict)
+                ),
+                {},
+            )
+            rejected_reason = str(rejected.get("reason") or "").strip().lower()
+            if rejected_reason == "cheap_remote_cap_exceeded":
+                message = (
+                    f"I didn't switch to {provider_label} because its paid models are above the automatic cheap cap of "
+                    f"{self._format_cost_per_1m(selection.get('cheap_remote_cap_per_1m'))}."
+                )
+            elif rejected_reason == "auth_missing":
+                message = f"I didn't switch to {provider_label} because its API key is not available."
+            else:
+                message = f"I didn't switch to {provider_label} because it does not have a policy-allowed chat model right now."
+        elif bool(selection.get("switch_recommended", False)) and str((candidate or {}).get("provider_id") or "").strip().lower() == provider_key:
+            message = f"I would recommend {provider_label} with {self._model_policy_candidate_label(candidate) or 'its best candidate'} right now, but I would still ask first."
+        else:
+            message = (
+                f"I didn't switch to {provider_label} because {str(selection.get('decision_detail') or '').strip().lower()}. "
+                f"The best {provider_label} candidate right now is {self._model_policy_candidate_label(candidate) or 'unavailable'}, "
+                f"and local-first kept {current_label}."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="model_policy_status",
+            payload={
+                **dict(provider_payload),
+                "type": "model_policy_explanation",
+                "title": f"{provider_label} policy explanation",
+                "summary": message,
+                "provider_id": provider_key,
+            },
+        )
+
+    def _model_policy_switch_candidate_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        payload = truth.model_policy_candidate()
+        candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None
+        selection = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
+        current_label = self._model_policy_candidate_label(
+            selection.get("selected_candidate") if isinstance(selection.get("selected_candidate"), dict) else None
+        ) or "the current model"
+        candidate_label = self._model_policy_candidate_label(candidate)
+        if bool(payload.get("switch_recommended", False)) and candidate_label:
+            message = f"I would recommend {candidate_label} right now, but I will not switch automatically."
+        else:
+            message = f"I would keep {current_label} right now because {str(payload.get('decision_detail') or '').strip().lower()}."
+        return self._runtime_truth_response(
+            text=message,
+            route="model_policy_status",
+            payload={
+                **dict(payload),
+                "type": "model_policy_candidate",
+                "title": "Best current candidate",
+                "summary": message,
+            },
+        )
+
+    def _model_policy_tier_candidate_response(self, tier: str | None) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_policy_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        tier_key = str(tier or "").strip().lower() or None
+        payload = truth.model_policy_candidate(tier_key)
+        candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None
+        tier_label = "free remote" if tier_key == "free_remote" else "cheap remote"
+        if candidate is None:
+            if tier_key == "cheap_remote":
+                message = (
+                    f"I do not have a cheap remote model under the automatic cap of "
+                    f"{self._format_cost_per_1m(payload.get('cheap_remote_cap_per_1m'))} right now."
+                )
+            else:
+                message = f"I do not have a {tier_label} model available right now."
+        else:
+            message = f"I would choose {self._model_policy_candidate_label(candidate)} as the best {tier_label} model right now."
+        return self._runtime_truth_response(
+            text=message,
+            route="model_policy_status",
+            payload={
+                **dict(payload),
+                "type": "model_policy_candidate",
+                "title": f"{tier_label.title()} candidate",
+                "summary": message,
+            },
+        )
+
+    def _find_ollama_models_response(self) -> OrchestratorResponse:
+        return self._model_inventory_response(local_only=True, provider_id="ollama")
+
+    def _execute_switch_better_local_model(
+        self,
+        user_id: str,
+        *,
+        model_id: str | None,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        candidate_model_id = str(model_id or "").strip() or None
+        if not candidate_model_id:
+            message = "I could not find a better local model right now."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                ok=False,
+                error_kind="local_model_unavailable",
+                payload={
+                    "type": "model_switch",
+                    "provider": "ollama",
+                    "ok": False,
+                    "title": "No local model found",
+                    "summary": message,
+                },
+            )
+        configure_ok, configure_body = truth.configure_local_chat_model(candidate_model_id)
+        configured_model = str((configure_body if isinstance(configure_body, dict) else {}).get("model_id") or candidate_model_id or "").strip() or None
+        message = str((configure_body if isinstance(configure_body, dict) else {}).get("message") or "I switched to a local model.")
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            used_memory=False,
+            used_tools=["model_controller"],
+            error_kind=None if configure_ok else str((configure_body if isinstance(configure_body, dict) else {}).get("error") or "local_model_switch_failed").strip() or "local_model_switch_failed",
+            ok=bool(configure_ok),
+            payload={
+                "type": "model_switch",
+                "provider": "ollama",
+                "ok": bool(configure_ok),
+                "model_id": configured_model,
+                "title": "Local model update",
+                "summary": message,
+            },
+        )
+
+    def _switch_better_local_model_response(self, user_id: str, *, confirmed: bool = False) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        choose_ok, choose_body = truth.choose_best_local_chat_model({"refresh": True})
+        if not choose_ok:
+            message = str((choose_body if isinstance(choose_body, dict) else {}).get("message") or "I could not find a better local model right now.")
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                error_kind=str((choose_body if isinstance(choose_body, dict) else {}).get("error") or "").strip() or None,
+                ok=False,
+                payload={
+                    "type": "model_switch",
+                    "provider": "ollama",
+                    "ok": False,
+                    "title": "No local model found",
+                    "summary": message,
+                },
+            )
+        candidate = choose_body.get("candidate") if isinstance(choose_body.get("candidate"), dict) else {}
+        candidate_model_id = str(candidate.get("model_id") or "").strip() or None
+        current = truth.current_chat_target_status()
+        if candidate_model_id and str(current.get("provider") or "").strip().lower() == "ollama" and str(current.get("model") or "").strip() == candidate_model_id:
+            message = f"Chat is already using the best available local model: {candidate_model_id}."
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                payload={
+                    "type": "model_switch",
+                    "provider": "ollama",
+                    "ok": True,
+                    "model_id": candidate_model_id,
+                    "title": "Local model unchanged",
+                    "summary": message,
+                },
+            )
+        if not confirmed:
+            question = (
+                f"I will switch chat to the best available local model {candidate_model_id}. "
+                "This mutates the configured chat model. Reply yes to proceed or no to cancel."
+            )
+            return self._confirmation_preview_response(
+                user_id,
+                route="model_status",
+                question=question,
+                used_tools=["model_controller"],
+                action={
+                    "operation": "switch_better_local_model",
+                    "params": {
+                        "model_id": candidate_model_id,
+                    },
+                },
+                title="Best local switch confirmation",
+                preview_payload={
+                    "provider": "ollama",
+                    "model_id": candidate_model_id,
+                    "preview": {
+                        "provider": "ollama",
+                        "model_id": candidate_model_id,
+                        "switch_kind": "best_local",
+                    },
+                },
+            )
+        return self._execute_switch_better_local_model(user_id, model_id=candidate_model_id)
+
+    def _configure_ollama_response(
+        self,
+        *,
+        make_default: bool,
+        used_memory: bool,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="setup_flow",
+                used_memory=used_memory,
+                reason="runtime_truth_service_unavailable",
+            )
+        snapshot = truth.provider_status("ollama")
+        current = truth.current_chat_target_status()
+        choose_ok, choose_body = truth.choose_best_local_chat_model({"refresh": True})
+        if not choose_ok:
+            message = str((choose_body if isinstance(choose_body, dict) else {}).get("message") or "I could not find a usable Ollama chat model right now.")
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=used_memory,
+                error_kind=str((choose_body if isinstance(choose_body, dict) else {}).get("error") or "local_model_unavailable").strip() or "local_model_unavailable",
+                ok=False,
+                payload={
+                    "type": "provider_test_result",
+                    "provider": "ollama",
+                    "ok": False,
+                    "title": "Ollama setup",
+                    "summary": message,
+                },
+            )
+        candidate = choose_body.get("candidate") if isinstance(choose_body.get("candidate"), dict) else {}
+        candidate_model_id = str(candidate.get("model_id") or snapshot.get("model_id") or "").strip() or None
+        if candidate_model_id and str(current.get("provider") or "").strip().lower() == "ollama" and str(current.get("model") or "").strip() == candidate_model_id:
+            message = f"Ollama is already configured for chat with {candidate_model_id}."
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=used_memory,
+                payload={
+                    "type": "setup_complete",
+                    "provider": "ollama",
+                    "model_id": candidate_model_id,
+                    "ok": True,
+                    "title": "Ollama ready",
+                    "summary": message,
+                },
+            )
+        if not candidate_model_id:
+            message = "I could not find a usable Ollama chat model right now."
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=used_memory,
+                ok=False,
+                error_kind="local_model_unavailable",
+                payload={
+                    "type": "provider_test_result",
+                    "provider": "ollama",
+                    "ok": False,
+                    "title": "Ollama setup",
+                    "summary": message,
+                },
+            )
+        configure_ok, configure_body = truth.configure_local_chat_model(candidate_model_id)
+        message = str((configure_body if isinstance(configure_body, dict) else {}).get("message") or "Ollama is ready for chat.")
+        configured_model = str((configure_body if isinstance(configure_body, dict) else {}).get("model_id") or candidate_model_id).strip() or candidate_model_id
+        return self._runtime_truth_response(
+            text=message,
+            route="setup_flow",
+            used_memory=used_memory,
+            error_kind=None if configure_ok else str((configure_body if isinstance(configure_body, dict) else {}).get("error") or "local_model_switch_failed").strip() or "local_model_switch_failed",
+            ok=bool(configure_ok),
+            payload={
+                "type": "setup_complete" if configure_ok else "provider_test_result",
+                "provider": "ollama",
+                "model_id": configured_model,
+                "ok": bool(configure_ok),
+                "title": "Ollama ready" if configure_ok else "Ollama setup",
+                "summary": message,
+                "make_default": bool(make_default),
+            },
+        )
+
+    def _setup_explanation_response(self, *, used_memory: bool) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="setup_flow",
+                used_memory=used_memory,
+                reason="runtime_truth_service_unavailable",
+            )
+        setup = truth.setup_status()
+        active_provider = str(setup.get("active_provider") or "").strip().lower() or None
+        active_model = str(setup.get("active_model") or "").strip() or None
+        provider_label = self._setup_provider_label(active_provider)
+        setup_state = str(setup.get("setup_state") or "unavailable").strip().lower() or "unavailable"
+        attention_kind = str(setup.get("attention_kind") or "").strip().lower() or None
+        provider_health_status = (
+            str(setup.get("provider_health_status") or "unknown").strip().lower() or "unknown"
+        )
+        health_reason = str(setup.get("provider_health_reason") or "").strip() or None
+        local_installed_rows = [
+            dict(row)
+            for row in (
+                setup.get("local_installed_models")
+                if isinstance(setup.get("local_installed_models"), list)
+                else []
+            )
+            if isinstance(row, dict)
+        ]
+        other_local_rows = [
+            dict(row)
+            for row in (
+                setup.get("other_local_models")
+                if isinstance(setup.get("other_local_models"), list)
+                else []
+            )
+            if isinstance(row, dict)
+        ]
+
+        if setup_state == "ready" and active_model:
+            message = f"Setup looks okay right now. Chat is using {active_model} on {provider_label}."
+            if active_provider == "ollama" and provider_health_status == "ok":
+                message = f"{message.rstrip('.')} Ollama is reachable."
+            elif active_provider:
+                message = f"{message.rstrip('.')} {provider_label} looks healthy."
+            if other_local_rows:
+                preview = self._inventory_preview(other_local_rows, limit=4)
+                if preview:
+                    message = f"{message.rstrip('.')} Other local chat models I can see are {preview}."
+            ok = True
+        elif setup_state == "attention" and active_model and active_provider:
+            if attention_kind == "provider_down":
+                message = (
+                    f"Setup needs attention right now. Chat is configured for {active_model} on {provider_label}, "
+                    f"but {provider_label} is not responding right now."
+                )
+            elif attention_kind == "provider_degraded":
+                message = (
+                    f"Setup needs attention right now. Chat is configured for {active_model} on {provider_label}, "
+                    f"but {provider_label} needs attention right now."
+                )
+            elif attention_kind == "model_unhealthy":
+                message = (
+                    f"Setup needs attention right now. Chat is configured for {active_model} on {provider_label}, "
+                    "but that model is not healthy right now."
+                )
+            else:
+                message = (
+                    f"Setup needs attention right now. Chat is configured for {active_model} on {provider_label}, "
+                    "but it is not ready right now."
+                )
+            if health_reason:
+                message = f"{message.rstrip('.')} Reason: {health_reason}."
+            ok = False
+        elif setup_state == "inventory_only":
+            preview = self._inventory_preview(local_installed_rows, limit=4)
+            message = (
+                f"I can see local chat models {preview}, but none is active right now."
+                if preview
+                else "I can see local chat models, but none is active right now."
+            )
+            ok = False
+        else:
+            message = (
+                "No chat model is available right now. "
+                "If you want, I can help you start Ollama or switch to another configured provider."
+            )
+            ok = False
+
+        return self._runtime_truth_response(
+            text=message,
+            route="setup_flow",
+            used_memory=used_memory,
+            used_runtime_state=True,
+            payload={
+                "type": "setup_explanation",
+                "ok": ok,
+                "provider": active_provider,
+                "model_id": active_model,
+                "health_status": provider_health_status,
+                "health_reason": health_reason,
+                "summary": message,
+            },
+        )
+
+    def _set_default_model_response(
+        self,
+        user_id: str,
+        text: str,
+        state: dict[str, Any],
+        *,
+        confirmed: bool = False,
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                used_memory=bool(state),
+                reason="runtime_truth_service_unavailable",
+            )
+        promote_default = self._model_controller_promote_requested(text)
+        resolution = self._resolve_controller_model_target(user_id, text)
+        if str(resolution.get("status") or "") == "ambiguous":
+            matches = [
+                str(item).strip()
+                for item in (resolution.get("matches") if isinstance(resolution.get("matches"), list) else [])
+                if str(item).strip()
+            ]
+            requested = str(resolution.get("requested") or "that model").strip() or "that model"
+            options = ", ".join(matches[:3])
+            message = (
+                f"I can switch to {requested} on more than one provider: {options}. "
+                "Which exact model do you want?"
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="model_status",
+                used_memory=bool(state),
+                next_question=message,
+                payload={
+                    "type": "action_required",
+                    "title": "Which exact model?",
+                    "summary": message,
+                    "matches": matches,
+                },
+            )
+        matched_model = (
+            str(resolution.get("model_id") or "").strip()
+            or str(state.get("model_id") or "").strip()
+            or None
+        )
+        provider_id = str(
+            resolution.get("provider_id")
+            or (matched_model.split(":", 1)[0] if matched_model and ":" in matched_model else "")
+            or ""
+        ).strip().lower() or None
+        if not confirmed:
+            if not matched_model:
+                message = (
+                    "I couldn't find that model in the current runtime registry. "
+                    "If you want, I can list the models that are ready now or the local installed models."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="model_status",
+                    used_memory=bool(state),
+                    next_question=message,
+                    payload={
+                        "type": "action_required",
+                        "title": "Which model?",
+                        "summary": message,
+                    },
+                )
+            if promote_default:
+                question = (
+                    f"I will make {matched_model} the default chat model. "
+                    "This mutates the configured chat target. Reply yes to proceed or no to cancel."
+                )
+            else:
+                question = (
+                    f"I will switch chat to {matched_model}. "
+                    "This mutates the active chat target. Reply yes to proceed or no to cancel."
+                )
+            return self._confirmation_preview_response(
+                user_id,
+                route="model_status",
+                question=question,
+                used_tools=["model_controller"],
+                action={
+                    "operation": "model_set_target",
+                    "params": {
+                        "model_id": matched_model,
+                        "provider_id": provider_id,
+                        "promote_default": promote_default,
+                        "used_memory": bool(state),
+                    },
+                },
+                title="Default model confirmation" if promote_default else "Model switch confirmation",
+                preview_payload={
+                    "provider": provider_id,
+                    "model_id": matched_model,
+                    "preview": {
+                        "provider": provider_id,
+                        "model_id": matched_model,
+                        "switch_kind": "make_default" if promote_default else "direct_switch",
+                    },
+                },
+                used_memory=bool(state),
+            )
+        return self._execute_model_set_target(
+            user_id,
+            model_id=matched_model,
+            provider_id=provider_id,
+            promote_default=promote_default,
+            used_memory=bool(state),
+        )
+
+    def _cancel_pending_setup_response(self, user_id: str, state: dict[str, Any]) -> OrchestratorResponse:
+        had_pending = bool(state)
+        self._clear_runtime_setup_state(user_id)
+        step = str(state.get("step") or "").strip().lower()
+        if had_pending and step == "awaiting_openrouter_reuse_confirm":
+            message = "Okay, I won't use the stored OpenRouter key right now."
+        else:
+            message = "Okay, I will keep the current chat model." if had_pending else "There is no pending setup right now."
+        return self._runtime_truth_response(
+            text=message,
+            route="setup_flow",
+            used_memory=had_pending,
+            payload={
+                "type": "action_required",
+                "title": "No change made",
+                "summary": message,
+            },
+        )
+
+    def _confirm_pending_setup_response(self, user_id: str, state: dict[str, Any]) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="setup_flow",
+                used_memory=bool(state),
+                reason="runtime_truth_service_unavailable",
+            )
+        step = str(state.get("step") or "").strip().lower()
+        if step == "awaiting_openrouter_reuse_confirm":
+            current = truth.current_chat_target_status()
+            make_default = bool(state.get("make_default"))
+            configure_ok, configure_body = truth.configure_openrouter(
+                None,
+                {
+                    "make_default": make_default,
+                    "defer_model_refresh": True,
+                },
+            )
+            configured_model = str((configure_body if isinstance(configure_body, dict) else {}).get("model_id") or "").strip() or None
+            if not configure_ok:
+                self._save_runtime_setup_state(
+                    user_id,
+                    {
+                        "step": "awaiting_openrouter_key",
+                        "provider": "openrouter",
+                        "make_default": make_default,
+                    },
+                )
+                message = str((configure_body if isinstance(configure_body, dict) else {}).get("message") or "OpenRouter setup did not succeed.")
+                return self._runtime_truth_response(
+                    text=message,
+                    route="setup_flow",
+                    used_memory=True,
+                    error_kind=str((configure_body if isinstance(configure_body, dict) else {}).get("error") or "upstream_down").strip() or "upstream_down",
+                    ok=False,
+                    payload={
+                        "type": "provider_test_result",
+                        "provider": "openrouter",
+                        "model_id": configured_model,
+                        "ok": False,
+                        "title": "OpenRouter test failed",
+                        "summary": message,
+                    },
+                )
+            self._clear_runtime_setup_state(user_id)
+            if configured_model and not make_default and bool(current.get("ready", False)):
+                prompt = f"OpenRouter is ready. Do you want me to switch chat to {configured_model} now?"
+                self._save_runtime_setup_state(
+                    user_id,
+                    {
+                        "step": "awaiting_switch_confirm",
+                        "action_type": "confirm_model_switch",
+                        "provider": "openrouter",
+                        "model_id": configured_model,
+                    },
+                )
+                return self._runtime_truth_response(
+                    text=prompt,
+                    route="setup_flow",
+                    used_memory=True,
+                    next_question=prompt,
+                    payload={
+                        "type": "confirm_switch_model",
+                        "provider": "openrouter",
+                        "model_id": configured_model,
+                        "title": "Use OpenRouter for chat?",
+                        "prompt": prompt,
+                        "approve_label": "Use OpenRouter",
+                        "approve_command": "yes",
+                        "cancel_label": "Keep current",
+                        "cancel_command": "no",
+                        "summary": prompt,
+                    },
+                )
+
+            message = str((configure_body if isinstance(configure_body, dict) else {}).get("message") or "OpenRouter is ready.")
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=True,
+                payload={
+                    "type": "setup_complete",
+                    "provider": "openrouter",
+                    "model_id": configured_model,
+                    "ok": True,
+                    "title": "OpenRouter ready",
+                    "summary": message,
+                },
+            )
+
+        pending_model = str(state.get("model_id") or "").strip()
+        pending_provider = str(state.get("provider") or "").strip().lower() or None
+        pending_action = str(state.get("action_type") or "").strip().lower() or None
+        if step != "awaiting_switch_confirm" or pending_action not in {"", "confirm_model_switch", "confirm_model_scout_switch"} or not pending_model:
+            self._clear_runtime_setup_state(user_id)
+            message = "There is no pending model switch right now."
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=bool(state),
+                payload={
+                    "type": "action_required",
+                    "title": "No pending switch",
+                    "summary": message,
+                },
+            )
+        current_target = truth.current_chat_target_status()
+        previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
+        previous_provider = str(state.get("previous_provider") or previous_provider or "").strip().lower() or None
+        previous_model = str(state.get("previous_model") or previous_model or "").strip() or None
+        explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+        if callable(explicit_setter):
+            default_ok, default_body = explicit_setter(
+                pending_model,
+                provider_id=pending_provider,
+            )
+        else:
+            default_ok, default_body = truth.set_default_chat_model(pending_model)
+        self._clear_runtime_setup_state(user_id)
+        applied_provider = str((default_body if isinstance(default_body, dict) else {}).get("provider") or pending_provider).strip().lower() or None
+        applied_model = str((default_body if isinstance(default_body, dict) else {}).get("model_id") or pending_model).strip() or None
+        if bool(default_ok):
+            self._record_model_trial_switch(
+                user_id,
+                previous_provider=previous_provider,
+                previous_model=previous_model,
+                applied_provider=applied_provider,
+                applied_model=applied_model,
+                source="model_scout_v2" if pending_action == "confirm_model_scout_switch" else "confirmed_switch",
+            )
+        return self._post_switch_response(
+            truth=truth,
+            route="setup_flow",
+            used_memory=True,
+            used_tools=["model_controller"],
+            ok=bool(default_ok),
+            body=default_body if isinstance(default_body, dict) else {},
+            applied_provider=applied_provider,
+            applied_model=applied_model,
+            success_type="setup_complete",
+            success_title="Chat model updated",
+            failure_title="Model switch failed",
+        )
+
+    def _configure_openrouter_response(
+        self,
+        user_id: str,
+        decision: dict[str, Any],
+        state: dict[str, Any],
+    ) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="setup_flow",
+                used_memory=bool(state),
+                reason="runtime_truth_service_unavailable",
+            )
+        make_default = bool(decision.get("make_default") or state.get("make_default"))
+        current = truth.current_chat_target_status()
+        if not bool(current.get("ready", False)):
+            if not str(current.get("model") or "").strip():
+                make_default = True
+        provider_snapshot = truth.provider_status("openrouter")
+        api_key = str(decision.get("api_key") or "").strip()
+        if not api_key and not bool(provider_snapshot.get("secret_present", False)):
+            self._save_runtime_setup_state(
+                user_id,
+                {
+                    "step": "awaiting_openrouter_key",
+                    "provider": "openrouter",
+                    "make_default": make_default,
+                },
+            )
+            message = "Paste your OpenRouter API key and I will finish the setup."
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=bool(state),
+                next_question=message,
+                payload={
+                    "type": "request_secret",
+                    "provider": "openrouter",
+                    "secret_kind": "api_key",
+                    "title": "OpenRouter key needed",
+                    "prompt": message,
+                    "submit_hint": "Paste the key directly in chat.",
+                    "summary": message,
+                },
+            )
+        if not api_key and not make_default and bool(provider_snapshot.get("secret_present", False)):
+            self._save_runtime_setup_state(
+                user_id,
+                {
+                    "step": "awaiting_openrouter_reuse_confirm",
+                    "provider": "openrouter",
+                    "make_default": False,
+                },
+            )
+            message = "I already have an OpenRouter API key stored. Reply yes and I will test it now, or paste a new key to replace it."
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=bool(state),
+                next_question=message,
+                payload={
+                    "type": "confirm_reuse_secret",
+                    "provider": "openrouter",
+                    "title": "Stored OpenRouter key available",
+                    "prompt": message,
+                    "approve_label": "Use stored key",
+                    "approve_command": "yes",
+                    "cancel_label": "Cancel",
+                    "cancel_command": "no",
+                    "submit_hint": "Or paste a new OpenRouter API key.",
+                    "summary": message,
+                },
+            )
+
+        configure_ok, configure_body = truth.configure_openrouter(
+            api_key,
+            {
+                "make_default": make_default,
+                "defer_model_refresh": True,
+            },
+        )
+        configured_model = str((configure_body if isinstance(configure_body, dict) else {}).get("model_id") or "").strip() or None
+        if not configure_ok:
+            self._save_runtime_setup_state(
+                user_id,
+                {
+                    "step": "awaiting_openrouter_key",
+                    "provider": "openrouter",
+                    "make_default": make_default,
+                },
+            )
+            message = str((configure_body if isinstance(configure_body, dict) else {}).get("message") or "OpenRouter setup did not succeed.")
+            return self._runtime_truth_response(
+                text=message,
+                route="setup_flow",
+                used_memory=bool(state) or bool(api_key),
+                error_kind=str((configure_body if isinstance(configure_body, dict) else {}).get("error") or "upstream_down").strip() or "upstream_down",
+                ok=False,
+                payload={
+                    "type": "provider_test_result",
+                    "provider": "openrouter",
+                    "model_id": configured_model,
+                    "ok": False,
+                    "title": "OpenRouter test failed",
+                    "summary": message,
+                },
+            )
+
+        self._clear_runtime_setup_state(user_id)
+        if configured_model and not make_default and bool(current.get("ready", False)):
+            prompt = f"OpenRouter is ready. Do you want me to switch chat to {configured_model} now?"
+            self._save_runtime_setup_state(
+                user_id,
+                {
+                    "step": "awaiting_switch_confirm",
+                    "action_type": "confirm_model_switch",
+                    "provider": "openrouter",
+                    "model_id": configured_model,
+                },
+            )
+            return self._runtime_truth_response(
+                text=prompt,
+                route="setup_flow",
+                used_memory=bool(state),
+                next_question=prompt,
+                payload={
+                    "type": "confirm_switch_model",
+                    "provider": "openrouter",
+                    "model_id": configured_model,
+                    "title": "Use OpenRouter for chat?",
+                    "prompt": prompt,
+                    "approve_label": "Use OpenRouter",
+                    "approve_command": "yes",
+                    "cancel_label": "Keep current",
+                    "cancel_command": "no",
+                    "summary": prompt,
+                },
+            )
+
+        message = str((configure_body if isinstance(configure_body, dict) else {}).get("message") or "OpenRouter is ready.")
+        return self._runtime_truth_response(
+            text=message,
+            route="setup_flow",
+            used_memory=bool(state),
+            payload={
+                "type": "setup_complete",
+                "provider": "openrouter",
+                "model_id": configured_model,
+                "ok": True,
+                "title": "OpenRouter ready",
+                "summary": message,
+            },
+        )
+
+    def _handle_runtime_truth_chat(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        state = self._current_runtime_setup_state(user_id)
+        repair_choice = self._repair_option_choice_response(user_id, text)
+        if repair_choice is not None:
+            return repair_choice
+        repair_followup = self._repair_context_handoff_response(user_id, text)
+        if repair_followup is not None:
+            return repair_followup
+        decision = classify_runtime_chat_route(
+            text,
+            awaiting_secret=str(state.get("step") or "") == "awaiting_openrouter_key",
+            awaiting_confirmation=str(state.get("step") or "") in {"awaiting_switch_confirm", "awaiting_openrouter_reuse_confirm"},
+        )
+        route = str(decision.get("route") or "generic_chat").strip().lower() or "generic_chat"
+        kind = str(decision.get("kind") or "none").strip().lower()
+        if kind == "product_specific_guard":
+            adapter = self._chat_runtime_adapter
+            if bool(
+                callable(getattr(adapter, "should_use_assistant_frontdoor", None))
+                and adapter.should_use_assistant_frontdoor(
+                    text=text,
+                    route_decision=decision,
+                    is_user_chat=True,
+                )
+            ):
+                return None
+            action_tool_response = self._handle_action_tool_intent(user_id, text)
+            if action_tool_response is not None:
+                return action_tool_response
+            return self._runtime_state_unavailable_response(
+                route="runtime_status",
+                used_memory=bool(state),
+                reason="product_specific_message_unclassified",
+            )
+        mode_safe_model_kinds = {
+            "describe_current_model",
+            "local_model_inventory",
+            "model_lifecycle_status",
+            "find_ollama_models",
+            "recommend_local_model",
+            "switch_better_local_model",
+            "model_ready_now",
+            "model_availability",
+            "model_scout_strategy",
+            "model_scout_discovery",
+        }
+        control_mode_response = (
+            None if kind in mode_safe_model_kinds else self._control_mode_intent_response(text)
+        )
+        if control_mode_response is not None:
+            return control_mode_response
+        if route == "generic_chat" or kind in {"none", "generic_chat"}:
+            return None
+        if kind in {"operational_doctor", "operational_agent_status", "operational_observe"}:
+            return self._operational_status_response(user_id, text, kind)
+        if kind == "assistant_capabilities":
+            return self._assistant_capabilities_response()
+        if kind in {"agent_memory_inspect", "agent_memory_preferences", "agent_memory_open_loops"}:
+            return self._agent_memory_response(user_id, kind, query_text=text)
+        if self._runtime_truth() is None:
+            return self._runtime_state_unavailable_response(
+                route=route,
+                used_memory=bool(state),
+                reason="runtime_truth_service_unavailable",
+            )
+        if kind == "providers_status":
+            return self._providers_status_response()
+        if kind == "provider_status":
+            return self._provider_status_response(str(decision.get("provider_id") or ""))
+        if kind in {"runtime_status", "telegram_status"}:
+            return self._runtime_status_response(kind)
+        if kind == "model_controller_policy":
+            return self._model_controller_policy_response()
+        if kind == "model_policy_status":
+            return self._model_policy_status_response()
+        if kind == "model_policy_cap":
+            return self._model_policy_cap_response()
+        if kind == "model_policy_current_choice":
+            return self._model_policy_current_choice_response()
+        if kind == "model_policy_provider_explanation":
+            return self._model_policy_provider_explanation_response(str(decision.get("provider_id") or "").strip() or None)
+        if kind == "model_policy_switch_candidate":
+            return self._model_policy_switch_candidate_response()
+        if kind == "model_policy_tier_candidate":
+            return self._model_policy_tier_candidate_response(str(decision.get("tier") or "").strip() or None)
+        if kind == "governance_adapters":
+            return self._governance_adapters_response()
+        if kind == "governance_background_tasks":
+            return self._governance_background_tasks_response()
+        if kind == "governance_blocks":
+            return self._governance_blocks_response()
+        if kind == "governance_pending":
+            return self._governance_pending_response()
+        if kind == "governance_overview":
+            return self._governance_overview_response()
+        if kind == "governance_skill_status":
+            return self._governance_skill_status_response(str(decision.get("skill_id") or "").strip() or None)
+        if kind == "governance_execution_mode":
+            return self._governance_execution_mode_response(str(decision.get("target_id") or "").strip() or None)
+        if kind == "governance_adapter_detail":
+            return self._governance_adapter_detail_response(str(decision.get("adapter_id") or "").strip() or None)
+        if kind == "describe_current_model":
+            return self._current_model_response()
+        if kind == "filesystem_list_directory":
+            return self._filesystem_list_directory_response(str(decision.get("path_hint") or "").strip() or None)
+        if kind == "filesystem_stat_path":
+            return self._filesystem_stat_path_response(str(decision.get("path_hint") or "").strip() or None)
+        if kind == "filesystem_read_text_file":
+            return self._filesystem_read_text_file_response(str(decision.get("path_hint") or "").strip() or None)
+        if kind == "filesystem_search_filenames":
+            return self._filesystem_search_filenames_response(
+                root_hint=str(decision.get("path_hint") or "").strip() or None,
+                query=str(decision.get("query") or "").strip() or None,
+            )
+        if kind == "filesystem_search_text":
+            return self._filesystem_search_text_response(
+                root_hint=str(decision.get("path_hint") or "").strip() or None,
+                query=str(decision.get("query") or "").strip() or None,
+            )
+        if kind == "shell_safe_command":
+            return self._shell_execute_safe_command_response(
+                command_name=str(decision.get("command_name") or "").strip() or None,
+                subject=str(decision.get("subject") or "").strip() or None,
+                query=str(decision.get("query") or "").strip() or None,
+                cwd=str(decision.get("cwd") or "").strip() or None,
+            )
+        if kind == "shell_install_package":
+            return self._shell_install_package_response(
+                user_id,
+                manager=str(decision.get("manager") or "").strip() or None,
+                package=str(decision.get("package") or "").strip() or None,
+                scope=str(decision.get("scope") or "").strip() or None,
+                dry_run=bool(decision.get("dry_run", False)),
+            )
+        if kind == "shell_create_directory":
+            return self._shell_create_directory_response(user_id, str(decision.get("path_hint") or "").strip() or None)
+        if kind == "shell_blocked_request":
+            return self._shell_blocked_request_response(
+                blocked_reason=str(decision.get("blocked_reason") or "").strip() or "unsupported_command",
+                request_text=str(decision.get("request_text") or "").strip() or None,
+            )
+        if kind == "model_lifecycle_status":
+            return self._model_lifecycle_response(text)
+        if kind == "model_scout_strategy":
+            return self._model_scout_strategy_response(user_id, text)
+        if kind == "model_scout_discovery":
+            return self._model_scout_discovery_response()
+        if kind == "recommend_local_model":
+            return self._model_scout_strategy_response(
+                user_id,
+                text,
+                requested_role_override="best_local",
+            )
+        if kind == "model_switch_advisory":
+            return self._model_switch_advisory_response()
+        if kind == "model_ready_now":
+            return self._model_ready_now_response()
+        if kind == "model_availability":
+            return self._model_inventory_response(
+                local_only=False,
+                remote_only=str(decision.get("inventory_scope") or "").strip().lower() == "remote",
+            )
+        if kind == "local_model_inventory":
+            provider_hint = str(decision.get("provider_id") or "").strip().lower() or None
+            return self._model_inventory_response(local_only=True, provider_id=provider_hint)
+        if kind == "find_ollama_models":
+            return self._find_ollama_models_response()
+        if kind == "switch_better_local_model":
+            return self._switch_better_local_model_response(user_id)
+        if kind == "model_acquisition_request":
+            return self._model_acquire_response(user_id, text)
+        if kind == "set_default_model":
+            return self._set_default_model_response(user_id, text, state)
+        if kind == "cancel_pending_setup":
+            return self._cancel_pending_setup_response(user_id, state)
+        if kind == "confirm_pending_setup":
+            return self._confirm_pending_setup_response(user_id, state)
+        if kind == "setup_explanation":
+            return self._setup_explanation_response(used_memory=bool(state))
+        if kind == "configure_ollama":
+            return self._configure_ollama_response(
+                make_default=bool(decision.get("make_default")),
+                used_memory=bool(state),
+            )
+        if kind in {"configure_openrouter", "provide_openrouter_key"}:
+            return self._configure_openrouter_response(user_id, decision, state)
+        return self._runtime_state_unavailable_response(
+            route=route,
+            used_memory=bool(state),
+            reason="unhandled_runtime_truth_route",
         )
 
     def _tool_handler_brief(self, request: dict[str, Any], user_id: str) -> dict[str, Any]:
@@ -613,8 +9164,93 @@ class Orchestrator:
         except Exception:
             return
 
-    def _llm_chat(self, user_id: str, text: str) -> OrchestratorResponse:
-        trace_id = f"orch-{uuid.uuid4().hex[:10]}"
+    @staticmethod
+    def _normalize_chat_messages(messages: Any, fallback_text: str) -> list[dict[str, str]]:
+        normalized: list[dict[str, str]] = []
+        for item in (messages if isinstance(messages, list) else []):
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip().lower() or "user"
+            if role not in {"system", "user", "assistant"}:
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            normalized.append({"role": role, "content": content})
+        if normalized:
+            return normalized
+        fallback = str(fallback_text or "").strip()
+        if not fallback:
+            return []
+        return [{"role": "user", "content": fallback}]
+
+    def _llm_chat(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse:
+        context = dict(chat_context) if isinstance(chat_context, dict) else {}
+        trace_id = str(context.get("trace_id") or "").strip() or f"orch-{uuid.uuid4().hex[:10]}"
+        source_surface = str(context.get("source_surface") or "orchestrator").strip().lower() or "orchestrator"
+        purpose = str(context.get("purpose") or "chat").strip() or "chat"
+        task_type_override = str(context.get("task_type") or purpose).strip() or "chat"
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        normalized_messages = self._normalize_chat_messages(context.get("messages"), text)
+        memory_context_text = str(context.get("memory_context_text") or "").strip()
+        if not memory_context_text:
+            memory_context_text = self._selective_chat_memory_context(user_id, text)
+        used_memory = bool(memory_context_text) or len(normalized_messages) > 1
+        runtime_adapter_used = bool(self._chat_runtime_adapter)
+        # Final SAFE MODE/frontdoor containment guard. Deterministic assistant
+        # handling should still win even if a grounded request drifted this far.
+        containment_response = self._safe_mode_containment_response(user_id, text)
+        if containment_response is not None:
+            return containment_response
+        unmatched_response = self._assistant_unmatched_input_response(user_id, text)
+        if unmatched_response is not None:
+            return unmatched_response
+        working_memory_payload = self._prepare_working_memory_for_chat(
+            user_id=user_id,
+            text=text,
+            payload=dict(payload),
+            thread_id=str(context.get("thread_id") or "").strip() or None,
+            messages=normalized_messages,
+            memory_context_text=memory_context_text,
+        )
+        normalized_messages = (
+            list(working_memory_payload.get("messages"))
+            if isinstance(working_memory_payload.get("messages"), list)
+            else normalized_messages
+        )
+        memory_context_text = str(working_memory_payload.get("memory_context_text") or "").strip()
+        used_memory = bool(memory_context_text) or len(normalized_messages) > 1 or bool(
+            working_memory_payload.get("used_working_memory")
+        )
+        payload = dict(payload)
+        payload["memory_context_text"] = memory_context_text
+        prepared = None
+        defaults: dict[str, Any] = {}
+        if runtime_adapter_used and callable(
+            getattr(self._chat_runtime_adapter, "prepare_orchestrator_chat_request", None)
+        ):
+            adapter_payload = self._chat_runtime_adapter.prepare_orchestrator_chat_request(
+                {
+                    "payload": dict(payload),
+                    "messages": normalized_messages,
+                    "request_started_epoch": int(context.get("request_started_epoch") or 0) or int(time.time()),
+                    "trace_id": trace_id,
+                    "source_surface": source_surface,
+                }
+            )
+            if isinstance(adapter_payload, dict):
+                prepared = adapter_payload.get("prepared")
+                defaults = (
+                    dict(adapter_payload.get("defaults"))
+                    if isinstance(adapter_payload.get("defaults"), dict)
+                    else {}
+                )
         heuristic_command = self._heuristic_llm_command(text)
         if heuristic_command:
             try:
@@ -636,7 +9272,15 @@ class Orchestrator:
                     task_type="tool_use",
                     fallback_count=0,
                 )
-                return response
+                return self._merge_response_data(
+                    response,
+                    route="generic_chat",
+                    used_runtime_state=runtime_adapter_used,
+                    used_llm=False,
+                    used_memory=used_memory,
+                    used_tools=[str(tool_request.get("tool") or "").strip()],
+                    ok=True,
+                )
             except Exception:
                 pass
         if not self._llm_chat_available():
@@ -649,39 +9293,141 @@ class Orchestrator:
                 task_type="chat",
                 fallback_count=0,
             )
-            return self._bootstrap_no_chat_response()
-        system_prompt = (
-            "You are Personal Agent, a local-first assistant.\n"
-            "Identity rule: you run inside the user's Personal Agent runtime.\n"
-            "Never say you were created by Anthropic/OpenAI or any external vendor.\n"
-            "Be the default chat UI. Keep replies concise and practical.\n"
-            "Ask one clarifying question when needed.\n"
-            "Never claim you ran checks/actions unless they actually ran.\n"
-            "If system state is unknown, say so and offer to check.\n"
-            "IF YOU NEED SYSTEM FACTS, YOU MUST reply with ONLY ONE LINE and NOTHING ELSE:\n"
-            "[[RUN:/brief]] or [[RUN:/status]] or [[RUN:/health]]\n"
-            "Use at most one RUN directive.\n"
-            "DO NOT suggest slash commands.\n"
-            "DO NOT print '/brief /status /help' in normal chat."
-        )
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": str(text or "")},
-        ]
-        try:
-            router_result = route_inference(
-                llm_client=self.llm_client,
-                messages=messages,
-                user_text=text,
-                task_hint=text,
-                purpose="chat",
-                trace_id=trace_id,
-                compute_tier="low",
-                metadata={
-                    "trace_id": trace_id,
-                    "source_surface": "orchestrator",
-                },
+            return self._merge_response_data(
+                self._bootstrap_no_chat_response(),
+                route="generic_chat",
+                used_runtime_state=runtime_adapter_used,
+                used_llm=False,
+                used_memory=used_memory,
+                used_tools=[],
+                ok=True,
             )
+        system_prompt = (
+            "\n".join(self._assistant_identity_prompt_lines())
+            + "\n"
+            + "Be friendly, calm, competent, concise, and practical.\n"
+            + "Avoid generic filler, canned support-bot language, and vendor/model self-descriptions.\n"
+            + "Sound like one consistent assistant, not a shell wrapper or support bot.\n"
+            + "Ask one clarifying question when needed.\n"
+            + "Never claim you ran checks/actions unless they actually ran.\n"
+            + "If system state is unknown, say so and offer to check.\n"
+            + "IF YOU NEED SYSTEM FACTS, YOU MUST reply with ONLY ONE LINE and NOTHING ELSE:\n"
+            + "[[RUN:/brief]] or [[RUN:/status]] or [[RUN:/health]]\n"
+            + "Use at most one RUN directive.\n"
+            + "DO NOT suggest slash commands.\n"
+            + "DO NOT print '/brief /status /help' in normal chat."
+        )
+        if memory_context_text:
+            system_prompt = (
+                f"{system_prompt}\n"
+                "Relevant remembered context (use only if it directly helps; never invent beyond it):\n"
+                f"{memory_context_text}"
+            )
+        messages = normalized_messages or [{"role": "user", "content": str(text or "").strip()}]
+        channel = self._chat_channel(context.get("channel") or source_surface)
+        explicit_timeout_seconds = float(payload.get("timeout_seconds") or 0) or None
+        request_id = str(context.get("request_id") or "").strip() or None
+
+        def _route_inference_kwargs(*, latency_fallback: bool) -> dict[str, Any]:
+            routed_messages = (
+                list(getattr(prepared, "messages", []))
+                if prepared is not None and isinstance(getattr(prepared, "messages", None), list)
+                else [{"role": "system", "content": system_prompt}, *messages]
+            )
+            effective_timeout_seconds = explicit_timeout_seconds
+            if channel == "telegram":
+                budget = (
+                    _TELEGRAM_LATENCY_FALLBACK_TIMEOUT_SECONDS
+                    if latency_fallback
+                    else _TELEGRAM_LATENCY_ROUTE_TIMEOUT_SECONDS
+                )
+                if effective_timeout_seconds is None:
+                    effective_timeout_seconds = budget
+                else:
+                    effective_timeout_seconds = min(float(effective_timeout_seconds), budget)
+            return {
+                "llm_client": self.llm_client,
+                "messages": routed_messages,
+                "user_text": (
+                    str(getattr(prepared, "last_user_text", "") or "").strip()
+                    if prepared is not None
+                    else str(text or "").strip()
+                ),
+                "task_hint": (
+                    str(getattr(prepared, "last_user_text", "") or "").strip()
+                    if prepared is not None
+                    else str(text or "").strip()
+                ),
+                "purpose": purpose,
+                "task_type": task_type_override,
+                "trace_id": trace_id,
+                "provider_override": (
+                    str(getattr(prepared, "provider_override", "") or "").strip().lower() or None
+                    if prepared is not None
+                    else None
+                ),
+                "model_override": (
+                    str(getattr(prepared, "model_override", "") or "").strip() or None
+                    if prepared is not None
+                    else None
+                ),
+                "require_tools": bool(getattr(prepared, "require_tools", False)) if prepared is not None else False,
+                "require_json": bool(payload.get("require_json")),
+                "require_vision": bool(payload.get("require_vision")),
+                "min_context_tokens": int(payload.get("min_context_tokens") or 0) or None,
+                "timeout_seconds": effective_timeout_seconds,
+                "compute_tier": "low",
+                "metadata": {
+                    "trace_id": trace_id,
+                    "source_surface": source_surface,
+                    "channel": channel,
+                    "latency_fallback": bool(latency_fallback),
+                    "selection_reason": (
+                        str(getattr(prepared, "selection_reason", "") or "").strip()
+                        if prepared is not None
+                        else None
+                    ),
+                },
+            }
+        try:
+            if prepared is not None and isinstance(getattr(prepared, "direct_result", None), dict):
+                router_result = dict(prepared.direct_result)
+                router_data = {}
+                used_llm = False
+            else:
+                router_result = route_inference(**_route_inference_kwargs(latency_fallback=False))
+                if channel == "telegram" and self._router_error_kind(router_result) == "timeout":
+                    slow_model = self._router_attempt_model(router_result)
+                    initial_duration_ms = int(router_result.get("duration_ms") or 0)
+                    self._record_runtime_event(
+                        "telegram_latency_guard",
+                        request_id=request_id,
+                        trace_id=trace_id,
+                        source=source_surface,
+                        model_selected=slow_model,
+                        duration_ms=initial_duration_ms,
+                        fallback_used=True,
+                    )
+                    fallback_result = route_inference(**_route_inference_kwargs(latency_fallback=True))
+                    fallback_model = self._router_attempt_model(fallback_result)
+                    self._record_runtime_event(
+                        "telegram_latency_fallback",
+                        request_id=request_id,
+                        trace_id=trace_id,
+                        source=source_surface,
+                        slow_model=slow_model,
+                        fallback_model=fallback_model,
+                        duration_ms=int(fallback_result.get("duration_ms") or initial_duration_ms),
+                        fallback_used=True,
+                        ok=bool(fallback_result.get("ok")),
+                    )
+                    router_result = fallback_result
+                router_data = (
+                    router_result.get("data")
+                    if isinstance(router_result.get("data"), dict)
+                    else {}
+                )
+                used_llm = True
         except Exception:
             self._log_llm_selection(
                 trace_id=trace_id,
@@ -692,10 +9438,18 @@ class Orchestrator:
                 task_type="chat",
                 fallback_count=0,
             )
-            return self._llm_error_fallback_response(user_id, text)
-        router_data = router_result.get("data") if isinstance(router_result.get("data"), dict) else {}
+            return self._merge_response_data(
+                self._llm_error_fallback_response(user_id, text),
+                route="generic_chat",
+                used_runtime_state=runtime_adapter_used,
+                used_llm=False,
+                used_memory=used_memory,
+                used_tools=[],
+                ok=False,
+                error_kind="llm_router_exception",
+            )
         task_request = router_data.get("task_request") if isinstance(router_data.get("task_request"), dict) else {}
-        task_type = str(task_request.get("task_type") or router_result.get("task_type") or "chat")
+        task_type = str(task_request.get("task_type") or router_result.get("task_type") or task_type_override)
         selection = router_data.get("selection") if isinstance(router_data.get("selection"), dict) else {}
         selection_reason = str(router_result.get("selection_reason") or selection.get("reason") or "router_default").strip() or "router_default"
         selection_fallbacks = [
@@ -705,6 +9459,27 @@ class Orchestrator:
         ]
         selected_provider = str(router_result.get("provider") or "").strip() or None
         selected_model = str(router_result.get("model") or "").strip() or None
+        selection_policy = (
+            build_chat_selection_policy_meta(prepared=prepared, result=router_result, defaults=defaults)
+            if prepared is not None and defaults
+            else None
+        )
+        response_common: dict[str, Any] = {
+            "route": "generic_chat",
+            "used_runtime_state": runtime_adapter_used,
+            "used_llm": bool(used_llm),
+            "used_memory": used_memory,
+            "used_tools": [],
+            "ok": bool(router_result.get("ok")),
+            "provider": selected_provider,
+            "model": selected_model,
+            "fallback_used": bool(router_result.get("fallback_used", False)),
+            "attempts": router_result.get("attempts") or [],
+            "duration_ms": int(router_result.get("duration_ms") or 0),
+            "error_kind": str(router_result.get("error_kind") or router_result.get("error_class") or "").strip() or None,
+        }
+        if selection_policy is not None:
+            response_common["selection_policy"] = selection_policy
         if not bool(router_result.get("ok")):
             self._log_llm_selection(
                 trace_id=trace_id,
@@ -717,7 +9492,8 @@ class Orchestrator:
             )
             llm_text = str(router_result.get("text") or "").strip()
             if llm_text:
-                return OrchestratorResponse(
+                return self._merge_response_data(
+                    OrchestratorResponse(
                     llm_text,
                     {
                         "llm_control": {
@@ -725,8 +9501,13 @@ class Orchestrator:
                             **router_data,
                         }
                     },
+                    ),
+                    **response_common,
                 )
-            return self._llm_error_fallback_response(user_id, text)
+            return self._merge_response_data(
+                self._llm_error_fallback_response(user_id, text),
+                **response_common,
+            )
         llm_text = str(router_result.get("text") or "").strip()
         if llm_text:
             llm_text = self._sanitize_vendor_identity_claim(
@@ -751,7 +9532,14 @@ class Orchestrator:
                     task_type=task_type,
                     fallback_count=len(selection_fallbacks),
                 )
-                return response
+                return self._merge_response_data(
+                    response,
+                    **{
+                        **response_common,
+                        "ok": True,
+                        "used_tools": [str(tool_request.get("tool") or "").strip()],
+                    },
+                )
             directive_command = self._parse_llm_run_directive(llm_text)
             if directive_command:
                 try:
@@ -776,7 +9564,14 @@ class Orchestrator:
                         task_type=task_type,
                         fallback_count=len(selection_fallbacks),
                     )
-                    return response
+                    return self._merge_response_data(
+                        response,
+                        **{
+                            **response_common,
+                            "ok": True,
+                            "used_tools": [str(tool_request.get("tool") or "").strip()],
+                        },
+                    )
                 except Exception:
                     self._log_llm_selection(
                         trace_id=trace_id,
@@ -787,7 +9582,14 @@ class Orchestrator:
                         task_type=task_type,
                         fallback_count=len(selection_fallbacks),
                     )
-                    return self._llm_error_fallback_response(user_id, text)
+                    return self._merge_response_data(
+                        self._llm_error_fallback_response(user_id, text),
+                        **{
+                            **response_common,
+                            "ok": False,
+                            "error_kind": "run_directive_failed",
+                        },
+                    )
             self._log_llm_selection(
                 trace_id=trace_id,
                 provider=selected_provider,
@@ -797,17 +9599,23 @@ class Orchestrator:
                 task_type=task_type,
                 fallback_count=len(selection_fallbacks),
             )
-            return OrchestratorResponse(
+            return self._merge_response_data(
+                OrchestratorResponse(
                 llm_text,
                 {
                     "llm_chat": {
                         "trace_id": trace_id,
-                        "route": "chat",
-                        "source_surface": "orchestrator",
+                        "route": "generic_chat",
+                        "source_surface": source_surface,
                         "provider": selected_provider,
                         "model": selected_model,
                         "task_type": task_type,
                     }
+                },
+                ),
+                **{
+                    **response_common,
+                    "ok": True,
                 },
             )
 
@@ -820,7 +9628,14 @@ class Orchestrator:
             task_type=task_type,
             fallback_count=len(selection_fallbacks),
         )
-        return self._llm_error_fallback_response(user_id, text)
+        return self._merge_response_data(
+            self._llm_error_fallback_response(user_id, text),
+            **{
+                **response_common,
+                "ok": False,
+                "error_kind": "llm_empty_response",
+            },
+        )
 
     @staticmethod
     def _vendor_claimed_in_text(text: str) -> str | None:
@@ -839,19 +9654,32 @@ class Orchestrator:
         provider: str | None,
         model: str | None,
     ) -> str:
-        claimed_vendor = self._vendor_claimed_in_text(llm_text)
-        if not claimed_vendor:
-            return llm_text
-        provider_id = str(provider or "").strip().lower()
-        model_id = str(model or "").strip().lower()
-        if claimed_vendor in provider_id or claimed_vendor in model_id:
-            return llm_text
+        original_text = str(llm_text or "")
+        original_claimed_vendor = self._vendor_claimed_in_text(original_text)
+        original_identity_leaked = self._assistant_identity_leaked(original_text)
+        sanitized = original_text
+        for pattern, replacement in _ASSISTANT_IDENTITY_REWRITE_PATTERNS:
+            sanitized = pattern.sub(replacement, sanitized, count=1)
+        sanitized = re.sub(r"[ \t]{2,}", " ", sanitized)
+        sanitized = re.sub(r"\s+([,.!?])", r"\1", sanitized).strip()
+        claimed_vendor = self._vendor_claimed_in_text(sanitized)
+        if (
+            not original_claimed_vendor
+            and not original_identity_leaked
+            and not claimed_vendor
+            and not self._assistant_identity_leaked(sanitized)
+        ):
+            return sanitized
+        assistant_name, user_name = self._configured_identity_names()
         identity = get_public_identity(
             provider=provider,
             model=model,
             local_providers={"ollama"},
+            assistant_name=assistant_name,
+            user_name=user_name,
         )
-        return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
+        summary = str(identity.get("summary") or "").strip()
+        return summary or f"I’m {assistant_identity_label(assistant_name=assistant_name)}."
 
     @staticmethod
     def _parse_llm_run_directive(llm_text: str) -> str | None:
@@ -1113,6 +9941,8 @@ class Orchestrator:
 
     def _context(self) -> dict[str, Any]:
         ctx = {"db": self.db, "timezone": self.timezone, "log_path": self.log_path}
+        if self._semantic_memory_service is not None:
+            ctx["semantic_memory"] = self._semantic_memory_service
         if self._runner:
             ctx["runner"] = self._runner
         if self.llm_client:
@@ -1710,12 +10540,13 @@ class Orchestrator:
             "thread_created_at": created_at,
             "thread_label": next_label,
         }
-        self._memory_runtime.set_thread_state(
-            user_id,
-            thread_id=active_thread_id,
-            status="active",
-            updated_at=int(datetime.now(timezone.utc).timestamp()),
-        )
+        if not bool(data.get("skip_runtime_thread_persist", False)):
+            self._memory_runtime.set_thread_state(
+                user_id,
+                thread_id=active_thread_id,
+                status="active",
+                updated_at=int(datetime.now(timezone.utc).timestamp()),
+            )
         return active_thread_id, created_at, next_label
 
     def _epistemic_recent_messages(self, user_id: str, thread_id: str, limit: int = 8) -> tuple[MessageTurn, ...]:
@@ -2196,11 +11027,36 @@ class Orchestrator:
     ) -> OrchestratorResponse:
         skill = self.skills.get(skill_name)
         if not skill:
+            blocked = self._blocked_skill_governance.get(skill_name)
+            if isinstance(blocked, dict):
+                return self._skill_governance_denied_response(skill_name, blocked)
             return OrchestratorResponse("Skill not found.")
 
         func = skill.functions.get(function_name)
         if not func:
             return OrchestratorResponse("Function not found.")
+
+        governance = self._skill_governance_decisions.get(skill_name)
+        if governance is None:
+            governance = self._skill_governance_store.get_skill_governance(skill_name)
+        if isinstance(governance, dict):
+            if not bool(governance.get("allowed", False)):
+                log_event(
+                    self.log_path,
+                    "skill_governance_denied",
+                    {
+                        "skill": skill_name,
+                        "function": function_name,
+                        "reason": str(governance.get("reason") or "execution_governance_denied"),
+                    },
+                )
+                return self._skill_governance_denied_response(skill_name, governance)
+            effective_mode = str(governance.get("requested_execution_mode") or DEFAULT_EXECUTION_MODE).strip().lower() or DEFAULT_EXECUTION_MODE
+            if effective_mode != DEFAULT_EXECUTION_MODE:
+                return OrchestratorResponse(
+                    f"Skill {skill_name} is governed as {effective_mode} and must be run by the main runtime, not directly from chat.",
+                    {"skill_governance": governance},
+                )
 
         pack_id = str(skill.pack_id or skill_name).strip() or skill_name
         iface = f"{skill_name}.{function_name}"
@@ -2405,9 +11261,38 @@ class Orchestrator:
         finally:
             self._runner = None
 
-    def handle_message(self, text: str, user_id: str) -> OrchestratorResponse:
-        response = self._handle_message_impl(text, user_id)
-        final_response = self._apply_epistemic_layer(user_id, text, response)
+    def handle_message(
+        self,
+        text: str,
+        user_id: str,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse:
+        response = self._handle_message_impl(text, user_id, chat_context=chat_context)
+        response_data = response.data if isinstance(response.data, dict) else {}
+        if bool(response_data.get("skip_epistemic_gate", False)):
+            final_response = response
+        else:
+            final_response = self._apply_epistemic_layer(user_id, text, response)
+        final_response = self._apply_assistant_response_guard(
+            user_id=user_id,
+            user_text=text,
+            response=final_response,
+        )
+        self._remember_interpretable_result(
+            user_id=user_id,
+            user_text=text,
+            response=final_response,
+        )
+        try:
+            self._record_chat_working_memory_turn(
+                user_id=user_id,
+                role="assistant",
+                text=final_response.text,
+                chat_context=chat_context,
+            )
+        except Exception:
+            pass
         try:
             self._memory_runtime.record_agent_action(
                 user_id,
@@ -2431,11 +11316,22 @@ class Orchestrator:
             return "memory_summary"
         return None
 
-    def _handle_message_impl(self, text: str, user_id: str) -> OrchestratorResponse:
+    def _handle_message_impl(
+        self,
+        text: str,
+        user_id: str,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse:
         self._runner = Runner()
         try:
+            context = dict(chat_context) if isinstance(chat_context, dict) else {}
+            requested_thread_id = str(context.get("thread_id") or "").strip()
+            if requested_thread_id:
+                self._set_active_thread_id_for_user(user_id, requested_thread_id)
             override, cleaned_text = memory_ingest.parse_memory_override(text)
             cmd = parse_command(text)
+            continuity_health_before = self._memory_runtime.inspect_user_state(user_id)
             if cmd and cmd.name == "nomem":
                 cmd = None
                 text = cleaned_text
@@ -2443,10 +11339,25 @@ class Orchestrator:
             self._memory_runtime.clear_expired_pending_items(user_id)
             if str(effective_user_text or "").strip() and not str(effective_user_text).strip().startswith("/"):
                 self._memory_runtime.record_user_request(user_id, str(effective_user_text))
-            self._memory_runtime.set_thread_state(
-                user_id,
-                runtime_mode=("READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"),
+                try:
+                    self._record_chat_working_memory_turn(
+                        user_id=user_id,
+                        role="user",
+                        text=str(effective_user_text),
+                        chat_context=context,
+                    )
+                except Exception:
+                    pass
+            skip_memory_thread_repair = bool(
+                cmd is not None
+                and cmd.name == "memory"
+                and not bool(continuity_health_before.get("healthy", True))
             )
+            if not skip_memory_thread_repair:
+                self._memory_runtime.set_thread_state(
+                    user_id,
+                    runtime_mode=("READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"),
+                )
             if not cmd:
                 tool_command = self._heuristic_llm_command(effective_user_text)
                 if tool_command == "/health_system":
@@ -2470,7 +11381,12 @@ class Orchestrator:
                     )
                 except (TypeError, ValueError, sqlite3.Error, OSError):
                     pass
-                self._memory_runtime.set_last_tool(user_id, cmd.name)
+                skip_memory_tool_repair = bool(
+                    cmd.name == "memory"
+                    and not bool(continuity_health_before.get("healthy", True))
+                )
+                if not skip_memory_tool_repair:
+                    self._memory_runtime.set_last_tool(user_id, cmd.name)
                 if cmd.name == "confirm":
                     pending = self.confirmations.pop(user_id)
                     if not pending:
@@ -2479,15 +11395,17 @@ class Orchestrator:
                     pending_id = str(action.get("pending_id") or "").strip()
                     if pending_id:
                         self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                    if str(action.get("kind") or "").strip().lower() == "native_mutation":
+                        return self._execute_confirmed_native_mutation(user_id, action)
                     return self._call_skill(
                         user_id,
                         action["skill"],
-                    action["function"],
-                    action["args"],
-                    action["requested_permissions"],
-                    action.get("action_type"),
-                    confirmed=True,
-                )
+                        action["function"],
+                        action["args"],
+                        action["requested_permissions"],
+                        action.get("action_type"),
+                        confirmed=True,
+                    )
 
                 if cmd.name == "remember":
                     result = self._call_skill(
@@ -4329,6 +13247,35 @@ class Orchestrator:
                 if cmd.name == "health":
                     return self._cards_response(user_id, self._health_payload(user_id))
 
+            runtime_text = cleaned_text if override else text
+            if not runtime_text.strip().startswith("/"):
+                interpretation_response = self._interpret_previous_result_followup(
+                    user_id,
+                    runtime_text,
+                    chat_context=context,
+                )
+                if interpretation_response is not None:
+                    return interpretation_response
+                deeper_system_response = self._deep_system_followup_response(user_id, runtime_text)
+                if deeper_system_response is not None:
+                    return deeper_system_response
+                runtime_response = self._handle_runtime_truth_chat(user_id, runtime_text)
+                if runtime_response is not None:
+                    return runtime_response
+                action_tool_response = self._handle_action_tool_intent(user_id, runtime_text)
+                if action_tool_response is not None:
+                    return action_tool_response
+                grounded_fallback = self._grounded_system_fallback_response(
+                    user_id,
+                    runtime_text,
+                    allow_actions=True,
+                )
+                if grounded_fallback is not None:
+                    return grounded_fallback
+                containment_response = self._safe_mode_containment_response(user_id, runtime_text)
+                if containment_response is not None:
+                    return containment_response
+
             thread_id = self._active_thread_id_for_user(user_id)
             if (
                 self._memory_runtime.should_start_new_thread(user_id, text, thread_id)
@@ -4407,6 +13354,8 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
                         action = pending_action.action
+                        if str(action.get("kind") or "").strip().lower() == "native_mutation":
+                            return self._execute_confirmed_native_mutation(user_id, action)
                         return self._call_skill(
                             user_id,
                             action["skill"],
@@ -4542,8 +13491,7 @@ class Orchestrator:
                     cards_payload = self._preferences_cards_payload()
                     return self._cards_response(user_id, cards_payload)
                 if nl_intent == "MEMORY_INSPECT":
-                    cards_payload = self._memory_inspection_payload()
-                    return self._cards_response(user_id, cards_payload)
+                    return self._agent_memory_response(user_id, "agent_memory_inspect", query_text=text)
                 if nl_intent == "OPEN_LOOPS_LIST":
                     return self._cards_response(user_id, self._open_loops_payload(status="open", order="due"))
                 if nl_intent == "DAILY_BRIEF_STATUS":
@@ -4595,7 +13543,7 @@ class Orchestrator:
                 return OrchestratorResponse(gate_result.get("message", ""))
 
             if self._llm_chat_available():
-                return self._llm_chat(user_id, text)
+                return self._llm_chat(user_id, text, chat_context=context)
 
             # Rule-based intent routing (v0.1)
             intent_ctx = self._intent_context()
@@ -5053,6 +14001,7 @@ class Orchestrator:
         tasks_md = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "tasks.md"))
         tasks: list[tuple[str, int | None]] = []
         lowered = (request_text or "").strip().lower()
+        open_loops = self.db.list_open_loops(status="open", limit=6, order="due")
         if os.path.isfile(tasks_md):
             try:
                 with open(tasks_md, "r", encoding="utf-8") as handle:
@@ -5078,20 +14027,50 @@ class Orchestrator:
         if "quick wins" in lowered:
             quick = [item for item in tasks if item[1] is not None and item[1] <= 20]
             tasks = quick if quick else tasks
+            open_loops = [row for row in open_loops if int(row.get("priority") or 3) <= 2]
         if "top 3" in lowered or "top three" in lowered or "priorities" in lowered:
             tasks = tasks[:3]
-        lines = [
+            open_loops = open_loops[:3]
+        task_lines = [
             f"{title} ({mins}m)" if mins is not None else title
             for title, mins in tasks[:6]
             if title
         ]
+        open_loop_lines: list[str] = []
+        for row in open_loops[:3]:
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            if not title:
+                continue
+            due = str(row.get("due_date") or "").strip()
+            priority = int(row.get("priority") or 3)
+            open_loop_lines.append(f"P{priority} {title}" + (f" (due {due})" if due else ""))
+        lines = [*open_loop_lines, *task_lines]
         if not lines:
-            lines = ["No tasks found in tasks.md or DB tasks table."]
-        cards = [{"key": "today-plan", "title": "Today plan", "lines": lines[:6], "severity": "ok"}]
+            lines = ["I do not have any active tasks or urgent open loops saved right now."]
+        cards = [{"key": "today-plan", "title": "Today priorities", "lines": lines[:6], "severity": "ok"}]
+        if open_loop_lines:
+            cards.append(
+                {
+                    "key": "today-open-loops",
+                    "title": "Open loops I am tracking",
+                    "lines": open_loop_lines[:3],
+                    "severity": "warn" if any("(due " in line for line in open_loop_lines[:3]) else "ok",
+                }
+            )
+        if open_loop_lines and task_lines:
+            summary = "Here is a practical plan for today based on your open loops and active tasks."
+        elif open_loop_lines:
+            summary = "Here is a practical plan for today based on the open loops I am tracking."
+        elif task_lines:
+            summary = "Here is a practical plan for today based on your active tasks."
+        else:
+            summary = "I do not have any active tasks or urgent open loops saved right now."
         return build_cards_payload(
             cards,
             raw_available=True,
-            summary="Here is your read-only plan for today.",
+            summary=summary,
             confidence=0.90,
             next_questions=["Show top 3 priorities.", "Show only quick wins."],
         )
@@ -5515,6 +14494,23 @@ class Orchestrator:
             culprit = largest_files[0][0] if largest_files else (growth[0][0] if growth else None)
             summary = f"Disk pressure culprit: {culprit}" if culprit else "Disk pressure is currently stable."
             return summary, ["Show only top growing paths", "Show largest files in /var/log"]
+        if skill_name == "hardware_report":
+            cards_payload = data.get("cards_payload") if isinstance(data, dict) else {}
+            next_questions = [
+                str(item).strip()
+                for item in (
+                    cards_payload.get("next_questions")
+                    if isinstance(cards_payload, dict) and isinstance(cards_payload.get("next_questions"), list)
+                    else []
+                )
+                if str(item).strip()
+            ]
+            summary = str(data.get("text") or "").strip() or "Hardware inventory is ready."
+            return summary, next_questions or [
+                "How much memory am I using?",
+                "How is my storage?",
+                "Can you see the GPU?",
+            ]
         if skill_name == "network_governor":
             cards_payload = data.get("cards_payload") if isinstance(data, dict) else {}
             lines = []
@@ -5558,6 +14554,7 @@ class Orchestrator:
         summary_parts: list[str] = []
         followups: list[str] = []
         permissions_map = {
+            "hardware_report": ["sys:read", "net:none"],
             "storage_report": ["db:read"],
             "resource_report": ["db:read"],
             "network_report": ["db:read"],

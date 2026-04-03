@@ -54,6 +54,21 @@ class Response:
     raw: Any = None
 
 
+@dataclass(frozen=True)
+class EmbeddingResponse:
+    provider: str
+    model: str
+    vectors: tuple[tuple[float, ...], ...]
+    usage: Usage = field(default_factory=Usage)
+    raw: Any = None
+
+    @property
+    def dimensions(self) -> int:
+        if not self.vectors:
+            return 0
+        return len(self.vectors[0])
+
+
 @dataclass
 class LLMError(Exception):
     kind: str

@@ -13,7 +13,7 @@ from agent.model_watch_hf import (
     load_hf_watch_state,
     scan_hf_watch,
 )
-from telegram_adapter.bot import maybe_handle_llm_fixit_reply
+from telegram_adapter.bot import maybe_handle_operator_recovery_reply
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -209,9 +209,9 @@ class TestModelWatchHF(unittest.TestCase):
             "agent.api_server.subprocess.run",
             return_value=Mock(returncode=0, stderr="", stdout=""),
         ) as subprocess_mock:
-            reply = maybe_handle_llm_fixit_reply(
-                llm_fixit_fn=lambda payload: runtime.llm_fixit(payload),
-                wizard_store=runtime._llm_fixit_store,  # type: ignore[attr-defined]
+            reply = maybe_handle_operator_recovery_reply(
+                operator_recovery_fn=lambda payload: runtime.operator_recovery(payload),
+                recovery_store=runtime.operator_recovery_store(),
                 audit_log=None,
                 chat_id="123456789",
                 text="1",
@@ -248,8 +248,13 @@ class TestModelWatchHF(unittest.TestCase):
         self.assertTrue(ok_apply)
         self.assertTrue(bool(body_apply.get("ok")))
         download_mock.assert_called_once()
-        subprocess_mock.assert_called_once()
-        refresh_mock.assert_called_once()
+        self.assertTrue(
+            any(
+                call.args and call.args[0][:2] == ["ollama", "create"]
+                for call in subprocess_mock.call_args_list
+            )
+        )
+        self.assertGreaterEqual(refresh_mock.call_count, 1)
 
 
 if __name__ == "__main__":

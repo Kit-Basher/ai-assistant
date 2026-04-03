@@ -104,6 +104,40 @@ def _doctor_snapshot_for_bootstrap() -> dict[str, object]:
     }
 
 
+def _doctor_snapshot_for_bootstrap_with_two_locals() -> dict[str, object]:
+    return {
+        "providers": [
+            {"id": "ollama", "enabled": True, "local": True},
+        ],
+        "models": [
+            {
+                "id": "ollama:cheap-local",
+                "provider": "ollama",
+                "capabilities": ["chat"],
+                "enabled": True,
+                "available": True,
+                "routable": True,
+                "max_context_tokens": 8192,
+                "input_cost_per_million_tokens": None,
+                "output_cost_per_million_tokens": None,
+                "health": {"status": "ok", "last_checked_at": 1},
+            },
+            {
+                "id": "ollama:strong-local",
+                "provider": "ollama",
+                "capabilities": ["chat"],
+                "enabled": True,
+                "available": True,
+                "routable": True,
+                "max_context_tokens": 65536,
+                "input_cost_per_million_tokens": None,
+                "output_cost_per_million_tokens": None,
+                "health": {"status": "ok", "last_checked_at": 1},
+            },
+        ],
+    }
+
+
 class TestLLMAutopilotUserGrade(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -322,7 +356,56 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
         self.assertFalse(noop_body["applied"])
         self.assertIn("already_configured", (noop_body.get("plan") or {}).get("reasons") or [])
 
-    def test_bootstrap_policy_non_loopback_denies_and_loopback_allows(self) -> None:
+    def test_bootstrap_prefers_stronger_local_not_just_any_local(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                self.snapshots_dir,
+                self.ledger_path,
+                self.autopilot_state_path,
+            )
+        )
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.update_permissions({"mode": "auto", "actions": {"llm.autopilot.bootstrap.apply": True}})
+        document = copy.deepcopy(runtime.registry_document)
+        document["models"]["ollama:cheap-local"] = {  # type: ignore[index]
+            "provider": "ollama",
+            "model": "cheap-local",
+            "capabilities": ["chat"],
+            "quality_rank": 3,
+            "cost_rank": 1,
+            "enabled": True,
+            "available": True,
+            "pricing": {"input_per_million_tokens": None, "output_per_million_tokens": None},
+            "max_context_tokens": 8192,
+        }
+        document["models"]["ollama:strong-local"] = {  # type: ignore[index]
+            "provider": "ollama",
+            "model": "strong-local",
+            "capabilities": ["chat"],
+            "quality_rank": 8,
+            "cost_rank": 3,
+            "enabled": True,
+            "available": True,
+            "pricing": {"input_per_million_tokens": None, "output_per_million_tokens": None},
+            "max_context_tokens": 65536,
+        }
+        defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
+        defaults["default_provider"] = None
+        defaults["default_model"] = None
+        document["defaults"] = defaults
+        saved, error = runtime._persist_registry_document(document)
+        self.assertTrue(saved)
+        self.assertIsNone(error)
+
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot_for_bootstrap_with_two_locals()):
+            ok, body = runtime.llm_autopilot_bootstrap({"actor": "webui", "confirm": True}, trigger="manual")
+        self.assertTrue(ok)
+        self.assertTrue(body["applied"])
+        self.assertEqual("ollama:strong-local", runtime.registry_document["defaults"]["default_model"])
+
+    def test_bootstrap_policy_requires_explicit_opt_in_even_on_loopback(self) -> None:
         runtime_denied = AgentRuntime(
             _config(
                 self.registry_path,
@@ -348,7 +431,7 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
         self.assertFalse(denied_ok)
         self.assertEqual("action_not_permitted", denied_body["error"])
 
-        runtime_allowed = AgentRuntime(
+        runtime_loopback = AgentRuntime(
             _config(
                 self.registry_path,
                 self.db_path,
@@ -356,6 +439,31 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
                 self.ledger_path,
                 self.autopilot_state_path,
                 llm_autopilot_bootstrap_allow_apply=None,
+            )
+        )
+        runtime_loopback.set_listening("127.0.0.1", 8765)
+        document_allowed = copy.deepcopy(runtime_loopback.registry_document)
+        defaults_allowed = document_allowed.get("defaults") if isinstance(document_allowed.get("defaults"), dict) else {}
+        defaults_allowed["default_provider"] = None
+        defaults_allowed["default_model"] = None
+        document_allowed["defaults"] = defaults_allowed
+        runtime_loopback._persist_registry_document(document_allowed)
+        with patch.object(runtime_loopback._router, "doctor_snapshot", return_value=_doctor_snapshot_for_bootstrap()):
+            loopback_ok, loopback_body = runtime_loopback.llm_autopilot_bootstrap(
+                {"actor": "webui", "confirm": True},
+                trigger="manual",
+            )
+        self.assertFalse(loopback_ok)
+        self.assertEqual("action_not_permitted", loopback_body["error"])
+
+        runtime_allowed = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                self.snapshots_dir,
+                self.ledger_path,
+                self.autopilot_state_path,
+                llm_autopilot_bootstrap_allow_apply=True,
             )
         )
         runtime_allowed.set_listening("127.0.0.1", 8765)

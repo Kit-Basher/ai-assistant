@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -10,8 +12,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-from agent.config import load_config
+from agent.config import load_config, resolved_default_log_path
 from agent.doctor import main as doctor_main
 from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import (
@@ -19,7 +22,6 @@ from agent.golden_path import (
     next_step_for_failure,
 )
 from agent.llm.install_approval import validate_install_approval
-from agent.llm.install_executor import execute_install_plan
 from agent.llm.install_planner import build_install_plan
 from agent.llm.install_planner import build_install_plan_for_model
 from agent.llm.model_inventory import build_model_inventory
@@ -40,9 +42,13 @@ from agent.telegram_runtime_state import (
     telegram_control_env,
     write_telegram_enablement,
 )
+from agent.version import read_build_info, read_git_commit
 
 
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
+_LOGGER = logging.getLogger(__name__)
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_STATUS_DEBUG_ENV = "AGENT_CLI_STATUS_DEBUG"
 
 
 def _repo_root() -> Path:
@@ -51,6 +57,47 @@ def _repo_root() -> Path:
 
 def _trace_id(prefix: str) -> str:
     return f"cli-{prefix}-{int(time.time())}-{os.getpid()}"
+
+
+def _llm_install_result_from_decision(*, decision: dict[str, Any], trace_id: str) -> dict[str, Any]:
+    return {
+        "ok": str(decision.get("error_kind") or "").strip() == "already_satisfied",
+        "executed": False,
+        "model_id": str(decision.get("model_id") or "").strip() or None,
+        "install_name": str(decision.get("install_name") or "").strip() or None,
+        "trace_id": trace_id,
+        "error_kind": None if str(decision.get("error_kind") or "").strip() == "already_satisfied" else str(decision.get("error_kind") or "install_not_allowed"),
+        "message": (
+            "Model already installed and healthy."
+            if str(decision.get("error_kind") or "").strip() == "already_satisfied"
+            else str(decision.get("message") or "Install request was rejected.")
+        ),
+        "verification": {},
+        "stdout_tail": "",
+        "stderr_tail": "",
+    }
+
+
+def _execute_llm_install_via_model_manager(*, config: Any, plan: dict[str, Any], trace_id: str) -> dict[str, Any]:
+    decision = validate_install_approval(plan, approve=True)
+    model_id = str(decision.get("model_id") or "").strip()
+    if str(decision.get("error_kind") or "").strip() not in {"", "already_satisfied"} and not bool(decision.get("allowed", False)):
+        return _llm_install_result_from_decision(decision=decision, trace_id=trace_id)
+    if not model_id:
+        return _llm_install_result_from_decision(decision=decision, trace_id=trace_id)
+    from agent.api_server import AgentRuntime
+
+    runtime = AgentRuntime(config)
+    return runtime._model_manager().execute_request(
+        {
+            "kind": "approved_ollama_pull",
+            "model_ref": model_id,
+        },
+        approve=True,
+        trace_id=trace_id,
+        timeout_seconds=1800.0,
+        source="cli.llm_install",
+    )
 
 
 def _http_json(
@@ -91,6 +138,130 @@ def _http_json(
     return False, "non_object_json"
 
 
+def _status_debug_enabled() -> bool:
+    value = str(os.getenv(_STATUS_DEBUG_ENV, "")).strip().lower()
+    return value in {"1", "true", "yes", "on", "debug"}
+
+
+def _emit_status_transport_debug(event: str, **fields: Any) -> None:
+    detail = " ".join(f"{key}={fields[key]}" for key in sorted(fields))
+    _LOGGER.debug("agent.cli.status %s %s", event, detail)
+    if _status_debug_enabled():
+        print(f"agent-cli-debug {event} {detail}".rstrip(), file=sys.stderr, flush=True)
+
+
+def _normalize_loopback_base_url(base_url: str) -> str:
+    parts = urlsplit(str(base_url).strip())
+    hostname = str(parts.hostname or "").strip().lower()
+    if hostname not in _LOOPBACK_HOSTS:
+        return str(base_url).rstrip("/")
+    netloc = "127.0.0.1"
+    if parts.port is not None:
+        netloc = f"{netloc}:{int(parts.port)}"
+    scheme = str(parts.scheme or "http").strip() or "http"
+    return urlunsplit((scheme, netloc, parts.path, parts.query, parts.fragment)).rstrip("/")
+
+
+def _is_loopback_base_url(base_url: str) -> bool:
+    hostname = str(urlsplit(str(base_url).strip()).hostname or "").strip().lower()
+    return hostname in _LOOPBACK_HOSTS
+
+
+def _build_api_request_target(*, base_url: str, path: str) -> str:
+    normalized_base = str(base_url).rstrip("/")
+    parts = urlsplit(normalized_base)
+    base_path = str(parts.path or "").rstrip("/")
+    normalized_path = str(path or "").strip()
+    if not normalized_path.startswith("/"):
+        normalized_path = f"/{normalized_path}"
+    target = f"{base_path}{normalized_path}" or "/"
+    return target if target.startswith("/") else f"/{target}"
+
+
+def _direct_http_json(
+    *,
+    base_url: str,
+    path: str,
+    method: str = "GET",
+    payload: dict[str, Any] | None = None,
+    timeout_seconds: float = 1.5,
+) -> tuple[bool, dict[str, Any] | str]:
+    normalized_base = _normalize_loopback_base_url(base_url) if _is_loopback_base_url(base_url) else str(base_url).rstrip("/")
+    parts = urlsplit(normalized_base)
+    scheme = str(parts.scheme or "http").strip().lower() or "http"
+    host = str(parts.hostname or "127.0.0.1").strip() or "127.0.0.1"
+    port = int(parts.port or (443 if scheme == "https" else 80))
+    url = f"{normalized_base.rstrip('/')}{path}"
+    target = _build_api_request_target(base_url=normalized_base, path=path)
+    normalized_method = str(method or "GET").upper()
+    body_text: str | None = None
+    body_bytes: bytes | None = None
+    headers: dict[str, str] = {}
+    if payload is not None:
+        body_text = json.dumps(payload, ensure_ascii=True, sort_keys=True)
+        body_bytes = body_text.encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    connection_cls: type[http.client.HTTPConnection] | type[http.client.HTTPSConnection]
+    connection_cls = http.client.HTTPSConnection if scheme == "https" else http.client.HTTPConnection
+    connection: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
+    try:
+        start = time.monotonic()
+        _emit_status_transport_debug(
+            "direct_http_start",
+            host=host,
+            method=normalized_method,
+            port=port,
+            target=target,
+            timeout_seconds=f"{float(timeout_seconds):.3f}",
+            url=url,
+        )
+        connection = connection_cls(host, port=port, timeout=max(float(timeout_seconds), 0.1))
+        connection.request(normalized_method, target, body=body_bytes, headers=headers)
+        response = connection.getresponse()
+        raw_bytes = response.read()
+    except Exception as exc:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        _emit_status_transport_debug(
+            "direct_http_exception",
+            elapsed_ms=elapsed_ms,
+            timeout_seconds=f"{float(timeout_seconds):.3f}",
+            url=url,
+            error=f"{exc.__class__.__name__}:{exc}",
+        )
+        return False, f"{exc.__class__.__name__}:{exc}"
+    finally:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    _emit_status_transport_debug(
+        "direct_http_finish",
+        elapsed_ms=elapsed_ms,
+        response_bytes=len(raw_bytes),
+        status=int(response.status),
+        reason=str(getattr(response, "reason", "") or ""),
+        url=url,
+    )
+    raw = raw_bytes.decode("utf-8")
+    if int(response.status) >= 400:
+        try:
+            parsed = json.loads(raw or "{}")
+            if isinstance(parsed, dict):
+                return True, parsed
+        except Exception:
+            pass
+        return False, f"http_{int(response.status)}"
+    try:
+        parsed = json.loads(raw or "{}")
+    except Exception as exc:
+        return False, f"json_error:{exc.__class__.__name__}"
+    if isinstance(parsed, dict):
+        return True, parsed
+    return False, "non_object_json"
+
+
 def _print_error(*, title: str, component: str, next_action: str) -> int:
     print(
         deterministic_error_message(
@@ -104,20 +275,163 @@ def _print_error(*, title: str, component: str, next_action: str) -> int:
     return 1
 
 
+def _timeout_like_error(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return "timeout" in text or "timed out" in text
+
+
+def _load_ready_status_payload(*, base_url: str) -> tuple[bool, dict[str, Any] | str]:
+    attempts = (6.0, 15.0)
+    last_error: dict[str, Any] | str = "ready_unavailable"
+    use_direct_http = _is_loopback_base_url(base_url)
+    for index, timeout_seconds in enumerate(attempts):
+        transport = "urllib"
+        if use_direct_http:
+            transport = "direct_http_loopback"
+            ok, payload_or_error = _direct_http_json(
+                base_url=base_url,
+                path="/ready",
+                timeout_seconds=float(timeout_seconds),
+            )
+        else:
+            ok, payload_or_error = _http_json(
+                base_url=base_url,
+                path="/ready",
+                timeout_seconds=float(timeout_seconds),
+            )
+        if ok and isinstance(payload_or_error, dict):
+            return True, payload_or_error
+        last_error = payload_or_error
+        _LOGGER.debug(
+            "agent.cli.status ready fetch failed transport=%s base_url=%s timeout_seconds=%.3f error=%s",
+            transport,
+            _normalize_loopback_base_url(base_url) if use_direct_http else str(base_url).rstrip("/"),
+            float(timeout_seconds),
+            payload_or_error,
+        )
+        if index + 1 >= len(attempts) or not _timeout_like_error(payload_or_error):
+            break
+    return False, last_error
+
+
+def _load_runtime_status_payload(*, base_url: str) -> tuple[bool, dict[str, Any] | str]:
+    attempts = (2.0, 4.0)
+    last_error: dict[str, Any] | str = "runtime_unavailable"
+    use_direct_http = _is_loopback_base_url(base_url)
+    for index, timeout_seconds in enumerate(attempts):
+        transport = "urllib"
+        if use_direct_http:
+            transport = "direct_http_loopback"
+            ok, payload_or_error = _direct_http_json(
+                base_url=base_url,
+                path="/runtime",
+                timeout_seconds=float(timeout_seconds),
+            )
+        else:
+            ok, payload_or_error = _http_json(
+                base_url=base_url,
+                path="/runtime",
+                timeout_seconds=float(timeout_seconds),
+            )
+        if ok and isinstance(payload_or_error, dict):
+            return True, payload_or_error
+        last_error = payload_or_error
+        _LOGGER.debug(
+            "agent.cli.runtime fetch failed transport=%s base_url=%s timeout_seconds=%.3f error=%s",
+            transport,
+            _normalize_loopback_base_url(base_url) if use_direct_http else str(base_url).rstrip("/"),
+            float(timeout_seconds),
+            payload_or_error,
+        )
+        if index + 1 >= len(attempts) or not _timeout_like_error(payload_or_error):
+            break
+    return False, last_error
+
+
+def _load_runtime_history_payload(*, base_url: str) -> tuple[bool, dict[str, Any] | str]:
+    attempts = (2.0, 4.0)
+    last_error: dict[str, Any] | str = "runtime_history_unavailable"
+    use_direct_http = _is_loopback_base_url(base_url)
+    for index, timeout_seconds in enumerate(attempts):
+        transport = "urllib"
+        if use_direct_http:
+            transport = "direct_http_loopback"
+            ok, payload_or_error = _direct_http_json(
+                base_url=base_url,
+                path="/runtime/history",
+                timeout_seconds=float(timeout_seconds),
+            )
+        else:
+            ok, payload_or_error = _http_json(
+                base_url=base_url,
+                path="/runtime/history",
+                timeout_seconds=float(timeout_seconds),
+            )
+        if ok and isinstance(payload_or_error, dict):
+            return True, payload_or_error
+        last_error = payload_or_error
+        _LOGGER.debug(
+            "agent.cli.runtime_history fetch failed transport=%s base_url=%s timeout_seconds=%.3f error=%s",
+            transport,
+            _normalize_loopback_base_url(base_url) if use_direct_http else str(base_url).rstrip("/"),
+            float(timeout_seconds),
+            payload_or_error,
+        )
+        if index + 1 >= len(attempts) or not _timeout_like_error(payload_or_error):
+            break
+    return False, last_error
+
+
+def _format_runtime_event_line(event: dict[str, Any]) -> str | None:
+    event_name = str(event.get("event") or "").strip().lower()
+    if event_name == "runtime_phase_change":
+        phase_from = str(event.get("phase_from") or "unknown").strip()
+        phase_to = str(event.get("phase_to") or "unknown").strip()
+        return f"{phase_from} -> {phase_to}"
+    if event_name == "default_model_change":
+        new_model = str(event.get("new_model") or "").strip()
+        if new_model:
+            return f"default model set: {new_model}"
+    if event_name == "provider_health_transition":
+        provider = str(event.get("provider") or "provider").strip()
+        old_status = str(event.get("old_status") or "unknown").strip()
+        new_status = str(event.get("new_status") or "unknown").strip()
+        return f"{provider} health: {old_status} -> {new_status}"
+    if event_name == "provider_switch":
+        new_provider = str(event.get("new_provider") or "").strip()
+        if new_provider:
+            return f"provider switched: {new_provider}"
+    return None
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     operator_env = telegram_control_env()
-    ok, payload_or_error = _http_json(
-        base_url=str(args.api_base_url),
-        path="/ready",
-        timeout_seconds=1.0,
-    )
+    if _status_debug_enabled():
+        _emit_status_transport_debug(
+            "status_context",
+            api_base_url=str(args.api_base_url),
+            cwd=os.getcwd(),
+            module_file=__file__,
+            python_executable=sys.executable,
+        )
+    ok, payload_or_error = _load_ready_status_payload(base_url=str(args.api_base_url))
     if not ok or not isinstance(payload_or_error, dict):
         return _print_error(
-            title="LLM provider unavailable",
+            title="Agent status unavailable",
             component="agent.cli.status",
             next_action="run `agent doctor`",
         )
     payload = payload_or_error
+    runtime_ok, runtime_payload_or_error = _load_runtime_status_payload(base_url=str(args.api_base_url))
+    runtime_payload = runtime_payload_or_error if runtime_ok and isinstance(runtime_payload_or_error, dict) else {}
+    runtime_history_ok, runtime_history_payload_or_error = _load_runtime_history_payload(base_url=str(args.api_base_url))
+    runtime_history_payload = (
+        runtime_history_payload_or_error
+        if runtime_history_ok and isinstance(runtime_history_payload_or_error, dict)
+        else {}
+    )
     telegram_runtime = get_telegram_runtime_state(env=operator_env)
     telegram_state = str(telegram_runtime.get("effective_state") or "unknown").strip().lower() or "unknown"
     runtime_status = payload.get("runtime_status") if isinstance(payload.get("runtime_status"), dict) else {}
@@ -158,6 +472,38 @@ def _cmd_status(args: argparse.Namespace) -> int:
         f"telegram: {telegram_state}",
         f"message: {message}",
     ]
+    if runtime_payload:
+        phase = str(runtime_payload.get("phase") or "").strip()
+        default_chat_model = str(runtime_payload.get("default_chat_model") or "").strip()
+        health_summary = (
+            runtime_payload.get("health_summary")
+            if isinstance(runtime_payload.get("health_summary"), dict)
+            else {}
+        )
+        if phase:
+            lines.append(f"phase: {phase}")
+        if default_chat_model:
+            lines.append(f"default_model: {default_chat_model}")
+        lines.append(
+            "provider_health: ok={ok} degraded={degraded} down={down}".format(
+                ok=int(health_summary.get("ok") or 0),
+                degraded=int(health_summary.get("degraded") or 0),
+                down=int(health_summary.get("down") or 0),
+            )
+        )
+    history_rows = (
+        runtime_history_payload.get("events")
+        if isinstance(runtime_history_payload.get("events"), list)
+        else []
+    )
+    rendered_events = [
+        line
+        for line in (_format_runtime_event_line(row) for row in history_rows[-3:] if isinstance(row, dict))
+        if line
+    ]
+    if rendered_events:
+        lines.append("Runtime events:")
+        lines.extend(f"- {line}" for line in rendered_events)
     next_action = str(telegram_runtime.get("next_action") or "").strip()
     if telegram_state not in {"enabled_running", "disabled_optional"} and next_action:
         lines.append(f"telegram_next_action: {next_action}")
@@ -166,18 +512,35 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_health(args: argparse.Namespace) -> int:
-    ok, payload_or_error = _http_json(
+    ready_ok, ready_payload_or_error = _http_json(
         base_url=str(args.api_base_url),
-        path="/llm/status",
+        path="/ready",
         timeout_seconds=1.2,
     )
-    if not ok or not isinstance(payload_or_error, dict):
+    payload = (
+        ready_payload_or_error.get("llm")
+        if ready_ok and isinstance(ready_payload_or_error, dict) and isinstance(ready_payload_or_error.get("llm"), dict)
+        else None
+    )
+    if not isinstance(payload, dict):
+        ok, payload_or_error = _http_json(
+            base_url=str(args.api_base_url),
+            path="/llm/status",
+            timeout_seconds=1.2,
+        )
+        if not ok or not isinstance(payload_or_error, dict):
+            return _print_error(
+                title="LLM provider unavailable",
+                component="agent.cli.health",
+                next_action="run `agent doctor`",
+            )
+        payload = payload_or_error
+    if not isinstance(payload, dict):
         return _print_error(
             title="LLM provider unavailable",
             component="agent.cli.health",
             next_action="run `agent doctor`",
         )
-    payload = payload_or_error
     provider = str(payload.get("default_provider") or "unknown").strip() or "unknown"
     model = (
         str(payload.get("resolved_default_model") or "").strip()
@@ -463,11 +826,9 @@ def _cmd_llm_install(args: argparse.Namespace) -> int:
         print("\n".join(lines), flush=True)
         return 0
 
-    result = execute_install_plan(
+    result = _execute_llm_install_via_model_manager(
         config=config,
-        registry=registry,
         plan=plan,
-        approve=True,
         trace_id=_trace_id("llm-install"),
     )
     if bool(getattr(args, "json", False)):
@@ -565,7 +926,7 @@ def _resolve_log_path(explicit: str | None) -> Path:
     env_path = str(os.getenv("AGENT_LOG_PATH", "")).strip()
     if env_path:
         return Path(env_path).expanduser()
-    return _repo_root() / "logs" / "agent.jsonl"
+    return Path(resolved_default_log_path()).expanduser()
 
 
 def _cmd_logs(args: argparse.Namespace) -> int:
@@ -591,28 +952,15 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _resolve_git_commit() -> str:
-    try:
-        proc = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=str(_repo_root()),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=0.3,
-        )
-    except Exception:
-        return "unknown"
-    value = (proc.stdout or "").strip()
-    return value or "unknown"
+    return str(read_git_commit(repo_root=_repo_root(), timeout_seconds=0.3) or "unknown")
 
 
 def _cmd_version(_args: argparse.Namespace) -> int:
-    version_path = _repo_root() / "VERSION"
-    try:
-        version = version_path.read_text(encoding="utf-8").strip()
-    except Exception:
-        version = "unknown"
-    print(f"version={version} commit={_resolve_git_commit()}", flush=True)
+    build_info = read_build_info(repo_root=_repo_root(), timeout_seconds=0.3)
+    print(
+        f"version={build_info.version} commit={build_info.git_commit or 'unknown'}",
+        flush=True,
+    )
     return 0
 
 

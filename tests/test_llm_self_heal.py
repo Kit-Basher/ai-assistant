@@ -3,7 +3,53 @@ from __future__ import annotations
 import copy
 import unittest
 
+from agent.config import Config
 from agent.llm.self_heal import build_drift_report, build_self_heal_plan
+
+
+def _config() -> Config:
+    return Config(
+        telegram_bot_token="token",
+        openai_api_key=None,
+        openai_model="gpt-4o-mini",
+        openai_model_worker=None,
+        agent_timezone="UTC",
+        db_path="/tmp/agent.db",
+        log_path="/tmp/agent.log",
+        skills_path="/tmp/skills",
+        ollama_host="http://127.0.0.1:11434",
+        ollama_model="llama3",
+        ollama_model_sentinel=None,
+        ollama_model_worker=None,
+        allow_cloud=True,
+        prefer_local=True,
+        llm_timeout_seconds=15,
+        llm_provider="none",
+        enable_llm_presentation=False,
+        openai_base_url=None,
+        ollama_base_url="http://127.0.0.1:11434",
+        anthropic_api_key=None,
+        llm_selector="single",
+        llm_broker_policy_path=None,
+        llm_allow_remote=True,
+        openrouter_api_key="sk-test",
+        openrouter_base_url="https://openrouter.ai/api/v1",
+        openrouter_model="openai/gpt-4o-mini",
+        openrouter_site_url=None,
+        openrouter_app_name=None,
+        llm_registry_path=None,
+        llm_routing_mode="auto",
+        llm_retry_attempts=1,
+        llm_retry_base_delay_ms=0,
+        llm_circuit_breaker_failures=2,
+        llm_circuit_breaker_window_seconds=60,
+        llm_circuit_breaker_cooldown_seconds=30,
+        llm_usage_stats_path="/tmp/usage.json",
+        llm_health_state_path="/tmp/health.json",
+        llm_automation_enabled=False,
+        model_scout_state_path="/tmp/scout.json",
+        autopilot_notify_store_path="/tmp/notify.json",
+    )
 
 
 def _base_registry() -> dict[str, object]:
@@ -189,7 +235,7 @@ class TestLLMSelfHeal(unittest.TestCase):
                 self.assertTrue(report["has_drift"])
                 self.assertIn(expected, report["reasons"])
 
-    def test_plan_prefers_same_provider_then_context_when_costs_equal(self) -> None:
+    def test_plan_prefers_stronger_local_candidate(self) -> None:
         document = _base_registry()
         document["defaults"]["default_model"] = "ollama:missing"  # type: ignore[index]
         document["models"]["ollama:alpha"] = {  # type: ignore[index]
@@ -221,11 +267,11 @@ class TestLLMSelfHeal(unittest.TestCase):
         }
         snapshot = _snapshot_from_registry(document)
         summary = _health_summary_from_registry(document)
-        plan = build_self_heal_plan(document, summary, router_snapshot=snapshot)
+        plan = build_self_heal_plan(document, summary, config=_config(), router_snapshot=snapshot)
         self.assertEqual("ollama:alpha", plan["proposed_defaults"]["default_model"])
         self.assertTrue(plan["impact"]["changes_count"] >= 1)
 
-    def test_plan_uses_lexical_when_costs_unknown(self) -> None:
+    def test_plan_prefers_larger_context_when_quality_is_equal(self) -> None:
         document = _base_registry()
         document["defaults"]["default_model"] = "ollama:missing"  # type: ignore[index]
         document["models"]["ollama:aaa"] = {  # type: ignore[index]
@@ -248,8 +294,8 @@ class TestLLMSelfHeal(unittest.TestCase):
         }
         snapshot = _snapshot_from_registry(document)
         summary = _health_summary_from_registry(document)
-        plan = build_self_heal_plan(document, summary, router_snapshot=snapshot)
-        self.assertEqual("ollama:aaa", plan["proposed_defaults"]["default_model"])
+        plan = build_self_heal_plan(document, summary, config=_config(), router_snapshot=snapshot)
+        self.assertEqual("ollama:zzz", plan["proposed_defaults"]["default_model"])
 
     def test_plan_is_deterministic_under_input_ordering(self) -> None:
         document = _base_registry()
@@ -267,8 +313,8 @@ class TestLLMSelfHeal(unittest.TestCase):
             "models": list(reversed(snapshot["models"])),  # type: ignore[index]
         }
 
-        plan_a = build_self_heal_plan(document, summary, router_snapshot=snapshot)
-        plan_b = build_self_heal_plan(reversed_doc, summary, router_snapshot=reversed_snapshot)
+        plan_a = build_self_heal_plan(document, summary, config=_config(), router_snapshot=snapshot)
+        plan_b = build_self_heal_plan(reversed_doc, summary, config=_config(), router_snapshot=reversed_snapshot)
         self.assertEqual(plan_a["changes"], plan_b["changes"])
         self.assertEqual(plan_a["reasons"], plan_b["reasons"])
         self.assertEqual(

@@ -8,6 +8,8 @@ import unittest
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.memory_v2.types import MemoryItem, MemoryLevel
+from agent.working_memory import WorkingMemoryState, append_turn
+from unittest.mock import patch
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -154,6 +156,126 @@ class TestAPIServerMemoryInjection(unittest.TestCase):
         self.assertIn("S-DET", selected_ids)
         self.assertIn("memory_context_text", captured_payload)
         self.assertIn("MEMORY[S-DET]", str(captured_payload.get("memory_context_text") or ""))
+
+    def test_semantic_recall_never_injects_without_deterministic_context(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, memory_v2_enabled=False, semantic_memory_enabled=True))
+
+        class _FakeSemanticService:
+            def build_context_for_payload(self, payload: dict[str, object], *, intent: str, now_ts: int | None = None):
+                _ = payload
+                _ = intent
+                _ = now_ts
+                return type(
+                    "Selection",
+                    (),
+                    {
+                        "candidates": [],
+                        "debug": {"status": "ok"},
+                        "merged_context_text": "SEMANTIC_MEMORY[demo]\n\"demo\"",
+                    },
+                )()
+
+        runtime._semantic_memory_service = _FakeSemanticService()  # type: ignore[assignment]
+        memory = runtime.build_memory_context_for_payload(
+            {"messages": [{"role": "user", "content": "cats"}]},
+            intent="chat",
+        )
+        self.assertIsNotNone(memory)
+        self.assertEqual("", str(memory.get("merged_context_text") or ""))
+        self.assertEqual([], memory.get("selected_ids"))
+        self.assertIn("semantic", memory)
+
+    def test_chat_runtime_path_compacts_working_memory_before_prompt_assembly(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        state = WorkingMemoryState()
+        for index in range(8):
+            role = "assistant" if index % 2 else "user"
+            append_turn(
+                state,
+                role=role,  # type: ignore[arg-type]
+                text=(f"Older implementation exchange {index}. " + "token " * 160).strip(),
+            )
+        runtime.orchestrator()._memory_runtime.save_working_memory_state("api:default", state)  # noqa: SLF001
+
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={
+                "ok": True,
+                "text": "Continuing now.",
+                "provider": "ollama",
+                "model": "ollama:qwen3.5:4b",
+                "task_type": "chat",
+                "selection_reason": "healthy+approved+local_first+task=chat",
+                "fallback_used": False,
+                "error_kind": None,
+                "next_action": None,
+                "trace_id": "orch-test",
+                "data": {"selection": {"selected_model": "ollama:qwen3.5:4b", "provider": "ollama", "reason": "healthy"}},
+            },
+        ) as route_mock:
+            ok, body = runtime.chat(
+                {
+                    "messages": [{"role": "user", "content": "Please continue the implementation."}],
+                    "min_context_tokens": 4096,
+                }
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(bool(body.get("ok")))
+        routed_messages = route_mock.call_args.kwargs.get("messages") or []
+        self.assertEqual("system", routed_messages[0]["role"])
+        self.assertIn("Working memory summaries", routed_messages[0]["content"])
+
+    def test_public_identity_uses_configured_assistant_name(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                assistant_name="Nova",
+                user_name="Casey",
+            )
+        )
+        with patch.object(runtime, "runtime_truth_service", side_effect=RuntimeError("unavailable")):
+            text = runtime.public_llm_identity_string()
+        self.assertIn("Nova, your Personal Agent", text)
+        self.assertNotIn("created by", text.lower())
+
+    def test_chat_runtime_path_uses_configured_assistant_name_when_preference_is_unset(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                assistant_name="Nova",
+                user_name="Casey",
+            )
+        )
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={
+                "ok": True,
+                "text": "I am created by OpenAI.",
+                "provider": "openai",
+                "model": "gpt-4o-mini",
+                "task_type": "chat",
+                "selection_reason": "healthy",
+                "fallback_used": False,
+                "error_kind": None,
+                "next_action": None,
+                "trace_id": "orch-test",
+                "data": {"selection": {"selected_model": "gpt-4o-mini", "provider": "openai", "reason": "healthy"}},
+            },
+        ):
+            ok, body = runtime.chat(
+                {
+                    "messages": [{"role": "user", "content": "who are you?"}],
+                    "min_context_tokens": 4096,
+                }
+            )
+        self.assertTrue(ok)
+        assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
+        text = str(assistant.get("content") or body.get("message") or "")
+        self.assertIn("Nova, your Personal Agent", text)
+        self.assertNotIn("created by openai", text.lower())
 
 
 if __name__ == "__main__":

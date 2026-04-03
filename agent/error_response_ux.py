@@ -12,6 +12,29 @@ def _iso_utc(epoch_seconds: int) -> str:
     return datetime.fromtimestamp(int(epoch_seconds), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _sentence(text: str) -> str:
+    cleaned = " ".join(str(text or "").strip().split())
+    if not cleaned:
+        return ""
+    return cleaned if cleaned.endswith((".", "!", "?")) else f"{cleaned}."
+
+
+def compose_actionable_message(
+    *,
+    what_happened: str,
+    why: str | None = None,
+    next_action: str | None = None,
+) -> str:
+    parts = [_sentence(what_happened)]
+    if why:
+        parts.append(_sentence(why))
+    message = " ".join(part for part in parts if part).strip()
+    next_text = " ".join(str(next_action or "").strip().split())
+    if next_text:
+        message = f"{message} Next: {next_text.rstrip('.')}."
+    return message.strip()
+
+
 def _cooldown_from_state(
     *,
     health_state: dict[str, Any] | None,
@@ -136,6 +159,7 @@ def deterministic_error_message(
 
 __all__ = [
     "bad_request_next_question",
+    "compose_actionable_message",
     "deterministic_error_message",
     "friendly_error_message",
     "upstream_down_message",

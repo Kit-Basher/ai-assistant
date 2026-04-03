@@ -265,6 +265,14 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertEqual(200, first.status_code)
         first_payload = json.loads(first.body.decode("utf-8"))
         self.assertTrue(first_payload["ok"])
+        self.assertTrue(bool(first_payload["operator_only"]))
+        self.assertTrue(bool(first_payload["compat_only"]))
+        self.assertEqual(
+            "runtime_truth.current_chat_target_status+runtime_truth.providers_status+"
+            "runtime_truth.model_readiness_status+runtime_truth.model_controller_policy_status",
+            first_payload["canonical_assistant_surface"],
+        )
+        self.assertEqual("operator_recovery_wizard", first_payload["separate_contract"])
         self.assertEqual("needs_user_choice", first_payload["status"])
         self.assertEqual("openrouter_down", first_payload["issue_code"])
         self.assertLessEqual(len(first_payload["choices"]), 3)
@@ -296,6 +304,45 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertTrue(third_payload["did_work"])
         self.assertEqual("llm_fixit", third_payload["intent"])
         self.assertFalse(bool(runtime._llm_fixit_store.state.get("active")))  # type: ignore[attr-defined]
+
+    def test_fixit_uses_canonical_truth_without_public_llm_status(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime._health_monitor.state["providers"] = {
+            "openrouter": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            },
+            "ollama": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+
+        with patch.object(runtime, "llm_status", side_effect=AssertionError("should not be called")):
+            handler = _HandlerForTest(runtime, "/llm/fixit", {})
+            handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ok"])
+        self.assertEqual("needs_user_choice", payload["status"])
+        self.assertEqual("openrouter_down", payload["issue_code"])
+        self.assertTrue(bool(payload["operator_only"]))
+        self.assertTrue(bool(payload["compat_only"]))
 
     def test_fixit_confirm_expired_returns_needs_clarification(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -531,6 +578,10 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
         with patch.object(
             runtime,
+            "_llm_fixit_status_payload",
+            return_value=_status_payload_no_local_chat(allow_remote_fallback=True),
+        ), patch.object(
+            runtime,
             "test_provider",
             return_value=(
                 False,
@@ -555,6 +606,18 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "sk-or-new",
             runtime.secret_store.get_secret("provider:openrouter:api_key"),
         )
+
+    def test_fixit_endpoint_is_loopback_operator_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        handler = _HandlerForTest(runtime, "/llm/fixit", {})
+        handler.client_address = ("192.168.1.2", 4567)
+
+        with patch.object(runtime, "llm_fixit", side_effect=AssertionError("should not be called")):
+            handler.do_POST()
+
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(403, handler.status_code)
+        self.assertEqual("forbidden", payload["error_kind"])
 
     def test_ollama_pull_endpoint_happy_path_and_allowlist(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -727,7 +790,11 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         runtime.set_listening("127.0.0.1", 8765)
         runtime.update_defaults({"allow_remote_fallback": False})
 
-        with patch.object(runtime, "llm_status", return_value=_status_payload_no_local_chat(allow_remote_fallback=False)):
+        with patch.object(
+            runtime,
+            "_llm_fixit_status_payload",
+            return_value=_status_payload_no_local_chat(allow_remote_fallback=False),
+        ):
             first = _HandlerForTest(runtime, "/llm/fixit", {})
             first.do_POST()
         self.assertEqual(200, first.status_code)
@@ -740,7 +807,11 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             choice_ids,
         )
 
-        with patch.object(runtime, "llm_status", return_value=_status_payload_no_local_chat(allow_remote_fallback=False)):
+        with patch.object(
+            runtime,
+            "_llm_fixit_status_payload",
+            return_value=_status_payload_no_local_chat(allow_remote_fallback=False),
+        ):
             second = _HandlerForTest(runtime, "/llm/fixit", {"answer": "1"})
             second.do_POST()
         self.assertEqual(200, second.status_code)
@@ -762,7 +833,11 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
             "max_context_tokens": None,
         }
 
-        with patch.object(runtime, "llm_status", return_value=_status_payload_no_local_chat(allow_remote_fallback=False)), patch.object(
+        with patch.object(
+            runtime,
+            "_llm_fixit_status_payload",
+            return_value=_status_payload_no_local_chat(allow_remote_fallback=False),
+        ), patch.object(
             runtime,
             "pull_ollama_model",
             return_value=(
@@ -820,6 +895,8 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         self.assertEqual(200, handler.status_code)
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
+        self.assertTrue(bool(payload["operator_only"]))
+        self.assertEqual("persisted_defaults_recovery", payload["separate_contract"])
         self.assertEqual("ollama:llama3", payload["chat_model"])
         self.assertEqual("ollama:qwen2.5:3b-instruct", payload["last_chat_model"])
 
@@ -845,7 +922,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
 
         with patch.object(
             runtime,
-            "llm_status",
+            "_llm_fixit_status_payload",
             return_value=_status_payload_no_local_chat(
                 allow_remote_fallback=False,
                 chat_model="ollama:qwen2.5:3b-instruct",
@@ -860,7 +937,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
 
         with patch.object(
             runtime,
-            "llm_status",
+            "_llm_fixit_status_payload",
             return_value=_status_payload_no_local_chat(
                 allow_remote_fallback=False,
                 chat_model="ollama:qwen2.5:3b-instruct",
@@ -973,7 +1050,7 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         )
         with patch.object(
             runtime,
-            "llm_status",
+            "_llm_fixit_status_payload",
             return_value=_status_payload_no_local_chat(
                 allow_remote_fallback=False,
                 chat_model="ollama:qwen2.5:3b-instruct",

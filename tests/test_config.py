@@ -102,6 +102,31 @@ class TestConfig(unittest.TestCase):
             config = load_config()
         self.assertTrue(config.memory_v2_enabled)
 
+    def test_semantic_memory_default_false(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TELEGRAM_BOT_TOKEN": "token", "LLM_PROVIDER": "none"},
+            clear=False,
+        ):
+            os.environ.pop("AGENT_SEMANTIC_MEMORY_ENABLED", None)
+            config = load_config()
+        self.assertFalse(config.semantic_memory_enabled)
+
+    def test_semantic_memory_env_true(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "LLM_PROVIDER": "none",
+                "AGENT_SEMANTIC_MEMORY_ENABLED": "true",
+                "AGENT_SEMANTIC_MEMORY_NOTES_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            config = load_config()
+        self.assertTrue(config.semantic_memory_enabled)
+        self.assertFalse(config.semantic_memory_notes_enabled)
+
     def test_llm_notifications_allow_test_env_true(self) -> None:
         with patch.dict(
             os.environ,
@@ -278,6 +303,28 @@ class TestConfig(unittest.TestCase):
         ):
             config = load_config()
         self.assertFalse(config.llm_autopilot_safe_mode)
+
+    def test_agent_safe_mode_disables_background_automation_and_pins_ollama_model(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "LLM_PROVIDER": "none",
+                "AGENT_SAFE_MODE": "1",
+                "OLLAMA_MODEL": "qwen3.5:4b",
+            },
+            clear=False,
+        ):
+            config = load_config()
+        self.assertTrue(config.safe_mode_enabled)
+        self.assertEqual("ollama:qwen3.5:4b", config.safe_mode_chat_model)
+        self.assertFalse(config.llm_automation_enabled)
+        self.assertFalse(config.model_scout_enabled)
+        self.assertFalse(config.model_watch_enabled)
+        self.assertFalse(config.autopilot_notify_enabled)
+        self.assertFalse(config.llm_self_heal_allow_apply)
+        self.assertFalse(config.llm_autopilot_bootstrap_allow_apply)
+        self.assertFalse(config.llm_notifications_allow_send)
 
     def test_llm_autopilot_bootstrap_allow_apply_unset_is_auto(self) -> None:
         with patch.dict(

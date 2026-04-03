@@ -123,6 +123,7 @@ class TestValueOptimalSelection(unittest.TestCase):
         self.registry_path = os.path.join(self.tmpdir.name, "registry.json")
         self.db_path = os.path.join(self.tmpdir.name, "agent.db")
         self._env_backup = dict(os.environ)
+        os.environ["OPENROUTER_API_KEY"] = "sk-test"
         os.environ["AGENT_SECRET_STORE_PATH"] = os.path.join(self.tmpdir.name, "secrets.enc.json")
         os.environ["AGENT_PERMISSIONS_PATH"] = os.path.join(self.tmpdir.name, "permissions.json")
         os.environ["AGENT_AUDIT_LOG_PATH"] = os.path.join(self.tmpdir.name, "audit.jsonl")
@@ -163,8 +164,12 @@ class TestValueOptimalSelection(unittest.TestCase):
                 "error_class": None,
             }
 
-        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch(
-            "agent.api_server.route_inference",
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch.object(
+            runtime._router,
+            "enabled",
+            return_value=True,
+        ), patch(
+            "agent.orchestrator.route_inference",
             side_effect=_fake_route_inference,
         ):
             ok, body = runtime.chat(
@@ -201,8 +206,12 @@ class TestValueOptimalSelection(unittest.TestCase):
         )
         runtime.registry_document = _registry_document()
 
-        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch(
-            "agent.api_server.route_inference",
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch.object(
+            runtime._router,
+            "enabled",
+            return_value=True,
+        ), patch(
+            "agent.orchestrator.route_inference",
         ) as route_mock:
             ok, body = runtime.chat(
                 {
@@ -257,8 +266,12 @@ class TestValueOptimalSelection(unittest.TestCase):
                 "error_class": None,
             }
 
-        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch(
-            "agent.api_server.route_inference",
+        with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot()), patch.object(
+            runtime._router,
+            "enabled",
+            return_value=True,
+        ), patch(
+            "agent.orchestrator.route_inference",
             side_effect=_fake_route_inference,
         ):
             ok, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})

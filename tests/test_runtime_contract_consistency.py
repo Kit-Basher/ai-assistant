@@ -43,7 +43,7 @@ class TestRuntimeContractConsistency(unittest.TestCase):
             "llm": {"provider": "ollama", "model": "qwen2.5:3b-instruct"},
         }
         output = io.StringIO()
-        with patch("agent.cli._http_json", return_value=(True, ready_payload)), redirect_stdout(output):
+        with patch("agent.cli._load_ready_status_payload", return_value=(True, ready_payload)), redirect_stdout(output):
             code = cli.main(["status"])
         self.assertEqual(0, code)
         cli_text = output.getvalue()
@@ -76,4 +76,3 @@ class TestRuntimeContractConsistency(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

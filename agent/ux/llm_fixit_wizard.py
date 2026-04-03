@@ -235,6 +235,11 @@ class LLMFixitWizardStore:
         return self.save(self.empty_state())
 
 
+# Compatibility alias for callers that only need operator recovery prompt state
+# and should not depend on the legacy llm_fixit naming.
+OperatorRecoveryStore = LLMFixitWizardStore
+
+
 
 def _safe_int(value: Any, default: int = 0) -> int:
     try:

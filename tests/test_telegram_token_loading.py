@@ -5,8 +5,10 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr
+from unittest.mock import Mock
 from unittest.mock import patch
 
+from agent.config import Config
 from agent.secret_store import SecretStore
 from telegram_adapter.bot import _resolve_telegram_bot_token, build_app, main, run_polling_with_backoff
 
@@ -99,6 +101,109 @@ class TestTelegramTokenLoading(unittest.TestCase):
         self.assertEqual([2.0], sleep_calls)
         joined = "\n".join(logs.output)
         self.assertIn("getUpdates conflict", joined)
+
+    def test_run_polling_with_backoff_does_not_build_local_runtime_for_default_builder(self) -> None:
+        token = "1234567:abcdefghijklmnopqrstuvwxyz_123456"
+        captured_kwargs: list[dict[str, object]] = []
+
+        class _FakeApp:
+            def run_polling(self, **_kwargs: object) -> None:
+                return None
+
+        def _fake_build_app(**kwargs: object) -> _FakeApp:
+            captured_kwargs.append(dict(kwargs))
+            return _FakeApp()
+
+        with patch("telegram_adapter.bot.build_app", side_effect=_fake_build_app):
+            code = run_polling_with_backoff(
+                token=token,
+                token_source="secret_store",
+            )
+
+        self.assertEqual(0, code)
+        self.assertEqual(1, len(captured_kwargs))
+        self.assertNotIn("runtime", captured_kwargs[0])
+
+    def test_build_app_enables_concurrent_updates(self) -> None:
+        config = Config(
+            telegram_bot_token="1234567:abcdefghijklmnopqrstuvwxyz_123456",
+            openai_api_key=None,
+            openai_model="gpt-4o-mini",
+            openai_model_worker=None,
+            agent_timezone="America/Regina",
+            db_path=os.path.join(self.tmpdir.name, "agent.db"),
+            log_path=os.path.join(self.tmpdir.name, "agent.log"),
+            skills_path=os.path.join(self.tmpdir.name, "skills"),
+            ollama_host=None,
+            ollama_model=None,
+            ollama_model_sentinel=None,
+            ollama_model_worker=None,
+            allow_cloud=False,
+            prefer_local=True,
+            llm_timeout_seconds=15,
+            telegram_enabled=True,
+        )
+
+        class _FakeApp:
+            def __init__(self) -> None:
+                self.bot_data: dict[str, object] = {}
+                self.job_queue = Mock()
+
+            def add_handler(self, _handler: object) -> None:
+                return None
+
+        class _FakeBuilder:
+            def __init__(self) -> None:
+                self.concurrent_updates_value: object | None = None
+
+            def token(self, _token: str) -> _FakeBuilder:
+                return self
+
+            def concurrent_updates(self, value: object) -> _FakeBuilder:
+                self.concurrent_updates_value = value
+                return self
+
+            def build(self) -> _FakeApp:
+                return _FakeApp()
+
+        fake_builder = _FakeBuilder()
+        fake_application = Mock()
+        fake_application.builder.return_value = fake_builder
+
+        class _FakeDB:
+            def __init__(self, _path: str) -> None:
+                self.path = _path
+
+            def init_schema(self, _path: str) -> None:
+                return None
+
+        class _FakeAuditLog:
+            def __init__(self, path: str | None = None) -> None:
+                self.path = path
+
+        with patch("telegram_adapter.bot.Application", fake_application), patch(
+            "telegram_adapter.bot.MemoryDB",
+            _FakeDB,
+        ), patch(
+            "telegram_adapter.bot._resolve_telegram_bot_token",
+            return_value=config.telegram_bot_token,
+        ), patch("telegram_adapter.bot.LLMRouter", return_value=object()), patch(
+            "telegram_adapter.bot.build_model_scout",
+            return_value=object(),
+        ), patch("telegram_adapter.bot.PermissionStore", return_value=object()), patch(
+            "telegram_adapter.bot.AuditLog",
+            _FakeAuditLog,
+        ), patch("telegram_adapter.bot.Orchestrator", return_value=object()), patch(
+            "telegram_adapter.bot.DebugProtocol",
+            return_value=object(),
+        ), patch(
+            "telegram_adapter.bot.register_handlers",
+            return_value=None,
+        ):
+            app = build_app(config=config)
+
+        self.assertIsInstance(app.bot_data, dict)
+        self.assertEqual(True, fake_builder.concurrent_updates_value)
 
 
 if __name__ == "__main__":

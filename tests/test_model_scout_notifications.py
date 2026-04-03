@@ -94,7 +94,7 @@ class TestModelScoutNotifications(unittest.TestCase):
         self.assertEqual("no_change", str(body.get("notification_reason") or ""))
         send_mock.assert_not_called()
 
-    def test_scout_change_sends_telegram_and_audits(self) -> None:
+    def test_scout_change_is_recorded_but_proactive_telegram_send_is_suppressed(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.registry_document = {
             "defaults": {
@@ -158,8 +158,8 @@ class TestModelScoutNotifications(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertTrue(body.get("ok"))
-        self.assertTrue(bool(body.get("notification_emitted")))
-        self.assertEqual("sent", str(body.get("notification_reason") or ""))
+        self.assertFalse(bool(body.get("notification_emitted")))
+        self.assertEqual("suppressed_by_control_plane_policy", str(body.get("notification_reason") or ""))
         events = body.get("model_scout_change_events") if isinstance(body.get("model_scout_change_events"), list) else []
         self.assertTrue(events)
         self.assertEqual("better_default_candidate", str(events[0].get("reason") or ""))
@@ -168,16 +168,13 @@ class TestModelScoutNotifications(unittest.TestCase):
         self.assertEqual("openrouter", str(events[0].get("provider") or ""))
         self.assertAlmostEqual(11.25, float(events[0].get("score_delta") or 0.0), places=2)
 
-        send_mock.assert_called_once()
-        sent_message = str(send_mock.call_args.args[2] if len(send_mock.call_args.args) >= 3 else "")
-        self.assertIn("Current default: openrouter:old-model", sent_message)
-        self.assertIn("Recommended default: openrouter:new-model", sent_message)
-        self.assertIn("PUT http://127.0.0.1:8765/defaults", sent_message)
+        send_mock.assert_not_called()
 
         audit_entries = runtime.get_audit(limit=30).get("entries", [])
         notify_rows = [row for row in audit_entries if row.get("action") == "llm.model_scout.notify"]
         self.assertTrue(notify_rows)
-        self.assertEqual("sent", notify_rows[0].get("outcome"))
+        self.assertEqual("skipped", notify_rows[0].get("outcome"))
+        self.assertEqual("suppressed_by_control_plane_policy", notify_rows[0].get("reason"))
         changed_rows = [row for row in audit_entries if row.get("action") == "llm.model_scout.changed"]
         self.assertTrue(changed_rows)
 

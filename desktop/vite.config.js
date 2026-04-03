@@ -19,9 +19,9 @@ export default defineConfig({
       "/chat": apiTarget,
       "/config": apiTarget,
       "/defaults": apiTarget,
+      "/llm": apiTarget,
       "/providers": apiTarget,
       "/telegram": apiTarget,
-      "/model_scout": apiTarget,
       "/permissions": apiTarget,
       "/audit": apiTarget,
       "/modelops": apiTarget

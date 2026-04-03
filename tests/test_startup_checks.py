@@ -27,12 +27,16 @@ class TestStartupChecks(unittest.TestCase):
             home = Path(tmpdir) / "home"
             home.mkdir(parents=True, exist_ok=True)
             (home / ".local" / "share" / "personal-agent").mkdir(parents=True, exist_ok=True)
+            (home / ".config" / "personal-agent").mkdir(parents=True, exist_ok=True)
             (home / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
             registry_path = Path(tmpdir) / "registry.json"
             registry_path.write_text(json.dumps({"providers": {}, "models": {}}), encoding="utf-8")
-            with patch("agent.startup_checks.Path.home", return_value=home):
-                with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": str(Path(tmpdir) / "missing.enc.json")}, clear=False):
-                    report = run_startup_checks(service="api", config=self._config(str(registry_path)))
+            with patch.dict(
+                os.environ,
+                {"HOME": str(home), "AGENT_SECRET_STORE_PATH": str(Path(tmpdir) / "missing.enc.json")},
+                clear=False,
+            ):
+                report = run_startup_checks(service="api", config=self._config(str(registry_path)))
         self.assertEqual("WARN", str(report.get("status")))
         checks = report.get("checks") if isinstance(report.get("checks"), list) else []
         self.assertTrue(any(isinstance(row, dict) and row.get("failure_code") == "secret_store_missing" for row in checks))
@@ -42,19 +46,23 @@ class TestStartupChecks(unittest.TestCase):
             home = Path(tmpdir) / "home"
             home.mkdir(parents=True, exist_ok=True)
             (home / ".local" / "share" / "personal-agent").mkdir(parents=True, exist_ok=True)
+            (home / ".config" / "personal-agent").mkdir(parents=True, exist_ok=True)
             (home / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
             secret_path = Path(tmpdir) / "secrets.enc.json"
             store = SecretStore(path=str(secret_path))
             store.set_secret("dummy", "1")
             registry_path = Path(tmpdir) / "registry.json"
             registry_path.write_text(json.dumps({"providers": {}, "models": {}}), encoding="utf-8")
-            with patch("agent.startup_checks.Path.home", return_value=home):
-                with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": str(secret_path)}, clear=False):
-                    report = run_startup_checks(
-                        service="telegram",
-                        config=self._config(str(registry_path), telegram_enabled=True),
-                        token=None,
-                    )
+            with patch.dict(
+                os.environ,
+                {"HOME": str(home), "AGENT_SECRET_STORE_PATH": str(secret_path)},
+                clear=False,
+            ):
+                report = run_startup_checks(
+                    service="telegram",
+                    config=self._config(str(registry_path), telegram_enabled=True),
+                    token=None,
+                )
         self.assertEqual("FAIL", str(report.get("status")))
         self.assertEqual("telegram_token_missing", str(report.get("failure_code")))
         self.assertIn("telegram:bot_token", str(report.get("next_action")))
@@ -64,19 +72,23 @@ class TestStartupChecks(unittest.TestCase):
             home = Path(tmpdir) / "home"
             home.mkdir(parents=True, exist_ok=True)
             (home / ".local" / "share" / "personal-agent").mkdir(parents=True, exist_ok=True)
+            (home / ".config" / "personal-agent").mkdir(parents=True, exist_ok=True)
             (home / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
             secret_path = Path(tmpdir) / "secrets.enc.json"
             store = SecretStore(path=str(secret_path))
             store.set_secret("dummy", "1")
             registry_path = Path(tmpdir) / "registry.json"
             registry_path.write_text(json.dumps({"providers": {}, "models": {}}), encoding="utf-8")
-            with patch("agent.startup_checks.Path.home", return_value=home):
-                with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": str(secret_path)}, clear=False):
-                    report = run_startup_checks(
-                        service="telegram",
-                        config=self._config(str(registry_path), telegram_enabled=False),
-                        token=None,
-                    )
+            with patch.dict(
+                os.environ,
+                {"HOME": str(home), "AGENT_SECRET_STORE_PATH": str(secret_path)},
+                clear=False,
+            ):
+                report = run_startup_checks(
+                    service="telegram",
+                    config=self._config(str(registry_path), telegram_enabled=False),
+                    token=None,
+                )
         self.assertEqual("PASS", str(report.get("status")))
         checks = report.get("checks") if isinstance(report.get("checks"), list) else []
         enabled_rows = [
@@ -90,15 +102,19 @@ class TestStartupChecks(unittest.TestCase):
             home = Path(tmpdir) / "home"
             home.mkdir(parents=True, exist_ok=True)
             (home / ".local" / "share" / "personal-agent").mkdir(parents=True, exist_ok=True)
+            (home / ".config" / "personal-agent").mkdir(parents=True, exist_ok=True)
             (home / ".config" / "systemd" / "user").mkdir(parents=True, exist_ok=True)
             secret_path = Path(tmpdir) / "secrets.enc.json"
             store = SecretStore(path=str(secret_path))
             store.set_secret("telegram:bot_token", "1234567:abcdefghijklmnopqrstuvwxyz_123456")
             registry_path = Path(tmpdir) / "registry.json"
             registry_path.write_text(json.dumps({"providers": {}, "models": {}}), encoding="utf-8")
-            with patch("agent.startup_checks.Path.home", return_value=home):
-                with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": str(secret_path)}, clear=False):
-                    report = run_startup_checks(service="api", config=self._config(str(registry_path)))
+            with patch.dict(
+                os.environ,
+                {"HOME": str(home), "AGENT_SECRET_STORE_PATH": str(secret_path)},
+                clear=False,
+            ):
+                report = run_startup_checks(service="api", config=self._config(str(registry_path)))
         self.assertEqual("PASS", str(report.get("status")))
         self.assertTrue(str(report.get("trace_id")).startswith("startup-api-"))
 

@@ -289,41 +289,70 @@ class TestLLMAutopilotNotifications(unittest.TestCase):
     def test_fixit_prompt_delivery_persists_state_and_audits_prompt(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.set_listening("127.0.0.1", 8765)
-        status_payload = {
-            "default_provider": "ollama",
-            "default_model": "ollama:qwen2.5:3b-instruct",
-            "resolved_default_model": "ollama:qwen2.5:3b-instruct",
-            "safe_mode": {"paused": False, "reason": ""},
-            "providers": [
-                {
-                    "id": "openrouter",
-                    "enabled": True,
-                    "available": True,
-                    "health": {
-                        "status": "down",
-                        "failure_streak": 12,
-                        "cooldown_until": None,
-                    },
-                },
-                {
-                    "id": "ollama",
-                    "enabled": True,
-                    "available": True,
-                    "health": {"status": "ok", "failure_streak": 0, "cooldown_until": None},
-                },
-            ],
-            "models": [
-                {
-                    "id": "ollama:qwen2.5:3b-instruct",
-                    "provider": "ollama",
-                    "enabled": True,
-                    "available": True,
-                    "routable": True,
-                    "health": {"status": "ok"},
-                }
-            ],
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "qwen2.5:3b-instruct",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.add_provider_model(
+            "openrouter",
+            {
+                "model": "openai/gpt-4o-mini",
+                "capabilities": ["chat"],
+                "available": False,
+            },
+        )
+        runtime.set_default_chat_model("ollama:qwen2.5:3b-instruct")
+        runtime._health_monitor.state["providers"] = {
+            "openrouter": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            },
+            "ollama": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
         }
-        with patch.object(runtime, "llm_status", return_value=status_payload), patch.object(
+        runtime._health_monitor.state["models"] = {
+            "ollama:qwen2.5:3b-instruct": {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": 100,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": 160,
+            },
+            "openrouter:openai/gpt-4o-mini": {
+                "status": "down",
+                "last_error_kind": "provider_unavailable",
+                "status_code": 502,
+                "last_checked_at": 100,
+                "cooldown_until": 0,
+                "down_since": 100,
+                "failure_streak": 12,
+                "next_probe_at": 160,
+            },
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+
+        with patch.object(runtime, "llm_status", side_effect=AssertionError("should not be called")), patch.object(
             runtime, "_resolve_telegram_target", return_value=("token", "123456789")
         ), patch.object(runtime, "_send_telegram_message", return_value=None):
             result = runtime._deliver_autopilot_notification(  # type: ignore[attr-defined]

@@ -66,6 +66,19 @@ class _UnavailableProvider(Provider):
             raw=None,
         )
 
+    def embed_texts(self, texts: tuple[str, ...], *, model: str, timeout_seconds: float):  # pragma: no cover - defensive
+        _ = texts
+        _ = model
+        _ = timeout_seconds
+        raise LLMError(
+            kind="provider_unavailable",
+            retriable=False,
+            provider=self._name,
+            status_code=None,
+            message="Provider is unavailable.",
+            raw=None,
+        )
+
 
 class LLMRouter:
     def __init__(
@@ -110,6 +123,20 @@ class LLMRouter:
             else:
                 providers[provider_id] = _UnavailableProvider(provider_id)
         return providers
+
+    def provider_for_id(self, provider_id: str) -> Provider | None:
+        provider_key = str(provider_id or "").strip().lower()
+        if not provider_key:
+            return None
+        provider = self._providers.get(provider_key)
+        return provider
+
+    def model_config(self, model_id: str) -> ModelConfig | None:
+        model_key = str(model_id or "").strip()
+        if not model_key:
+            return None
+        model = self.registry.models.get(model_key)
+        return model
 
     @staticmethod
     def _normalize_messages(messages: list[dict[str, str]] | tuple[dict[str, str], ...]) -> tuple[Message, ...]:

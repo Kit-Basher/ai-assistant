@@ -3,8 +3,12 @@ from __future__ import annotations
 import tempfile
 import unittest
 
-from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
-from telegram_adapter.bot import _map_fixit_reply_to_payload, maybe_handle_llm_fixit_reply
+from agent.ux.llm_fixit_wizard import LLMFixitWizardStore, OperatorRecoveryStore
+from telegram_adapter.bot import (
+    _map_fixit_reply_to_payload,
+    maybe_handle_llm_fixit_reply,
+    maybe_handle_operator_recovery_reply,
+)
 
 
 class TestTelegramFixitWizardReplies(unittest.TestCase):
@@ -76,6 +80,43 @@ class TestTelegramFixitWizardReplies(unittest.TestCase):
                 log_path=None,
             )
             self.assertEqual("Applied safe LLM fixes.", message)
+            self.assertEqual(True, captured.get("confirm"))
+            self.assertEqual("telegram", captured.get("actor"))
+
+    def test_maybe_handle_operator_recovery_invokes_generic_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = OperatorRecoveryStore(path=f"{tmpdir}/fixit.json")
+            store.save(
+                {
+                    "active": True,
+                    "issue_hash": "abc",
+                    "issue_code": "openrouter_down",
+                    "step": "awaiting_confirm",
+                    "question": "Apply?",
+                    "choices": [],
+                    "pending_plan": [{"id": "01", "kind": "safe_action", "action": "health.run", "reason": "test"}],
+                    "pending_confirm_token": "token",
+                    "pending_created_ts": 1,
+                    "pending_expires_ts": 9999999999,
+                    "pending_issue_code": "openrouter_down",
+                    "last_prompt_ts": 1,
+                }
+            )
+            captured: dict[str, object] = {}
+
+            def _operator_recovery(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+                captured.update(payload)
+                return True, {"ok": True, "message": "Applied operator recovery.", "error_kind": None}
+
+            message = maybe_handle_operator_recovery_reply(
+                operator_recovery_fn=_operator_recovery,
+                recovery_store=store,
+                audit_log=None,
+                chat_id="123456",
+                text="yes",
+                log_path=None,
+            )
+            self.assertEqual("Applied operator recovery.", message)
             self.assertEqual(True, captured.get("confirm"))
             self.assertEqual("telegram", captured.get("actor"))
 

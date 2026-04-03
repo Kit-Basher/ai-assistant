@@ -3,6 +3,9 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from agent.config import Config
+from agent.llm.default_model_policy import choose_best_default_chat_candidate
+
 
 _CHAT_REQUIRED_ROUTING_MODES = {
     "auto",
@@ -144,6 +147,7 @@ def build_self_heal_plan(
     registry_document: dict[str, Any],
     health_summary: dict[str, Any] | None = None,
     *,
+    config: Config,
     router_snapshot: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     document = registry_document if isinstance(registry_document, dict) else {}
@@ -175,11 +179,10 @@ def build_self_heal_plan(
         }
 
     selected = _select_replacement_candidate(
-        document,
-        health_summary or {},
+        config=config,
+        registry_document=document,
+        health_summary=health_summary or {},
         router_snapshot=router_snapshot or {},
-        default_provider=str(proposed_defaults.get("default_provider") or "").strip().lower(),
-        allow_remote_fallback=bool(proposed_defaults.get("allow_remote_fallback", True)),
     )
     if selected is None:
         joined_drift = ",".join(drift_reasons) or "unknown_drift"
@@ -342,157 +345,37 @@ def _model_has_chat_capability(model_payload: dict[str, Any] | None) -> bool:
     return "chat" in capabilities
 
 
-def _observed_cost(model_payload: dict[str, Any], model_row: dict[str, Any] | None) -> float | None:
-    pricing = model_payload.get("pricing") if isinstance(model_payload.get("pricing"), dict) else {}
-    if pricing:
-        input_cost = pricing.get("input_per_million_tokens")
-        output_cost = pricing.get("output_per_million_tokens")
-        if _is_number(input_cost) and _is_number(output_cost):
-            return float(input_cost) + float(output_cost)
-    if isinstance(model_row, dict):
-        input_cost = model_row.get("input_cost_per_million_tokens")
-        output_cost = model_row.get("output_cost_per_million_tokens")
-        if _is_number(input_cost) and _is_number(output_cost):
-            return float(input_cost) + float(output_cost)
-    return None
-
-
 def _select_replacement_candidate(
+    *,
+    config: Config,
     registry_document: dict[str, Any],
     health_summary: dict[str, Any],
-    *,
     router_snapshot: dict[str, Any],
-    default_provider: str,
-    allow_remote_fallback: bool,
 ) -> dict[str, Any] | None:
-    document = registry_document if isinstance(registry_document, dict) else {}
-    providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
-    models = document.get("models") if isinstance(document.get("models"), dict) else {}
-    health_payload = health_summary if isinstance(health_summary, dict) else {}
-    snapshot = router_snapshot if isinstance(router_snapshot, dict) else {}
-
-    provider_rows = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
-    model_rows = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
-    provider_lookup = {
-        str(row.get("id") or "").strip().lower(): row
-        for row in provider_rows
-        if isinstance(row, dict) and str(row.get("id") or "").strip()
-    }
-    model_lookup = {
-        str(row.get("id") or "").strip(): row
-        for row in model_rows
-        if isinstance(row, dict) and str(row.get("id") or "").strip()
-    }
-    provider_health_rows = health_payload.get("providers") if isinstance(health_payload.get("providers"), list) else []
-    model_health_rows = health_payload.get("models") if isinstance(health_payload.get("models"), list) else []
-    provider_health_lookup = {
-        str(row.get("id") or "").strip().lower(): row
-        for row in provider_health_rows
-        if isinstance(row, dict) and str(row.get("id") or "").strip()
-    }
-    model_health_lookup = {
-        str(row.get("id") or "").strip(): row
-        for row in model_health_rows
-        if isinstance(row, dict) and str(row.get("id") or "").strip()
-    }
-
-    candidates: list[dict[str, Any]] = []
-    for model_id in sorted(models.keys()):
-        model_payload = models.get(model_id)
-        if not isinstance(model_payload, dict):
-            continue
-        provider_id = str(model_payload.get("provider") or "").strip().lower()
-        provider_payload = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None
-        if provider_payload is None:
-            continue
-        provider_row = provider_lookup.get(provider_id)
-        provider_health_row = provider_health_lookup.get(provider_id)
-        model_row = model_lookup.get(model_id)
-        model_health_row = model_health_lookup.get(model_id)
-
-        is_local = bool(provider_payload.get("local", False))
-        provider_enabled = bool(provider_payload.get("enabled", True))
-        provider_available = _provider_available(provider_row, provider_health_row, provider_payload)
-        model_enabled = bool(model_payload.get("enabled", True))
-        model_available = bool(model_payload.get("available", True))
-        has_chat = _model_has_chat_capability(model_payload)
-        routable = _model_routable(model_row, model_payload, provider_available)
-        health_status = _model_status(model_row, model_health_row)
-        health_ok = health_status == "ok"
-        if not provider_enabled or provider_available is False:
-            continue
-        if not model_enabled or not model_available:
-            continue
-        if not has_chat or not routable or not health_ok:
-            continue
-        observed_cost = _observed_cost(model_payload, model_row)
-        max_context_tokens = _safe_context(model_payload.get("max_context_tokens"), model_row)
-        candidates.append(
-            {
-                "provider_id": provider_id,
-                "model_id": model_id,
-                "is_local": is_local,
-                "health_status": health_status,
-                "observed_cost": observed_cost,
-                "max_context_tokens": max_context_tokens,
-            }
-        )
-
-    same_provider_local = [
-        row
-        for row in candidates
-        if row.get("provider_id") == default_provider and bool(row.get("is_local"))
-    ]
-    any_local = [row for row in candidates if bool(row.get("is_local"))]
-    remote = [row for row in candidates if not bool(row.get("is_local"))]
-
-    if same_provider_local:
-        selected = _rank_replacement_candidates(same_provider_local)[0]
-        group = "same_provider_local"
-    elif any_local:
-        selected = _rank_replacement_candidates(any_local)[0]
-        group = "any_local"
-    elif allow_remote_fallback and remote:
-        selected = _rank_replacement_candidates(remote)[0]
-        group = "remote_fallback"
-    else:
-        return None
-
-    cost = selected.get("observed_cost")
-    cost_label = f"cost={cost:.6f}" if isinstance(cost, float) else "cost=unknown"
-    selected["rationale"] = (
-        f"picked {selected['model_id']} because {group}+chat+routable+health_ok+{cost_label}"
+    policy_result = choose_best_default_chat_candidate(
+        config=config,
+        registry_document=registry_document,
+        router_snapshot=router_snapshot,
+        health_summary=health_summary,
     )
-    return selected
-
-
-def _rank_replacement_candidates(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    def _key(row: dict[str, Any]) -> tuple[int, float, int, str]:
-        cost = row.get("observed_cost")
-        model_id = str(row.get("model_id") or "")
-        if isinstance(cost, float):
-            return (0, float(cost), -int(row.get("max_context_tokens") or 0), model_id)
-        return (1, 0.0, 0, model_id)
-
-    return sorted(rows, key=_key)
-
-
-def _safe_context(raw_context: Any, model_row: dict[str, Any] | None) -> int:
-    if _is_number(raw_context):
-        return max(0, int(raw_context))
-    if isinstance(model_row, dict) and _is_number(model_row.get("max_context_tokens")):
-        return max(0, int(model_row.get("max_context_tokens")))
-    return 0
-
-
-def _is_number(value: Any) -> bool:
-    if value is None:
-        return False
-    try:
-        float(value)
-    except (TypeError, ValueError):
-        return False
-    return True
+    if not bool(policy_result.get("switch_recommended")):
+        return None
+    selected = policy_result.get("recommended_candidate") if isinstance(policy_result.get("recommended_candidate"), dict) else None
+    if selected is None:
+        return None
+    tier = str(selected.get("tier") or "unknown")
+    detail = str(policy_result.get("decision_detail") or "").strip() or "selected_healthy_replacement"
+    return {
+        "provider_id": str(selected.get("provider_id") or "").strip().lower(),
+        "model_id": str(selected.get("model_id") or "").strip(),
+        "is_local": bool(selected.get("local", False)),
+        "health_status": str(selected.get("health_status") or "unknown").strip().lower(),
+        "observed_cost": float(selected.get("expected_cost_per_1m") or 0.0),
+        "max_context_tokens": int(selected.get("context_window") or 0),
+        "tier": tier,
+        "utility": float(selected.get("utility") or 0.0),
+        "rationale": f"picked {selected.get('model_id')} because {tier}+{detail}",
+    }
 
 
 def _change_sort_key(row: dict[str, Any]) -> tuple[str, str, str]:

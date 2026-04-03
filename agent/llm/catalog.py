@@ -11,6 +11,7 @@ import urllib.parse
 import urllib.request
 
 from agent.llm.capabilities import capability_list_from_inference, infer_capabilities_from_catalog
+from agent.llm.known_model_metadata import known_model_metadata
 
 
 _CATALOG_SCHEMA_VERSION = 1
@@ -41,6 +42,26 @@ def _rounded_cost(value: Any) -> float | None:
     return round(parsed, 6)
 
 
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _openrouter_cost_per_million(*, per_token: Any, per_million: Any) -> float | None:
+    explicit_per_million = _rounded_cost(per_million)
+    if explicit_per_million is not None:
+        return explicit_per_million
+    parsed_per_token = _safe_float(per_token)
+    if parsed_per_token is None:
+        return None
+    return round(parsed_per_token * 1_000_000.0, 6)
+
+
 def _iso_from_epoch(epoch: int | None) -> str | None:
     if epoch is None or int(epoch) <= 0:
         return None
@@ -66,11 +87,44 @@ def _normalize_capabilities(raw: Any) -> list[str]:
     return normalized
 
 
+def _normalize_labels(raw: Any) -> list[str]:
+    if isinstance(raw, str):
+        values = [raw]
+    elif isinstance(raw, list):
+        values = raw
+    else:
+        values = []
+    return sorted(
+        {
+            str(item).strip().lower()
+            for item in values
+            if str(item).strip()
+        }
+    )
+
+
+def _normalize_task_types(raw: Any) -> list[str]:
+    return _normalize_labels(raw)
+
+
+def _normalize_modalities(raw: Any) -> list[str]:
+    return _normalize_labels(raw)
+
+
+def _normalize_modality(raw: Any) -> str | None:
+    value = str(raw or "").strip().lower()
+    return value or None
+
+
 def normalize_catalog_entry(
     provider_id: str,
     model_name: str,
     *,
     capabilities: Any,
+    task_types: Any = None,
+    architecture_modality: Any = None,
+    input_modalities: Any = None,
+    output_modalities: Any = None,
     max_context_tokens: Any,
     input_cost_per_million_tokens: Any,
     output_cost_per_million_tokens: Any,
@@ -86,6 +140,10 @@ def normalize_catalog_entry(
         "provider_id": provider,
         "model": model,
         "capabilities": _normalize_capabilities(capabilities),
+        "task_types": _normalize_task_types(task_types) if task_types is not None else [],
+        "architecture_modality": _normalize_modality(architecture_modality),
+        "input_modalities": _normalize_modalities(input_modalities),
+        "output_modalities": _normalize_modalities(output_modalities),
         "max_context_tokens": max_context,
         "input_cost_per_million_tokens": _rounded_cost(input_cost_per_million_tokens),
         "output_cost_per_million_tokens": _rounded_cost(output_cost_per_million_tokens),
@@ -168,9 +226,22 @@ def _openrouter_capabilities(row: dict[str, Any]) -> list[str]:
     }
     if "image" in modality_values:
         caps.add("image")
+        caps.add("vision")
+    if "image" in modality:
+        caps.add("image")
+        caps.add("vision")
     if "embedding" in modality_values:
         return ["embedding"]
     return sorted(caps)
+
+
+def _openrouter_modality_payload(row: dict[str, Any]) -> dict[str, Any]:
+    architecture = row.get("architecture") if isinstance(row.get("architecture"), dict) else {}
+    return {
+        "architecture_modality": architecture.get("modality"),
+        "input_modalities": architecture.get("input_modalities"),
+        "output_modalities": architecture.get("output_modalities"),
+    }
 
 
 def _inferred_capabilities(
@@ -286,6 +357,10 @@ def fetch_provider_catalog(
                             model_name,
                             source_caps=_capabilities_from_ollama(model_name, row),
                         ),
+                        task_types=known_model_metadata(provider, model_name).get("task_types"),
+                        architecture_modality=None,
+                        input_modalities=None,
+                        output_modalities=None,
                         max_context_tokens=details.get("context_length")
                         or details.get("num_ctx")
                         or row.get("context_length"),
@@ -320,6 +395,7 @@ def fetch_provider_catalog(
                 if not model_name:
                     continue
                 pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
+                modality_payload = _openrouter_modality_payload(row)
                 output.append(
                     normalize_catalog_entry(
                         provider,
@@ -329,13 +405,25 @@ def fetch_provider_catalog(
                             model_name,
                             source_caps=_openrouter_capabilities(row),
                         ),
+                        task_types=known_model_metadata(provider, model_name).get("task_types"),
+                        architecture_modality=modality_payload.get("architecture_modality"),
+                        input_modalities=modality_payload.get("input_modalities"),
+                        output_modalities=modality_payload.get("output_modalities"),
                         max_context_tokens=row.get("context_length") or row.get("max_context_length"),
-                        input_cost_per_million_tokens=pricing.get("prompt")
-                        or pricing.get("input")
-                        or pricing.get("input_per_million_tokens"),
-                        output_cost_per_million_tokens=pricing.get("completion")
-                        or pricing.get("output")
-                        or pricing.get("output_per_million_tokens"),
+                        input_cost_per_million_tokens=_openrouter_cost_per_million(
+                            per_token=_first_present(
+                                pricing.get("prompt"),
+                                pricing.get("input"),
+                            ),
+                            per_million=pricing.get("input_per_million_tokens"),
+                        ),
+                        output_cost_per_million_tokens=_openrouter_cost_per_million(
+                            per_token=_first_present(
+                                pricing.get("completion"),
+                                pricing.get("output"),
+                            ),
+                            per_million=pricing.get("output_per_million_tokens"),
+                        ),
                         source=source,
                     )
                 )
@@ -372,6 +460,10 @@ def fetch_provider_catalog(
                         model_name,
                         source_caps=_capabilities_from_remote_model_id(model_name),
                     ),
+                    task_types=known_model_metadata(provider, model_name).get("task_types"),
+                    architecture_modality=None,
+                    input_modalities=None,
+                    output_modalities=None,
                     max_context_tokens=None,
                     input_cost_per_million_tokens=None,
                     output_cost_per_million_tokens=None,
@@ -426,6 +518,10 @@ class CatalogStore:
                 provider_id,
                 model_name,
                 capabilities=item.get("capabilities"),
+                task_types=item.get("task_types"),
+                architecture_modality=item.get("architecture_modality"),
+                input_modalities=item.get("input_modalities"),
+                output_modalities=item.get("output_modalities"),
                 max_context_tokens=item.get("max_context_tokens"),
                 input_cost_per_million_tokens=item.get("input_cost_per_million_tokens"),
                 output_cost_per_million_tokens=item.get("output_cost_per_million_tokens"),

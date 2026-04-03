@@ -172,10 +172,11 @@ class TestAuthoritativeDomainGate(unittest.TestCase):
         }
 
         with (
+            patch.object(runtime._router, "enabled", return_value=True),
             patch.object(runtime, "_collect_authoritative_observations", return_value=observations) as collect_call,
-            patch("agent.api_server.route_inference", return_value=router_result) as route_call,
+            patch("agent.orchestrator.route_inference", return_value=router_result) as route_call,
         ):
-            ok, _body = runtime.chat({"messages": [{"role": "user", "content": "my pc is lagging badly"}]})
+            ok, _body = runtime.chat({"messages": [{"role": "user", "content": "my fps is stuttering badly lately"}]})
 
         self.assertTrue(ok)
         self.assertEqual(1, collect_call.call_count)
@@ -187,12 +188,13 @@ class TestAuthoritativeDomainGate(unittest.TestCase):
         self.assertTrue(call_args.kwargs["require_tools"])
 
         with (
+            patch.object(runtime._router, "enabled", return_value=True),
             patch.object(runtime, "_collect_authoritative_observations", return_value=observations) as collect_call,
-            patch("agent.api_server.route_inference", return_value=router_result) as route_call,
+            patch("agent.orchestrator.route_inference", return_value=router_result) as route_call,
         ):
             ok, _body = runtime.chat(
                 {
-                    "messages": [{"role": "user", "content": "my pc is lagging badly"}],
+                    "messages": [{"role": "user", "content": "my fps is stuttering badly lately"}],
                     "require_tools": False,
                 }
             )

@@ -6,6 +6,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import Mock
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -439,11 +440,34 @@ class TestReadyEndpoint(unittest.TestCase):
 
     def test_ready_reuses_canonical_llm_status_when_provider_is_unhealthy(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
-        canonical_status = _canonical_llm_status_payload(
-            failure_code="provider_unhealthy",
-            active_provider_status="down",
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "llama3.2",
+                "capabilities": ["chat"],
+                "available": True,
+            },
         )
-        with patch.object(runtime, "llm_status", return_value=canonical_status), patch(
+        runtime.set_default_chat_model("ollama:llama3.2")
+        runtime._health_monitor.state["providers"] = {  # type: ignore[attr-defined]
+            "ollama": {
+                "status": "down",
+                "last_error_kind": "server_error",
+                "status_code": 503,
+                "last_checked_at": 123,
+            }
+        }
+        runtime._health_monitor.state["models"] = {  # type: ignore[attr-defined]
+            "ollama:llama3.2": {
+                "provider_id": "ollama",
+                "status": "down",
+                "last_error_kind": "server_error",
+                "status_code": 503,
+                "last_checked_at": 123,
+            }
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+        with patch(
             "agent.api_server.get_telegram_runtime_state",
             return_value={
                 "enabled": False,
@@ -485,8 +509,23 @@ class TestReadyEndpoint(unittest.TestCase):
         runtime.startup_phase = "warming"
         with runtime._startup_warmup_lock:
             runtime._startup_warmup_remaining = ["router_reload"]
-        canonical_status = _canonical_llm_status_payload()
-        with patch.object(runtime, "llm_status", return_value=canonical_status), patch(
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "llama3.2",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.set_default_chat_model("ollama:llama3.2")
+        runtime._health_monitor.state["providers"] = {  # type: ignore[attr-defined]
+            "ollama": {"status": "ok", "last_checked_at": 123}
+        }
+        runtime._health_monitor.state["models"] = {  # type: ignore[attr-defined]
+            "ollama:llama3.2": {"provider_id": "ollama", "status": "ok", "last_checked_at": 123}
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+        with patch(
             "agent.api_server.get_telegram_runtime_state",
             return_value={
                 "enabled": False,
@@ -515,7 +554,8 @@ class TestReadyEndpoint(unittest.TestCase):
         ready_payload = json.loads(ready_handler.body.decode("utf-8"))
         llm_payload = json.loads(llm_handler.body.decode("utf-8"))
         self.assertFalse(ready_payload["ready"])
-        self.assertEqual("warming", ready_payload["phase"])
+        self.assertEqual("warmup", ready_payload["phase"])
+        self.assertEqual("warming", ready_payload["startup_phase"])
         self.assertEqual(["router_reload"], ready_payload["warmup_remaining"])
         self.assertEqual("DEGRADED", ready_payload["runtime_mode"])
         self.assertEqual("READY", llm_payload["runtime_mode"])
@@ -524,8 +564,23 @@ class TestReadyEndpoint(unittest.TestCase):
 
     def test_ready_telegram_overlay_does_not_replace_canonical_llm_status(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
-        canonical_status = _canonical_llm_status_payload()
-        with patch.object(runtime, "llm_status", return_value=canonical_status), patch(
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "llama3.2",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.set_default_chat_model("ollama:llama3.2")
+        runtime._health_monitor.state["providers"] = {  # type: ignore[attr-defined]
+            "ollama": {"status": "ok", "last_checked_at": 123}
+        }
+        runtime._health_monitor.state["models"] = {  # type: ignore[attr-defined]
+            "ollama:llama3.2": {"provider_id": "ollama", "status": "ok", "last_checked_at": 123}
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+        with patch(
             "agent.api_server.get_telegram_runtime_state",
             return_value={
                 "enabled": True,
@@ -560,14 +615,196 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual(llm_payload["runtime_status"], ready_payload["llm"]["runtime_status"])
         self.assertEqual("READY", ready_payload["llm"]["runtime_status"]["runtime_mode"])
 
+    def test_ready_uses_live_llm_truth_when_safe_mode_pin_and_raw_health_are_stale(self) -> None:
+        runtime = AgentRuntime(
+            replace(
+                _config(self.registry_path, self.db_path),
+                safe_mode_enabled=True,
+                safe_mode_chat_model="qwen2.5:3b-instruct",
+                ollama_model="qwen3.5:4b",
+            )
+        )
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "qwen2.5:3b-instruct",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "qwen3.5:4b",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:qwen3.5:4b"})
+        runtime.startup_phase = "ready"
+        runtime._health_monitor.state["providers"] = {  # type: ignore[attr-defined]
+            "ollama": {"status": "down", "last_checked_at": 123}
+        }
+        runtime._health_monitor.state["models"] = {  # type: ignore[attr-defined]
+            "ollama:qwen3.5:4b": {"provider_id": "ollama", "status": "down", "last_checked_at": 123}
+        }
+        live_snapshot = {
+            "providers": [
+                {"id": "ollama", "enabled": True, "local": True, "health": {"status": "ok"}},
+            ],
+            "models": [
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "capabilities": ["chat"],
+                    "health": {"status": "ok"},
+                },
+                {
+                    "id": "ollama:qwen3.5:4b",
+                    "provider": "ollama",
+                    "enabled": True,
+                    "available": True,
+                    "routable": True,
+                    "capabilities": ["chat"],
+                    "health": {"status": "ok"},
+                },
+            ],
+        }
+        live_models = {
+            "ollama:qwen2.5:3b-instruct": {
+                "provider": "ollama",
+                "enabled": True,
+                "available": True,
+                "capabilities": ["chat"],
+            },
+            "ollama:qwen3.5:4b": {
+                "provider": "ollama",
+                "enabled": True,
+                "available": True,
+                "capabilities": ["chat"],
+            },
+        }
+        live_providers = {
+            "ollama": {
+                "enabled": True,
+                "local": True,
+            }
+        }
+
+        with patch.object(runtime, "_canonical_runtime_router_snapshot", return_value=live_snapshot), patch.object(
+            runtime,
+            "_runtime_snapshot_target_documents",
+            return_value=(live_models, live_providers, {"ollama"}),
+        ), patch(
+            "agent.api_server.get_telegram_runtime_state",
+            return_value={
+                "enabled": False,
+                "token_configured": False,
+                "token_source": "missing",
+                "ready_state": "disabled_optional",
+                "effective_state": "disabled_optional",
+                "config_source": "default",
+                "config_source_path": None,
+                "service_installed": True,
+                "service_active": False,
+                "service_enabled": False,
+                "lock_present": False,
+                "lock_live": False,
+                "lock_stale": False,
+                "lock_path": None,
+                "lock_pid": None,
+                "next_action": "Run: python -m agent telegram_enable",
+            },
+        ):
+            ready_handler = _HandlerForTest(runtime, "/ready")
+            ready_handler.do_GET()
+            llm_handler = _HandlerForTest(runtime, "/llm/status")
+            llm_handler.do_GET()
+
+        ready_payload = json.loads(ready_handler.body.decode("utf-8"))
+        llm_payload = json.loads(llm_handler.body.decode("utf-8"))
+        self.assertTrue(bool(ready_payload["ready"]))
+        self.assertEqual("READY", ready_payload["runtime_mode"])
+        self.assertEqual(llm_payload["runtime_status"], ready_payload["llm"]["runtime_status"])
+        self.assertEqual("READY", ready_payload["llm"]["runtime_status"]["runtime_mode"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", ready_payload["safe_mode_target"]["effective_model"])
+        self.assertTrue(bool(ready_payload["safe_mode_target"]["configured_valid"]))
+        self.assertEqual("configured_pin", ready_payload["safe_mode_target"]["reason"])
+        self.assertEqual("ollama:qwen2.5:3b-instruct", ready_payload["llm"]["model"])
+        self.assertNotIn("unavailable", str(ready_payload.get("message") or "").lower())
+        self.assertNotIn("not healthy", str(ready_payload.get("message") or "").lower())
+
     def test_ready_status_uses_canonical_llm_status_helper(self) -> None:
         ready_source = inspect.getsource(AgentRuntime.ready_status)
+        observability_source = inspect.getsource(AgentRuntime._runtime_observability_context)
         llm_helper_source = inspect.getsource(AgentRuntime._canonical_llm_ready_context)
-        self.assertIn("self._canonical_llm_ready_context()", ready_source)
-        self.assertIn("self.llm_status()", llm_helper_source)
+        self.assertIn("self._canonical_llm_ready_context()", observability_source)
+        self.assertIn("self._llm_status_payload(", llm_helper_source)
+        self.assertIn("self.llm_health_summary(", llm_helper_source)
+        self.assertNotIn("self._health_monitor.state", llm_helper_source)
         self.assertNotIn("provider_status_hint", ready_source)
         self.assertNotIn("model_status_hint", ready_source)
         self.assertNotIn("doctor_snapshot", ready_source)
+
+    def test_ready_stays_fast_when_full_llm_status_path_is_slow(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch.object(runtime, "llm_status", side_effect=AssertionError("ready should not call llm_status")), patch(
+            "agent.api_server.get_telegram_runtime_state",
+            return_value={
+                "enabled": False,
+                "token_configured": False,
+                "token_source": "missing",
+                "ready_state": "disabled_optional",
+                "effective_state": "disabled_optional",
+                "config_source": "default",
+                "config_source_path": None,
+                "service_installed": True,
+                "service_active": False,
+                "service_enabled": False,
+                "lock_present": False,
+                "lock_live": False,
+                "lock_stale": False,
+                "lock_path": None,
+                "lock_pid": None,
+                "next_action": "Run: python -m agent telegram_enable",
+            },
+        ):
+            handler = _HandlerForTest(runtime, "/ready")
+            handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertIn("llm", payload)
+        self.assertIn("runtime_status", payload["llm"])
+
+    def test_send_json_flushes_and_closes_connection(self) -> None:
+        handler = object.__new__(APIServerHandler)
+        handler.wfile = Mock()
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        APIServerHandler._send_json(handler, 200, {"ok": True, "ready": True})
+        self.assertTrue(bool(handler.close_connection))
+        handler.send_header.assert_any_call("Connection", "close")
+        handler.end_headers.assert_called_once()
+        handler.wfile.write.assert_called_once()
+        self.assertGreaterEqual(handler.wfile.flush.call_count, 2)
+
+    def test_send_bytes_flushes_and_closes_connection(self) -> None:
+        handler = object.__new__(APIServerHandler)
+        handler.wfile = Mock()
+        handler.send_response = Mock()
+        handler.send_header = Mock()
+        handler.end_headers = Mock()
+        APIServerHandler._send_bytes(handler, 200, b"ok", content_type="text/plain")
+        self.assertTrue(bool(handler.close_connection))
+        handler.send_header.assert_any_call("Connection", "close")
+        handler.end_headers.assert_called_once()
+        handler.wfile.write.assert_called_once_with(b"ok")
+        self.assertGreaterEqual(handler.wfile.flush.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -110,7 +110,7 @@ def detect_onboarding_state(
         return ONBOARDING_TOKEN_MISSING
 
     ready_flag = bool(ready.get("ready", False))
-    phase = _norm(ready.get("phase"))
+    phase = _norm(ready.get("startup_phase") or ready.get("phase"))
     runtime_mode = _norm(runtime_status.get("runtime_mode") or ready.get("runtime_mode"))
     startup_status = _norm(startup.get("status"))
 

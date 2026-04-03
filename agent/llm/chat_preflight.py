@@ -5,11 +5,9 @@ import json
 from typing import Any, Callable, Mapping
 
 from agent.llm.value_policy import (
-    UtilityScore,
     ValuePolicy,
     detect_premium_escalation_triggers,
     normalize_policy,
-    rank_candidates_by_utility,
 )
 
 
@@ -37,7 +35,7 @@ class PreparedChatRequest:
 class RuntimeChatPreflightBridge:
     default_policy: dict[str, Any] | ValuePolicy | None
     premium_policy: dict[str, Any] | ValuePolicy | None
-    model_policy_candidates: Callable[[], list[dict[str, Any]]]
+    select_chat_candidates: Callable[..., dict[str, Any]]
     premium_override_active: Callable[[int], bool]
     premium_override_once: bool
     persist_premium_over_cap_prompt: Callable[..., str]
@@ -61,14 +59,6 @@ def _memory_prefix_messages(memory_context_text: str) -> list[_Message]:
     if not text:
         return []
     return [{"role": "system", "content": text}]
-
-
-def _top_non_default(rows: list[UtilityScore], default_model: str | None) -> UtilityScore | None:
-    baseline = str(default_model or "").strip()
-    for row in rows:
-        if str(row.model_id) != baseline:
-            return row
-    return None
 
 
 def _short_circuit_result(
@@ -101,7 +91,7 @@ def prepare_chat_request(
     request_started_epoch: int,
     default_policy: dict[str, Any] | ValuePolicy | None,
     premium_policy: dict[str, Any] | ValuePolicy | None,
-    model_policy_candidates: Callable[[], list[dict[str, Any]]],
+    select_chat_candidates: Callable[..., dict[str, Any]],
     premium_override_active: Callable[[int], bool],
     premium_override_once: bool,
     persist_premium_over_cap_prompt: Callable[..., str],
@@ -143,21 +133,25 @@ def prepare_chat_request(
     )
 
     escalation_reasons = detect_premium_escalation_triggers(user_text=last_user_text, payload=dict(payload))
-    premium_selected: UtilityScore | None = None
+    premium_selected: dict[str, Any] | None = None
     consume_premium_override_once = False
     if escalation_reasons and not explicit_model_override and not explicit_provider_override:
-        candidates = list(model_policy_candidates())
-        default_allowed, default_rejected = rank_candidates_by_utility(
-            candidates,
+        allowed_tiers = ("local", "free_remote", "cheap_remote", "remote")
+        default_selection = select_chat_candidates(
             policy=normalized_default_policy,
-            allow_remote_fallback=allow_remote_fallback,
+            policy_name="default",
+            current_model_id=default_model,
+            allowed_tiers=allowed_tiers,
+            min_improvement=0.0,
+            allow_remote_fallback_override=allow_remote_fallback,
         )
-        default_by_id = {str(row.model_id): row for row in [*default_allowed, *default_rejected]}
-        default_score = default_by_id.get(str(default_model or "").strip())
-        premium_allowed, _premium_rejected = rank_candidates_by_utility(
-            candidates,
+        premium_selection = select_chat_candidates(
             policy=normalized_premium_policy,
-            allow_remote_fallback=allow_remote_fallback,
+            policy_name="premium",
+            current_model_id=default_model,
+            allowed_tiers=allowed_tiers,
+            min_improvement=0.0,
+            allow_remote_fallback_override=allow_remote_fallback,
         )
         premium_unbounded = ValuePolicy(
             name=normalized_premium_policy.name,
@@ -168,26 +162,58 @@ def prepare_chat_request(
             latency_weight=normalized_premium_policy.latency_weight,
             instability_weight=normalized_premium_policy.instability_weight,
         )
-        premium_no_cap_allowed, _premium_no_cap_rejected = rank_candidates_by_utility(
-            candidates,
+        premium_no_cap_selection = select_chat_candidates(
             policy=premium_unbounded,
-            allow_remote_fallback=allow_remote_fallback,
+            policy_name="premium",
+            current_model_id=default_model,
+            allowed_tiers=allowed_tiers,
+            min_improvement=0.0,
+            allow_remote_fallback_override=allow_remote_fallback,
         )
-        baseline_utility = float(default_score.utility) if default_score is not None else -10_000.0
-        top_premium = _top_non_default(premium_allowed, default_model)
-        top_no_cap = _top_non_default(premium_no_cap_allowed, default_model)
+        default_score = (
+            default_selection.get("current_candidate")
+            if isinstance(default_selection.get("current_candidate"), dict)
+            else None
+        )
+        baseline_utility = float((default_score or {}).get("utility") or -10_000.0)
+        premium_allowed = [
+            dict(row)
+            for row in (premium_selection.get("candidate_rows") if isinstance(premium_selection.get("candidate_rows"), list) else [])
+            if isinstance(row, dict)
+        ]
+        premium_no_cap_allowed = [
+            dict(row)
+            for row in (premium_no_cap_selection.get("candidate_rows") if isinstance(premium_no_cap_selection.get("candidate_rows"), list) else [])
+            if isinstance(row, dict)
+        ]
+        top_premium = next(
+            (
+                row
+                for row in premium_allowed
+                if str(row.get("model_id") or "").strip() != str(default_model or "").strip()
+            ),
+            None,
+        )
+        top_no_cap = next(
+            (
+                row
+                for row in premium_no_cap_allowed
+                if str(row.get("model_id") or "").strip() != str(default_model or "").strip()
+            ),
+            None,
+        )
         override_active = bool(premium_override_active(int(request_started_epoch)))
         if top_no_cap is not None and (
-            float(top_no_cap.expected_cost_per_1m) > float(normalized_premium_policy.cost_cap_per_1m)
+            float(top_no_cap.get("expected_cost_per_1m") or 0.0) > float(normalized_premium_policy.cost_cap_per_1m)
         ):
-            if override_active and (float(top_no_cap.utility) > baseline_utility):
+            if override_active and (float(top_no_cap.get("utility") or 0.0) > baseline_utility):
                 premium_selected = top_no_cap
                 consume_premium_override_once = bool(premium_override_once)
             elif not override_active:
                 prompt = persist_premium_over_cap_prompt(
                     baseline_model=str(default_model or ""),
-                    premium_model=str(top_no_cap.model_id),
-                    premium_cost=float(top_no_cap.expected_cost_per_1m),
+                    premium_model=str(top_no_cap.get("model_id") or ""),
+                    premium_cost=float(top_no_cap.get("expected_cost_per_1m") or 0.0),
                     premium_cap=float(normalized_premium_policy.cost_cap_per_1m),
                 )
                 return PreparedChatRequest(
@@ -198,7 +224,7 @@ def prepare_chat_request(
                     require_tools=require_tools,
                     selection_reason="premium_over_cap_confirmation_required",
                     escalation_reasons=escalation_reasons,
-                    premium_selected_model=str(top_no_cap.model_id),
+                    premium_selected_model=str(top_no_cap.get("model_id") or ""),
                     direct_result=_short_circuit_result(
                         ok=True,
                         text=prompt,
@@ -209,19 +235,19 @@ def prepare_chat_request(
                     response_selection_policy={
                         "mode": "premium_over_cap",
                         "baseline_model": str(default_model or ""),
-                        "premium_candidate": str(top_no_cap.model_id),
-                        "premium_cost_per_1m": float(top_no_cap.expected_cost_per_1m),
+                        "premium_candidate": str(top_no_cap.get("model_id") or ""),
+                        "premium_cost_per_1m": float(top_no_cap.get("expected_cost_per_1m") or 0.0),
                         "premium_cap_per_1m": float(normalized_premium_policy.cost_cap_per_1m),
                         "escalation_reasons": list(escalation_reasons),
                     },
                     log_reason="premium_over_cap_confirmation_required",
                     log_fallback_used=False,
                 )
-        if premium_selected is None and top_premium is not None and float(top_premium.utility) > baseline_utility:
+        if premium_selected is None and top_premium is not None and float(top_premium.get("utility") or 0.0) > baseline_utility:
             premium_selected = top_premium
         if premium_selected is not None:
-            model_override = str(premium_selected.model_id)
-            provider_override = str(premium_selected.provider)
+            model_override = str(premium_selected.get("model_id") or "").strip() or None
+            provider_override = str(premium_selected.get("provider_id") or "").strip().lower() or None
             selection_reason = "premium_escalation"
 
     if not explicit_require_tools:
@@ -238,7 +264,7 @@ def prepare_chat_request(
                     require_tools=False,
                     selection_reason="authoritative_tool_failure",
                     escalation_reasons=escalation_reasons,
-                    premium_selected_model=str(getattr(premium_selected, "model_id", "") or "") or None,
+                    premium_selected_model=str((premium_selected or {}).get("model_id") or "") or None,
                     direct_result=_short_circuit_result(
                         ok=True,
                         text=authoritative_tool_failure_text(domains, exc),
@@ -275,7 +301,7 @@ def prepare_chat_request(
         require_tools=require_tools,
         selection_reason=selection_reason,
         escalation_reasons=escalation_reasons,
-        premium_selected_model=str(getattr(premium_selected, "model_id", "") or "") or None,
+        premium_selected_model=str((premium_selected or {}).get("model_id") or "") or None,
         consume_premium_override_once=consume_premium_override_once,
     )
 
@@ -295,7 +321,7 @@ def prepare_runtime_chat_request(
         request_started_epoch=request_started_epoch,
         default_policy=bridge.default_policy,
         premium_policy=bridge.premium_policy,
-        model_policy_candidates=bridge.model_policy_candidates,
+        select_chat_candidates=bridge.select_chat_candidates,
         premium_override_active=bridge.premium_override_active,
         premium_override_once=bridge.premium_override_once,
         persist_premium_over_cap_prompt=bridge.persist_premium_over_cap_prompt,

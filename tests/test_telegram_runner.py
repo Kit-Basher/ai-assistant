@@ -7,6 +7,7 @@ import threading
 import types
 import unittest
 import warnings
+from unittest.mock import patch
 
 from agent.telegram_runner import TelegramRunner
 
@@ -20,6 +21,68 @@ class _AuditCapture:
 
 
 class TestTelegramRunner(unittest.TestCase):
+    def test_runner_passes_operator_recovery_wrapper_to_app_factory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            captured: dict[str, object] = {}
+            started_event = threading.Event()
+
+            class _Runtime:
+                config = object()
+
+                def operator_recovery(self, payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+                    return True, {"ok": True, "payload": dict(payload)}
+
+                def operator_recovery_store(self) -> object:
+                    return object()
+
+            runtime = _Runtime()
+
+            class _FakeUpdater:
+                async def start_polling(self, **_kwargs: object) -> None:
+                    started_event.set()
+
+                async def stop(self) -> None:
+                    return
+
+            class _FakeApp:
+                def __init__(self) -> None:
+                    self.updater = _FakeUpdater()
+
+                async def initialize(self) -> None:
+                    return
+
+                async def start(self) -> None:
+                    return
+
+                async def stop(self) -> None:
+                    return
+
+                async def shutdown(self) -> None:
+                    return
+
+            def _factory(**kwargs: object) -> object:
+                captured.update(kwargs)
+                return _FakeApp()
+
+            with patch("agent.telegram_runner.acquire_telegram_poll_lock", return_value=object()), patch(
+                "agent.telegram_runner.release_telegram_poll_lock",
+                return_value=None,
+            ):
+                runner = TelegramRunner(
+                    runtime=runtime,  # type: ignore[arg-type]
+                    log_path=os.path.join(tmpdir, "agent.log"),
+                    audit_log=_AuditCapture(),  # type: ignore[arg-type]
+                    app_factory=_factory,
+                    token_resolver=lambda: ("token", "env"),
+                )
+                self.assertTrue(runner.start())
+                self.assertTrue(started_event.wait(1.0))
+                runner.stop()
+            self.assertIn("operator_recovery_fn", captured)
+            self.assertIn("operator_recovery_store", captured)
+            self.assertNotIn("llm_fixit_fn", captured)
+            self.assertNotIn("llm_fixit_store", captured)
+
     def test_start_and_stop_with_token_runs_embedded_polling(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             started_event = threading.Event()
@@ -50,16 +113,20 @@ class TestTelegramRunner(unittest.TestCase):
                 async def shutdown(self) -> None:
                     return
 
-            runner = TelegramRunner(
-                runtime=runtime,
-                log_path=log_path,
-                audit_log=audit,  # type: ignore[arg-type]
-                app_factory=lambda **_kwargs: _FakeApp(),
-                token_resolver=lambda: ("token", "env"),
-            )
-            self.assertTrue(runner.start())
-            self.assertTrue(started_event.wait(1.0))
-            runner.stop()
+            with patch("agent.telegram_runner.acquire_telegram_poll_lock", return_value=object()), patch(
+                "agent.telegram_runner.release_telegram_poll_lock",
+                return_value=None,
+            ):
+                runner = TelegramRunner(
+                    runtime=runtime,
+                    log_path=log_path,
+                    audit_log=audit,  # type: ignore[arg-type]
+                    app_factory=lambda **_kwargs: _FakeApp(),
+                    token_resolver=lambda: ("token", "env"),
+                )
+                self.assertTrue(runner.start())
+                self.assertTrue(started_event.wait(1.0))
+                runner.stop()
             actions = [str(row.get("action")) for row in audit.rows]
             self.assertIn("telegram.start", actions)
             self.assertIn("telegram.stop", actions)
@@ -102,15 +169,19 @@ class TestTelegramRunner(unittest.TestCase):
                 app_calls.append(1)
                 raise RuntimeError("boom")
 
-            runner = TelegramRunner(
-                runtime=runtime,
-                log_path=log_path,
-                audit_log=audit,  # type: ignore[arg-type]
-                app_factory=_failing_app_factory,
-                token_resolver=lambda: ("token", "env"),
-                sleep_fn=lambda seconds: sleep_calls.append(float(seconds)),
-            )
-            runner._run_loop(token="token", token_source="env", max_iters=2)
+            with patch("agent.telegram_runner.acquire_telegram_poll_lock", return_value=object()), patch(
+                "agent.telegram_runner.release_telegram_poll_lock",
+                return_value=None,
+            ):
+                runner = TelegramRunner(
+                    runtime=runtime,
+                    log_path=log_path,
+                    audit_log=audit,  # type: ignore[arg-type]
+                    app_factory=_failing_app_factory,
+                    token_resolver=lambda: ("token", "env"),
+                    sleep_fn=lambda seconds: sleep_calls.append(float(seconds)),
+                )
+                runner._run_loop(token="token", token_source="env", max_iters=2)
             self.assertEqual(2, len(app_calls))
             self.assertEqual([5.0, 10.0], sleep_calls)
             self.assertTrue(any(str(row.get("action")) == "telegram.crash" for row in audit.rows))
@@ -133,15 +204,19 @@ class TestTelegramRunner(unittest.TestCase):
             def _conflict_app_factory(**_kwargs: object) -> object:
                 raise Conflict("terminated by other getUpdates request")
 
-            runner = TelegramRunner(
-                runtime=runtime,
-                log_path=log_path,
-                audit_log=audit,  # type: ignore[arg-type]
-                app_factory=_conflict_app_factory,
-                token_resolver=lambda: ("token", "env"),
-                sleep_fn=lambda seconds: sleep_calls.append(float(seconds)),
-            )
-            runner._run_loop(token="token", token_source="env", max_iters=1)
+            with patch("agent.telegram_runner.acquire_telegram_poll_lock", return_value=object()), patch(
+                "agent.telegram_runner.release_telegram_poll_lock",
+                return_value=None,
+            ):
+                runner = TelegramRunner(
+                    runtime=runtime,
+                    log_path=log_path,
+                    audit_log=audit,  # type: ignore[arg-type]
+                    app_factory=_conflict_app_factory,
+                    token_resolver=lambda: ("token", "env"),
+                    sleep_fn=lambda seconds: sleep_calls.append(float(seconds)),
+                )
+                runner._run_loop(token="token", token_source="env", max_iters=1)
             self.assertEqual([2.0], sleep_calls)
             self.assertTrue(any(str(row.get("action")) == "telegram.crash" for row in audit.rows))
             with open(log_path, "r", encoding="utf-8") as handle:

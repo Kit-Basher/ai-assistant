@@ -38,6 +38,15 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _metadata_channel(metadata: dict[str, Any] | None) -> str | None:
+    if not isinstance(metadata, dict):
+        return None
+    value = str(metadata.get("channel") or metadata.get("source_surface") or "").strip().lower()
+    if value in {"telegram", "api", "cli"}:
+        return value
+    return None
+
+
 def _normalized_error_result(
     *,
     error_kind: str,
@@ -186,6 +195,7 @@ class InferenceRouter:
                 task_request=normalized_task,
                 allow_remote_fallback=allow_remote_fallback,
                 trace_id=normalized_trace_id,
+                metadata=metadata,
             )
             if control_result:
                 if control_result.get("inventory") is not None:
@@ -277,6 +287,9 @@ class InferenceRouter:
     def _allow_remote_fallback(self, *, local_only: bool | None) -> bool:
         if local_only is not None:
             return not bool(local_only)
+        llm_config = getattr(self.llm_client, "config", None)
+        if bool(getattr(llm_config, "safe_mode_enabled", False)):
+            return False
         registry = getattr(self.llm_client, "registry", None)
         defaults = getattr(registry, "defaults", None)
         allow_remote = getattr(defaults, "allow_remote_fallback", None)
@@ -290,6 +303,7 @@ class InferenceRouter:
         task_request: dict[str, Any],
         allow_remote_fallback: bool,
         trace_id: str | None,
+        metadata: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         llm_config = getattr(self.llm_client, "config", None)
         llm_registry = getattr(self.llm_client, "registry", None)
@@ -313,6 +327,8 @@ class InferenceRouter:
             inventory,
             task_request,
             allow_remote_fallback=allow_remote_fallback,
+            channel=_metadata_channel(metadata),
+            latency_fallback=bool((metadata or {}).get("latency_fallback")),
             trace_id=trace_id,
             policy_name="default",
             policy=getattr(llm_config, "default_policy", None),

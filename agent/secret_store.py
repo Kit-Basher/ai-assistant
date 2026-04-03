@@ -8,6 +8,7 @@ import json
 import os
 import platform
 from pathlib import Path
+import threading
 
 
 class SecretStore:
@@ -16,6 +17,9 @@ class SecretStore:
         self._path = Path(path) if path else default_path
         self._service_name = service_name
         self._keyring = self._load_keyring()
+        self._file_cache_lock = threading.Lock()
+        self._file_cache_stamp: tuple[int, int] | None = None
+        self._file_cache_data: dict[str, str] | None = None
 
     @property
     def backend_name(self) -> str:
@@ -95,14 +99,34 @@ class SecretStore:
 
     def _read_file_secrets(self) -> dict[str, str]:
         if not self._path.is_file():
+            with self._file_cache_lock:
+                self._file_cache_stamp = None
+                self._file_cache_data = {}
             return {}
+        try:
+            stat_result = self._path.stat()
+            stamp = (int(stat_result.st_mtime_ns), int(stat_result.st_size))
+        except OSError:
+            stamp = None
+        with self._file_cache_lock:
+            if (
+                stamp is not None
+                and self._file_cache_stamp == stamp
+                and isinstance(self._file_cache_data, dict)
+            ):
+                return dict(self._file_cache_data)
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
-                return {}
-            return self._decrypt_payload(raw)
+                data: dict[str, str] = {}
+            else:
+                data = self._decrypt_payload(raw)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError, TypeError, binascii.Error, RuntimeError):
-            return {}
+            data = {}
+        with self._file_cache_lock:
+            self._file_cache_stamp = stamp
+            self._file_cache_data = dict(data)
+        return dict(data)
 
     def _write_file_secrets(self, data: dict[str, str]) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,6 +136,22 @@ class SecretStore:
             os.chmod(self._path, 0o600)
         except OSError:
             pass
+        try:
+            stat_result = self._path.stat()
+            stamp: tuple[int, int] | None = (int(stat_result.st_mtime_ns), int(stat_result.st_size))
+        except OSError:
+            stamp = None
+        with self._file_cache_lock:
+            self._file_cache_stamp = stamp
+            self._file_cache_data = dict(data)
+
+    def validate(self) -> None:
+        if not self._path.is_file():
+            raise FileNotFoundError(str(self._path))
+        raw = json.loads(self._path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise RuntimeError("invalid secret store payload")
+        _ = self._decrypt_payload(raw)
 
     def get_secret(self, key: str) -> str | None:
         if self._keyring is not None:

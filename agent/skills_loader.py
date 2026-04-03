@@ -13,6 +13,11 @@ from agent.packs.manifest import (
     manifest_to_dict,
     normalize_permissions,
 )
+from agent.skill_governance import (
+    SkillExecutionRequest,
+    parse_skill_execution_request,
+    scan_skill_source_for_persistence,
+)
 
 
 @dataclass
@@ -30,6 +35,10 @@ class Skill:
     version: str
     permissions: list[str]
     functions: dict[str, SkillFunction]
+    skill_type: str = "general"
+    execution_request: SkillExecutionRequest | None = None
+    governance_source_issues: tuple[str, ...] = ()
+    source_path: str | None = None
     pack_id: str = ""
     pack_trust: str = "native"
     pack_permissions: dict[str, Any] | None = None
@@ -41,9 +50,11 @@ class Skill:
 class SkillLoader:
     def __init__(self, skills_path: str) -> None:
         self.skills_path = skills_path
+        self.blocked_skills: list[dict[str, Any]] = []
 
     def load_all(self) -> dict[str, Skill]:
         skills: dict[str, Skill] = {}
+        self.blocked_skills = []
         if not os.path.isdir(self.skills_path):
             return skills
 
@@ -56,6 +67,25 @@ class SkillLoader:
 
             with open(manifest_path, "r", encoding="utf-8") as handle:
                 manifest = json.load(handle)
+            execution_request = parse_skill_execution_request(manifest, skill_id=str(manifest.get("name") or entry))
+            with open(handler_path, "r", encoding="utf-8") as handle:
+                handler_source = handle.read()
+            governance_source_issues = scan_skill_source_for_persistence(handler_source)
+            if governance_source_issues:
+                self.blocked_skills.append(
+                    {
+                        "skill_id": execution_request.skill_id,
+                        "skill_type": execution_request.skill_type,
+                        "requested_execution_mode": execution_request.requested_execution_mode,
+                        "requested_capabilities": list(execution_request.requested_capabilities),
+                        "persistence_requested": bool(execution_request.persistence_requested),
+                        "reason": "forbidden_persistence_pattern",
+                        "source_issues": list(governance_source_issues),
+                        "source_pack": str(manifest.get("name") or entry).strip() or entry,
+                        "source_path": handler_path,
+                    }
+                )
+                continue
 
             spec = importlib.util.spec_from_file_location(f"skills.{entry}.handler", handler_path)
             if spec is None or spec.loader is None:
@@ -102,6 +132,10 @@ class SkillLoader:
                 version=manifest.get("version", "0.1.0"),
                 permissions=manifest.get("permissions", []),
                 functions=functions,
+                skill_type=execution_request.skill_type,
+                execution_request=execution_request,
+                governance_source_issues=governance_source_issues,
+                source_path=handler_path,
                 pack_id=str(pack_manifest_dict.get("pack_id") or manifest["name"]),
                 pack_trust=str(pack_manifest_dict.get("trust") or "native"),
                 pack_permissions=pack_permissions,

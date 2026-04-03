@@ -10,6 +10,7 @@ from typing import Any
 
 from agent.config import Config
 from agent.llm.capabilities import is_vision_model_name
+from agent.llm.known_model_metadata import known_model_metadata
 
 
 _REGISTRY_SCHEMA_VERSION = 2
@@ -50,6 +51,7 @@ class ModelConfig:
     provider: str
     model: str
     capabilities: frozenset[str]
+    task_types: tuple[str, ...]
     quality_rank: int
     cost_rank: int
     default_for: tuple[str, ...]
@@ -58,6 +60,9 @@ class ModelConfig:
     input_cost_per_million_tokens: float | None = None
     output_cost_per_million_tokens: float | None = None
     max_context_tokens: int | None = None
+    architecture_modality: str | None = None
+    input_modalities: tuple[str, ...] = ()
+    output_modalities: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,6 +123,10 @@ class Registry:
                 "provider": model.provider,
                 "model": model.model,
                 "capabilities": sorted(model.capabilities),
+                "task_types": list(model.task_types),
+                "architecture_modality": model.architecture_modality,
+                "input_modalities": list(model.input_modalities),
+                "output_modalities": list(model.output_modalities),
                 "quality_rank": model.quality_rank,
                 "cost_rank": model.cost_rank,
                 "default_for": list(model.default_for),
@@ -190,6 +199,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "provider": "openai",
                 "model": "gpt-4.1-mini",
                 "capabilities": ["chat", "json", "tools"],
+                "task_types": known_model_metadata("openai", "gpt-4.1-mini").get("task_types", []),
                 "quality_rank": 7,
                 "cost_rank": 4,
                 "default_for": ["chat", "presentation_rewrite"],
@@ -199,12 +209,13 @@ def _default_registry_document() -> dict[str, Any]:
                     "input_per_million_tokens": 0.4,
                     "output_per_million_tokens": 1.6,
                 },
-                "max_context_tokens": 128000,
+                "max_context_tokens": known_model_metadata("openai", "gpt-4.1-mini").get("max_context_tokens", 128000),
             },
             "openai:gpt-4.1": {
                 "provider": "openai",
                 "model": "gpt-4.1",
                 "capabilities": ["chat", "json", "tools", "vision"],
+                "task_types": known_model_metadata("openai", "gpt-4.1").get("task_types", []),
                 "quality_rank": 9,
                 "cost_rank": 8,
                 "default_for": ["best_quality"],
@@ -214,12 +225,13 @@ def _default_registry_document() -> dict[str, Any]:
                     "input_per_million_tokens": 2.0,
                     "output_per_million_tokens": 8.0,
                 },
-                "max_context_tokens": 128000,
+                "max_context_tokens": known_model_metadata("openai", "gpt-4.1").get("max_context_tokens", 128000),
             },
             "openai:gpt-4o-mini": {
                 "provider": "openai",
                 "model": "gpt-4o-mini",
                 "capabilities": ["chat", "json", "tools"],
+                "task_types": known_model_metadata("openai", "gpt-4o-mini").get("task_types", []),
                 "quality_rank": 6,
                 "cost_rank": 3,
                 "default_for": ["chat"],
@@ -235,6 +247,7 @@ def _default_registry_document() -> dict[str, Any]:
                 "provider": "openrouter",
                 "model": "openai/gpt-4o-mini",
                 "capabilities": ["chat", "json", "tools"],
+                "task_types": known_model_metadata("openrouter", "openai/gpt-4o-mini").get("task_types", []),
                 "quality_rank": 6,
                 "cost_rank": 3,
                 "default_for": ["chat"],
@@ -359,6 +372,7 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
             "provider": provider,
             "model": model_name,
             "capabilities": list(payload.get("capabilities") or _default_capabilities(provider, model_name)),
+            "task_types": list(payload.get("task_types") or known_model_metadata(provider, model_name).get("task_types") or []),
             "quality_rank": int(payload.get("quality_rank", 0) or 0),
             "cost_rank": int(payload.get("cost_rank", 0) or 0),
             "default_for": list(payload.get("default_for") or []),
@@ -388,6 +402,14 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
 
 
 def _normalize_document(raw: dict[str, Any]) -> dict[str, Any]:
+    if (
+        raw
+        and "schema_version" not in raw
+        and not isinstance(raw.get("routing"), dict)
+        and any(isinstance(raw.get(key), dict) for key in ("providers", "models", "defaults"))
+    ):
+        raw = dict(raw)
+        raw["schema_version"] = _REGISTRY_SCHEMA_VERSION
     if int(raw.get("schema_version", 0) or 0) >= _REGISTRY_SCHEMA_VERSION:
         merged = _default_registry_document()
         merged.update({"schema_version": _REGISTRY_SCHEMA_VERSION})
@@ -445,6 +467,7 @@ def _upsert_config_model(data: dict[str, Any], provider: str, model: str | None)
         "provider": provider,
         "model": model_name,
         "capabilities": list(existing.get("capabilities") or _default_capabilities(provider, model_name)),
+        "task_types": list(existing.get("task_types") or known_model_metadata(provider, model_name).get("task_types") or []),
         "quality_rank": quality_rank,
         "cost_rank": cost_rank,
         "default_for": sorted(default_for),
@@ -553,6 +576,18 @@ def _parse_registry(data: dict[str, Any], path: str | None) -> Registry:
             provider=provider,
             model=model_name,
             capabilities=capabilities,
+            task_types=tuple(str(item).strip().lower() for item in (payload.get("task_types") or []) if str(item).strip()),
+            architecture_modality=(str(payload.get("architecture_modality") or "").strip().lower() or None),
+            input_modalities=tuple(
+                str(item).strip().lower()
+                for item in (payload.get("input_modalities") or [])
+                if str(item).strip()
+            ),
+            output_modalities=tuple(
+                str(item).strip().lower()
+                for item in (payload.get("output_modalities") or [])
+                if str(item).strip()
+            ),
             quality_rank=int(payload.get("quality_rank", 0) or 0),
             cost_rank=int(payload.get("cost_rank", 0) or 0),
             default_for=tuple(str(item) for item in (payload.get("default_for") or [])),
@@ -600,6 +635,14 @@ def load_registry_document(path: str | None) -> dict[str, Any]:
         return _default_registry_document()
     raw = _read_registry_file(path)
     return _normalize_document(raw)
+
+
+def parse_registry_document(document: dict[str, Any] | None, *, path: str | None = None) -> Registry:
+    raw = copy.deepcopy(document if isinstance(document, dict) else {})
+    if raw and "schema_version" not in raw and any(isinstance(raw.get(key), dict) for key in ("providers", "models", "defaults")):
+        raw["schema_version"] = _REGISTRY_SCHEMA_VERSION
+    normalized = _normalize_document(raw)
+    return _parse_registry(normalized, path)
 
 
 def load_registry(config: Config) -> Registry:
