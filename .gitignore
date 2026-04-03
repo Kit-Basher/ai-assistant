@@ -1,0 +1,31 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+logs/agent.jsonl
+memory/agent.db
+memory/ui_config.json
+memory/llm_usage_stats.json
+packaging/.env
+desktop/node_modules/
+desktop/dist/
+desktop/.vite/
+desktop/src-tauri/target/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+# local runtime state
+llm_registry.json
+agent/webui/dist/
+
+# editor/temp cruft
+.#*
+*~
+# local sqlite / state (belt + suspenders)
+*.db
+*.sqlite
+*.sqlite3
+

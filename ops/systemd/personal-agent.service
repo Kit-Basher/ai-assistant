@@ -1,0 +1,17 @@
+[Unit]
+Description=Personal Agent
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/personal-agent/agent.env
+ExecStart=/home/c/personal-agent/.venv/bin/python -m telegram_adapter
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,1081 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timedelta, timezone
+import json
+import logging
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from agent.audit_log import AuditLog
+from agent.doctor import DoctorCheck, DoctorReport
+from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
+from telegram_adapter.bot import _handle_brief_alias, _handle_message, _handle_status
+
+
+class _FakeResponse:
+    def __init__(self, text: str, data: dict[str, object] | None = None) -> None:
+        self.text = text
+        self.data = data
+
+
+class _FakeOrchestrator:
+    def __init__(self, reply_text: str = "chat reply", data: dict[str, object] | None = None) -> None:
+        self.reply_text = reply_text
+        self.data = data
+        self.calls: list[tuple[str, str]] = []
+
+    def handle_message(self, text: str, *, user_id: str) -> _FakeResponse:
+        self.calls.append((text, user_id))
+        return _FakeResponse(self.reply_text, self.data)
+
+
+class _RaisingOrchestrator:
+    def handle_message(self, text: str, *, user_id: str) -> _FakeResponse:
+        _ = text
+        _ = user_id
+        raise RuntimeError("boom")
+
+
+class _FakeDB:
+    def __init__(self) -> None:
+        self.values: dict[str, str] = {}
+
+    def set_preference(self, key: str, value: str) -> None:
+        self.values[str(key)] = str(value)
+
+
+class _FakeSentMessage:
+    def __init__(self, replies: list[dict[str, str | None]], index: int) -> None:
+        self._replies = replies
+        self._index = index
+
+    async def edit_text(self, text: str, parse_mode: str | None = None, **_: object) -> None:
+        self._replies[self._index] = {"text": text, "parse_mode": parse_mode}
+
+
+class _FakeMessage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.message_id = 1
+        self.replies: list[dict[str, str | None]] = []
+
+    async def reply_text(self, text: str, parse_mode: str | None = None, **_: object) -> _FakeSentMessage:
+        self.replies.append({"text": text, "parse_mode": parse_mode})
+        return _FakeSentMessage(self.replies, len(self.replies) - 1)
+
+
+class _FakeChat:
+    def __init__(self, chat_id: int) -> None:
+        self.id = chat_id
+
+
+class _FakeUpdate:
+    def __init__(self, chat_id: int, text: str) -> None:
+        self.effective_chat = _FakeChat(chat_id)
+        self.effective_message = _FakeMessage(text)
+
+
+class _FakeContext:
+    def __init__(self, bot_data: dict[str, object]) -> None:
+        self.application = type("App", (), {"bot_data": bot_data})()
+
+
+def _read_audit_rows(path: str) -> list[dict[str, object]]:
+    with open(path, "r", encoding="utf-8") as handle:
+        return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+
+
+def _chat_api_response(text: str, *, data: dict[str, object] | None = None) -> dict[str, object]:
+    meta_source = dict(data) if isinstance(data, dict) else {}
+    return {
+        "ok": bool(meta_source.get("ok", True)),
+        "assistant": {"content": text},
+        "message": text,
+        "meta": {
+            "route": str(meta_source.get("route") or "generic_chat"),
+            "used_llm": bool(meta_source.get("used_llm", True)),
+            "used_memory": bool(meta_source.get("used_memory", False)),
+            "used_runtime_state": bool(meta_source.get("used_runtime_state", False)),
+            "used_tools": list(meta_source.get("used_tools") or []),
+            "generic_fallback_used": bool(meta_source.get("generic_fallback_used", False)),
+            "generic_fallback_reason": meta_source.get("generic_fallback_reason"),
+            "runtime_state_failure_reason": meta_source.get("runtime_state_failure_reason"),
+        },
+        "error_kind": meta_source.get("error_kind"),
+    }
+
+
+class TestTelegramAuditLogging(unittest.TestCase):
+    @staticmethod
+    def _ready_runtime() -> object:
+        class _Runtime:
+            version = "0.2.0"
+            git_commit = "abc123def456"
+            started_at = datetime.now(timezone.utc) - timedelta(seconds=30)
+
+            def ready_status(self) -> dict[str, object]:
+                return {
+                    "ok": True,
+                    "ready": True,
+                    "runtime_mode": "READY",
+                    "runtime_status": {
+                        "runtime_mode": "READY",
+                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "next_action": None,
+                    },
+                    "telegram": {"state": "running"},
+                }
+
+            def llm_status(self) -> dict[str, object]:
+                return {
+                    "default_provider": "ollama",
+                    "default_model": "ollama:qwen2.5:3b-instruct",
+                    "resolved_default_model": "ollama:qwen2.5:3b-instruct",
+                    "active_provider_health": {"status": "ok"},
+                    "active_model_health": {"status": "ok"},
+                }
+
+        return _Runtime()
+
+    def test_help_phrase_returns_command_list(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            update = _FakeUpdate(42, "help")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Available commands:", reply_text)
+            self.assertIn("doctor – diagnostics", reply_text)
+            self.assertIn("setup – setup/recovery guidance", reply_text)
+            self.assertIn("status – runtime status", reply_text)
+            self.assertIn("memory – what are we doing / resume", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_fix_phrase_routes_to_doctor_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            update = _FakeUpdate(42, "fix")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+            fake_report = DoctorReport(
+                trace_id="doctor-1700000000-999",
+                generated_at="2026-03-05T00:00:00+00:00",
+                summary_status="WARN",
+                checks=[DoctorCheck("x", "WARN", "warn detail", next_action="do one thing")],
+                next_action="do one thing",
+                fixes_applied=[],
+                support_bundle_path=None,
+            )
+            with patch("agent.telegram_bridge.run_doctor_report", return_value=fake_report):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Doctor: WARN", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_doctor_text_routes_to_doctor_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            chat_id = "11992233"
+            update = _FakeUpdate(int(chat_id), "doctor")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+            fake_report = DoctorReport(
+                trace_id="doctor-1700000000-999",
+                generated_at="2026-03-05T00:00:00+00:00",
+                summary_status="WARN",
+                checks=[DoctorCheck("x", "WARN", "warn detail", next_action="do one thing")],
+                next_action="do one thing",
+                fixes_applied=[],
+                support_bundle_path=None,
+            )
+            with patch("agent.telegram_bridge.run_doctor_report", return_value=fake_report):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Doctor: WARN", reply_text)
+            self.assertIn("trace doctor-1700000000-999", reply_text)
+            self.assertIn("agent doctor --json", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
+            self.assertNotIn("LLM unavailable right now.", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_received_then_handled_fixit_choice_routes_second_option(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            wizard_path = f"{tmpdir}/wizard.json"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=wizard_path)
+            wizard_store.save(
+                {
+                    "active": True,
+                    "issue_hash": "issue-2",
+                    "issue_code": "openrouter_down",
+                    "step": "awaiting_choice",
+                    "question": "Choose an option",
+                    "choices": [
+                        {"id": "local_only", "label": "Use local-only", "recommended": True},
+                        {"id": "repair_openrouter", "label": "Repair OpenRouter", "recommended": False},
+                        {"id": "details", "label": "Show details", "recommended": False},
+                    ],
+                    "pending_plan": [],
+                    "pending_confirm_token": None,
+                    "pending_created_ts": None,
+                    "pending_expires_ts": None,
+                    "pending_issue_code": None,
+                    "last_prompt_ts": 1,
+                }
+            )
+            orchestrator = _FakeOrchestrator(reply_text="should not be used")
+            db = _FakeDB()
+            chat_id = "123456789"
+            update = _FakeUpdate(int(chat_id), "2")
+            captured_payload: dict[str, object] = {}
+
+            def _llm_fixit(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+                captured_payload.update(payload)
+                return True, {"ok": True, "message": "Repairing OpenRouter."}
+
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": _llm_fixit,
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            rows = _read_audit_rows(audit_path)
+            actions = [str(row.get("action")) for row in rows if str(row.get("action", "")).startswith("telegram.message.")]
+            self.assertEqual(["telegram.message.received", "telegram.message.handled"], actions)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("fixit", params.get("route"))
+            self.assertEqual("repair_openrouter", captured_payload.get("answer"))
+            self.assertEqual([], orchestrator.calls)
+
+    def test_received_then_handled_fixit_choice_route_with_numeric_reply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            wizard_path = f"{tmpdir}/wizard.json"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=wizard_path)
+            wizard_store.save(
+                {
+                    "active": True,
+                    "issue_hash": "issue-1",
+                    "issue_code": "openrouter_down",
+                    "step": "awaiting_choice",
+                    "question": "Choose an option",
+                    "choices": [
+                        {"id": "local_only", "label": "Use local-only", "recommended": True},
+                        {"id": "repair_openrouter", "label": "Repair OpenRouter", "recommended": False},
+                        {"id": "details", "label": "Show details", "recommended": False},
+                    ],
+                    "pending_plan": [],
+                    "pending_confirm_token": None,
+                    "pending_created_ts": None,
+                    "pending_expires_ts": None,
+                    "pending_issue_code": None,
+                    "last_prompt_ts": 1,
+                }
+            )
+            orchestrator = _FakeOrchestrator(reply_text="should not be used")
+            db = _FakeDB()
+            chat_id = "123456789"
+            update = _FakeUpdate(int(chat_id), "1")
+            captured_payload: dict[str, object] = {}
+
+            def _llm_fixit(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+                captured_payload.update(payload)
+                return True, {"ok": True, "message": "Applied local-only."}
+
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": _llm_fixit,
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            rows = _read_audit_rows(audit_path)
+            actions = [str(row.get("action")) for row in rows if str(row.get("action", "")).startswith("telegram.message.")]
+            self.assertEqual(["telegram.message.received", "telegram.message.handled"], actions)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("fixit", params.get("route"))
+
+            self.assertEqual("local_only", captured_payload.get("answer"))
+            self.assertEqual("telegram", captured_payload.get("actor"))
+            self.assertEqual([], orchestrator.calls)
+
+    def test_received_then_handled_fixit_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            wizard_path = f"{tmpdir}/wizard.json"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=wizard_path)
+            wizard_store.save(
+                {
+                    "active": True,
+                    "issue_hash": "abc",
+                    "issue_code": "openrouter_down",
+                    "step": "awaiting_confirm",
+                    "question": "Apply?",
+                    "choices": [],
+                    "pending_plan": [{"id": "01", "kind": "safe_action", "action": "health.run", "reason": "test"}],
+                    "pending_confirm_token": "token",
+                    "pending_created_ts": 1,
+                    "pending_expires_ts": 9_999_999_999,
+                    "pending_issue_code": "openrouter_down",
+                    "last_prompt_ts": 1,
+                }
+            )
+            orchestrator = _FakeOrchestrator(reply_text="should not be used")
+            db = _FakeDB()
+            chat_id = "123456789"
+            update = _FakeUpdate(int(chat_id), "yes")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "fixit applied"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            rows = _read_audit_rows(audit_path)
+            actions = [str(row.get("action")) for row in rows if str(row.get("action", "")).startswith("telegram.message.")]
+            self.assertEqual(["telegram.message.received", "telegram.message.handled"], actions)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("fixit", params.get("route"))
+            self.assertIn("chat_id_redacted", params)
+            self.assertNotEqual(chat_id, str(params.get("chat_id_redacted") or ""))
+            params_text = json.dumps(params, ensure_ascii=True)
+            self.assertNotIn(chat_id, params_text)
+            self.assertNotIn("yes", params_text.lower())
+            self.assertEqual([], orchestrator.calls)
+
+    def test_received_then_handled_chat_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(
+                reply_text="chat ok",
+                data={
+                    "route": "generic_chat",
+                    "used_llm": True,
+                    "used_memory": False,
+                    "used_runtime_state": False,
+                    "used_tools": [],
+                },
+            )
+            db = _FakeDB()
+            chat_id = "987654321"
+            user_text = "show me task summary"
+            update = _FakeUpdate(int(chat_id), user_text)
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response(
+                    "chat ok",
+                    data={
+                        "route": "generic_chat",
+                        "used_llm": True,
+                        "used_memory": False,
+                        "used_runtime_state": False,
+                        "used_tools": [],
+                    },
+                ),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            rows = _read_audit_rows(audit_path)
+            actions = [str(row.get("action")) for row in rows if str(row.get("action", "")).startswith("telegram.message.")]
+            self.assertEqual(["telegram.message.received", "telegram.message.handled"], actions)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("generic_chat", params.get("route"))
+            self.assertIn("chat_id_redacted", params)
+            self.assertNotEqual(chat_id, str(params.get("chat_id_redacted") or ""))
+            params_text = json.dumps(params, ensure_ascii=True)
+            self.assertNotIn(chat_id, params_text)
+            self.assertNotIn(user_text.lower(), params_text.lower())
+            self.assertEqual([], orchestrator.calls)
+
+    def test_status_command_returns_status_with_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            chat_id = "12349876"
+            update = _FakeUpdate(int(chat_id), "/status")
+            runtime = type(
+                "Runtime",
+                (),
+                {
+                    "version": "0.2.0",
+                    "git_commit": "abc123def456",
+                    "started_at": datetime.now(timezone.utc) - timedelta(seconds=42),
+                },
+            )()
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                    "runtime": runtime,
+                }
+            )
+
+            asyncio.run(_handle_status(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("✅ Agent is running", reply_text)
+            self.assertIn("commit abc123def456", reply_text)
+            self.assertIn("uptime", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_hello_forwards_to_orchestrator_not_status_template(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="LLM_CHAT_REPLY")
+            db = _FakeDB()
+            chat_id = "246801357"
+            update = _FakeUpdate(int(chat_id), "hello")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response("LLM_CHAT_REPLY"),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("LLM_CHAT_REPLY", reply_text)
+            self.assertNotIn("✅ Agent is running", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_text_command_path_delegates_to_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="should not run")
+            db = _FakeDB()
+            chat_id = "333444555"
+            update = _FakeUpdate(int(chat_id), "status")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
+                }
+            )
+            bridge_payload = {
+                "ok": True,
+                "handled": True,
+                "text": "bridge status",
+                "route": "status",
+                "trace_id": "tg-bridge-1",
+                "next_action": None,
+            }
+            with patch("telegram_adapter.bot.handle_telegram_command", return_value=bridge_payload) as mocked_bridge:
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("bridge status", reply_text)
+            self.assertEqual([], orchestrator.calls)
+            mocked_bridge.assert_called_once()
+
+    def test_help_returns_help_route(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="unused")
+            db = _FakeDB()
+            chat_id = "654321987"
+            update = _FakeUpdate(int(chat_id), "help")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("Available commands:", reply_text)
+            self.assertIn("doctor – diagnostics", reply_text)
+            self.assertIn("setup – setup/recovery guidance", reply_text)
+            self.assertIn("status – runtime status", reply_text)
+            self.assertIn("health – health snapshot", reply_text)
+            self.assertIn("brief – system summary", reply_text)
+            self.assertIn("memory – what are we doing / resume", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+            rows = _read_audit_rows(audit_path)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("help", params.get("route"))
+
+    def test_unknown_orchestrator_reply_uses_improved_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(
+                reply_text="I didn’t understand that. Try /brief, or ask “anything new on my PC?”",
+                data={
+                    "route": "generic_chat",
+                    "used_llm": True,
+                    "used_memory": False,
+                    "used_runtime_state": False,
+                    "used_tools": [],
+                },
+            )
+            db = _FakeDB()
+            chat_id = "1122334455"
+            update = _FakeUpdate(int(chat_id), "asdkjhasdkjh")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response(
+                    "I didn’t understand that. Try /brief, or ask “anything new on my PC?”",
+                    data={
+                        "route": "generic_chat",
+                        "used_llm": True,
+                        "used_memory": False,
+                        "used_runtime_state": False,
+                        "used_tools": [],
+                    },
+                ),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("I didn’t understand that. Try /brief, or ask “anything new on my PC?”", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+            rows = _read_audit_rows(audit_path)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("generic_chat", params.get("route"))
+
+    def test_health_equivalent_text_routes_to_health_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(
+                reply_text="health ok",
+                data={
+                    "route": "runtime_status",
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_runtime_state": True,
+                    "used_tools": [],
+                },
+            )
+            db = _FakeDB()
+            chat_id = "777123999"
+            update = _FakeUpdate(int(chat_id), "how is the bot health")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response(
+                    "health ok",
+                    data={
+                        "route": "runtime_status",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                    },
+                ),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("health ok", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
+            self.assertNotIn("LLM unavailable right now.", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_status_text_routes_to_status_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(reply_text="status ok")
+            db = _FakeDB()
+            chat_id = "777123111"
+            update = _FakeUpdate(int(chat_id), "status")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                    "runtime": self._ready_runtime(),
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("runtime_mode: READY", reply_text)
+            self.assertIn("telegram: running", reply_text)
+            self.assertNotIn("Reply 1, 2, or 3.", reply_text)
+            self.assertNotIn("LLM unavailable right now.", reply_text)
+            self.assertNotIn("ENABLE_WRITES", reply_text)
+            self.assertNotIn("Last disk_report", reply_text)
+            self.assertNotIn("Recent audits", reply_text)
+            self.assertEqual([], orchestrator.calls)
+
+    def test_health_bad_request_retry_preserves_readable_labels_and_paths(self) -> None:
+        class BadRequest(Exception):
+            pass
+
+        class _FlakyMessage(_FakeMessage):
+            def __init__(self, text: str) -> None:
+                super().__init__(text)
+                self._attempt = 0
+
+            async def reply_text(self, text: str, parse_mode: str | None = None, **kwargs: object) -> None:
+                _ = kwargs
+                self._attempt += 1
+                if self._attempt == 1:
+                    raise BadRequest("can't parse entities")
+                self.replies.append({"text": text, "parse_mode": parse_mode})
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            health_text = (
+                "now_utc: 2026-03-06T12:00:00Z\n"
+                "uptime_sec: 42\n"
+                "schema_version: 3\n"
+                "db_path: /home/c/personal-agent/memory/agent.db"
+            )
+            orchestrator = _FakeOrchestrator(reply_text=health_text)
+            db = _FakeDB()
+            chat_id = "700001234"
+            update = _FakeUpdate(int(chat_id), "health")
+            update.effective_message = _FlakyMessage("health")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("now_utc", reply_text)
+            self.assertIn("uptime_sec", reply_text)
+            self.assertIn("schema_version", reply_text)
+            self.assertIn("/home/c/personal-agent/memory/agent.db", reply_text)
+
+    def test_health_route_bad_request_retries_plain_and_logs_once(self) -> None:
+        class BadRequest(Exception):
+            pass
+
+        class _FlakyMessage(_FakeMessage):
+            def __init__(self, text: str) -> None:
+                super().__init__(text)
+                self.calls: list[dict[str, object]] = []
+                self._attempt = 0
+
+            async def reply_text(self, text: str, parse_mode: str | None = None, **kwargs: object) -> _FakeSentMessage:
+                self.calls.append({"text": text, "parse_mode": parse_mode, **kwargs})
+                self._attempt += 1
+                if self._attempt == 1:
+                    raise BadRequest("can't parse entities")
+                self.replies.append({"text": text, "parse_mode": parse_mode})
+                return _FakeSentMessage(self.replies, len(self.replies) - 1)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            log_path = f"{tmpdir}/agent.log"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            orchestrator = _FakeOrchestrator(
+                reply_text="health ok",
+                data={
+                    "route": "runtime_status",
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_runtime_state": True,
+                    "used_tools": [],
+                },
+            )
+            db = _FakeDB()
+            chat_id = "8800112233"
+            update = _FakeUpdate(int(chat_id), "how is the bot health")
+            update.effective_message = _FlakyMessage("how is the bot health")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": log_path,
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with self.assertLogs("telegram_adapter.bot", level="ERROR") as logs:
+                with patch(
+                    "telegram_adapter.bot._post_local_api_chat_json_async",
+                    return_value=_chat_api_response(
+                        "health ok",
+                        data={
+                            "route": "runtime_status",
+                            "used_llm": False,
+                            "used_memory": False,
+                            "used_runtime_state": True,
+                            "used_tools": [],
+                        },
+                    ),
+                ):
+                    asyncio.run(_handle_message(update, context))
+
+            self.assertEqual([], orchestrator.calls)
+            self.assertEqual(2, len(update.effective_message.calls))
+            self.assertIsNone(update.effective_message.calls[0].get("parse_mode"))
+            self.assertIsNone(update.effective_message.calls[1].get("parse_mode"))
+            self.assertEqual("health ok", str(update.effective_message.replies[-1]["text"]))
+
+            joined_logs = "\n".join(logs.output)
+            self.assertIn("can't parse entities", joined_logs)
+
+            with open(log_path, "r", encoding="utf-8") as handle:
+                rows = [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+            out_rows = [row for row in rows if str(row.get("type")) == "telegram.out"]
+            self.assertEqual(1, len(out_rows))
+
+    def test_runtime_state_failure_reason_is_logged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = f"{tmpdir}/agent.log"
+            orchestrator = _FakeOrchestrator(
+                reply_text="I couldn't read that from the runtime state.",
+                data={
+                    "route": "model_status",
+                    "error_kind": "runtime_state_unavailable",
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_runtime_state": True,
+                    "used_tools": [],
+                    "runtime_payload": {
+                        "type": "runtime_state_unavailable",
+                        "reason": "current_model_missing",
+                    },
+                },
+            )
+            update = _FakeUpdate(42, "what model are you using?")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": _FakeDB(),
+                    "log_path": log_path,
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response(
+                    "I couldn't read that from the runtime state.",
+                    data={
+                        "route": "model_status",
+                        "error_kind": "runtime_state_unavailable",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": True,
+                        "used_tools": [],
+                        "runtime_state_failure_reason": "current_model_missing",
+                    },
+                ),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            with open(log_path, "r", encoding="utf-8") as handle:
+                rows = [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+            telegram_rows = [
+                row.get("payload")
+                for row in rows
+                if str(row.get("type")) == "telegram_message" and isinstance(row.get("payload"), dict)
+            ]
+            self.assertTrue(telegram_rows)
+            self.assertEqual("current_model_missing", telegram_rows[-1].get("runtime_state_failure_reason"))
+
+    def test_proxy_failure_reason_is_logged(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = f"{tmpdir}/agent.log"
+            update = _FakeUpdate(42, "what model are you using?")
+            context = _FakeContext(
+                {
+                    "orchestrator": _FakeOrchestrator(reply_text="unused"),
+                    "db": _FakeDB(),
+                    "log_path": log_path,
+                    "audit_log": AuditLog(path=f"{tmpdir}/audit.jsonl"),
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": LLMFixitWizardStore(path=f"{tmpdir}/wizard.json"),
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value={
+                    "_proxy_error": {
+                        "kind": "disconnect",
+                        "detail": "broken pipe",
+                        "backend_reachable": True,
+                        "backend_ready": True,
+                        "backend_phase": "ready",
+                    }
+                },
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            with open(log_path, "r", encoding="utf-8") as handle:
+                rows = [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+            telegram_rows = [
+                row.get("payload")
+                for row in rows
+                if str(row.get("type")) == "telegram_message" and isinstance(row.get("payload"), dict)
+            ]
+            self.assertTrue(telegram_rows)
+            self.assertEqual("disconnect", telegram_rows[-1].get("proxy_failure_kind"))
+            self.assertEqual("broken pipe", telegram_rows[-1].get("proxy_failure_detail"))
+            self.assertEqual(True, telegram_rows[-1].get("proxy_backend_ready"))
+
+    def test_reply_text_is_truncated_to_safe_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+            long_text = "x" * 5000
+            orchestrator = _FakeOrchestrator(reply_text=long_text)
+            db = _FakeDB()
+            chat_id = "9911223344"
+            update = _FakeUpdate(int(chat_id), "show me task summary")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                    "llm_fixit_store": wizard_store,
+                    "audit_log": audit_log,
+                }
+            )
+
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response(long_text),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            self.assertTrue(update.effective_message.replies)
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertLessEqual(len(reply_text), 3900)
+            self.assertTrue(reply_text.endswith("… (truncated)"))
+
+    def test_brief_alias_routes_to_brief_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audit_path = f"{tmpdir}/audit.jsonl"
+            audit_log = AuditLog(path=audit_path)
+            orchestrator = _FakeOrchestrator(reply_text="brief reply")
+            db = _FakeDB()
+            chat_id = "99887766"
+            update = _FakeUpdate(int(chat_id), "/breif")
+            context = _FakeContext(
+                {
+                    "orchestrator": orchestrator,
+                    "db": db,
+                    "log_path": f"{tmpdir}/agent.log",
+                    "audit_log": audit_log,
+                }
+            )
+
+            asyncio.run(_handle_brief_alias(update, context))
+
+            self.assertEqual([("/brief", chat_id)], orchestrator.calls)
+            self.assertTrue(update.effective_message.replies)
+            self.assertEqual("brief reply", update.effective_message.replies[-1]["text"])
+            rows = _read_audit_rows(audit_path)
+            handled_row = [row for row in rows if row.get("action") == "telegram.message.handled"][-1]
+            params = handled_row.get("params_redacted") if isinstance(handled_row.get("params_redacted"), dict) else {}
+            self.assertEqual("alias", params.get("route"))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+def test_api_proxy_exception_logs_traceback_and_returns_fallback(caplog):  # type: ignore[no-untyped-def]
+    with tempfile.TemporaryDirectory() as tmpdir:
+        audit_path = f"{tmpdir}/audit.jsonl"
+        audit_log = AuditLog(path=audit_path)
+        wizard_store = LLMFixitWizardStore(path=f"{tmpdir}/wizard.json")
+        orchestrator = _RaisingOrchestrator()
+        db = _FakeDB()
+        chat_id = "9988776655"
+        update = _FakeUpdate(int(chat_id), "hello")
+        context = _FakeContext(
+            {
+                "orchestrator": orchestrator,
+                "db": db,
+                "log_path": f"{tmpdir}/agent.log",
+                "llm_fixit_fn": lambda _payload: (True, {"ok": True, "message": "ignored"}),
+                "llm_fixit_store": wizard_store,
+                "audit_log": audit_log,
+            }
+        )
+
+        caplog.set_level(logging.ERROR, logger="telegram_adapter.bot")
+        with patch("telegram_adapter.bot._post_local_api_chat_json_async", side_effect=RuntimeError("boom")):
+            asyncio.run(_handle_message(update, context))
+
+        assert update.effective_message.replies
+        reply_text = str(update.effective_message.replies[-1]["text"] or "")
+        assert "Sorry — the agent encountered an error." == reply_text
+
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        assert "boom" in logged
+        assert "Traceback (most recent call last)" in logged

@@ -1,0 +1,49 @@
+{
+  "name": "git",
+  "description": "Safe local git operations limited to the personal-agent repo.",
+  "version": "0.1.0",
+  "permissions": ["net:none"],
+  "functions": [
+    {
+      "name": "git_status",
+      "args_schema": {"type": "object", "properties": {}}
+    },
+    {
+      "name": "git_add_all",
+      "args_schema": {"type": "object", "properties": {}}
+    },
+    {
+      "name": "git_commit",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "message": {"type": "string"},
+          "approval_token": {"type": "string"}
+        },
+        "required": ["message", "approval_token"]
+      }
+    },
+    {
+      "name": "git_tag",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "message": {"type": "string"},
+          "approval_token": {"type": "string"}
+        },
+        "required": ["name", "message", "approval_token"]
+      }
+    },
+    {
+      "name": "git_push",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "approval_token": {"type": "string"}
+        },
+        "required": ["approval_token"]
+      }
+    }
+  ]
+}

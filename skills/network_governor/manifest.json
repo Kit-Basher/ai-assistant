@@ -1,0 +1,27 @@
+{
+  "name": "network_governor",
+  "description": "Observe-only network snapshots and reports (interfaces, routing, DNS).",
+  "version": "0.8.0",
+  "permissions": ["db:read", "db:write", "sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "network_snapshot",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "network_report",
+      "read_only": true,
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

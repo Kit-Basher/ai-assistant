@@ -1,0 +1,28 @@
+{
+  "name": "resource_governor",
+  "description": "Observe-only CPU/RAM snapshots and reports (load, memory, top processes).",
+  "version": "0.7.0",
+  "permissions": ["db:read", "db:write", "sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "resource_snapshot",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "top_n": {"type": "integer"},
+          "user_id": {"type": "string"}
+        }
+      }
+    },
+    {
+      "name": "resource_report",
+      "read_only": true,
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

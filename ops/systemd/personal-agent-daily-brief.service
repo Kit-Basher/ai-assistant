@@ -1,0 +1,13 @@
+[Unit]
+Description=Personal Agent Scheduled Daily Brief
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/c/personal-agent
+Environment=PYTHONPATH=/home/c/personal-agent
+EnvironmentFile=-/etc/personal-agent/agent.env
+EnvironmentFile=-%h/.config/personal-agent/agent.env
+ExecStart=/home/c/personal-agent/.venv/bin/python -m agent.scheduled_daily_brief
+StandardOutput=journal
+StandardError=journal

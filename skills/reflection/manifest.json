@@ -1,0 +1,17 @@
+{
+  "name": "reflection",
+  "description": "Observe-only weekly rollups over existing snapshots.",
+  "version": "1.0.0",
+  "permissions": ["db:read", "sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "weekly_reflection",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}

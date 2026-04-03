@@ -1,0 +1,10 @@
+{
+  "huggingface_watch_authors": [
+    "Nanbeige"
+  ],
+  "max_size_gb": 8,
+  "require_license": [
+    "apache-2.0",
+    "mit"
+  ]
+}

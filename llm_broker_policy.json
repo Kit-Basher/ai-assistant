@@ -1,0 +1,6 @@
+{
+  "allow_cloud": false,
+  "allow_openai": false,
+  "allow_openrouter": false,
+  "prefer_local": true
+}
