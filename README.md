@@ -1,663 +1,431 @@
-# Personal Agent (Local-first PC Health Agent)
+# Personal Agent
 
-Local-first personal assistant with SQLite memory, deterministic routing, and systemd-managed scheduling.
-Canonical product/runtime truth: [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
-v1 scope is local-first PC health management with read-only diagnostics/guidance first; skill packs extend capabilities later.
+Personal Agent is a local-first AI assistant that answers from real runtime
+state, uses bounded native skills, and previews any mutating action before it
+executes it.
 
-## Documentation Order (Source of Truth)
-Use docs in this order when context conflicts:
-1. `PRODUCT_RUNTIME_SPEC.md`
-2. `README.md`
-3. `ARCHITECTURE.md`
-4. `PROJECT_STATUS.md`
-5. `docs/operator/*`
-6. `docs/design/*`
-7. `docs/history/*`
+It can inspect the current model/runtime, recommend better model choices, read
+and search safe parts of the filesystem, run a small set of bounded shell
+operations, safely ingest downloaded text-based skill packs, and carry out
+explicit controller actions such as testing or switching models.
 
-## Getting Started In 60 Seconds
-1. Create venv:
+It is not a guessy autonomous agent. It does not invent state, does not expose
+arbitrary shell execution, and does not mutate local or system state without an
+explicit confirmation step.
+
+## What It Does
+- Local-first assistant: local models and local state are preferred by default.
+- Grounded: assistant answers for runtime, model, filesystem, shell, and
+  controller actions come from deterministic runtime truth or native skill
+  results, not generic prose.
+- Controller-backed: testing models, switching temporarily, making a default,
+  acquiring models, package installs, and directory creation all go through the
+  canonical controller/native-skill path.
+- Approval-gated: mutating actions preview first and execute only after explicit
+  confirmation.
+- Safe external pack ingestion: downloaded third-party packs are quarantined,
+  scanned, normalized, and denied permissions by default.
+
+## What It Won't Do
+- It will not run arbitrary shell commands.
+- It will not read your whole filesystem indiscriminately.
+- It will not mutate local or system state without explicit confirmation.
+- It will not auto-install or auto-switch models.
+- It will not let discovery proposals change canonical recommendations on their
+  own.
+- It will not execute foreign code or plugin packs.
+- It will not install dependencies from imported packs.
+
+## Core Concepts
+
+### SAFE MODE
+- Baseline mode unless explicitly overridden.
+- Local-first and advisory-first.
+- Remote switching is blocked.
+- Install/download/import actions are blocked.
+- Recommendations can still be shown, but they do not execute anything.
+
+### Controlled Mode
+- Explicit override only.
+- Entered or exited through `GET/POST /llm/control_mode`.
+- Enables explicit remote switching and explicit acquisition/install flows when
+  provider/model policy allows them.
+- Nothing switches or installs automatically here either.
+
+### Canonical Recommendation Truth
+- `recommendation_roles` is the one canonical advisory contract.
+- `POST /llm/models/check` and `POST /llm/models/recommend` are aligned on that
+  truth.
+- Compatibility fields are derived-only summaries, not a second advisory path.
+
+### Discovery / Proposals / Policy
+- Discovery output is non-canonical and review-only.
+- `POST /llm/models/proposals` lists proposals and supports filtering.
+- Proposals remain `proposed`, `non_canonical`, `review_required`, and
+  `not_adopted`.
+- `review_suggestion` helps operators prepare explicit policy writes.
+- `POST /llm/models/policy` writes reviewed policy entries.
+- `GET /llm/models/policy` lists current reviewed policy entries.
+- Curated policy statuses:
+  - `known_good`
+  - `known_stale`
+  - `avoid`
+
+## Native Capabilities
+
+### Runtime / Model / Controller
+- Current model and effective runtime target inspection.
+- Local and cloud model inventory queries.
+- Local, coding, research, and cheap-cloud recommendations.
+- Deterministic controller actions:
+  - test a model
+  - switch temporarily
+  - make default
+  - switch back
+  - acquire/install model through the canonical model manager
+
+### Filesystem
+- List directories.
+- Stat paths.
+- Read bounded text files.
+- Search by filename.
+- Search bounded text content.
+- Safety boundary:
+  - allowed roots only
+  - sensitive-path blocking
+  - symlink/path normalization checks
+  - bounded reads and searches
+
+### Shell
+- Safe read-only environment inspection commands.
+- Bounded package install path.
+- Bounded directory creation path.
+- No public arbitrary shell execution surface.
+
+### External Packs
+- Read-only discovery is available through pack sources:
+  - `GET /pack_sources`
+  - `GET /pack_sources/catalog`
+  - `POST /pack_sources/catalog`
+  - `GET /pack_sources/catalog/<source_id>`
+  - `PUT /pack_sources/catalog/<source_id>`
+  - `DELETE /pack_sources/catalog/<source_id>`
+  - `GET /pack_sources/<source_id>/packs`
+  - `GET /pack_sources/<source_id>/search?q=...`
+  - `GET /pack_sources/<source_id>/packs/<remote_id>/preview`
+- Operators can manage the configured discovery source catalog through the API.
+- Configuring a source does not imply trust. Catalog and policy are separate
+  controls.
+- Discovery sources are policy-gated per source id, source kind, and cache TTL.
+- Allowlisted discovery sources are still untrusted. Allowlisted means
+  queryable, not trusted or executable.
+- Operators can inspect and update discovery source policy through the API:
+  - `GET /pack_sources/policy`
+  - `PUT /pack_sources/policy`
+  - `GET /pack_sources/<source_id>/policy`
+  - `PUT /pack_sources/<source_id>/policy`
+  - these surfaces are loopback/operator-only
+- Discovery metadata is untrusted and advisory only.
+- Discovery cache is performance-only and remains untrusted metadata.
+- Preview is not install. Nothing becomes locally usable until an explicit
+  fetch/install request goes through quarantine and review.
+- `POST /packs/install` ingests either:
+  - a local downloaded pack snapshot
+  - a supported remote archive source over `https`
+- Remote fetch fills quarantine only, then goes through:
+  - quarantine
+  - safe remote fetch / archive validation
+  - classification
+  - static risk scan
+  - normalization
+  - plain-language review output
+- Supported today:
+  - portable text skills centered on `SKILL.md`
+  - optional `references/`, `assets/`, `AGENTS.md`, and metadata files
+- Foreign code or plugin packs are discovered and audited, but they are not
+  executed.
+- GitHub/archive sources are provenance-stamped and pinned where possible.
+- Imported external packs get no granted permissions by default.
+- Canonical pack identity is content-derived:
+  - same safe normalized content from different URLs collapses to the same
+    canonical pack id
+  - same source with changed content is treated as a new pack/version
+- Registry listings may surface likely portable text skills, experience packs,
+  or likely native/plugin packs, but those type hints do not grant trust.
+- Native/plugin packages may be discoverable, but current policy still blocks
+  them from execution and safe import.
+- Read-only inspection surfaces exist for normalized external packs:
+  - `GET /packs/<canonical_id>`
+  - `GET /packs/<canonical_id>/history`
+  - `GET /packs/compare?from=<canonical_id>&to=<canonical_id>`
+
+### Intentionally Not Supported
+- `rm`/delete/remove flows.
+- Unrestricted disk access.
+- Automatic installs or switches.
+- Automatic adoption of discovery proposals.
+
+## Confirmation / Approval Rules
+- Read-only actions run immediately:
+  - runtime/model status
+  - recommendations
+  - filesystem list/stat/read/search
+  - safe read-only shell queries
+- Mutating actions preview first:
+  - model switch / make default / acquire
+  - package install
+  - create directory
+- Execution happens only after explicit confirmation such as `yes`.
+
+## Example Flows
+Mutating action preview/confirm:
+
+```text
+User: install ripgrep
+Assistant: I will install ripgrep. This mutates the system. Reply yes to proceed or no to cancel.
+User: yes
+Assistant: [runs the bounded install path and returns the real result]
+```
+
+Blocked sensitive access:
+
+```text
+User: read ~/.ssh/config
+Assistant: Blocked. sensitive_path_blocked.
+```
+
+The same preview-first rule applies to `create a folder called logs in this
+repo`, `switch temporarily to ...`, `make this the default`, and explicit model
+acquisition requests.
+
+## Quick Start
+Canonical install path:
+- code checkout: `~/personal-agent`
+- mutable state: `~/.local/share/personal-agent`
+- operator config/policy: `~/.config/personal-agent`
+- user service: `~/.config/systemd/user/personal-agent-api.service`
+
+1. Clone or move the repo to `~/personal-agent`, then:
+   - `cd ~/personal-agent`
+2. Create a virtualenv and install the package:
    - `python3 -m venv .venv`
    - `. .venv/bin/activate`
-2. Install deps:
-   - `pip install -r requirements.txt`
-3. Start API service:
-   - `systemctl --user restart personal-agent-api.service`
-4. Verify runtime:
-   - `python -m agent setup --dry-run`
-   - `python -m agent status`
+   - `pip install -e .`
+3. Install the user service:
+   - `mkdir -p ~/.config/systemd/user`
+   - `ln -sf ~/personal-agent/systemd/personal-agent-api.service ~/.config/systemd/user/personal-agent-api.service`
+   - `systemctl --user daemon-reload`
+4. Ensure the user service can survive reboot:
+   - `loginctl enable-linger "$USER"`
+5. Enable and start the runtime:
+   - `systemctl --user enable --now personal-agent-api.service`
+6. Run first-run setup and diagnostics:
+   - `python -m agent setup`
    - `python -m agent doctor`
+7. Run the release smoke suite:
+   - if you are validating this install or preparing a release:
+     - `python scripts/release_smoke.py`
 
-Unified CLI:
-- `python -m agent setup`
-- `python -m agent doctor`
-- `python -m agent status`
-- `python -m agent health`
-- `python -m agent health_system`
-- `python -m agent llm_inventory`
-- `python -m agent llm_select --task "..."`
-- `python -m agent llm_plan --task "..."`
-- `python -m agent brief`
-- `python -m agent memory`
-- `python -m agent logs`
-- `python -m agent version`
-
-Implemented now:
-- PC health monitoring (read-only) via `python -m agent health_system`
-- Deterministic system health analysis with severity (`OK/WARN/CRITICAL`) and actionable suggestions
-- Deterministic LLM control plane for local-first model inventory, task classification, model selection, and approved install planning
-
-## Golden Path
-1. Start/restart the API service.
-2. Verify with `python -m agent status`.
-3. Use native UI or CLI first for setup/status.
-4. Talk to Telegram in plain English if enabled.
-5. If anything looks wrong, run `python -m agent doctor` and follow the single `Next action`.
-6. Telegram is an optional transport surface; it does not own runtime business logic.
-7. Telegram `help/setup/status/health/doctor/memory` uses the same canonical contracts as CLI/runtime helpers.
-
-Runtime contract (all surfaces use the same mode names):
-- `READY`: normal operation.
-- `BOOTSTRAP_REQUIRED`: setup guidance only.
-- `DEGRADED`: partial operation, read-only checks still work.
-- `FAILED`: deterministic error block with trace id + one next step.
-
-Onboarding contract (deterministic first-run states):
-- `NOT_STARTED`
-- `TOKEN_MISSING`
-- `LLM_MISSING`
-- `SERVICES_DOWN`
-- `READY`
-- `DEGRADED`
-
-Recovery contract (single best next action per mode):
-- `TELEGRAM_DOWN`
-- `API_DOWN`
-- `TOKEN_INVALID`
-- `LLM_UNAVAILABLE`
-- `LOCK_CONFLICT`
-- `DEGRADED_READ_ONLY`
-- `UNKNOWN_FAILURE`
-
-## Deterministic Tool Contract
-- LLM-originated actions use one canonical request shape (`agent/tool_contract.py`):
-  - `tool`, `args`, `reason`, `read_only`, `confidence`
-- Execution goes through one gate (`agent/tool_executor.py`) with one permission decision path (`agent/permission_contract.py`).
-- Read-only tools can run in degraded/bootstrap modes when possible.
-- Write tools are blocked unless explicitly allowed by policy (`enable_writes` and safe-mode checks).
-
-## LLM Control Plane
-- The core runtime now has a deterministic LLM control plane under `agent/llm/*`.
-- It covers:
-  - inventory of known + installed models
-  - one normalized health truth shared by inventory, selector, and planner
-  - deterministic task classification
-  - local-first model selection with strict capability matching
-  - approved install planning based on suitable installed healthy models, not mere catalog existence
-  - approved local model profiles for chat, coding, vision, and reasoning install recommendations
-- Operator entrypoints:
-  - `python -m agent llm_inventory`
-  - `python -m agent llm_select --task "debug this traceback"`
-  - `python -m agent llm_plan --task "compare these approaches"`
-- Approved install plans are planning-only. They do not silently download or switch models.
-- Approved install planning uses a small local Ollama shortlist, not broad remote catalog guessing.
-- v1 coding selection requires `chat` capability. JSON output is optional, not required, for local coding assistance.
-- Approved local install execution is available through `python -m agent llm_install ... --approve`.
-- v1 install execution is local Ollama only and always requires explicit operator approval.
-- Approved local profiles can strengthen capability truth for installed Ollama models.
-- Post-install verification now understands local vision-capable Ollama models such as `llava:7b`.
-
-## Continuity Contract
-- Conversation continuity is normalized by `agent/memory_contract.py` and persisted via `agent/memory_runtime.py`.
-- Follow-ups like `yes/no/do it/that one/show me more` only bind when exactly one valid pending item exists in the current thread.
-- Ambiguous/expired/no-resumable follow-ups return deterministic error blocks (`trace_id`, `component`, `next_action`) with no guessing.
-- Use `python -m agent memory` (or Telegram: `what are we doing?`) for a short, truthful continuity summary.
-
-## If You Only Learn 3 Commands
-- `python -m agent setup`
-- `python -m agent status`
-- `python -m agent doctor`
-
-## First 5 Minutes
-1. Start service: `systemctl --user restart personal-agent-api.service`
-2. Run setup guide: `python -m agent setup`
-3. Verify: `python -m agent status`
-4. Diagnose if needed: `python -m agent doctor`
-5. Optional Telegram transport:
-   - check adapter: `python -m agent telegram_status`
-   - enable adapter: `python -m agent telegram_enable`
-   - set token: `python -m agent.secrets set telegram:bot_token`
-   - disable adapter later if needed: `python -m agent telegram_disable`
-   - send Telegram message: `help`
-
-## Troubleshooting
-- First step for any issue: `python -m agent doctor`
-- Canonical first-run and recovery guide: `python -m agent setup`
-- Detailed machine-readable output: `python -m agent doctor --json`
-- Safe local remediation only: `python -m agent doctor --fix`
-- Runtime entrypoints bootstrap stdout logging automatically, so logs are visible in journald/stdout by default.
-- Telegram is optional. Use `python -m agent telegram_status` for the effective adapter state and exact next action.
-
-## Local API + Web UI
-Run local HTTP API (no Telegram token required):
+Upgrade path:
+- `cd ~/personal-agent`
+- `git pull --ff-only`
 - `. .venv/bin/activate`
-- `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
-- Open browser: `http://127.0.0.1:8765`
-
-Endpoints:
-- `GET /health`
-- `GET /version`
-- `GET /telegram/status`
-- `GET /models`
-- `POST /chat`
-- `GET /config`
-- `PUT /config`
-- `GET /providers`
-- `POST /providers`
-- `PUT /providers/{id}`
-- `DELETE /providers/{id}`
-- `POST /providers/{id}/secret`
-- `POST /providers/{id}/test`
-- `POST /providers/{id}/models`
-- `POST /providers/{id}/models/refresh`
-- `GET /defaults`
-- `PUT /defaults`
-- `POST /models/refresh`
-- `POST /telegram/secret`
-- `POST /telegram/test`
-- `GET /model_scout/status`
-- `GET /model_scout/suggestions`
-- `GET /model_scout/sources`
-- `POST /model_scout/run`
-- `POST /model_scout/suggestions/{id}/dismiss`
-- `POST /model_scout/suggestions/{id}/mark_installed`
-- `GET /llm/health`
-- `POST /llm/health/run`
-- `GET /llm/catalog`
-- `GET /llm/catalog/status`
-- `POST /llm/catalog/run`
-- `POST /llm/capabilities/reconcile/plan`
-- `POST /llm/capabilities/reconcile/apply`
-- `POST /llm/autoconfig/plan`
-- `POST /llm/autoconfig/apply`
-- `POST /llm/hygiene/plan`
-- `POST /llm/hygiene/apply`
-- `POST /llm/cleanup/plan`
-- `POST /llm/cleanup/apply`
-- `POST /llm/self_heal/plan`
-- `POST /llm/self_heal/apply`
-- `GET /llm/autopilot/ledger?limit=N`
-- `GET /llm/autopilot/ledger/{id}`
-- `GET /llm/autopilot/explain_last`
-- `POST /llm/autopilot/undo`
-- `POST /llm/autopilot/bootstrap`
-- `GET /llm/registry/snapshots?limit=N`
-- `POST /llm/registry/rollback`
-- `GET /llm/notifications?limit=N`
-- `GET /llm/notifications/status`
-- `GET /llm/notifications/last_change`
-- `GET /llm/notifications/policy`
-- `POST /llm/notifications/test`
-- `POST /llm/notifications/mark_read`
-- `POST /llm/notifications/prune`
-- `GET /llm/support/bundle`
-- `GET /llm/support/diagnose?id=<provider_or_model_id>`
-- `POST /llm/support/remediate/plan`
-- `GET /permissions`
-- `PUT /permissions`
-- `GET /audit`
-- `POST /modelops/plan`
-- `POST /modelops/execute`
-
-UI behavior:
-- `GET /` serves the local web UI from `agent/webui/dist`.
-- Static assets (`/assets/*`) are served by the same API process.
-- Runtime installs do not require Node or Rust.
-- `Model Scout` tab shows recommendation-only model suggestions and lets you dismiss/mark installed.
-- `Permissions` tab controls constrained ModelOps autonomy and shows recent audit entries.
-
-Web UI build (dev-time only):
-1. `./scripts/build_webui.sh`
-2. This runs:
-   - `npm ci`
-   - `npm run build`
-3. Build source lives in `desktop/`; output is written to `agent/webui/dist/`.
-
-Optional dev mode:
-- `WEBUI_DEV_PROXY=1 .venv/bin/python -m agent.api_server`
-- Then open the dev server URL shown on `/` (default `http://127.0.0.1:1420`).
-- For hot reload: `cd desktop && npm run dev` (requests use same-origin paths and Vite proxies API routes to `127.0.0.1:8765`).
-
-Check running API identity:
-- `curl -s http://127.0.0.1:8765/health`
-- `curl -s http://127.0.0.1:8765/version`
-- `curl -s http://127.0.0.1:8765/telegram/status`
-
-## API User Service (systemd)
-Install as a user service:
-- `mkdir -p ~/.config/systemd/user`
-- `cp systemd/personal-agent-api.service ~/.config/systemd/user/`
+- `pip install -e .`
+- `python -m agent doctor --fix`
 - `systemctl --user daemon-reload`
-- `systemctl --user enable --now personal-agent-api.service`
+- `systemctl --user restart personal-agent-api.service`
+- `python -m agent status`
 
-Or use helper script:
-- `./scripts/install_user_service.sh`
+Recovery/reset path:
+- `python -m agent setup`
+- `python -m agent doctor --fix`
+- `systemctl --user restart personal-agent-api.service`
+- `python -m agent status`
 
-Check status/logs:
-- `systemctl --user status personal-agent-api.service`
-- `journalctl --user -u personal-agent-api.service -f`
+Uninstall path:
+- `systemctl --user disable --now personal-agent-api.service`
+- `rm -f ~/.config/systemd/user/personal-agent-api.service`
+- `systemctl --user daemon-reload`
+- optionally remove `~/.config/personal-agent` and `~/.local/share/personal-agent`
 
-Telegram token setup (UI/API):
-- Open `http://127.0.0.1:8765` and use the `Telegram` tab, or:
-- `curl -X POST http://127.0.0.1:8765/telegram/secret -H 'Content-Type: application/json' -d '{"bot_token":"<token>"}'`
-- `curl -X POST http://127.0.0.1:8765/telegram/test`
+Legacy `install.sh`, `uninstall.sh`, and `doctor.sh` are intentionally retired
+and fail closed. Use the user-service path above instead.
 
-Secret storage:
-- Primary: OS keychain via `keyring` (if available in runtime environment)
-- Fallback: encrypted local file at `~/.local/share/personal-agent/secrets.enc.json`
-- Telegram bot token key: `telegram:bot_token`
+If you are upgrading an older repo-local install, `python -m agent doctor --fix`
+copies legacy `memory/agent.db` and `logs/agent.jsonl` into the canonical
+state directory before restart.
 
-Provider/model registry:
-- File: `llm_registry.json` (schema v2, JSON on disk)
-- Backward compatibility: v1 files are loaded via migration/compat logic at runtime.
+Useful local commands:
+- `python -m agent status`
+- `python -m agent doctor`
+- `python -m agent health`
+- `python -m agent llm_inventory`
+- `python -m agent memory`
 
-Add any OpenAI-compatible provider:
-1. Open `http://127.0.0.1:8765` and go to `Providers`.
-2. Use `Add Provider (OpenAI-Compatible)`:
-   - `id` (e.g. `openrouter`, `myrouter`)
-   - `base_url` (e.g. `https://openrouter.ai/api/v1`)
-   - `chat_path` (default `/v1/chat/completions`; OpenRouter preset uses `/chat/completions`)
-   - optional default headers/query params as JSON objects
-   - optional API key (stored in secret store as `provider:<id>:api_key`)
-3. Save and test. Then fetch models or add a model manually if listing is unsupported.
+Diagnostics / recovery path:
+- `python -m agent setup`
+  - canonical first-run and guided recovery surface
+- `python -m agent doctor`
+  - deterministic local diagnostics
+- `python -m agent doctor --collect-diagnostics`
+  - one redacted local diagnostics bundle for support/debugging
+- `python -m agent doctor --fix`
+  - safe local repair for missing dirs, drop-ins, and legacy state migration
 
-Examples:
-- OpenRouter:
-  - `base_url=https://openrouter.ai/api/v1`
-  - `chat_path=/chat/completions`
-- Generic router/OpenAI-compatible:
-  - `base_url=https://api.example.com`
-  - `chat_path=/v1/chat/completions`
+Memory operator surfaces:
+- `python -m agent memory`
+  - plain resumable-state summary for the current thread
+  - if continuity memory is degraded, the summary says so explicitly instead of silently repairing it
+- continuity persistence remains full-record replace, but it is now revision-aware:
+  - per-key optimistic concurrency control is enforced at the storage write boundary
+  - successful writes increment a stored revision
+  - stale cross-runtime writes are rejected instead of silently overwriting newer state
+  - there is no merge-on-write path
+  - there is no cross-key atomic snapshot or cross-key merge behavior
+  - a stale runtime must reload before retrying a rejected save
+- `GET /memory/status` (loopback only)
+  - canonical inspect surface for deterministic continuity memory, optional `memory_v2`, and optional semantic memory
+  - includes current continuity revisions, last attempted write outcome, last successful write outcome, and last stale-write conflict metadata
+  - conflict metadata is observable, not auto-resolved
+- `POST /memory/reset` (loopback only)
+  - explicit preview + confirm reset surface
+  - supported components: `continuity`, `memory_v2`, `semantic`, or `all`
+  - no memory component is erased until `confirm=true`
 
-Routing (high-level):
-- `auto`: balanced quality/cost ordering.
-- `prefer_cheap`: prioritize lower-cost models.
-- `prefer_best`: prioritize higher-quality models.
-- `prefer_local_lowest_cost_capable`: local-capable models first; otherwise lowest expected token-cost among capable remote models.
-  - Expected cost uses rolling usage averages per `(task_type, provider, model)` from `llm_usage_stats.json` (next to DB by default).
-  - Local models with unknown pricing are treated as zero-cost for ranking.
+## Release Artifacts
+- Canonical packaging metadata lives in `pyproject.toml`.
+- Canonical version truth lives in `VERSION`.
+- Canonical release build command:
+  - `python scripts/build_dist.py --outdir dist --clean`
+- Expected artifacts:
+  - `dist/personal_agent-<version>-py3-none-any.whl`
+  - `dist/personal_agent-<version>.tar.gz`
+- Canonical packaged CLI entry points:
+  - `personal-agent`
+  - `personal-agent-api`
+  - `personal-agent-telegram`
+- The canonical long-running service install for this release is still the repo
+  checkout plus user-systemd path above.
+- Debian/system packaging is not supported for this release.
+- Legacy `packaging/` service/env artifacts are not the shipping install path.
 
-Model Scout v1 (recommend-only):
-- Scans Hugging Face trending models (`/api/trending?type=model`) and proposes local GGUF/Ollama candidates first.
-- Uses local backends for discovery:
-  - Ollama: reads local `/api/tags` for installed models.
-  - OpenRouter: reads `/models` when key source is configured.
-- Adds remote suggestions only for enabled/tested remote providers, based on expected cost + health.
-- Never auto-installs models and never auto-changes defaults.
-- Uses deterministic scoring, dedupe, and cooldown to avoid spam.
-- Storage: SQLite tables in `agent.db` when available; JSON fallback at `~/.local/share/personal-agent/model_scout_state.json`.
+## Product-Relevant Operator Surfaces
+- `POST /chat`
+  - assistant front door
+- `GET /health`
+  - fast service/runtime health
+  - explicit `phase`, `startup_phase`, `runtime_mode`, `warmup_remaining`,
+    safe-mode/policy blocking state
+- `GET /ready`
+  - richest readiness surface
+  - includes runtime readiness, warmup/degraded state, next action, and policy state
+- `GET /runtime`
+  - operator runtime snapshot
+  - includes explicit runtime status plus provider/router summary
+- `GET /llm/control_mode`
+  - current SAFE/Controlled mode state
+- `POST /llm/control_mode`
+  - explicit mode override
+- `POST /llm/models/check`
+  - canonical operator recommendation/status view
+- `POST /llm/models/recommend`
+  - canonical assistant/operator recommendation view
+- `POST /llm/models/proposals`
+  - non-canonical discovery proposal queue
+- `GET /llm/models/policy`
+  - curated policy list/read surface
+- `POST /llm/models/policy`
+  - curated policy write/update/remove surface
+- `GET /packs`
+  - runtime/native packs plus external pack ingestion records
+- `GET /pack_sources`
+  - configured discovery-only external pack sources
+- `GET /pack_sources/catalog`
+  - operator-only discovery source catalog read surface
+- `POST /pack_sources/catalog`
+  - operator-only discovery source catalog create surface
+- `GET /pack_sources/policy`
+  - operator-only discovery source policy read surface
+- `GET /pack_sources/catalog/<source_id>`
+  - operator-only discovery source detail read surface
+- `GET /pack_sources/<source_id>/packs`
+  - normalized listing view for one discovery source
+- `GET /pack_sources/<source_id>/search?q=...`
+  - read-only search over untrusted registry metadata
+- `GET /pack_sources/<source_id>/packs/<remote_id>/preview`
+  - preview one external listing and generate a safe install handoff
+- `PUT /pack_sources/catalog/<source_id>`
+  - operator-only discovery source catalog update surface
+- `GET /pack_sources/<source_id>/policy`
+  - operator-only per-source policy read surface
+- `DELETE /pack_sources/catalog/<source_id>`
+  - operator-only discovery source catalog delete surface
+- `PUT /pack_sources/policy`
+  - operator-only discovery source policy update surface
+- `PUT /pack_sources/<source_id>/policy`
+  - operator-only per-source policy override update surface
+- `GET /packs/<canonical_id>`
+  - inspect one normalized external pack by canonical content id
+- `GET /packs/<canonical_id>/history`
+  - inspect source history and version chain for one external pack
+- `GET /packs/compare?from=<canonical_id>&to=<canonical_id>`
+  - read-only structured diff and plain-language change summary between two
+    normalized pack versions
+- `POST /packs/install`
+  - quarantined external pack ingestion for downloaded snapshots or supported
+    remote archives
 
-LLM catalog/health/autoconfig/hygiene/cleanup:
-- Catalog store persists provider model metadata (capabilities, context window, pricing when available) at `LLM_CATALOG_PATH` (default `~/.local/share/personal-agent/llm_catalog.json`).
-- Catalog endpoints:
-  - `GET /llm/catalog` returns normalized catalog rows (optional provider filter + limit).
-  - `GET /llm/catalog/status` returns last refresh/error per provider.
-  - `POST /llm/catalog/run` triggers a refresh and syncs catalog metadata into registry model rows.
-- Health monitor persists provider/model status at `LLM_HEALTH_STATE_PATH` (default `~/.local/share/personal-agent/llm_health_state.json`).
-- Router skip-list avoids candidates marked down/degraded during active cooldown windows.
-- Capabilities reconcile endpoints:
-  - `POST /llm/capabilities/reconcile/plan` computes deterministic capability mismatch fixes from catalog inference.
-  - `POST /llm/capabilities/reconcile/apply` applies capability/default_for fixes via transactional write + ledger + audit.
-- Autoconfig endpoints:
-  - `POST /llm/autoconfig/plan` returns deterministic proposed defaults/provider toggles.
-  - `POST /llm/autoconfig/apply` applies plan via permission gate + audit.
-- Hygiene endpoints:
-  - `POST /llm/hygiene/plan` returns deterministic registry cleanup diff.
-  - `POST /llm/hygiene/apply` applies cleanup via permission gate + audit.
-- Cleanup endpoints:
-  - `POST /llm/cleanup/plan` returns deterministic prune/disable plan from usage + health + catalog.
-  - `POST /llm/cleanup/apply` applies cleanup via `llm.registry.prune` permission gate and scheduler policy.
+These are the product-facing surfaces worth learning first. The repo contains
+additional internal/operator endpoints, but they are not the core publishable
+surface.
 
-LLM Autopilot loop (API process, deterministic):
-- Sequence per scheduler cycle:
-  1. `POST /models/refresh` logic (provider inventory refresh; Ollama uses `/api/tags` as source of truth)
-  2. `POST /llm/catalog/run` logic (authoritative provider catalogs + deterministic metadata sync)
-  3. `POST /llm/capabilities/reconcile/plan` + `POST /llm/capabilities/reconcile/apply` (if permissions/policy allow)
-  4. `POST /llm/health/run` (provider-specific probes + persisted cooldown/backoff)
-  5. `POST /llm/hygiene/plan` + `POST /llm/hygiene/apply` (if permissions allow)
-  6. `POST /llm/cleanup/plan` + `POST /llm/cleanup/apply` (if permissions allow/policy allows)
-  7. `POST /llm/self_heal/plan` + `POST /llm/self_heal/apply` (if drift exists; if allowed)
-  8. `POST /llm/autoconfig/plan` + `POST /llm/autoconfig/apply` (if permissions allow)
-- Conservative default behavior:
-  - keep current healthy/routable defaults unchanged
-  - detect and report defaults drift in `GET /llm/health` under `health.drift`
-  - self-heal defaults when current default provider/model drifts (missing, unavailable, unroutable, non-chat, unhealthy)
-  - repair missing/invalid defaults deterministically (prefer local chat-capable model, then remote if allowed/available)
-  - normalize `default_model` to fully-qualified `provider:model`
-- Safety model:
-  - apply actions are permission-gated (`llm.autoconfig.apply`, `llm.hygiene.apply`, `llm.self_heal.apply`, `llm.registry.prune`, `llm.capabilities.reconcile.apply`)
-  - scheduler capability-reconcile auto-apply is only allowed by default on loopback bindings when `LLM_CAPABILITIES_RECONCILE_ALLOW_APPLY` is unset
-  - scheduler self-heal auto-apply is only allowed by default on loopback bindings when `LLM_SELF_HEAL_ALLOW_APPLY` is unset
-  - scheduler cleanup auto-apply is only allowed by default on loopback bindings when `LLM_REGISTRY_PRUNE_ALLOW_APPLY` is unset
-  - every catalog/health/autoconfig/hygiene/cleanup/self-heal run emits an audit record with decision, outcome, reason, duration, and modified ids
-  - cleanup/hygiene never remove secrets; they only update registry entries
+## Release Smoke Suite
+Run this before calling a build releasable:
+- `python scripts/release_smoke.py`
 
-Autopilot safety + rollback:
-- Apply actions (`llm.autoconfig.apply`, `llm.hygiene.apply`, `llm.cleanup.apply`, `llm.self_heal.apply`, `llm.capabilities.reconcile.apply`) use transactional registry writes:
-  - snapshot before apply
-  - atomic write/replace
-  - post-write invariant verification
-  - automatic restore if verification fails
-- Every successful transactional apply now records:
-  - `snapshot_id_before`
-  - `snapshot_id_after` (post-apply snapshot, best-effort)
-  - `resulting_registry_hash`
-  - stable-sorted `changed_ids`
-- Snapshot API:
-  - `GET /llm/registry/snapshots?limit=N`
-  - `POST /llm/registry/rollback` with `{ "snapshot_id": "..." }`
-- Rollback policy:
-  - loopback binding + `LLM_REGISTRY_ROLLBACK_ALLOW` unset: auto-allow
-  - non-loopback: requires `llm.registry.rollback` permission
-- One-click undo API:
-  - `POST /llm/autopilot/undo`
-  - resolves latest successful autopilot apply action and rolls back to its `snapshot_id_before`
-  - uses existing rollback policy/permission checks and audits `llm.autopilot.undo`
-- Safe mode (`LLM_AUTOPILOT_SAFE_MODE=1` default):
-  - allows local repairs (mark unroutable, fix local defaults)
-  - blocks remote activation changes:
-    - enabling remote providers/models
-    - switching defaults to remote provider/model
-    - enabling remote fallback from false->true
-  - blocked actions are reported in health under `health.autopilot.last_blocked_reason`
-- Churn escalation:
-  - runtime tracks recent autopilot applies and detects churn (`LLM_AUTOPILOT_CHURN_MIN_APPLIES` within `LLM_AUTOPILOT_CHURN_WINDOW_SECONDS`)
-  - on churn, runtime enters a persisted safe-mode override (`LLM_AUTOPILOT_STATE_PATH`) and pauses apply phases until operator intervention
-  - emits audit action `llm.autopilot.safe_mode.enter` and notification context
-- Bootstrap defaults:
-  - `POST /llm/autopilot/bootstrap` deterministically selects a local chat-capable healthy model when defaults are unset/unroutable
-  - loopback + `LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY` unset: auto-allow
-  - non-loopback: requires `llm.autopilot.bootstrap.apply` permission
-- Explain endpoint:
-  - `GET /llm/autopilot/explain_last`
-  - returns latest successful autopilot apply with rationale lines, stable `changed_ids`, snapshot/hash metadata, and redacted evidence subset
-- Action ledger API (UI-friendly):
-  - `GET /llm/autopilot/ledger?limit=N`
-  - `GET /llm/autopilot/ledger/{id}`
-  - entries include action, decision/outcome/reason, `snapshot_id_before`, `snapshot_id_after`, `resulting_registry_hash`, and stable-sorted `changed_ids`
+It is the canonical fast release gate. It runs a fixed deterministic set of
+tests covering:
+- fresh-install and first-run path checks
+- health/readiness/runtime restart truth
+- chat/tool golden-path behavior
+- basic memory inspect/degrade behavior
+- safe external pack discovery/preview/install blocked-path behavior
+- redacted diagnostics/no-secrets sanity
 
-Autopilot notifications:
-- When scheduler cycles mutate defaults/provider/model state, it builds one combined natural-language notification for that cycle.
-- Diff source is deterministic and limited to:
-  - defaults: `routing_mode`, `default_provider`, `default_model`, `allow_remote_fallback`
-  - providers: `enabled`, `available`, `health.status`, `health.cooldown_until`, `health.down_since`, `health.failure_streak`
-  - models: `enabled`, `available`, `routable`, `health.status`, `health.cooldown_until`, `health.down_since`, `health.failure_streak`
-- Delivery targets (deterministic order):
-  - `telegram` target first when configured and remote send policy permits.
-  - `local` target fallback (always configured) so UI still shows delivered notifications when Telegram is absent/unavailable.
-- Send policy:
-  - loopback binding + `LLM_NOTIFICATIONS_ALLOW_SEND` unset: auto-allow (developer default)
-  - non-loopback: remote send requires `llm.notifications.send` permission (local target still records delivery)
-- Anti-spam:
-  - rate limit (`AUTOPILOT_NOTIFY_RATE_LIMIT_SECONDS`, default `1800`)
-  - dedupe by stable change hash (`AUTOPILOT_NOTIFY_DEDUPE_WINDOW_SECONDS`, default `86400`)
-  - quiet hours defer Telegram send but still record (`AUTOPILOT_NOTIFY_QUIET_START_HOUR` / `AUTOPILOT_NOTIFY_QUIET_END_HOUR`)
-  - retention/compaction in store:
-    - `LLM_NOTIFICATIONS_MAX_ITEMS` (default `200`)
-    - `LLM_NOTIFICATIONS_MAX_AGE_DAYS` (default `30`)
-    - `LLM_NOTIFICATIONS_COMPACT` (default `1`; keeps only recent repeated `no_changes`/same-diff groups)
-- API:
-  - `GET /llm/notifications?limit=N`
-  - `GET /llm/notifications/status`
-    - includes `last_read_hash` and `unread_count`
-  - `GET /llm/notifications/last_change`
-    - returns the latest actionable change summary (skips no-op/rate-limit/dedupe/quiet-hour rows)
-  - `GET /llm/notifications/policy` (shows effective test policy from loopback/knob logic)
-  - `POST /llm/notifications/test`
-  - `POST /llm/notifications/mark_read` with `{ "hash": "<dedupe_hash>" }`
-  - `POST /llm/notifications/prune` (permission-gated by `llm.notifications.prune`)
-    - Requires explicit policy allow for `llm.notifications.prune` (no loopback auto-allow path).
-  - Web UI shows this policy as a badge in the Autopilot Notifications card.
-- `GET /llm/health` includes last scheduler notify outcome/hash in `health.notifications`.
-- `GET /llm/health` includes deterministic defaults drift report in `health.drift`.
+A passing run means the core supported product path is still coherent and the
+main safety/recovery gates are intact.
 
-Chat response meta now includes an ops summary:
-- `meta.autopilot.last_notification`:
-  - `hash`, `ts_iso`, `title`, `outcome`, `reason`, `delivered_to`
-- `meta.autopilot.since_last_user_message`:
-  - count of notifications with `ts > chat_request_start_ts`
+If you want the heavier follow-up validation path, run:
+- `python scripts/release_validation_extended.py`
 
-Support diagnostics (local-only, deterministic):
-- `GET /llm/support/bundle`
-  - exports a redacted local support bundle (defaults/providers/models/health/audit/ledger/notifications/policies)
-  - no network calls; no secret values
-- `GET /llm/support/diagnose?id=<provider_id_or_model_id>`
-  - explains provider/model failure state from stored validation + health + catalog evidence
-  - includes stable `root_causes` and safe `recommended_actions`
-- `POST /llm/support/remediate/plan`
-  - returns a plan-only remediation sequence for `fix_routing`, `reduce_churn`, or `bootstrap`
-  - never applies changes and never writes registry state
+That extended suite adds slower checks such as fresh wheel-install validation
+and extra deferred-startup/restart coverage without bloating the main smoke
+gate.
 
-Background automation (API process):
-- Enabled by default when `LLM_AUTOMATION_ENABLED=1`.
-- Jobs:
-  - provider/model refresh every `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
-  - bootstrap check every `LLM_SELF_HEAL_INTERVAL_S` (default `86400`; first run shortly after startup)
-  - catalog refresh every `LLM_CATALOG_REFRESH_INTERVAL_S` (default `21600`)
-  - capability reconcile every `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
-  - health probe every `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
-  - hygiene every `LLM_HYGIENE_INTERVAL_SECONDS` (default `86400`)
-  - cleanup every `LLM_HYGIENE_INTERVAL_SECONDS` (default `86400`)
-  - model scout every `LLM_MODEL_SCOUT_INTERVAL_SECONDS` (default `86400`)
-  - autoconfig every `LLM_AUTOCONFIG_INTERVAL_SECONDS` (default `604800`)
-- Optional startup autoconfig: `LLM_AUTOCONFIG_RUN_ON_STARTUP=1`.
-- Disable all background jobs with `LLM_AUTOMATION_ENABLED=0`.
+## Current Boundaries
+- Remote recommendation quality still depends on trustworthy metadata quality.
+- Discovery is proposal-only; it does not automatically change canonical
+  recommendations.
+- External pack discovery metadata is advisory only; safe import still supports
+  portable text skills only.
+- There is no unrestricted shell surface and no unrestricted filesystem
+  mutation.
+- Debian/system packaging is out of scope for this release.
+- Foreign code/plugin packs are not executable.
+- Automatic switching, automatic installing, and automatic proposal adoption are
+  out of scope for this release.
+- The release smoke suite is intentionally compact and does not attempt live
+  network/provider smoke coverage or real reboot automation.
 
-Constrained autonomy (ModelOps only):
-- Autonomy scope is limited to model-management actions:
-  - `modelops.install_ollama`
-  - `modelops.pull_ollama_model`
-  - `modelops.import_gguf_to_ollama`
-  - `modelops.set_default_model`
-  - `modelops.enable_disable_provider_or_model`
-  - `llm.autoconfig.apply`
-  - `llm.hygiene.apply`
-  - `llm.registry.prune`
-  - `llm.registry.rollback`
-  - `llm.self_heal.apply`
-  - `llm.capabilities.reconcile.apply`
-  - `llm.autopilot.bootstrap.apply`
-  - `llm.notifications.test`
-  - `llm.notifications.send`
-  - `llm.notifications.prune`
-- Default policy is deny for all actions.
-- Exception: `llm.notifications.test` is auto-allowed on loopback-only API bindings when `LLM_NOTIFICATIONS_ALLOW_TEST` is unset (developer ergonomics).
-- Exception: `llm.notifications.send` is auto-allowed for loopback-only API bindings when `LLM_NOTIFICATIONS_ALLOW_SEND` is unset.
-- API flow is plan-first:
-  - `POST /modelops/plan` returns deterministic steps + allow/deny decision.
-  - `POST /modelops/execute` executes only if policy allows (and confirmation is provided in `manual_confirm` mode).
-- No arbitrary shell execution: only whitelisted command paths are used by ModelOps executor.
-- Audit is append-only and redacted.
+## Source Of Truth
+Use docs in this order when context conflicts:
+1. `README.md`
+2. `PRODUCT_RUNTIME_SPEC.md`
+3. `PROJECT_STATUS.md`
+4. `docs/operator/*`
+5. `docs/design/*`
 
-Side-by-side staging run:
-1. Use a different API port:
-   - `.venv/bin/python -m agent.api_server --port 8876`
-2. Use separate data/config paths:
-   - `AGENT_DB_PATH=/tmp/personal-agent-staging/agent.db`
-   - `LLM_REGISTRY_PATH=/tmp/personal-agent-staging/llm_registry.json`
-   - `AGENT_SECRET_STORE_PATH=/tmp/personal-agent-staging/secrets.enc.json`
-   - `LLM_USAGE_STATS_PATH=/tmp/personal-agent-staging/llm_usage_stats.json`
-
-## Environment Variables
-Telegram token source:
-- Preferred: secret store key `telegram:bot_token` (configured via web UI/API)
-- Backward-compatible fallback: `TELEGRAM_BOT_TOKEN`
-
-Common optional:
-- `TELEGRAM_ENABLED` (default `0`; normally managed through `python -m agent telegram_enable` / `telegram_disable`)
-- `AGENT_TIMEZONE` (default `America/Regina`)
-- `AGENT_DB_PATH` (default `memory/agent.db`)
-- `AGENT_LOG_PATH` (default `logs/agent.jsonl`)
-- `AGENT_SKILLS_PATH` (default `skills/`)
-- `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS` (`1` makes `scripts/doctor.py` fail when required systemd units are missing; default skips these checks when units are not installed)
-  - Doctor guide: `docs/operator/doctor.md` (`python -m agent doctor`, `--json`, `--fix`)
-- `PERCEPTION_ENABLED` (default `1`)
-- `PERCEPTION_ROOTS` (comma-separated allowlist roots for perception top-dir sizing; default `/home,/data/projects`)
-- `PERCEPTION_INTERVAL_SECONDS` (default `5`; reserved for future background scheduling)
-- `ENABLE_SCHEDULED_SNAPSHOTS` (`1` to enable periodic snapshots)
-- `ENABLE_WRITES` (default off)
-
-LLM/provider optional:
-- `OPENAI_API_KEY`, `OPENAI_MODEL`
-- `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`
-- `OLLAMA_HOST`, `OLLAMA_MODEL`
-- `LLM_REGISTRY_PATH` (defaults to `llm_registry.json` if present)
-- `LLM_ROUTING_MODE` (`auto`, `prefer_cheap`, `prefer_best`, `prefer_local_lowest_cost_capable`)
-- `LLM_RETRY_ATTEMPTS`
-- `LLM_RETRY_BASE_DELAY_MS`
-- `LLM_CIRCUIT_BREAKER_FAILURES`
-- `LLM_CIRCUIT_BREAKER_WINDOW_SECONDS`
-- `LLM_CIRCUIT_BREAKER_COOLDOWN_SECONDS`
-- `LLM_USAGE_STATS_PATH` (default: `llm_usage_stats.json` next to DB)
-- `LLM_CATALOG_PATH` (default `~/.local/share/personal-agent/llm_catalog.json`)
-- `MODEL_SCOUT_ENABLED` (default `1`)
-- `MODEL_SCOUT_NOTIFY_DELTA` (default `15`)
-- `MODEL_SCOUT_ABSOLUTE_THRESHOLD` (default `80`)
-- `MODEL_SCOUT_MAX_SUGGESTIONS_PER_NOTIFY` (default `2`)
-- `MODEL_SCOUT_LICENSE_ALLOWLIST` (default `apache-2.0,mit,bsd-3-clause`)
-- `MODEL_SCOUT_SIZE_MAX_B` (default `12`)
-- `AGENT_MODEL_SCOUT_STATE_PATH` (JSON fallback path when SQLite is unavailable)
-- `LLM_AUTOMATION_ENABLED` (default `1`)
-- `LLM_HEALTH_INTERVAL_SECONDS` (default `900`)
-- `LLM_HEALTH_MAX_PROBES_PER_RUN` (default `6`)
-- `LLM_HEALTH_PROBE_TIMEOUT_SECONDS` (default `6`)
-- `LLM_HEALTH_STATE_PATH` (default `~/.local/share/personal-agent/llm_health_state.json`)
-- `LLM_CATALOG_REFRESH_INTERVAL_S` (default `21600`)
-- `LLM_MODEL_SCOUT_INTERVAL_SECONDS` (default `86400`)
-- `LLM_AUTOCONFIG_INTERVAL_SECONDS` (default `604800`)
-- `LLM_AUTOCONFIG_RUN_ON_STARTUP` (default `0`)
-- `LLM_HYGIENE_INTERVAL_SECONDS` (default `86400`)
-- `LLM_HYGIENE_UNAVAILABLE_DAYS` (default `7`)
-- `LLM_HYGIENE_REMOVE_EMPTY_DISABLED_PROVIDERS` (default `1`)
-- `LLM_HYGIENE_DISABLE_REPEATEDLY_FAILING_PROVIDERS` (default `0`)
-- `LLM_HYGIENE_PROVIDER_FAILURE_STREAK` (default `8`)
-- `LLM_REGISTRY_PRUNE_ALLOW_APPLY` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: always allow scheduler cleanup applies without `llm.registry.prune`
-  - `false`: always require `llm.registry.prune`
-- `LLM_REGISTRY_PRUNE_UNUSED_DAYS` (default `30`)
-- `LLM_REGISTRY_PRUNE_DISABLE_FAILING_PROVIDER` (default `0`)
-- `LLM_REGISTRY_SNAPSHOTS_DIR` (default `~/.local/share/personal-agent/registry_snapshots`)
-- `LLM_REGISTRY_SNAPSHOT_MAX_ITEMS` (default `40`)
-- `LLM_REGISTRY_ROLLBACK_ALLOW` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: allow rollback without `llm.registry.rollback`
-  - `false`: always require `llm.registry.rollback`
-- `LLM_AUTOPILOT_SAFE_MODE` (default `1`)
-- `LLM_AUTOPILOT_STATE_PATH` (default `~/.local/share/personal-agent/autopilot_state.json`)
-- `LLM_AUTOPILOT_CHURN_WINDOW_SECONDS` (default `1800`)
-- `LLM_AUTOPILOT_CHURN_MIN_APPLIES` (default `4`)
-- `LLM_AUTOPILOT_CHURN_RECENT_LIMIT` (default `80`)
-- `LLM_AUTOPILOT_BOOTSTRAP_ALLOW_APPLY` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: allow `/llm/autopilot/bootstrap` without `llm.autopilot.bootstrap.apply`
-  - `false`: always require `llm.autopilot.bootstrap.apply`
-- `LLM_AUTOPILOT_LEDGER_PATH` (default `~/.local/share/personal-agent/autopilot_action_ledger.json`)
-- `LLM_AUTOPILOT_LEDGER_MAX_ITEMS` (default `400`)
-- `LLM_SELF_HEAL_INTERVAL_S` (default `86400`)
-- `LLM_SELF_HEAL_ALLOW_APPLY` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: always allow scheduler self-heal applies without `llm.self_heal.apply` permission action
-  - `false`: always require `llm.self_heal.apply` permission action
-- `LLM_CAPABILITIES_RECONCILE_ALLOW_APPLY` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: always allow scheduler capability-reconcile applies without `llm.capabilities.reconcile.apply`
-  - `false`: always require `llm.capabilities.reconcile.apply`
-- `AUTOPILOT_NOTIFY_ENABLED` (default `1`)
-- `AUTOPILOT_NOTIFY_RATE_LIMIT_SECONDS` (default `1800`)
-- `AUTOPILOT_NOTIFY_DEDUPE_WINDOW_SECONDS` (default `86400`)
-- `AUTOPILOT_NOTIFY_STORE_PATH` (default `~/.local/share/personal-agent/llm_notifications.json`)
-- `AUTOPILOT_NOTIFY_QUIET_START_HOUR` (optional, 0-23)
-- `AUTOPILOT_NOTIFY_QUIET_END_HOUR` (optional, 0-23)
-- `LLM_NOTIFICATIONS_MAX_ITEMS` (default `200`)
-- `LLM_NOTIFICATIONS_MAX_AGE_DAYS` (default `30`; `0` disables age-based pruning)
-- `LLM_NOTIFICATIONS_COMPACT` (default `1`; `0` disables repeated-diff compaction)
-- `LLM_NOTIFICATIONS_ALLOW_TEST` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: always allow `/llm/notifications/test` without permission action toggle
-  - `false`: always require `llm.notifications.test` permission action
-- `LLM_NOTIFICATIONS_ALLOW_SEND` (optional: `true`/`false`)
-  - unset: auto policy (`true` for loopback-only API binding, `false` otherwise)
-  - `true`: always allow scheduler autopilot sends without `llm.notifications.send`
-  - `false`: always require `llm.notifications.send` permission action
-
-Desktop/API optional:
-- `AGENT_API_HOST` (default `127.0.0.1`)
-- `AGENT_API_PORT` (default `8765`)
-- `AGENT_SECRET_STORE_PATH` (encrypted file fallback location)
-- `AGENT_WEBUI_DIST_PATH` (default `agent/webui/dist`)
-- `WEBUI_DEV_PROXY` (`1` to show dev server landing page on `/`)
-- `WEBUI_DEV_URL` (default `http://127.0.0.1:1420`)
-- `AGENT_PERMISSIONS_PATH` (default `~/.config/personal-agent/permissions.json`)
-- `AGENT_AUDIT_LOG_PATH` (default `~/.local/share/personal-agent/audit.jsonl`)
-
-## Legacy/Optional
-- Legacy Tauri scaffold files remain under `desktop/src-tauri/`, but they are not used in the default install or runtime path.
-
-## Install (systemd)
-Recommended user install:
-- `bash ops/install.sh --user`
-
-System install:
-- `bash ops/install.sh`
-
-Uninstall:
-- `bash ops/install.sh uninstall`
-
-## Telegram Commands (Registered in `telegram_adapter/bot.py`)
-- `/remind <YYYY-MM-DD HH:MM> | <text>`
-- `/status`
-- `/disk_grow [path]`
-- `/audit`
-- `/storage_snapshot`
-- `/storage_report`
-- `/resource_report`
-- `/brief`
-- `/network_report`
-- `/weekly_reflection`
-- `/today`
-- `/task_add <title>`
-- `/done <id>`
-- `/open_loops [all|due|important]`
-- `/health`
-- `/daily_brief_status`
-- `/ask <question>`
-- `/ask_opinion <question>`
-- `/scout`
-- `/scout_dismiss <suggestion_id>`
-- `/scout_installed <suggestion_id>`
-- `/permissions` (ModelOps permissions summary)
-- `/audit` (last 5 redacted ModelOps audit events)
-
-Notes:
-- `/task_add` also accepts advanced pipe syntax:
-  - `/task_add <project> | <title> | <effort_mins> | <impact_1to5>`
-- `/done` requires numeric task id.
-
-## Daily Brief Scheduling
-Daily brief scheduling is systemd-driven via:
-- `ops/systemd/personal-agent-daily-brief.service`
-- `ops/systemd/personal-agent-daily-brief.timer`
-
-Entrypoint:
-- `.venv/bin/python -m agent.scheduled_daily_brief`
-
-User timer status:
-- `systemctl --user status personal-agent-daily-brief.timer`
-
-## Testing
-- Full suite: `pytest -q`
-- Current local result (2026-02-18): `486 passed`
-
-## Architecture References
-- `ARCHITECTURE.md`
-- `STABILITY.md`
+## More Context
+- Product/runtime scope: `PRODUCT_RUNTIME_SPEC.md`
+- Current architecture/handover: `PROJECT_STATUS.md`
+- Operator guides: `docs/operator/`

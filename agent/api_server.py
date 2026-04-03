@@ -6,27 +6,32 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
 import hashlib
+import html
 import ipaddress
 import json
 import mimetypes
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import traceback
-from typing import Any, Callable
+import uuid
+from typing import Any, Callable, Mapping
 import urllib.error
 import urllib.parse
 import urllib.request
 
 from agent.config import Config, load_config
+from agent.chat_response_serializer import serialize_orchestrator_chat_response
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import (
     bad_request_next_question,
+    compose_actionable_message,
     deterministic_error_message,
     friendly_error_message,
 )
@@ -69,10 +74,21 @@ from agent.model_watch_hf import (
     scan_hf_watch,
 )
 from agent.response_envelope import failure, ok_result, validate_envelope
+from agent.skill_governance import (
+    ALLOWED_EXECUTION_MODES,
+    DECLARABLE_CAPABILITIES,
+    DEFAULT_EXECUTION_MODE,
+    evaluate_skill_execution_request,
+)
+from agent.skill_governance_store import SkillGovernanceStore
+from agent.version import read_build_info, read_git_commit, read_version
+from agent.runtime_truth_service import RuntimeTruthService
+from agent.runtime_lifecycle import RuntimeLifecyclePhase, derive_runtime_lifecycle_phase
+from agent.runtime_events import RuntimeEventRecorder
 from agent.runtime_contract import (
-    get_effective_llm_identity,
     normalize_user_facing_status,
 )
+from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
@@ -97,15 +113,28 @@ from agent.llm.catalog import (
 from agent.llm.cleanup import apply_registry_cleanup_plan, build_registry_cleanup_plan
 from agent.llm.chat_preflight import (
     RuntimeChatPreflightBridge,
-    build_chat_selection_policy_meta,
     prepare_runtime_chat_request,
 )
 from agent.llm.default_model_guard import validate_default_model
 from agent.llm.health import HealthProbeSettings, HealthStateStore, LLMHealthMonitor
 from agent.llm.hygiene import apply_hygiene_plan, build_hygiene_plan
 from agent.llm.install_executor import execute_install_plan
+from agent.llm.model_discovery_policy import (
+    ModelDiscoveryPolicyStore,
+    allowed_model_discovery_role_hints,
+    allowed_model_discovery_statuses,
+)
+from agent.llm.model_discovery import (
+    allowed_model_discovery_proposal_kinds,
+    allowed_model_discovery_proposal_sources,
+)
+from agent.llm.model_manager import (
+    CanonicalModelManager,
+    build_model_manager_request_from_hf_plan_rows,
+)
 from agent.llm.install_planner import build_install_plan_for_model
 from agent.llm.inference_router import route_inference
+from agent.llm.known_model_metadata import known_model_metadata
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.runtime_model_snapshot import build_runtime_model_snapshot
 from agent.llm.notifications import (
@@ -134,18 +163,14 @@ from agent.llm.support import (
 from agent.llm.value_policy import (
     ValuePolicy,
     normalize_policy,
-    rank_candidates_by_utility,
-    utility_delta,
 )
 from agent.llm.registry import RegistryStore
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Message, Request
 from agent.modelops import ModelOpsExecutor, ModelOpsPlanner, SafeRunner
 from agent.modelops.discovery import ModelInfo, list_models_ollama, list_models_openrouter
-from agent.modelops.recommend import (
+from agent.modelops.seen_state import (
     load_seen_model_ids,
-    recommend_models,
-    recommendation_to_dict,
     save_seen_model_ids,
 )
 from agent.onboarding_contract import (
@@ -156,6 +181,7 @@ from agent.onboarding_contract import (
 )
 from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
+    OperatorRecoveryStore,
     WizardChoice,
     WizardDecision,
     build_plan_for_choice as wizard_build_plan_for_choice,
@@ -182,15 +208,20 @@ from agent.memory_v2.ingest import ingest_bootstrap_snapshot
 from agent.memory_v2.retrieval import select_memory
 from agent.memory_v2.storage import SQLiteMemoryStore
 from agent.memory_v2.types import MemoryLevel, MemoryQuery
-from agent.packs.manifest import PackManifestError, compute_permissions_hash, load_manifest, normalize_permissions
+from agent.memory_runtime import MemoryRuntime
+from agent.semantic_memory import build_semantic_memory_service
+from agent.packs.external_ingestion import ExternalPackIngestor
+from agent.packs.manifest import compute_permissions_hash, normalize_permissions
 from agent.packs.policy import is_iface_allowed
+from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
+from agent.packs.remote_fetch import RemotePackFetcher
 from agent.packs.store import PackStore
 from agent.recovery_contract import (
     detect_recovery_mode,
     recovery_next_action,
     recovery_summary,
 )
-from agent.orchestrator import classify_authoritative_domain, has_local_observations_block
+from agent.orchestrator import Orchestrator, classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
 from agent.secret_store import SecretStore
@@ -217,11 +248,7 @@ _SAFE_MODE_BLOCKED_DEDUPE_SECONDS = 600
 _SAFE_MODE_PAUSED_HEALTH_NOTIFY_SECONDS = 21600
 _MODEL_SCOUT_PACK_ID = "model_scout"
 _MODEL_SCOUT_IFACES = (
-    "model_scout.status",
-    "model_scout.suggestions",
     "model_scout.run",
-    "model_scout.dismiss",
-    "model_scout.mark_installed",
 )
 _HEALTH_STATUSES = {"ok", "degraded", "down", "unknown", "not_applicable"}
 _OLLAMA_PULL_ALLOWLIST = (
@@ -283,6 +310,13 @@ def compute_notification_test_policy(runtime: "AgentRuntime") -> dict[str, Any]:
 
 
 def compute_notification_send_policy(runtime: "AgentRuntime") -> dict[str, Any]:
+    if bool(getattr(runtime.config, "safe_mode_enabled", False)):
+        return {
+            "bind_host": str(urllib.parse.urlparse(str(runtime.listening_url or "")).hostname or "").strip(),
+            "is_loopback": runtime._host_is_loopback(str(urllib.parse.urlparse(str(runtime.listening_url or "")).hostname or "").strip()),
+            "allow_send_effective": False,
+            "allow_reason": "safe_mode",
+        }
     parsed = urllib.parse.urlparse(str(runtime.listening_url or ""))
     bind_host = str(parsed.hostname or "").strip()
     is_loopback = runtime._host_is_loopback(bind_host)
@@ -317,6 +351,13 @@ def compute_notification_send_policy(runtime: "AgentRuntime") -> dict[str, Any]:
 
 
 def compute_self_heal_apply_policy(runtime: "AgentRuntime") -> dict[str, Any]:
+    if bool(getattr(runtime.config, "safe_mode_enabled", False)):
+        return {
+            "bind_host": str(urllib.parse.urlparse(str(runtime.listening_url or "")).hostname or "").strip(),
+            "is_loopback": runtime._host_is_loopback(str(urllib.parse.urlparse(str(runtime.listening_url or "")).hostname or "").strip()),
+            "allow_apply_effective": False,
+            "allow_reason": "safe_mode",
+        }
     parsed = urllib.parse.urlparse(str(runtime.listening_url or ""))
     bind_host = str(parsed.hostname or "").strip()
     is_loopback = runtime._host_is_loopback(bind_host)
@@ -335,18 +376,11 @@ def compute_self_heal_apply_policy(runtime: "AgentRuntime") -> dict[str, Any]:
             "allow_apply_effective": False,
             "allow_reason": "explicit_false",
         }
-    if is_loopback:
-        return {
-            "bind_host": bind_host,
-            "is_loopback": True,
-            "allow_apply_effective": True,
-            "allow_reason": "loopback_auto",
-        }
     return {
         "bind_host": bind_host,
-        "is_loopback": False,
+        "is_loopback": is_loopback,
         "allow_apply_effective": False,
-        "allow_reason": "permission_required",
+        "allow_reason": "explicit_opt_in_required" if is_loopback else "permission_required",
     }
 
 
@@ -453,6 +487,13 @@ def compute_registry_rollback_policy(runtime: "AgentRuntime") -> dict[str, Any]:
 
 
 def compute_autopilot_bootstrap_apply_policy(runtime: "AgentRuntime") -> dict[str, Any]:
+    if bool(getattr(runtime.config, "safe_mode_enabled", False)):
+        return {
+            "bind_host": str(urllib.parse.urlparse(str(runtime.listening_url or "")).hostname or "").strip(),
+            "is_loopback": runtime._host_is_loopback(str(urllib.parse.urlparse(str(runtime.listening_url or "")).hostname or "").strip()),
+            "allow_apply_effective": False,
+            "allow_reason": "safe_mode",
+        }
     parsed = urllib.parse.urlparse(str(runtime.listening_url or ""))
     bind_host = str(parsed.hostname or "").strip()
     is_loopback = runtime._host_is_loopback(bind_host)
@@ -471,18 +512,11 @@ def compute_autopilot_bootstrap_apply_policy(runtime: "AgentRuntime") -> dict[st
             "allow_apply_effective": False,
             "allow_reason": "explicit_false",
         }
-    if is_loopback:
-        return {
-            "bind_host": bind_host,
-            "is_loopback": True,
-            "allow_apply_effective": True,
-            "allow_reason": "loopback_auto",
-        }
     return {
         "bind_host": bind_host,
-        "is_loopback": False,
+        "is_loopback": is_loopback,
         "allow_apply_effective": False,
-        "allow_reason": "permission_required",
+        "allow_reason": "explicit_opt_in_required" if is_loopback else "permission_required",
     }
 
 
@@ -526,6 +560,8 @@ class AgentRuntime:
         self._defer_bootstrap_warmup = bool(defer_bootstrap_warmup)
         self._registry_lock = threading.RLock()
         self.startup_phase = "starting"
+        self._runtime_lifecycle_lock = threading.Lock()
+        self._runtime_lifecycle_phase = RuntimeLifecyclePhase.BOOT.value
         self._startup_warmup_lock = threading.Lock()
         self._startup_warmup_remaining: list[str] = []
         self._startup_warmup_thread: threading.Thread | None = None
@@ -538,8 +574,12 @@ class AgentRuntime:
         self.started_at = datetime.now(timezone.utc)
         self.started_at_iso = self.started_at.isoformat()
         self.pid = os.getpid()
-        self.version = self._read_version()
-        self.git_commit = self._read_git_commit()
+        self.runtime_id = f"runtime-{self.pid}-{int(self.started_at.timestamp())}"
+        build_info = read_build_info(repo_root=self._repo_root)
+        self.version = build_info.version
+        self.version_source = build_info.version_source
+        self.git_commit = build_info.git_commit
+        self._runtime_events = RuntimeEventRecorder(runtime_id=self.runtime_id, max_events=100)
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -549,6 +589,7 @@ class AgentRuntime:
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
         self.permission_policy = PermissionPolicy()
         self.pack_store = PackStore(self.config.db_path)
+        self._skill_governance_store = SkillGovernanceStore(self.config.db_path)
         self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
         self.webui_dist_path = Path(
             os.getenv("AGENT_WEBUI_DIST_PATH", "").strip() or str(self._repo_root / "agent" / "webui" / "dist")
@@ -578,6 +619,12 @@ class AgentRuntime:
         )
         self._model_watch_store = ModelWatchStore(path=model_watch_state_path)
         self._model_watch_catalog_path = model_watch_catalog_path_for_config(self.config)
+        model_discovery_policy_path = self._runtime_state_path(
+            config,
+            os.getenv("AGENT_MODEL_DISCOVERY_POLICY_PATH", "").strip() or None,
+            "model_discovery_policy.json",
+        )
+        self._model_discovery_policy_store = ModelDiscoveryPolicyStore(path=model_discovery_policy_path)
         model_watch_hf_state_path = self._runtime_state_path(
             config,
             self.config.model_watch_hf_state_path,
@@ -608,11 +655,21 @@ class AgentRuntime:
             toggle_enabled=self._modelops_toggle_enabled,
         )
         self._memory_v2_store: SQLiteMemoryStore | None = None
+        self._memory_v2_init_error: str | None = None
+        self._memory_v2_last_error: dict[str, Any] | None = None
         if bool(self.config.memory_v2_enabled):
             try:
                 self._memory_v2_store = SQLiteMemoryStore(self.config.db_path)
+                self._memory_v2_init_error = None
             except Exception as exc:  # pragma: no cover - defensive initialization path
                 self._memory_v2_store = None
+                self._memory_v2_init_error = exc.__class__.__name__
+                self._memory_v2_last_error = {
+                    "subsystem": "memory_v2",
+                    "operation": "init",
+                    "error": exc.__class__.__name__,
+                    "at": int(time.time()),
+                }
                 log_event(
                     self.config.log_path,
                     "memory_v2_init_failed",
@@ -620,6 +677,9 @@ class AgentRuntime:
                         "error": exc.__class__.__name__,
                     },
                 )
+        self._semantic_memory_service = None
+        self._semantic_memory_init_error: str | None = None
+        self._semantic_memory_last_error: dict[str, Any] | None = None
 
         self._scheduler_stop = threading.Event()
         self._scheduler_thread: threading.Thread | None = None
@@ -677,6 +737,12 @@ class AgentRuntime:
             "llm_fixit_wizard_state.json",
         )
         self._llm_fixit_store = LLMFixitWizardStore(path=llm_fixit_state_path)
+        self._runtime_truth_service = RuntimeTruthService(self)
+        self._orchestrator_lock = threading.RLock()
+        self._orchestrator_db: MemoryDB | None = None
+        self._orchestrator: Orchestrator | None = None
+        self._chat_runtime_bootstrap_completed = False
+        self._local_chat_bootstrap_last_attempt_ts: int = 0
         self._model_watch_hf_last_status: dict[str, Any] = {
             "enabled": bool(self.config.model_watch_hf_enabled),
             "last_run_ts": None,
@@ -689,6 +755,8 @@ class AgentRuntime:
         self._safe_mode_last_escalation_reason: str | None = (
             str(self._autopilot_safety_state.status().get("last_churn_reason") or "").strip() or None
         )
+        self._safe_mode_explicit_chat_target_override: dict[str, str] | None = None
+        self._temporary_chat_target_override: dict[str, str] | None = None
         latest_notification_rows = self._notification_store.recent(limit=1)
         latest_notification = latest_notification_rows[0] if latest_notification_rows else {}
         self._last_notify_status: dict[str, Any] = {
@@ -715,6 +783,9 @@ class AgentRuntime:
             "created_ts": None,
             "expires_ts": None,
         }
+        self._intent_choice_state: dict[str, dict[str, Any]] = {}
+        self._binary_clarification_state: dict[str, dict[str, Any]] = {}
+        self._thread_integrity_state: dict[str, dict[str, Any]] = {}
         self._premium_override_once = False
         self._premium_override_until_ts: int | None = None
         self._model_watch_last_proposal_evaluation: dict[str, Any] | None = None
@@ -856,31 +927,10 @@ class AgentRuntime:
         }
 
     def _read_version(self) -> str:
-        version_file = self._repo_root / "VERSION"
-        try:
-            if version_file.is_file():
-                version = version_file.read_text(encoding="utf-8").strip()
-                if version:
-                    return version
-        except (OSError, UnicodeError):
-            pass
-        return "unknown"
+        return read_version(repo_root=self._repo_root)[0]
 
     def _read_git_commit(self) -> str | None:
-        try:
-            result = subprocess.run(
-                ["git", "-C", str(self._repo_root), "rev-parse", "--short", "HEAD"],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                commit = (result.stdout or "").strip()
-                if commit:
-                    return commit
-        except (OSError, subprocess.SubprocessError):
-            pass
-        return None
+        return read_git_commit(repo_root=self._repo_root)
 
     def _ensure_native_packs_registered(self) -> None:
         try:
@@ -908,6 +958,127 @@ class AgentRuntime:
             permissions=self._model_scout_pack_permissions(),
             manifest_path=None,
         )
+
+    def _sync_builtin_managed_components(self) -> None:
+        try:
+            telegram = self.telegram_status()
+        except Exception:
+            telegram = {}
+        effective_state = str(telegram.get("effective_state") or telegram.get("state") or "unknown").strip().lower() or "unknown"
+        enabled = bool(telegram.get("enabled", False) or telegram.get("configured", False))
+        startup_policy = "enabled" if enabled else "disabled"
+        last_error = None if effective_state in {"enabled_running", "running"} else (str(telegram.get("next_action") or "").strip() or None)
+        self._skill_governance_store.register_managed_adapter(
+            adapter_id="telegram",
+            adapter_type="telegram_polling",
+            source_skill=None,
+            source_package="runtime",
+            approved=True,
+            enabled=enabled,
+            startup_policy=startup_policy,
+            health_status=effective_state,
+            last_error=last_error,
+            owner="runtime",
+            requested_by="platform",
+            reason="Telegram transport is a managed adapter owned by the Personal Agent runtime.",
+        )
+        scheduler_alive = bool(self._scheduler_thread is not None and self._scheduler_thread.is_alive())
+        self._skill_governance_store.register_background_task(
+            task_id="runtime_scheduler",
+            source_skill=None,
+            source_package="runtime",
+            schedule="runtime_loop",
+            trigger_type="internal",
+            approved=True,
+            enabled=scheduler_alive or bool(self.config.llm_automation_enabled),
+            health_status="running" if scheduler_alive else "idle",
+            last_run_at=None,
+            last_error=None,
+            resource_limits={"owner": "main_runtime"},
+            owner="runtime",
+            requested_by="platform",
+            reason="Main runtime-owned scheduler loop for managed background work.",
+        )
+
+    def skill_governance_status(self) -> dict[str, Any]:
+        loader = SkillLoader(self.config.skills_path)
+        loaded_skills = loader.load_all()
+        for row in loader.blocked_skills:
+            self._skill_governance_store.record_skill_governance(
+                skill_id=str(row.get("skill_id") or "").strip() or "unknown_skill",
+                skill_type=str(row.get("skill_type") or "general"),
+                requested_execution_mode=str(row.get("requested_execution_mode") or DEFAULT_EXECUTION_MODE),
+                requested_capabilities=[
+                    str(item).strip()
+                    for item in (row.get("requested_capabilities") if isinstance(row.get("requested_capabilities"), list) else [])
+                    if str(item).strip()
+                ],
+                persistence_requested=bool(row.get("persistence_requested", False)),
+                allowed=False,
+                requires_user_approval=False,
+                reason=str(row.get("reason") or "forbidden_persistence_pattern"),
+                source_issues=[
+                    str(item).strip()
+                    for item in (row.get("source_issues") if isinstance(row.get("source_issues"), list) else [])
+                    if str(item).strip()
+                ],
+                source_pack=str(row.get("source_pack") or "").strip() or None,
+            )
+        for skill in loaded_skills.values():
+            request = skill.execution_request
+            if request is None:
+                continue
+            decision = evaluate_skill_execution_request(
+                request,
+                source_issues=skill.governance_source_issues,
+                managed_background_task_approved=self._skill_governance_store.has_approved_background_task_for_skill(skill.name),
+                managed_adapter_approved=self._skill_governance_store.has_approved_adapter_for_skill(skill.name),
+            )
+            self._skill_governance_store.record_skill_governance(
+                skill_id=skill.name,
+                skill_type=skill.skill_type,
+                requested_execution_mode=request.requested_execution_mode,
+                requested_capabilities=list(request.requested_capabilities),
+                persistence_requested=bool(request.persistence_requested),
+                allowed=bool(decision.allowed),
+                requires_user_approval=bool(decision.requires_user_approval),
+                reason=str(decision.reason or "unknown"),
+                source_issues=list(decision.source_issues),
+                source_pack=str(skill.pack_id or skill.name).strip() or None,
+            )
+        self._sync_builtin_managed_components()
+        return {
+            "ok": True,
+            "policy": {
+                "allowed_execution_modes": sorted(ALLOWED_EXECUTION_MODES),
+                "default_execution_mode": DEFAULT_EXECUTION_MODE,
+                "declarable_capabilities": sorted(DECLARABLE_CAPABILITIES),
+                "persistent_execution_default": "deny",
+            },
+            "skills": self._skill_governance_store.list_skill_governance(),
+            "managed_adapters": self._skill_governance_store.list_managed_adapters(),
+            "background_tasks": self._skill_governance_store.list_background_tasks(),
+        }
+
+    def managed_adapters_status(self) -> dict[str, Any]:
+        self._sync_builtin_managed_components()
+        return {
+            "ok": True,
+            "managed_adapters": self._skill_governance_store.list_managed_adapters(),
+        }
+
+    def background_tasks_status(self) -> dict[str, Any]:
+        self._sync_builtin_managed_components()
+        return {
+            "ok": True,
+            "background_tasks": self._skill_governance_store.list_background_tasks(),
+        }
+
+    def register_managed_adapter(self, **kwargs: Any) -> tuple[bool, dict[str, Any]]:
+        return True, self._skill_governance_store.register_managed_adapter(**kwargs)
+
+    def register_background_task(self, **kwargs: Any) -> tuple[bool, dict[str, Any]]:
+        return True, self._skill_governance_store.register_background_task(**kwargs)
 
     @staticmethod
     def _model_scout_pack_permissions() -> dict[str, Any]:
@@ -952,6 +1123,9 @@ class AgentRuntime:
         message: str,
         error_kind: str = "bad_request",
         next_question: str | None = None,
+        why: str | None = None,
+        next_action: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
         body: dict[str, Any] = {
             "ok": False,
@@ -960,9 +1134,53 @@ class AgentRuntime:
             "message": message,
             "errors": [error],
         }
+        if why:
+            body["why"] = str(why).strip()
+        if next_action:
+            body["next_action"] = str(next_action).strip()
         if next_question:
             body["next_question"] = next_question
+        if isinstance(extra, dict):
+            body.update(extra)
         return False, body
+
+    @staticmethod
+    def _operator_only_error_payload(*, path: str) -> dict[str, Any]:
+        why = "This surface only accepts loopback operator requests from the same machine."
+        next_action = "Retry from the local machine, or use the supported local operator CLI."
+        return {
+            "ok": False,
+            "error": "forbidden",
+            "error_kind": "forbidden",
+            "message": compose_actionable_message(
+                what_happened=f"{path} is operator-only.",
+                why=why,
+                next_action=next_action,
+            ),
+            "why": why,
+            "next_action": next_action,
+            "operator_only": True,
+        }
+
+    @staticmethod
+    def _confirm_required_payload(
+        *,
+        what_happened: str,
+        why: str,
+        next_action: str,
+    ) -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": "confirm_required",
+            "error_kind": "confirm_required",
+            "message": compose_actionable_message(
+                what_happened=what_happened,
+                why=why,
+                next_action=next_action,
+            ),
+            "why": why,
+            "next_action": next_action,
+        }
 
     @staticmethod
     def _pack_clarification(*, intent: str, message: str, trace_id: str = "packs") -> tuple[bool, dict[str, Any]]:
@@ -1000,65 +1218,664 @@ class AgentRuntime:
             "packs": self.pack_store.list_packs(),
         }
 
-    def packs_install(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        source = str(payload.get("source") or "").strip()
-        pack_dir = str(payload.get("path") or "").strip()
-        if not pack_dir:
-            if source and source not in {"path", "local"} and "://" not in source:
-                pack_dir = source
-            elif source in {"path", "local"}:
-                pack_dir = str(payload.get("pack_path") or "").strip()
-        if not pack_dir:
-            return self._pack_error(
-                error="bad_request",
-                error_kind="bad_request",
-                message="pack source path is required",
-                next_question="Provide a local pack directory path containing pack.json.",
-            )
-        if "://" in source and source not in {"path", "local"}:
-            return self._pack_error(
-                error="bad_request",
-                error_kind="bad_request",
-                message="only local path installs are supported",
-                next_question="Use a local filesystem path for now.",
-            )
-        manifest_path = os.path.join(pack_dir, "pack.json")
+    def _pack_registry_discovery(self) -> PackRegistryDiscoveryService:
+        return PackRegistryDiscoveryService(
+            pack_store=self.pack_store,
+            storage_root=self.pack_store.external_storage_root(),
+        )
+
+    def list_pack_sources(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "sources": self._pack_registry_discovery().list_sources(),
+        }
+
+    def get_pack_sources_policy(self) -> tuple[bool, dict[str, Any]]:
+        payload = self._pack_registry_discovery().get_policy()
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    def get_pack_sources_catalog(self) -> tuple[bool, dict[str, Any]]:
+        payload = self._pack_registry_discovery().get_catalog()
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    def get_pack_source_catalog_entry(self, source_id: str) -> tuple[bool, dict[str, Any]]:
         try:
-            manifest = load_manifest(manifest_path)
-        except PackManifestError as exc:
+            payload = self._pack_registry_discovery().get_catalog_source(source_id)
+        except KeyError:
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources or GET /pack_sources/catalog.",
+            )
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    def get_pack_source_policy(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+        try:
+            payload = self._pack_registry_discovery().get_source_policy(source_id)
+        except KeyError:
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources.",
+            )
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    @staticmethod
+    def _pack_source_policy_last_change(payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        meta = payload.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("last_change"), dict):
+            return dict(meta.get("last_change") or {})
+        persisted = payload.get("persisted_policy")
+        if isinstance(persisted, dict):
+            persisted_meta = persisted.get("meta")
+            if isinstance(persisted_meta, dict) and isinstance(persisted_meta.get("last_change"), dict):
+                return dict(persisted_meta.get("last_change") or {})
+        return {}
+
+    @staticmethod
+    def _pack_source_catalog_last_change(payload: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {}
+        meta = payload.get("meta")
+        if isinstance(meta, dict) and isinstance(meta.get("last_change"), dict):
+            return dict(meta.get("last_change") or {})
+        persisted = payload.get("persisted_catalog")
+        if isinstance(persisted, dict):
+            persisted_meta = persisted.get("meta")
+            if isinstance(persisted_meta, dict) and isinstance(persisted_meta.get("last_change"), dict):
+                return dict(persisted_meta.get("last_change") or {})
+        return {}
+
+    def create_pack_source_catalog(
+        self,
+        payload: dict[str, Any],
+        *,
+        changed_by: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(changed_by or "").strip() or "loopback_operator"
+        try:
+            result = self._pack_registry_discovery().create_catalog_source(payload, changed_by=actor)
+        except ValueError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            error_code = str(exc or "invalid_source_payload").strip() or "invalid_source_payload"
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_catalog.create",
+                params={"payload": payload},
+                decision="deny",
+                reason=error_code,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error=error_code,
+                error_kind="bad_request",
+                message=f"invalid discovery source catalog create: {error_code}",
+                next_question="Use source_id, name, kind, base_url, enabled, discovery_only, supports_search, supports_preview, supports_compare_hint, and notes.",
+            )
+        last_change = self._pack_source_catalog_last_change(result)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="packs.discovery_catalog.create",
+            params={
+                "source_id": (result.get("source") or {}).get("id"),
+                "changed_fields": last_change.get("changed_fields"),
+                "previous_catalog_hash": last_change.get("previous_catalog_hash"),
+                "new_catalog_hash": last_change.get("new_catalog_hash"),
+            },
+            decision="allow",
+            reason="catalog_written",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            **result,
+        }
+
+    def update_pack_source_catalog(
+        self,
+        source_id: str,
+        payload: dict[str, Any],
+        *,
+        changed_by: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(changed_by or "").strip() or "loopback_operator"
+        try:
+            result = self._pack_registry_discovery().update_catalog_source(source_id, payload, changed_by=actor)
+        except KeyError:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_catalog.update",
+                params={"source_id": source_id, "payload": payload},
+                decision="deny",
+                reason="pack_source_not_found",
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources/catalog.",
+            )
+        except ValueError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            error_code = str(exc or "invalid_source_payload").strip() or "invalid_source_payload"
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_catalog.update",
+                params={"source_id": source_id, "payload": payload},
+                decision="deny",
+                reason=error_code,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error=error_code,
+                error_kind="bad_request",
+                message=f"invalid discovery source catalog update: {error_code}",
+                next_question="Use source_id, name, kind, base_url, enabled, discovery_only, supports_search, supports_preview, supports_compare_hint, and notes.",
+            )
+        last_change = self._pack_source_catalog_last_change(result)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="packs.discovery_catalog.update",
+            params={
+                "source_id": source_id,
+                "changed_fields": last_change.get("changed_fields"),
+                "previous_catalog_hash": last_change.get("previous_catalog_hash"),
+                "new_catalog_hash": last_change.get("new_catalog_hash"),
+            },
+            decision="allow",
+            reason="catalog_written",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            **result,
+        }
+
+    def delete_pack_source_catalog(
+        self,
+        source_id: str,
+        *,
+        changed_by: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(changed_by or "").strip() or "loopback_operator"
+        try:
+            result = self._pack_registry_discovery().delete_catalog_source(source_id, changed_by=actor)
+        except KeyError:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_catalog.delete",
+                params={"source_id": source_id},
+                decision="deny",
+                reason="pack_source_not_found",
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources/catalog.",
+            )
+        last_change = self._pack_source_catalog_last_change(result)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="packs.discovery_catalog.delete",
+            params={
+                "source_id": source_id,
+                "changed_fields": last_change.get("changed_fields"),
+                "previous_catalog_hash": last_change.get("previous_catalog_hash"),
+                "new_catalog_hash": last_change.get("new_catalog_hash"),
+                "policy_override_removed": bool(result.get("policy_override_removed", False)),
+            },
+            decision="allow",
+            reason="catalog_written",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            **result,
+        }
+
+    def update_pack_sources_policy(
+        self,
+        payload: dict[str, Any],
+        *,
+        changed_by: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(changed_by or "").strip() or "loopback_operator"
+        try:
+            result = self._pack_registry_discovery().update_global_policy(payload, changed_by=actor)
+        except ValueError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            error_code = str(exc or "invalid_policy_payload").strip() or "invalid_policy_payload"
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_policy.update",
+                params={"scope": "defaults", "payload": payload},
+                decision="deny",
+                reason=error_code,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error=error_code,
+                error_kind="bad_request",
+                message=f"invalid discovery source policy update: {error_code}",
+                next_question="Use only enabled, allowlisted, denied, allowed_source_kinds, cache_ttl_seconds, max_results, and notes.",
+            )
+        last_change = self._pack_source_policy_last_change(result)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="packs.discovery_policy.update",
+            params={
+                "scope": "defaults",
+                "changed_fields": last_change.get("changed_fields"),
+                "previous_policy_hash": last_change.get("previous_policy_hash"),
+                "new_policy_hash": last_change.get("new_policy_hash"),
+            },
+            decision="allow",
+            reason="policy_written",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            **result,
+        }
+
+    def update_pack_source_policy(
+        self,
+        source_id: str,
+        payload: dict[str, Any],
+        *,
+        changed_by: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(changed_by or "").strip() or "loopback_operator"
+        try:
+            result = self._pack_registry_discovery().update_source_policy(source_id, payload, changed_by=actor)
+        except KeyError:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_policy.update",
+                params={"scope": f"source:{source_id}", "payload": payload},
+                decision="deny",
+                reason="pack_source_not_found",
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources.",
+            )
+        except ValueError as exc:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            error_code = str(exc or "invalid_policy_payload").strip() or "invalid_policy_payload"
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_policy.update",
+                params={"scope": f"source:{source_id}", "payload": payload},
+                decision="deny",
+                reason=error_code,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=duration_ms,
+            )
+            return self._pack_error(
+                error=error_code,
+                error_kind="bad_request",
+                message=f"invalid discovery source policy update: {error_code}",
+                next_question="Use only enabled, allowlisted, denied, allowed_source_kinds, cache_ttl_seconds, max_results, and notes.",
+            )
+        last_change = self._pack_source_policy_last_change(result)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="packs.discovery_policy.update",
+            params={
+                "scope": f"source:{source_id}",
+                "source_id": source_id,
+                "changed_fields": last_change.get("changed_fields"),
+                "previous_policy_hash": last_change.get("previous_policy_hash"),
+                "new_policy_hash": last_change.get("new_policy_hash"),
+            },
+            decision="allow",
+            reason="policy_written",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            **result,
+        }
+
+    def list_pack_source_packs(self, source_id: str) -> tuple[bool, dict[str, Any]]:
+        try:
+            payload = self._pack_registry_discovery().list_packs(source_id)
+        except KeyError:
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources.",
+            )
+        except RegistrySourcePolicyError as exc:
+            return self._pack_error(
+                error="pack_source_blocked_by_policy",
+                error_kind="blocked_by_policy",
+                message=compose_actionable_message(
+                    what_happened=f"I did not query discovery source {source_id}",
+                    why="Current discovery policy blocks that source.",
+                    next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
+                ),
+                why="Current discovery policy blocks that source.",
+                next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
+                next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
+                extra={"policy": exc.policy.to_dict()},
+            )
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    def search_pack_source(self, source_id: str, query: str) -> tuple[bool, dict[str, Any]]:
+        try:
+            payload = self._pack_registry_discovery().search(source_id, query)
+        except KeyError:
+            return self._pack_error(
+                error="pack_source_not_found",
+                error_kind="bad_request",
+                message=f"pack source not found: {source_id}",
+                next_question="Use a source id returned by GET /pack_sources.",
+            )
+        except RegistrySourcePolicyError as exc:
+            return self._pack_error(
+                error="pack_source_blocked_by_policy",
+                error_kind="blocked_by_policy",
+                message=compose_actionable_message(
+                    what_happened=f"I did not query discovery source {source_id}",
+                    why="Current discovery policy blocks that source.",
+                    next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
+                ),
+                why="Current discovery policy blocks that source.",
+                next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
+                next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
+                extra={"policy": exc.policy.to_dict()},
+            )
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    def preview_pack_source_listing(self, source_id: str, remote_id: str) -> tuple[bool, dict[str, Any]]:
+        try:
+            payload = self._pack_registry_discovery().preview(source_id, remote_id)
+        except RegistrySourcePolicyError as exc:
+            return self._pack_error(
+                error="pack_source_blocked_by_policy",
+                error_kind="blocked_by_policy",
+                message=compose_actionable_message(
+                    what_happened=f"I did not preview discovery source {source_id}",
+                    why="Current discovery policy blocks that source.",
+                    next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
+                ),
+                why="Current discovery policy blocks that source.",
+                next_action="Use GET /pack_sources to inspect allowed sources, or update discovery source policy first.",
+                next_question="Use GET /pack_sources to inspect allowed sources and their policy state.",
+                extra={"policy": exc.policy.to_dict()},
+            )
+        except KeyError as exc:
+            message = str(exc)
+            if "registry source not found" in message:
+                return self._pack_error(
+                    error="pack_source_not_found",
+                    error_kind="bad_request",
+                    message=f"pack source not found: {source_id}",
+                    next_question="Use a source id returned by GET /pack_sources.",
+                )
+            return self._pack_error(
+                error="pack_listing_not_found",
+                error_kind="bad_request",
+                message=f"pack listing not found: {remote_id}",
+                next_question="Use a remote_id returned by the source listing or search endpoint.",
+            )
+        return True, {
+            "ok": True,
+            **payload,
+        }
+
+    def get_pack_details(self, canonical_id: str) -> tuple[bool, dict[str, Any]]:
+        pack = self.pack_store.get_external_pack(canonical_id)
+        if pack is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"external pack not found: {canonical_id}",
+                next_question="Use a canonical external pack id returned by /packs or /packs/install.",
+            )
+        return True, {
+            "ok": True,
+            "pack": pack,
+        }
+
+    def get_pack_history(self, canonical_id: str) -> tuple[bool, dict[str, Any]]:
+        history = self.pack_store.get_external_pack_history(canonical_id)
+        if history is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"external pack not found: {canonical_id}",
+                next_question="Use a canonical external pack id returned by /packs or /packs/install.",
+            )
+        return True, {
+            "ok": True,
+            "pack": history.get("pack"),
+            "source_history": history.get("source_history", []),
+            "version_chain": history.get("version_chain", []),
+            "version_count": int(history.get("version_count") or 0),
+        }
+
+    def compare_packs(self, from_pack_id: str, to_pack_id: str) -> tuple[bool, dict[str, Any]]:
+        if not from_pack_id or not to_pack_id:
             return self._pack_error(
                 error="bad_request",
                 error_kind="bad_request",
-                message=f"invalid pack manifest: {exc}",
-                next_question="Fix pack.json and retry install.",
+                message="from and to canonical pack ids are required",
+                next_question="Provide both compare ids, for example /packs/compare?from=<id>&to=<id>.",
+            )
+        diff_payload = self.pack_store.get_or_build_external_pack_diff(from_pack_id, to_pack_id)
+        if diff_payload is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message="one or both compare pack ids were not found",
+                next_question="Use canonical pack ids returned by /packs or /packs/install.",
+            )
+        return True, {
+            "ok": True,
+            "compare": diff_payload,
+        }
+
+    def packs_install(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        source_value = payload.get("source")
+        source_text = str(source_value or "").strip() if not isinstance(source_value, dict) else ""
+        pack_dir = str(payload.get("path") or "").strip()
+        remote_source = None
+        if isinstance(source_value, dict):
+            remote_url = str(source_value.get("url") or payload.get("url") or "").strip()
+            remote_kind = str(source_value.get("kind") or payload.get("source_kind") or "").strip().lower()
+            remote_ref = str(source_value.get("ref") or payload.get("ref") or "").strip() or None
+            if remote_url:
+                remote_source = RemotePackFetcher.build_source(
+                    kind=remote_kind or "generic_archive_url",
+                    url=remote_url,
+                    ref=remote_ref,
+                )
+        else:
+            if "://" in source_text or str(payload.get("url") or "").strip():
+                remote_source = RemotePackFetcher.build_source(
+                    kind=str(payload.get("source_kind") or "").strip().lower() or "generic_archive_url",
+                    url=str(payload.get("url") or source_text).strip(),
+                    ref=str(payload.get("ref") or "").strip() or None,
+                )
+            elif not pack_dir:
+                if source_text and source_text not in {"path", "local"} and "://" not in source_text:
+                    pack_dir = source_text
+                elif source_text in {"path", "local"}:
+                    pack_dir = str(payload.get("pack_path") or "").strip()
+        if remote_source is None and not pack_dir:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack source path or remote url is required",
+                next_question="Provide a local downloaded pack path or a supported remote https archive source.",
+            )
+        try:
+            ingestor = ExternalPackIngestor(self.pack_store.external_storage_root())
+            if remote_source is not None:
+                normalization_result, review_envelope = ingestor.ingest_from_remote_source(
+                    remote_source,
+                    created_by="packs_install",
+                )
+            else:
+                normalization_result, review_envelope = ingestor.ingest_from_path(
+                    pack_dir,
+                    source_origin="local_path",
+                    created_by="packs_install",
+                )
+        except FileNotFoundError:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack source path does not exist",
+                next_question="Provide a valid local downloaded pack path.",
             )
         requested_pack_id = str(payload.get("pack_id") or "").strip()
-        if requested_pack_id and requested_pack_id != manifest.pack_id:
+        if requested_pack_id and requested_pack_id != str(normalization_result.pack.id):
             return self._pack_error(
                 error="bad_request",
                 error_kind="bad_request",
-                message="pack_id does not match manifest",
-                next_question=f"Use pack_id {manifest.pack_id} or update pack.json.",
+                message="pack_id does not match normalized pack id",
+                next_question=f"Use pack_id {normalization_result.pack.id} or omit pack_id.",
             )
-        enable = bool(payload.get("enable", False))
-        pack_row = self.pack_store.install_pack(manifest, manifest_path=manifest_path, enable=enable)
+        pack_row = self.pack_store.record_external_pack(
+            canonical_pack=normalization_result.pack.to_dict(),
+            classification=normalization_result.classification,
+            status=normalization_result.status,
+            risk_report=normalization_result.risk_report.to_dict(),
+            review_envelope=review_envelope.to_dict(),
+            quarantine_path=normalization_result.quarantine_path,
+            normalized_path=normalization_result.normalized_path,
+        )
+        response_review = pack_row.get("review_envelope") if isinstance(pack_row.get("review_envelope"), dict) else review_envelope.to_dict()
+        response_risk = pack_row.get("risk_report") if isinstance(pack_row.get("risk_report"), dict) else normalization_result.risk_report.to_dict()
         log_event(
             self.config.log_path,
-            "pack_installed",
+            "external_pack_ingested",
             {
-                "pack_id": manifest.pack_id,
-                "trust": manifest.trust,
-                "enabled": bool(pack_row.get("enabled")),
+                "pack_id": str(pack_row.get("canonical_id") or normalization_result.pack.id),
+                "classification": normalization_result.classification,
+                "status": normalization_result.status,
+                "risk_level": str(response_risk.get("level") or normalization_result.risk_report.level),
             },
         )
-        message = f"Installed pack {manifest.pack_id}."
-        if manifest.trust != "native":
-            message += f" Approve pack {manifest.pack_id} before running it?"
+        if normalization_result.status == "normalized":
+            why = "I kept only safe text and reference content, and granted no permissions."
+            next_action = "Review the imported pack details before relying on it."
+            message = compose_actionable_message(
+                what_happened=f"I imported {normalization_result.pack.name} as a portable text skill",
+                why=why,
+                next_action=next_action,
+            )
+        elif normalization_result.status == "partial_safe_import":
+            why = "The source included executable or otherwise unsafe files, so I stripped them and kept only safe text/assets."
+            next_action = "Use the imported safe content, or request advanced review if you need anything else from the pack."
+            message = compose_actionable_message(
+                what_happened=f"I only imported the safe parts of {normalization_result.pack.name}",
+                why=why,
+                next_action=next_action,
+            )
+        else:
+            why = "The pack needs behavior that the current safe import policy does not allow."
+            next_action = "Review the pack summary, or recreate a safe local text-only version."
+            message = compose_actionable_message(
+                what_happened=f"I blocked {normalization_result.pack.name} after quarantine and review",
+                why=why,
+                next_action=next_action,
+            )
         return True, {
             "ok": True,
             "pack": pack_row,
             "message": message,
-            "requires_approval": manifest.trust != "native",
+            "why": why,
+            "next_action": next_action,
+            "requires_approval": False,
+            "review_required": True,
+            "normalization_result": {
+                **normalization_result.to_dict(),
+                "pack": pack_row.get("canonical_pack") if isinstance(pack_row.get("canonical_pack"), dict) else normalization_result.pack.to_dict(),
+                "risk_report": response_risk,
+            },
+            "review": response_review,
         }
 
     def packs_approve(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -1156,6 +1973,42 @@ class AgentRuntime:
                 secret_store=self.secret_store,
             )
             self.router.set_external_health_state(self._health_monitor.state)
+            self._refresh_semantic_memory_service()
+
+    def _refresh_semantic_memory_service(self) -> None:
+        router = self.router
+        if router is None:
+            self._semantic_memory_service = None
+            return
+        try:
+            self._semantic_memory_service = build_semantic_memory_service(
+                config=self.config,
+                registry=router.registry,
+                provider_resolver=router.provider_for_id,
+                db_path=self.config.db_path,
+            )
+            self._semantic_memory_init_error = None
+            if self._orchestrator is not None:
+                self._orchestrator._semantic_memory_service = self._semantic_memory_service  # noqa: SLF001
+                try:
+                    setattr(self._orchestrator.db, "_semantic_memory_service", self._semantic_memory_service)
+                except Exception:
+                    pass
+        except Exception as exc:  # pragma: no cover - defensive initialization path
+            self._semantic_memory_service = None
+            self._semantic_memory_init_error = exc.__class__.__name__
+            self._record_memory_issue(
+                subsystem="semantic_memory",
+                operation="init",
+                error=exc.__class__.__name__,
+            )
+            log_event(
+                self.config.log_path,
+                "semantic_memory_init_failed",
+                {
+                    "error": exc.__class__.__name__,
+                },
+            )
 
     @property
     def _router(self) -> LLMRouter:
@@ -1182,6 +2035,7 @@ class AgentRuntime:
         tasks: list[str] = [
             "native_packs",
             "router_reload",
+            "chat_runtime_bootstrap",
         ]
         if (
             bool(self.config.memory_v2_enabled)
@@ -1217,6 +2071,9 @@ class AgentRuntime:
             self._reload_router()
             if self.router is not None:
                 self.router.set_external_health_state(self._health_monitor.state)
+            return
+        if task == "chat_runtime_bootstrap":
+            self._ensure_chat_runtime_bootstrapped()
             return
         if task == "memory_bootstrap":
             if (
@@ -1301,6 +2158,13 @@ class AgentRuntime:
         self._scheduler_stop.set()
         if self._scheduler_thread is not None:
             self._scheduler_thread.join(timeout=2.0)
+        if self._orchestrator_db is not None:
+            try:
+                self._orchestrator_db.close()
+            except Exception:
+                pass
+            self._orchestrator_db = None
+            self._orchestrator = None
         self.model_scout.close()
 
     def start_embedded_telegram(
@@ -1365,6 +2229,8 @@ class AgentRuntime:
             pass
 
     def _start_background_scheduler_if_enabled(self) -> None:
+        if self._safe_mode_enabled():
+            return
         if not bool(self.config.llm_automation_enabled):
             return
         if self._scheduler_thread is not None:
@@ -1899,6 +2765,97 @@ class AgentRuntime:
             "last_ts": float(checked_at),
         }
 
+    def _canonical_health_model_id(
+        self,
+        provider_id: str,
+        model_value: str | None,
+    ) -> str | None:
+        provider_key = str(provider_id or "").strip().lower()
+        candidate = str(model_value or "").strip()
+        if not provider_key or not candidate:
+            return None
+        models = (
+            self.registry_document.get("models")
+            if isinstance(self.registry_document.get("models"), dict)
+            else {}
+        )
+        model_payload = models.get(candidate) if isinstance(models.get(candidate), dict) else None
+        if isinstance(model_payload, dict) and str(model_payload.get("provider") or "").strip().lower() == provider_key:
+            return candidate
+        normalized_model = self._canonical_model_name(provider_key, candidate, models)
+        if not normalized_model:
+            return None
+        if ":" in normalized_model:
+            prefix, _remainder = normalized_model.split(":", 1)
+            if prefix.strip().lower() == provider_key:
+                return normalized_model
+        return f"{provider_key}:{normalized_model}"
+
+    def _record_authoritative_provider_success(
+        self,
+        provider_id: str,
+        model_id: str | None = None,
+    ) -> None:
+        provider_key = str(provider_id or "").strip().lower()
+        if not provider_key:
+            return
+        previous_statuses = self._provider_health_status_snapshot()
+        now_epoch = int(time.time())
+        next_probe_at = now_epoch + max(1, int(self._health_monitor.settings.interval_seconds))
+        state = (
+            dict(self._health_monitor.state)
+            if isinstance(self._health_monitor.state, dict)
+            else self._health_monitor.store.empty_state()
+        )
+        providers = state.get("providers") if isinstance(state.get("providers"), dict) else {}
+        models = state.get("models") if isinstance(state.get("models"), dict) else {}
+        state["providers"] = providers
+        state["models"] = models
+
+        provider_row = providers.get(provider_key) if isinstance(providers.get(provider_key), dict) else {}
+        provider_row.update(
+            {
+                "status": "ok",
+                "last_error_kind": None,
+                "status_code": None,
+                "last_checked_at": now_epoch,
+                "cooldown_until": None,
+                "down_since": None,
+                "failure_streak": 0,
+                "next_probe_at": next_probe_at,
+            }
+        )
+        providers[provider_key] = provider_row
+
+        canonical_model_id = self._canonical_health_model_id(provider_key, model_id)
+        if canonical_model_id:
+            model_row = models.get(canonical_model_id) if isinstance(models.get(canonical_model_id), dict) else {}
+            model_row.update(
+                {
+                    "provider_id": provider_key,
+                    "status": "ok",
+                    "last_error_kind": None,
+                    "status_code": None,
+                    "last_checked_at": now_epoch,
+                    "cooldown_until": None,
+                    "down_since": None,
+                    "failure_streak": 0,
+                    "next_probe_at": next_probe_at,
+                }
+            )
+            models[canonical_model_id] = model_row
+
+        state["last_run_at"] = now_epoch
+        self._health_monitor.state = self._health_monitor.store.save(state)
+        if self.router is not None:
+            self._router.set_external_health_state(self._health_monitor.state)
+        current_statuses = self._provider_health_status_snapshot()
+        self._emit_provider_health_transition_events(
+            previous_statuses,
+            current_statuses,
+            source="authoritative_success",
+        )
+
     def _maybe_probe_ollama_on_demand(
         self,
         *,
@@ -2138,9 +3095,13 @@ class AgentRuntime:
         provider_cfg, _provider_payload = built
         models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
         model_payload = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
-        model_name = str(model_payload.get("model") or "").strip() or (
-            str(model_id).split(":", 1)[1] if ":" in str(model_id) else str(model_id)
-        )
+        model_name = str(model_payload.get("model") or "").strip()
+        if not model_name:
+            model_name = str(model_id or "").strip()
+            if ":" in model_name:
+                prefix, remainder = model_name.split(":", 1)
+                if str(prefix or "").strip().lower() == str(provider_id or "").strip().lower():
+                    model_name = str(remainder or "").strip()
         return probe_model(
             provider_cfg,
             model_name,
@@ -2420,6 +3381,57 @@ class AgentRuntime:
         except Exception:
             pass
 
+    def runtime_event_history(self, *, limit: int = 50) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "events": self._runtime_events.snapshot(limit=max(1, min(int(limit), 100))),
+        }
+
+    def record_runtime_event(self, event_name: str, **fields: Any) -> dict[str, Any]:
+        return self._runtime_events.log_runtime_event(event_name, **fields)
+
+    def _provider_health_status_snapshot(self) -> dict[str, str]:
+        health_state = copy.deepcopy(self._health_monitor.state) if isinstance(self._health_monitor.state, dict) else {}
+        provider_rows = health_state.get("providers") if isinstance(health_state.get("providers"), dict) else {}
+        now_epoch = int(time.time())
+        statuses: dict[str, str] = {}
+        for provider_id, raw_row in provider_rows.items():
+            provider_key = str(provider_id or "").strip().lower()
+            if not provider_key:
+                continue
+            health = self._normalize_health_record(raw_row if isinstance(raw_row, dict) else {}, now_epoch=now_epoch)
+            statuses[provider_key] = str(health.get("status") or "unknown").strip().lower() or "unknown"
+        return statuses
+
+    def _emit_provider_health_transition_events(
+        self,
+        previous_statuses: Mapping[str, str] | None,
+        current_statuses: Mapping[str, str] | None,
+        *,
+        source: str,
+    ) -> None:
+        previous = {
+            str(provider_id or "").strip().lower(): str(status or "").strip().lower() or "unknown"
+            for provider_id, status in (previous_statuses or {}).items()
+            if str(provider_id or "").strip()
+        }
+        current = {
+            str(provider_id or "").strip().lower(): str(status or "").strip().lower() or "unknown"
+            for provider_id, status in (current_statuses or {}).items()
+            if str(provider_id or "").strip()
+        }
+        for provider_id in sorted(set(previous) | set(current)):
+            old_status = previous.get(provider_id, "unknown")
+            new_status = current.get(provider_id, "unknown")
+            if old_status == new_status:
+                continue
+            self._runtime_events.log_provider_health_transition(
+                provider_id,
+                old_status,
+                new_status,
+                context={"source": source},
+            )
+
     @staticmethod
     def _scheduler_wait(
         *,
@@ -2471,6 +3483,147 @@ class AgentRuntime:
             rows.append({"id": model_id, **payload})
         return rows
 
+    @staticmethod
+    def _annotate_operator_surface_payload(
+        payload: Mapping[str, Any] | None,
+        *,
+        surface: str,
+        canonical_assistant_surface: str,
+        operator_only: bool,
+        compat_only: bool = False,
+        separate_contract: str | None = None,
+    ) -> dict[str, Any]:
+        body = dict(payload if isinstance(payload, Mapping) else {})
+        body.setdefault("operator_surface", True)
+        body.setdefault("operator_only", bool(operator_only))
+        body.setdefault("non_canonical_for_assistant", True)
+        body.setdefault("canonical_assistant_surface", canonical_assistant_surface)
+        body.setdefault("surface", surface)
+        if compat_only:
+            body.setdefault("compat_only", True)
+        if str(separate_contract or "").strip():
+            body.setdefault("separate_contract", str(separate_contract).strip())
+        return body
+
+    @staticmethod
+    def _operator_surface_provider_in_scope(row: Mapping[str, Any] | None) -> bool:
+        provider_row = row if isinstance(row, Mapping) else {}
+        model_ids = provider_row.get("model_ids") if isinstance(provider_row.get("model_ids"), list) else []
+        return bool(
+            provider_row.get("known", False)
+            or provider_row.get("configured", False)
+            or provider_row.get("active", False)
+            or provider_row.get("effective_active", False)
+            or model_ids
+        )
+
+    def _operator_provider_health_payload(
+        self,
+        provider_id: str,
+        provider_truth: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        truth = self.runtime_truth_service()
+        raw_health_reader = getattr(truth, "_provider_health_row", None)
+        raw_health = raw_health_reader(provider_id) if callable(raw_health_reader) else {}
+        health_reason_reader = getattr(truth, "_health_reason", None)
+        raw_reason = health_reason_reader(raw_health) if callable(health_reason_reader) else None
+        normalized_health = self._normalize_health_record(
+            {
+                **(dict(raw_health) if isinstance(raw_health, dict) else {}),
+                "status": str(provider_truth.get("health_status") or raw_health.get("status") or "unknown").strip().lower()
+                or "unknown",
+            },
+            now_epoch=int(time.time()),
+        )
+        raw_last_error_kind = str(raw_health.get("last_error_kind") or "").strip() or None
+        raw_status_code = int(raw_health.get("status_code") or 0) or None
+        return {
+            "status": str(normalized_health.get("status") or "unknown").strip().lower() or "unknown",
+            "reason": str(provider_truth.get("health_reason") or raw_reason or "").strip() or None,
+            "connection_state": str(provider_truth.get("connection_state") or "").strip().lower() or None,
+            "selection_state": str(provider_truth.get("selection_state") or "").strip().lower() or None,
+            "usable_for_selection": bool(provider_truth.get("usable_for_selection", False)),
+            "policy_blocked": bool(provider_truth.get("policy_blocked", False)),
+            "last_error_kind": raw_last_error_kind or (str(normalized_health.get("last_error_kind") or "").strip() or None),
+            "status_code": raw_status_code if raw_status_code is not None else (int(normalized_health.get("status_code") or 0) or None),
+            "last_checked_at": int(normalized_health.get("last_checked_at") or 0) or None,
+            "last_checked_at_iso": str(normalized_health.get("last_checked_at_iso") or "").strip() or None,
+            "cooldown_until": int(normalized_health.get("cooldown_until") or 0) or None,
+            "cooldown_until_iso": str(normalized_health.get("cooldown_until_iso") or "").strip() or None,
+            "down_since": int(normalized_health.get("down_since") or 0) or None,
+            "down_since_iso": str(normalized_health.get("down_since_iso") or "").strip() or None,
+            "failure_streak": int(normalized_health.get("failure_streak") or 0) or None,
+            "next_probe_at": int(raw_health.get("next_probe_at") or 0) or None,
+        }
+
+    def _operator_provider_model_payload(
+        self,
+        readiness_row: Mapping[str, Any],
+        *,
+        registry_model_payload: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        model_id = str(readiness_row.get("model_id") or "").strip()
+        truth = self.runtime_truth_service()
+        raw_health_reader = getattr(truth, "_model_health_row", None)
+        raw_health = raw_health_reader(model_id) if callable(raw_health_reader) else {}
+        health_reason_reader = getattr(truth, "_health_reason", None)
+        raw_reason = health_reason_reader(raw_health) if callable(health_reason_reader) else None
+        registry_payload = registry_model_payload if isinstance(registry_model_payload, Mapping) else {}
+        normalized_health = self._normalize_health_record(
+            {
+                **(dict(raw_health) if isinstance(raw_health, dict) else {}),
+                "status": str(readiness_row.get("model_health_status") or raw_health.get("status") or "unknown").strip().lower()
+                or "unknown",
+            },
+            now_epoch=int(time.time()),
+        )
+        raw_last_error_kind = str(raw_health.get("last_error_kind") or "").strip() or None
+        raw_status_code = int(raw_health.get("status_code") or 0) or None
+        return {
+            "id": model_id,
+            "provider": str(readiness_row.get("provider_id") or "").strip().lower() or None,
+            "model": str(readiness_row.get("model_name") or registry_payload.get("model") or model_id).strip() or model_id,
+            "capabilities": list(readiness_row.get("capabilities") or []),
+            "enabled": bool(readiness_row.get("enabled", True)),
+            "available": bool(readiness_row.get("available", False)),
+            "routable": bool(readiness_row.get("usable_now", False)),
+            "local": bool(readiness_row.get("local", False)),
+            "active": bool(readiness_row.get("active", False)),
+            "installed": bool(readiness_row.get("installed", False)),
+            "configured": bool(readiness_row.get("configured", False)),
+            "usable_now": bool(readiness_row.get("usable_now", False)),
+            "quality_rank": int(readiness_row.get("quality_rank") or 0),
+            "cost_rank": int(readiness_row.get("cost_rank") or 0),
+            "context_window": int(readiness_row.get("context_window") or 0) or None,
+            "price_in": readiness_row.get("price_in"),
+            "price_out": readiness_row.get("price_out"),
+            "availability_state": str(readiness_row.get("availability_state") or "").strip().lower() or None,
+            "availability_reason": str(readiness_row.get("availability_reason") or "").strip() or None,
+            "eligibility_state": str(readiness_row.get("eligibility_state") or "").strip().lower() or None,
+            "eligibility_reason": str(readiness_row.get("eligibility_reason") or "").strip() or None,
+            "provider_connection_state": str(readiness_row.get("provider_connection_state") or "").strip().lower() or None,
+            "provider_selection_state": str(readiness_row.get("provider_selection_state") or "").strip().lower() or None,
+            "lifecycle_state": str(readiness_row.get("lifecycle_state") or "").strip().lower() or None,
+            "lifecycle_message": str(readiness_row.get("lifecycle_message") or "").strip() or None,
+            "acquirable": bool(readiness_row.get("acquirable", False)),
+            "acquisition_state": str(readiness_row.get("acquisition_state") or "").strip().lower() or None,
+            "acquisition_reason": str(readiness_row.get("acquisition_reason") or "").strip() or None,
+            "health": {
+                "status": str(normalized_health.get("status") or "unknown").strip().lower() or "unknown",
+                "reason": str(raw_reason or readiness_row.get("availability_reason") or "").strip() or None,
+                "last_error_kind": raw_last_error_kind or (str(normalized_health.get("last_error_kind") or "").strip() or None),
+                "status_code": raw_status_code if raw_status_code is not None else (int(normalized_health.get("status_code") or 0) or None),
+                "last_checked_at": int(normalized_health.get("last_checked_at") or 0) or None,
+                "last_checked_at_iso": str(normalized_health.get("last_checked_at_iso") or "").strip() or None,
+                "cooldown_until": int(normalized_health.get("cooldown_until") or 0) or None,
+                "cooldown_until_iso": str(normalized_health.get("cooldown_until_iso") or "").strip() or None,
+                "down_since": int(normalized_health.get("down_since") or 0) or None,
+                "down_since_iso": str(normalized_health.get("down_since_iso") or "").strip() or None,
+                "failure_streak": int(normalized_health.get("failure_streak") or 0) or None,
+                "next_probe_at": int(raw_health.get("next_probe_at") or 0) or None,
+            },
+        }
+
     def _ensure_defaults(self, document: dict[str, Any]) -> dict[str, Any]:
         defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
         if not isinstance(defaults, dict):
@@ -2483,6 +3636,7 @@ class AgentRuntime:
         defaults.setdefault("default_model", None)
         defaults.setdefault("last_chat_model", None)
         defaults.setdefault("allow_remote_fallback", True)
+        defaults.setdefault("chat_control_mode_override", None)
         defaults.setdefault("fallback_chain", [])
         chat_model = str(defaults.get("chat_model") or "").strip() or None
         legacy_default_model = str(defaults.get("default_model") or "").strip() or None
@@ -2497,6 +3651,10 @@ class AgentRuntime:
 
         last_chat_model = str(defaults.get("last_chat_model") or "").strip() or None
         defaults["last_chat_model"] = last_chat_model
+        chat_control_mode_override = str(defaults.get("chat_control_mode_override") or "").strip().lower() or None
+        if chat_control_mode_override not in {"safe", "controlled"}:
+            chat_control_mode_override = None
+        defaults["chat_control_mode_override"] = chat_control_mode_override
 
         embed_model = str(defaults.get("embed_model") or "").strip() or None
         if embed_model is None:
@@ -2504,6 +3662,721 @@ class AgentRuntime:
         defaults["embed_model"] = embed_model
         document["defaults"] = defaults
         return defaults
+
+    def _chat_control_mode_override(self) -> str | None:
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults = self._ensure_defaults(document)
+        override = str(defaults.get("chat_control_mode_override") or "").strip().lower() or None
+        if override in {"safe", "controlled"}:
+            return override
+        return None
+
+    def _chat_control_config_default_mode(self) -> str:
+        return "safe" if bool(getattr(self.config, "safe_mode_enabled", False)) else "controlled"
+
+    def _safe_mode_enabled(self) -> bool:
+        override = self._chat_control_mode_override()
+        if override in {"safe", "controlled"}:
+            return override == "safe"
+        return self._chat_control_config_default_mode() == "safe"
+
+    def _chat_control_mode(self) -> str:
+        return "safe" if self._safe_mode_enabled() else "controlled"
+
+    def _chat_control_policy(self) -> dict[str, Any]:
+        defaults = self.get_defaults()
+        config_default_mode = self._chat_control_config_default_mode()
+        override_mode = self._chat_control_mode_override()
+        effective_mode = override_mode or config_default_mode
+        safe_mode = effective_mode == "safe"
+        allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
+        if safe_mode:
+            allow_remote_fallback = False
+        allow_remote_recommendation = not safe_mode
+        return {
+            "mode": effective_mode,
+            "mode_label": "SAFE MODE" if safe_mode else "Controlled Mode",
+            "safe_mode": safe_mode,
+            "mode_source": "explicit_override" if override_mode else "config_default",
+            "config_default_mode": config_default_mode,
+            "config_default_mode_label": "SAFE MODE" if config_default_mode == "safe" else "Controlled Mode",
+            "override_mode": override_mode,
+            "override_active": bool(override_mode),
+            "allow_remote_fallback": allow_remote_fallback,
+            "allow_remote_recommendation": allow_remote_recommendation,
+            "allow_remote_switch": not safe_mode,
+            "allow_install_pull": not safe_mode,
+            "scout_advisory_only": safe_mode,
+            "approval_required_actions": [
+                "test_model",
+                "switch_temporarily",
+                "make_default",
+                "acquire_model",
+            ],
+            "forbidden_actions": (
+                [
+                    "remote_switch",
+                    "install_download_import",
+                ]
+                if safe_mode
+                else []
+            ),
+            "transition": {
+                "endpoint": "/llm/control_mode",
+                "confirm_required": True,
+                "loopback_only": True,
+                "can_enter_controlled_mode": effective_mode != "controlled",
+                "can_enter_safe_mode": effective_mode != "safe",
+                "can_clear_override": bool(override_mode),
+            },
+        }
+
+    def _safe_mode_chat_target_ready(self) -> bool:
+        if not self._safe_mode_enabled():
+            return False
+        try:
+            truth = self.runtime_truth_service()
+            if truth is None:
+                return False
+            current = truth.current_chat_target_status()
+            return bool((current if isinstance(current, dict) else {}).get("ready", False))
+        except Exception:
+            return False
+
+    def assistant_frontdoor_active(self) -> bool:
+        if not self._safe_mode_enabled():
+            return False
+        try:
+            truth = self.runtime_truth_service()
+            if truth is None:
+                return False
+            current = truth.current_chat_target_status()
+            current_row = current if isinstance(current, dict) else {}
+            if bool(current_row.get("ready", False)):
+                return True
+            if str(current_row.get("provider") or "").strip() or str(current_row.get("model") or "").strip():
+                return True
+            target_truth = (
+                truth.chat_target_truth()
+                if callable(getattr(truth, "chat_target_truth", None))
+                else {}
+            )
+            target_row = target_truth if isinstance(target_truth, dict) else {}
+            if any(
+                str(target_row.get(key) or "").strip()
+                for key in ("configured_model", "effective_model", "configured_provider", "effective_provider")
+            ):
+                return True
+            inventory = (
+                truth.model_inventory_status()
+                if callable(getattr(truth, "model_inventory_status", None))
+                else {}
+            )
+            models = inventory.get("models") if isinstance(inventory, dict) and isinstance(inventory.get("models"), list) else []
+            if not models:
+                readiness = (
+                    truth.model_readiness_status()
+                    if callable(getattr(truth, "model_readiness_status", None))
+                    else {}
+                )
+                models = (
+                    readiness.get("models")
+                    if isinstance(readiness, dict) and isinstance(readiness.get("models"), list)
+                    else []
+                )
+            return any(isinstance(row, dict) for row in models)
+        except Exception:
+            return False
+
+    def should_use_assistant_frontdoor(
+        self,
+        *,
+        text: str | None = None,
+        route_decision: dict[str, Any] | None = None,
+        is_user_chat: bool = True,
+    ) -> bool:
+        _ = route_decision
+        if not bool(is_user_chat):
+            return False
+        if str(text or "").strip().startswith("/"):
+            return False
+        if not self._safe_mode_enabled():
+            return False
+        return self.assistant_frontdoor_active()
+
+    def assistant_chat_available(self) -> bool:
+        if self._safe_mode_enabled():
+            return self._safe_mode_chat_target_ready()
+        return self.llm_available()
+
+    def _runtime_snapshot_target_documents(self) -> tuple[dict[str, Any], dict[str, Any], set[str]]:
+        router_snapshot = self._canonical_runtime_router_snapshot()
+        runtime_snapshot = build_runtime_model_snapshot(
+            config=self.config,
+            registry=self._router.registry,
+            router_snapshot=router_snapshot,
+        )
+        provider_rows = runtime_snapshot.get("providers") if isinstance(runtime_snapshot.get("providers"), list) else []
+        model_rows = runtime_snapshot.get("models") if isinstance(runtime_snapshot.get("models"), list) else []
+
+        providers: dict[str, Any] = {}
+        for row in provider_rows:
+            if not isinstance(row, dict):
+                continue
+            provider_id = str(row.get("id") or "").strip().lower()
+            if not provider_id:
+                continue
+            providers[provider_id] = {
+                "enabled": bool(row.get("enabled", True)),
+                "local": bool(row.get("local", provider_id == "ollama")),
+            }
+
+        models: dict[str, Any] = {}
+        for row in model_rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            provider_id = (
+                str(row.get("provider") or "").strip().lower()
+                or (str(model_id).split(":", 1)[0].strip().lower() if ":" in model_id else "")
+            )
+            if not model_id or not provider_id:
+                continue
+            providers.setdefault(
+                provider_id,
+                {
+                    "enabled": True,
+                    "local": bool(provider_id == "ollama"),
+                },
+            )
+            capabilities = [
+                str(item).strip()
+                for item in (row.get("capabilities") if isinstance(row.get("capabilities"), list) else [])
+                if str(item).strip()
+            ]
+            models[model_id] = {
+                "provider": provider_id,
+                "enabled": bool(row.get("enabled", True)),
+                "available": bool(row.get("available", True)),
+                "capabilities": capabilities,
+            }
+
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys() if str(provider_id).strip()}
+        return models, providers, provider_ids
+
+    def _resolve_exact_chat_target_against_documents(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None,
+        require_local: bool | None,
+        require_available: bool,
+        models: dict[str, Any],
+        providers: dict[str, Any],
+        provider_ids: set[str],
+        default_local_provider: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        requested_model = str(model_id or "").strip()
+        provider_key = str(provider_id or "").strip().lower() or None
+        if not requested_model:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+
+        provider_for_model = provider_key if provider_key and provider_key in provider_ids else None
+        inferred_prefix = (
+            str(requested_model.split(":", 1)[0]).strip().lower()
+            if ":" in requested_model
+            else None
+        )
+        if provider_for_model is None and inferred_prefix and inferred_prefix in provider_ids:
+            provider_for_model = inferred_prefix
+        if (
+            provider_for_model is None
+            and provider_key is None
+            and default_local_provider
+            and str(default_local_provider).strip().lower() in provider_ids
+        ):
+            provider_for_model = str(default_local_provider).strip().lower()
+
+        canonical_model = self._normalize_default_model_id(
+            requested_model,
+            provider_for_model=provider_for_model,
+            models=models,
+            provider_ids=provider_ids,
+        )
+        valid_default, validated_model, validation_error = validate_default_model(
+            canonical_model,
+            models,
+            purpose="chat",
+        )
+        if not valid_default or not validated_model:
+            response = {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+            details = (
+                dict(validation_error.get("details"))
+                if isinstance(validation_error, dict) and isinstance(validation_error.get("details"), dict)
+                else None
+            )
+            if details is not None:
+                response["details"] = details
+            return False, response
+
+        model_payload = models.get(validated_model) if isinstance(models.get(validated_model), dict) else {}
+        actual_provider = str(model_payload.get("provider") or validated_model.split(":", 1)[0]).strip().lower()
+        if provider_key and provider_key in provider_ids and actual_provider != provider_key:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        provider_payload = providers.get(actual_provider) if isinstance(providers.get(actual_provider), dict) else {}
+        if not provider_payload or not bool(provider_payload.get("enabled", True)):
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        is_local = bool(provider_payload.get("local", actual_provider == "ollama"))
+        if require_local is True and not is_local:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        if require_local is False and is_local:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        if not bool(model_payload.get("enabled", True)):
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        if require_available and not bool(model_payload.get("available", True)):
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        return True, {
+            "ok": True,
+            "provider": actual_provider,
+            "model_id": validated_model,
+            "local": is_local,
+        }
+
+    def _resolve_exact_chat_target(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None = None,
+        require_local: bool | None = None,
+        require_available: bool = False,
+    ) -> tuple[bool, dict[str, Any]]:
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(candidate).strip().lower() for candidate in providers.keys()}
+        return self._resolve_exact_chat_target_against_documents(
+            model_id,
+            provider_id=provider_id,
+            require_local=require_local,
+            require_available=require_available,
+            models=models,
+            providers=providers,
+            provider_ids=provider_ids,
+        )
+
+    def _resolve_exact_chat_target_live(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None = None,
+        require_local: bool | None = None,
+        require_available: bool = False,
+    ) -> tuple[bool, dict[str, Any]]:
+        models, providers, provider_ids = self._runtime_snapshot_target_documents()
+        default_local_provider = "ollama" if require_local is not False else None
+        return self._resolve_exact_chat_target_against_documents(
+            model_id,
+            provider_id=provider_id,
+            require_local=require_local,
+            require_available=require_available,
+            models=models,
+            providers=providers,
+            provider_ids=provider_ids,
+            default_local_provider=default_local_provider,
+        )
+
+    def _safe_mode_local_fallback_target(self, *, exclude_model_ids: set[str] | None = None) -> dict[str, Any]:
+        override = (
+            set(str(item).strip() for item in exclude_model_ids if str(item).strip())
+            if isinstance(exclude_model_ids, set)
+            else set()
+        )
+        models, providers, _provider_ids = self._runtime_snapshot_target_documents()
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults = self._ensure_defaults(document)
+
+        requested_candidates: list[str] = []
+        fallback_ollama = str(getattr(self.config, "ollama_model", "") or "").strip()
+        if fallback_ollama:
+            requested_candidates.append(f"ollama:{fallback_ollama}")
+        current_local = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip()
+        if current_local:
+            requested_candidates.append(current_local)
+        for model_id, payload in sorted(models.items()):
+            if not isinstance(payload, dict):
+                continue
+            provider_key = str(payload.get("provider") or "").strip().lower()
+            provider_payload = providers.get(provider_key) if isinstance(providers.get(provider_key), dict) else {}
+            is_local = bool(provider_payload.get("local", provider_key == "ollama"))
+            capabilities = {
+                str(item).strip().lower()
+                for item in (payload.get("capabilities") if isinstance(payload.get("capabilities"), list) else [])
+                if str(item).strip()
+            }
+            if not is_local or "chat" not in capabilities:
+                continue
+            requested_candidates.append(str(model_id).strip())
+
+        seen: set[str] = set()
+        for requested in requested_candidates:
+            model_ref = str(requested or "").strip()
+            if not model_ref or model_ref in seen or model_ref in override:
+                continue
+            seen.add(model_ref)
+            provider_for_model = (
+                str(model_ref.split(":", 1)[0]).strip().lower()
+                if ":" in model_ref
+                else "ollama"
+            )
+            target_ok, target_body = self._resolve_exact_chat_target_live(
+                model_ref,
+                provider_id=provider_for_model,
+                require_local=True,
+                require_available=True,
+            )
+            if not target_ok:
+                continue
+            return {
+                "provider": str(target_body.get("provider") or "").strip().lower(),
+                "model": str(target_body.get("model_id") or "").strip(),
+            }
+        return {}
+
+    def safe_mode_target_status(self) -> dict[str, Any]:
+        if not self._safe_mode_enabled():
+            return {"enabled": False}
+
+        configured_model = str(getattr(self.config, "safe_mode_chat_model", "") or "").strip() or None
+        _live_models, live_providers, live_provider_ids = self._runtime_snapshot_target_documents()
+        configured_provider = None
+        if configured_model and ":" in configured_model:
+            configured_prefix = str(configured_model.split(":", 1)[0]).strip().lower()
+            if configured_prefix in live_provider_ids:
+                configured_provider = configured_prefix
+        override = (
+            dict(self._safe_mode_explicit_chat_target_override)
+            if isinstance(self._safe_mode_explicit_chat_target_override, dict)
+            else {}
+        )
+        override_model = str(override.get("model") or "").strip() or None
+        override_provider = str(override.get("provider") or "").strip().lower() or None
+        configured_valid: bool | None = None
+        configured_error_message: str | None = None
+
+        if override_model and override_provider:
+            override_ok, override_body = self._resolve_exact_chat_target_live(
+                override_model,
+                provider_id=override_provider,
+                require_local=True,
+                require_available=True,
+            )
+            if override_ok:
+                return {
+                    "enabled": True,
+                    "configured_model": configured_model,
+                    "configured_provider": configured_provider,
+                    "configured_valid": configured_valid,
+                    "explicit_override_model": override_model,
+                    "explicit_override_provider": override_provider,
+                    "explicit_override_active": True,
+                    "effective_model": str(override_body.get("model_id") or override_model).strip(),
+                    "effective_provider": str(override_body.get("provider") or override_provider).strip().lower(),
+                    "effective_local": bool(override_body.get("local", False)),
+                    "reason": "explicit_confirmed_switch",
+                    "message": (
+                        f"Safe mode is using the explicit confirmed target "
+                        f"{str(override_body.get('model_id') or override_model).strip()}."
+                    ),
+                }
+            self._safe_mode_explicit_chat_target_override = None
+
+        if configured_model:
+            configured_ok, configured_body = self._resolve_exact_chat_target_live(
+                configured_model,
+                provider_id=configured_provider,
+                require_local=True,
+                require_available=True,
+            )
+            configured_valid = bool(configured_ok)
+            if configured_ok:
+                actual_provider = str(configured_body.get("provider") or configured_provider or "").strip().lower() or configured_provider
+                actual_model = str(configured_body.get("model_id") or configured_model).strip()
+                return {
+                    "enabled": True,
+                    "configured_model": actual_model,
+                    "configured_provider": actual_provider,
+                    "configured_valid": True,
+                    "explicit_override_model": None,
+                    "explicit_override_provider": None,
+                    "explicit_override_active": False,
+                    "effective_model": actual_model,
+                    "effective_provider": actual_provider,
+                    "effective_local": bool(configured_body.get("local", True)),
+                    "reason": "configured_pin",
+                    "message": f"Safe mode is pinned to {actual_model}.",
+                }
+            live_pin_exists = False
+            if (configured_provider == "ollama" or ("ollama" in live_provider_ids and configured_provider is None)):
+                try:
+                    tags_payload = self._ollama_tags_models(timeout_seconds=1.0)
+                except Exception:
+                    tags_payload = {"ok": False, "models": []}
+                live_models = {
+                    str(item).strip()
+                    for item in (
+                        tags_payload.get("models")
+                        if isinstance(tags_payload, dict) and isinstance(tags_payload.get("models"), list)
+                        else []
+                    )
+                    if str(item).strip()
+                }
+                normalized_configured_model = (
+                    configured_model.split(":", 1)[1].strip()
+                    if configured_model.startswith("ollama:")
+                    else configured_model
+                )
+                live_pin_exists = bool(
+                    live_models
+                    and (
+                        normalized_configured_model in live_models
+                        or configured_model in live_models
+                    )
+                )
+            if live_pin_exists:
+                configured_valid = True
+                configured_error_message = (
+                    f"Safe mode pin {configured_model} is installed, but it is not ready right now."
+                )
+                if not configured_provider and "ollama" in live_provider_ids:
+                    configured_provider = "ollama"
+            else:
+                configured_error_message = f"Safe mode pin {configured_model} is unavailable."
+
+        fallback = self._safe_mode_local_fallback_target(
+            exclude_model_ids={configured_model} if configured_model else None,
+        )
+        fallback_model = str(fallback.get("model") or "").strip() or None
+        fallback_provider = str(fallback.get("provider") or "").strip().lower() or None
+        if fallback_model and fallback_provider:
+            if configured_model and configured_valid is False:
+                return {
+                    "enabled": True,
+                    "configured_model": configured_model,
+                    "configured_provider": configured_provider,
+                    "configured_valid": False,
+                    "explicit_override_model": None,
+                    "explicit_override_provider": None,
+                    "explicit_override_active": False,
+                    "effective_model": fallback_model,
+                    "effective_provider": fallback_provider,
+                    "effective_local": True,
+                    "reason": "configured_pin_invalid",
+                    "message": (
+                        f"{configured_error_message or f'Safe mode pin {configured_model} is unavailable.'} "
+                        f"Falling back to {fallback_model}."
+                    ),
+                }
+            if configured_model and configured_valid is True and configured_error_message:
+                return {
+                    "enabled": True,
+                    "configured_model": configured_model,
+                    "configured_provider": configured_provider,
+                    "configured_valid": True,
+                    "explicit_override_model": None,
+                    "explicit_override_provider": None,
+                    "explicit_override_active": False,
+                    "effective_model": fallback_model,
+                    "effective_provider": fallback_provider,
+                    "effective_local": True,
+                    "reason": "configured_pin_not_ready",
+                    "message": (
+                        f"{configured_error_message} Using {fallback_model} for now."
+                    ),
+                }
+            return {
+                "enabled": True,
+                "configured_model": configured_model,
+                "configured_provider": configured_provider,
+                "configured_valid": configured_valid,
+                "explicit_override_model": None,
+                "explicit_override_provider": None,
+                "explicit_override_active": False,
+                "effective_model": fallback_model,
+                "effective_provider": fallback_provider,
+                "effective_local": True,
+                "reason": "fallback_local_candidate",
+                "message": f"Safe mode is using {fallback_model}.",
+            }
+
+        if configured_model and configured_valid is True and configured_error_message:
+            return {
+                "enabled": True,
+                "configured_model": configured_model,
+                "configured_provider": configured_provider,
+                "configured_valid": True,
+                "explicit_override_model": None,
+                "explicit_override_provider": None,
+                "explicit_override_active": False,
+                "effective_model": None,
+                "effective_provider": None,
+                "effective_local": False,
+                "reason": "configured_pin_not_ready",
+                "message": configured_error_message,
+            }
+
+        if configured_model and configured_valid is False:
+            return {
+                "enabled": True,
+                "configured_model": configured_model,
+                "configured_provider": configured_provider,
+                "configured_valid": False,
+                "explicit_override_model": None,
+                "explicit_override_provider": None,
+                "explicit_override_active": False,
+                "effective_model": None,
+                "effective_provider": None,
+                "effective_local": False,
+                "reason": "configured_pin_invalid",
+                "message": (
+                    f"{configured_error_message or f'Safe mode pin {configured_model} is unavailable.'} "
+                    "No local chat fallback is ready."
+                ),
+            }
+
+        return {
+            "enabled": True,
+            "configured_model": configured_model,
+            "configured_provider": configured_provider,
+            "configured_valid": configured_valid,
+            "explicit_override_model": None,
+            "explicit_override_provider": None,
+            "explicit_override_active": False,
+            "effective_model": None,
+            "effective_provider": None,
+            "effective_local": False,
+            "reason": "no_safe_mode_target",
+            "message": "Safe mode does not currently have a usable chat target.",
+        }
+
+    def _safe_mode_pinned_chat_target(self) -> dict[str, Any]:
+        if not self._safe_mode_enabled():
+            return {}
+        target_status = self.safe_mode_target_status()
+        effective_model = str(target_status.get("effective_model") or "").strip() or None
+        effective_provider = str(target_status.get("effective_provider") or "").strip().lower() or None
+        if effective_model and effective_provider:
+            return {
+                "provider": effective_provider,
+                "model": effective_model,
+            }
+        return {}
+
+    def _safe_mode_effective_defaults(self, defaults: dict[str, Any]) -> dict[str, Any]:
+        effective = dict(defaults)
+        if not self._safe_mode_enabled():
+            return effective
+        target_status = self.safe_mode_target_status()
+        pinned_provider = str(target_status.get("effective_provider") or "").strip().lower() or None
+        pinned_model = str(target_status.get("effective_model") or "").strip() or None
+        if pinned_provider:
+            effective["default_provider"] = pinned_provider
+        if pinned_model:
+            effective["chat_model"] = pinned_model
+            effective["default_model"] = pinned_model
+            effective["resolved_default_model"] = pinned_model
+        elif bool(target_status.get("enabled", False)):
+            effective["chat_model"] = None
+            effective["default_model"] = None
+            effective["resolved_default_model"] = None
+        effective["allow_remote_fallback"] = False
+        return effective
+
+    def _stored_chat_default_target(self) -> dict[str, str] | None:
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults = self._ensure_defaults(document)
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
+        default_model = self._resolved_chat_default_model(
+            defaults=defaults,
+            models=models,
+            provider_ids=provider_ids,
+        )
+        default_provider = (
+            str(defaults.get("default_provider") or "").strip().lower()
+            or (
+                str(default_model).split(":", 1)[0].strip().lower()
+                if default_model and ":" in str(default_model)
+                else None
+            )
+        )
+        if not default_model or not default_provider:
+            return None
+        return {
+            "provider": default_provider,
+            "model": default_model,
+        }
+
+    def _temporary_chat_target_effective_defaults(self, defaults: dict[str, Any]) -> dict[str, Any]:
+        effective = dict(defaults)
+        if self._safe_mode_enabled():
+            return effective
+        override = (
+            dict(self._temporary_chat_target_override)
+            if isinstance(self._temporary_chat_target_override, dict)
+            else {}
+        )
+        override_model = str(override.get("model") or "").strip() or None
+        override_provider = str(override.get("provider") or "").strip().lower() or None
+        if not override_model or not override_provider:
+            return effective
+        override_ok, override_body = self._resolve_exact_chat_target_live(
+            override_model,
+            provider_id=override_provider,
+            require_available=True,
+        )
+        if not override_ok:
+            self._temporary_chat_target_override = None
+            return effective
+        effective["default_provider"] = (
+            str(override_body.get("provider") or override_provider).strip().lower() or override_provider
+        )
+        effective["chat_model"] = str(override_body.get("model_id") or override_model).strip() or override_model
+        effective["default_model"] = effective["chat_model"]
+        effective["resolved_default_model"] = effective["chat_model"]
+        return effective
 
     @staticmethod
     def _best_local_embedding_model(models: dict[str, Any]) -> str | None:
@@ -2597,15 +4470,23 @@ class AgentRuntime:
         document["defaults"] = defaults
 
     def health(self) -> dict[str, Any]:
-        snapshot = self._router.doctor_snapshot()
+        core_status = self._runtime_core_status_payload()
         return {
             "ok": True,
             "service": "personal-agent-api",
             "time": datetime.now(timezone.utc).isoformat(),
-            "routing_mode": snapshot.get("routing_mode"),
-            "configured_providers": [item.get("id") for item in snapshot.get("providers") or []],
+            "version": self.version,
+            "git_commit": self.git_commit,
+            "pid": self.pid,
+            "listening": self.listening_url,
+            "routing_mode": (
+                self._router.policy.mode
+                if self.router is not None
+                else str(self.get_defaults().get("routing_mode") or self.config.llm_routing_mode or "auto")
+            ),
+            "configured_providers": self._sorted_provider_ids(),
             "registry_path": self.registry_store.path,
-            "safe_mode": self._safe_mode_health_payload(),
+            **core_status,
         }
 
     def models(self) -> dict[str, Any]:
@@ -2618,45 +4499,95 @@ class AgentRuntime:
             "circuits": snapshot.get("circuits") or {},
         }
 
+    def model_lifecycle_status(self) -> dict[str, Any]:
+        truth = self.runtime_truth_service()
+        payload = truth.model_lifecycle_status() if callable(getattr(truth, "model_lifecycle_status", None)) else {}
+        return dict(payload) if isinstance(payload, dict) else {
+            "models": [],
+            "counts": {},
+            "tracked_targets": 0,
+            "source": "runtime_truth.model_lifecycle_status",
+        }
+
     def version_info(self) -> dict[str, Any]:
         return {
             "ok": True,
             "version": self.version,
+            "version_source": self.version_source,
             "git_commit": self.git_commit,
             "started_at": self.started_at_iso,
             "pid": self.pid,
             "listening": self.listening_url,
         }
 
+    # Operator/public provider view. Assistant/runtime decisions must use
+    # RuntimeTruthService provider and readiness surfaces instead.
     def list_providers(self) -> dict[str, Any]:
-        snapshot = self._router.doctor_snapshot()
-        provider_health = {
-            str(item.get("id") or ""): item.get("health") or {}
-            for item in (snapshot.get("providers") or [])
-            if isinstance(item, dict)
-        }
-        model_health = {
-            str(item.get("id") or ""): item.get("health") or {}
-            for item in (snapshot.get("models") or [])
-            if isinstance(item, dict)
-        }
-        providers = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
-        rows = [
+        truth = self.runtime_truth_service()
+        providers_payload = truth.providers_status() if callable(getattr(truth, "providers_status", None)) else {}
+        readiness_payload = truth.model_readiness_status() if callable(getattr(truth, "model_readiness_status", None)) else {}
+        provider_rows = (
+            providers_payload.get("providers")
+            if isinstance(providers_payload.get("providers"), list)
+            else []
+        )
+        readiness_rows = (
+            readiness_payload.get("models")
+            if isinstance(readiness_payload.get("models"), list)
+            else []
+        )
+        models_doc = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
+        providers_doc = self.registry_document.get("providers") if isinstance(self.registry_document.get("providers"), dict) else {}
+        readiness_by_provider: dict[str, list[dict[str, Any]]] = {}
+        for row in readiness_rows:
+            if not isinstance(row, dict):
+                continue
+            provider_id = str(row.get("provider_id") or "").strip().lower()
+            if not provider_id:
+                continue
+            readiness_by_provider.setdefault(provider_id, []).append(dict(row))
+        rows: list[dict[str, Any]] = []
+        for provider_truth in provider_rows:
+            if not isinstance(provider_truth, dict):
+                continue
+            if not self._operator_surface_provider_in_scope(provider_truth):
+                continue
+            provider_id = str(provider_truth.get("provider") or "").strip().lower()
+            if not provider_id:
+                continue
+            provider_payload = providers_doc.get(provider_id) if isinstance(providers_doc.get(provider_id), dict) else {}
+            public_payload = self._provider_public_payload(provider_id, provider_payload)
+            models = [
+                self._operator_provider_model_payload(
+                    readiness_row,
+                    registry_model_payload=models_doc.get(str(readiness_row.get("model_id") or "").strip()),
+                )
+                for readiness_row in readiness_by_provider.get(provider_id, [])
+            ]
+            rows.append(
+                {
+                    **public_payload,
+                    "enabled": bool(provider_truth.get("enabled", public_payload.get("enabled", True))),
+                    "local": bool(provider_truth.get("local", public_payload.get("local", False))),
+                    "configured": bool(provider_truth.get("configured", False)),
+                    "active": bool(provider_truth.get("active", False)),
+                    "effective_active": bool(provider_truth.get("effective_active", False)),
+                    "auth_required": bool(provider_truth.get("auth_required", False)),
+                    "secret_present": bool(provider_truth.get("secret_present", False)),
+                    "health": self._operator_provider_health_payload(provider_id, provider_truth),
+                    "models": models,
+                }
+            )
+        rows.sort(key=lambda row: (0 if bool(row.get("active", False)) else 1, str(row.get("id") or "")))
+        return self._annotate_operator_surface_payload(
             {
-                **self._provider_public_payload(provider_id, payload),
-                "health": provider_health.get(provider_id, {}),
-                "models": [
-                    {
-                        **model_row,
-                        "health": model_health.get(str(model_row.get("id") or ""), {}),
-                    }
-                    for model_row in self._models_for_provider(provider_id)
-                ],
-            }
-            for provider_id, payload in sorted(providers.items())
-            if isinstance(payload, dict)
-        ]
-        return {"providers": rows}
+                "providers": rows,
+                "canonical_truth_source": "runtime_truth.providers_status+runtime_truth.model_readiness_status",
+            },
+            surface="/providers",
+            canonical_assistant_surface="runtime_truth.providers_status+runtime_truth.model_readiness_status",
+            operator_only=False,
+        )
 
     def _telegram_runtime_state(self) -> dict[str, Any]:
         try:
@@ -2727,52 +4658,102 @@ class AgentRuntime:
             return "service_down"
         return None
 
+    def _current_runtime_lifecycle_phase(
+        self,
+        *,
+        startup_phase: str,
+        warmup_remaining: list[str],
+        runtime_ready: bool,
+        runtime_mode: str | None,
+        active_provider_health: Mapping[str, Any] | None,
+        active_model_health: Mapping[str, Any] | None,
+    ) -> str:
+        with self._runtime_lifecycle_lock:
+            previous_phase = self._runtime_lifecycle_phase
+            lifecycle_phase = derive_runtime_lifecycle_phase(
+                startup_phase=startup_phase,
+                warmup_remaining=warmup_remaining,
+                startup_warmup_started=bool(self._startup_warmup_started),
+                runtime_ready=bool(runtime_ready),
+                runtime_mode=runtime_mode,
+                active_provider_health=active_provider_health,
+                active_model_health=active_model_health,
+                previous_phase=previous_phase,
+            )
+            self._runtime_lifecycle_phase = lifecycle_phase.value
+        if previous_phase != lifecycle_phase.value:
+            self._runtime_events.log_runtime_phase_change(
+                previous_phase,
+                lifecycle_phase.value,
+                context={
+                    "startup_phase": startup_phase,
+                    "runtime_mode": str(runtime_mode or "").strip().upper() or None,
+                    "runtime_ready": bool(runtime_ready),
+                },
+            )
+        return lifecycle_phase.value
+
     def _canonical_llm_ready_context(self) -> dict[str, Any]:
-        # /ready must consume the canonical /llm/status payload rather than recomputing LLM health locally.
-        llm_status = self.llm_status()
-        llm_runtime_status = (
-            dict(llm_status.get("runtime_status"))
+        # /ready must use the same live runtime/provider/model truth as /llm/status.
+        if self.router is None:
+            runtime_status = normalize_user_facing_status(
+                ready=False,
+                bootstrap_required=False,
+                failure_code="router_unavailable",
+                phase="starting",
+                provider=None,
+                model=None,
+                local_providers={"ollama"},
+            )
+            llm_status = {
+                "ok": True,
+                "default_provider": None,
+                "default_model": None,
+                "resolved_default_model": None,
+                "chat_model": None,
+                "allow_remote_fallback": bool(self.get_defaults().get("allow_remote_fallback", True)),
+                "providers": [],
+                "models": [],
+                "active_provider_health": {"status": "unknown"},
+                "active_model_health": {"status": "unknown"},
+                "runtime_mode": str(runtime_status.get("runtime_mode") or "DEGRADED"),
+                "runtime_status": runtime_status,
+                "policy": self._chat_control_policy(),
+            }
+            return {
+                "status_payload": llm_status,
+                "runtime_status": runtime_status,
+                "provider": None,
+                "model": None,
+                "local_providers": {"ollama"},
+            }
+        router_snapshot = self._canonical_runtime_router_snapshot()
+        health_summary = self.llm_health_summary(router_snapshot=router_snapshot)
+        llm_status = self._llm_status_payload(
+            health_summary=health_summary,
+            router_snapshot=router_snapshot,
+        )
+        runtime_status = (
+            llm_status.get("runtime_status")
             if isinstance(llm_status.get("runtime_status"), dict)
             else {}
         )
-        llm_provider = (
-            str(llm_runtime_status.get("provider") or "").strip().lower()
-            or str(llm_status.get("default_provider") or "").strip().lower()
-            or None
-        )
-        llm_model = (
-            str(llm_runtime_status.get("model") or "").strip()
-            or str(llm_status.get("resolved_default_model") or "").strip()
-            or str(llm_status.get("default_model") or "").strip()
-            or None
-        )
+        llm_provider = str(llm_status.get("default_provider") or "").strip().lower() or None
+        resolved_default_model = str(llm_status.get("resolved_default_model") or "").strip() or None
         llm_local_providers = {
             str((row or {}).get("id") or "").strip().lower()
             for row in (llm_status.get("providers") if isinstance(llm_status.get("providers"), list) else [])
             if isinstance(row, dict) and bool(row.get("local", False))
         } or {"ollama"}
-        runtime_status = (
-            llm_runtime_status
-            if llm_runtime_status
-            else normalize_user_facing_status(
-                ready=False,
-                bootstrap_required=bool(not llm_model),
-                failure_code="llm_unavailable",
-                phase=None,
-                provider=llm_provider,
-                model=llm_model,
-                local_providers=llm_local_providers,
-            )
-        )
         return {
             "status_payload": llm_status,
             "runtime_status": runtime_status,
             "provider": llm_provider,
-            "model": llm_model,
+            "model": resolved_default_model,
             "local_providers": llm_local_providers,
         }
 
-    def ready_status(self) -> dict[str, Any]:
+    def _runtime_observability_context(self) -> dict[str, Any]:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
         telegram_enabled = bool(telegram.get("enabled", False))
@@ -2788,20 +4769,19 @@ class AgentRuntime:
             for item in (llm_context.get("local_providers") if isinstance(llm_context.get("local_providers"), set) else [])
             if str(item).strip()
         } or {"ollama"}
-        hf_status = self._model_watch_hf_status_snapshot()
-        phase = str(self.startup_phase or "starting").strip().lower() or "starting"
+        startup_phase = str(self.startup_phase or "starting").strip().lower() or "starting"
         warmup_remaining = self._warmup_remaining_snapshot()
-        if phase == "starting" and not self._startup_warmup_started and not warmup_remaining:
+        if startup_phase == "starting" and not self._startup_warmup_started and not warmup_remaining:
             # Runtime can be instantiated directly in tests/tools without going through run_server().
             # Treat that mode as immediately ready.
-            phase = "ready"
+            startup_phase = "ready"
         startup_failure_code = str(self._startup_last_error or "").strip() or None
-        if phase in {"starting", "listening", "warming", "degraded"}:
+        if startup_phase in {"starting", "listening", "warming", "degraded"}:
             normalized_status = normalize_user_facing_status(
                 ready=False,
                 bootstrap_required=False,
                 failure_code=startup_failure_code,
-                phase=phase,
+                phase=startup_phase,
                 provider=llm_provider,
                 model=llm_model,
                 local_providers=llm_local_providers,
@@ -2814,7 +4794,7 @@ class AgentRuntime:
                     ready=False,
                     bootstrap_required=False,
                     failure_code=telegram_failure_code,
-                    phase=phase,
+                    phase=startup_phase,
                     provider=llm_provider,
                     model=llm_model,
                     local_providers=llm_local_providers,
@@ -2823,10 +4803,188 @@ class AgentRuntime:
             else:
                 normalized_status = canonical_llm_runtime_status
                 ready = bool(normalized_status.get("ready", False))
+        lifecycle_phase = self._current_runtime_lifecycle_phase(
+            startup_phase=startup_phase,
+            warmup_remaining=warmup_remaining,
+            runtime_ready=bool(ready),
+            runtime_mode=str(normalized_status.get("runtime_mode") or ""),
+            active_provider_health=(
+                llm_status.get("active_provider_health")
+                if isinstance(llm_status.get("active_provider_health"), dict)
+                else {}
+            ),
+            active_model_health=(
+                llm_status.get("active_model_health")
+                if isinstance(llm_status.get("active_model_health"), dict)
+                else {}
+            ),
+        )
+        return {
+            "telegram": telegram,
+            "telegram_state": telegram_state,
+            "telegram_enabled": telegram_enabled,
+            "llm_context": llm_context,
+            "llm_status": llm_status,
+            "canonical_llm_runtime_status": canonical_llm_runtime_status,
+            "llm_provider": llm_provider,
+            "llm_model": llm_model,
+            "llm_local_providers": llm_local_providers,
+            "startup_phase": startup_phase,
+            "phase": lifecycle_phase,
+            "warmup_remaining": list(warmup_remaining),
+            "normalized_status": normalized_status,
+            "ready": bool(ready),
+        }
+
+    def _runtime_blocked_state(
+        self,
+        *,
+        safe_mode: Mapping[str, Any],
+        safe_mode_target: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        paused = bool(safe_mode.get("paused", False))
+        if paused:
+            paused_reason = str(safe_mode.get("reason") or "safe_mode_paused").strip() or "safe_mode_paused"
+            return {
+                "blocked": True,
+                "kind": "policy",
+                "reason": paused_reason,
+                "message": build_safe_mode_paused_message(reason=paused_reason, blocked_detail="mutating automation"),
+            }
+        target_enabled = bool(safe_mode_target.get("enabled", False))
+        effective_model = str(safe_mode_target.get("effective_model") or "").strip()
+        target_reason = str(safe_mode_target.get("reason") or "").strip() or None
+        target_message = str(safe_mode_target.get("message") or "").strip() or None
+        if target_enabled and not effective_model and target_reason in {
+            "configured_pin_invalid",
+            "configured_pin_not_ready",
+            "no_safe_mode_target",
+        }:
+            return {
+                "blocked": True,
+                "kind": "safe_mode_target",
+                "reason": target_reason,
+                "message": target_message,
+            }
+        return {
+            "blocked": False,
+            "kind": None,
+            "reason": None,
+            "message": None,
+        }
+
+    def _runtime_surface_message(
+        self,
+        *,
+        startup_phase: str,
+        normalized_status: Mapping[str, Any],
+        onboarding_summary: str | None = None,
+        onboarding_next_action: str | None = None,
+        safe_mode_target: Mapping[str, Any] | None = None,
+    ) -> str:
+        if startup_phase == "degraded":
+            message = "Startup warmup degraded. Check logs and retry."
+        elif startup_phase in {"starting", "listening", "warming"}:
+            message = "Starting up... retrying. Try /ready again in a moment."
+        elif str(onboarding_summary or "").strip():
+            next_action = str(onboarding_next_action or "").strip()
+            message = (
+                f"{str(onboarding_summary).strip()} Next: {next_action}"
+                if next_action
+                else str(onboarding_summary).strip()
+            )
+        else:
+            message = str(normalized_status.get("summary") or "").strip() or "Agent is ready."
+        target_payload = safe_mode_target if isinstance(safe_mode_target, Mapping) else {}
+        if (
+            bool(target_payload.get("enabled", False))
+            and target_payload.get("configured_valid") is False
+            and str(target_payload.get("message") or "").strip()
+        ):
+            message = f"{message} {str(target_payload.get('message') or '').strip()}".strip()
+        return message
+
+    def _runtime_core_status_payload(self) -> dict[str, Any]:
+        observability = self._runtime_observability_context()
+        safe_mode = self._safe_mode_health_payload()
+        safe_mode_target = self.safe_mode_target_status()
+        control_mode = self._chat_control_policy()
+        telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
+        startup_phase = str(observability.get("startup_phase") or "starting").strip().lower() or "starting"
+        phase = (
+            str(observability.get("phase") or RuntimeLifecyclePhase.READY.value).strip().lower()
+            or RuntimeLifecyclePhase.READY.value
+        )
+        warmup_remaining = list(observability.get("warmup_remaining") or [])
+        normalized_status = (
+            observability["normalized_status"] if isinstance(observability.get("normalized_status"), dict) else {}
+        )
+        blocked = self._runtime_blocked_state(
+            safe_mode=safe_mode,
+            safe_mode_target=safe_mode_target if isinstance(safe_mode_target, Mapping) else {},
+        )
+        message = self._runtime_surface_message(
+            startup_phase=startup_phase,
+            normalized_status=normalized_status,
+            safe_mode_target=safe_mode_target if isinstance(safe_mode_target, Mapping) else {},
+        )
+        return {
+            "ready": bool(observability.get("ready", False)),
+            "phase": phase,
+            "startup_phase": startup_phase,
+            "warmup_remaining": warmup_remaining,
+            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
+            "runtime_status": dict(normalized_status),
+            "failure_code": str(normalized_status.get("failure_code") or "").strip() or None,
+            "next_action": normalized_status.get("next_action"),
+            "last_error": str(self._startup_last_error or "").strip() or None,
+            "message": message,
+            "safe_mode": safe_mode,
+            "safe_mode_target": safe_mode_target,
+            "control_mode": {
+                "mode": str(control_mode.get("mode") or "safe"),
+                "mode_label": str(control_mode.get("mode_label") or "SAFE MODE"),
+                "mode_source": str(control_mode.get("mode_source") or "config_default"),
+                "allow_remote_switch": bool(control_mode.get("allow_remote_switch", False)),
+                "allow_install_pull": bool(control_mode.get("allow_install_pull", False)),
+                "forbidden_actions": list(control_mode.get("forbidden_actions") or []),
+                "approval_required_actions": list(control_mode.get("approval_required_actions") or []),
+            },
+            "blocked": blocked,
+            "telegram": {
+                "enabled": bool(observability.get("telegram_enabled", False)),
+                "state": str(observability.get("telegram_state") or "unknown"),
+                "effective_state": str(telegram.get("effective_state") or "unknown"),
+                "embedded_state": str(telegram.get("embedded_state") or "").strip() or None,
+                "last_error": str(telegram.get("last_error") or "").strip() or None,
+            },
+        }
+
+    def ready_status(self) -> dict[str, Any]:
+        observability = self._runtime_observability_context()
+        safe_mode_target = self.safe_mode_target_status()
+        telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
+        telegram_state = str(observability.get("telegram_state") or "stopped")
+        telegram_enabled = bool(observability.get("telegram_enabled", False))
+        llm_status = observability["llm_status"] if isinstance(observability.get("llm_status"), dict) else {}
+        canonical_llm_runtime_status = (
+            observability["canonical_llm_runtime_status"]
+            if isinstance(observability.get("canonical_llm_runtime_status"), dict)
+            else {}
+        )
+        hf_status = self._model_watch_hf_status_snapshot()
+        startup_phase = str(observability.get("startup_phase") or "starting").strip().lower() or "starting"
+        phase = str(observability.get("phase") or RuntimeLifecyclePhase.READY.value).strip().lower() or RuntimeLifecyclePhase.READY.value
+        warmup_remaining = list(observability.get("warmup_remaining") or [])
+        normalized_status = (
+            observability["normalized_status"] if isinstance(observability.get("normalized_status"), dict) else {}
+        )
+        ready = bool(observability.get("ready", False))
         setup_context_ready_payload: dict[str, Any] = {
             "ok": True,
             "ready": bool(ready),
             "phase": phase,
+            "startup_phase": startup_phase,
             "failure_code": str(normalized_status.get("failure_code") or "").strip() or None,
             "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
             "runtime_status": normalized_status,
@@ -2871,18 +5029,18 @@ class AgentRuntime:
         }
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
         recent_messages = self._ready_recent_telegram_messages(limit=5)
-        if phase == "degraded":
-            message = "Startup warmup degraded. Check logs and retry."
-        elif phase in {"starting", "listening", "warming"}:
-            message = "Starting up... retrying. Try /ready again in a moment."
-        elif str(onboarding_state).strip().upper() != "READY":
-            message = f"{onboarding_payload['summary']} Next: {onboarding_payload['next_action']}"
-        else:
-            message = str(normalized_status.get("summary") or "").strip() or "Agent is ready."
+        message = self._runtime_surface_message(
+            startup_phase=startup_phase,
+            normalized_status=normalized_status,
+            onboarding_summary=None if str(onboarding_state).strip().upper() == "READY" else str(onboarding_payload.get("summary") or ""),
+            onboarding_next_action=None if str(onboarding_state).strip().upper() == "READY" else str(onboarding_payload.get("next_action") or ""),
+            safe_mode_target=safe_mode_target,
+        )
         return {
             "ok": True,
             "ready": bool(ready),
             "phase": phase,
+            "startup_phase": startup_phase,
             "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
             "next_action": normalized_status.get("next_action"),
             "runtime_status": normalized_status,
@@ -2905,6 +5063,7 @@ class AgentRuntime:
             "model_watch": {
                 "hf": hf_status,
             },
+            "safe_mode_target": safe_mode_target,
             "llm": {
                 "provider": canonical_llm_runtime_status.get("provider"),
                 "model": canonical_llm_runtime_status.get("model"),
@@ -2918,8 +5077,151 @@ class AgentRuntime:
                 "resolved_default_model": llm_status.get("resolved_default_model"),
                 "default_model": llm_status.get("default_model"),
                 "allow_remote_fallback": bool(llm_status.get("allow_remote_fallback", True)),
+                "policy": llm_status.get("policy") if isinstance(llm_status.get("policy"), dict) else {},
             },
             "message": message,
+        }
+
+    def runtime_snapshot(self) -> dict[str, Any]:
+        observability = self._runtime_observability_context()
+        core_status = self._runtime_core_status_payload()
+        safe_mode_target = core_status.get("safe_mode_target") if isinstance(core_status.get("safe_mode_target"), dict) else {}
+        defaults = self.get_defaults()
+        document = copy.deepcopy(self.registry_document) if isinstance(self.registry_document, dict) else {}
+        providers_document = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        models_document = document.get("models") if isinstance(document.get("models"), dict) else {}
+        llm_status = observability["llm_status"] if isinstance(observability.get("llm_status"), dict) else {}
+        active_provider = str(llm_status.get("default_provider") or "").strip().lower() or None
+        active_model = str(llm_status.get("resolved_default_model") or "").strip() or None
+        active_model_health = (
+            llm_status.get("active_model_health") if isinstance(llm_status.get("active_model_health"), dict) else {}
+        )
+        health_state = copy.deepcopy(self._health_monitor.state) if isinstance(self._health_monitor.state, dict) else {}
+        provider_health_state = (
+            health_state.get("providers")
+            if isinstance(health_state.get("providers"), dict)
+            else {}
+        )
+
+        provider_ids: set[str] = {
+            str(provider_id).strip().lower()
+            for provider_id in providers_document.keys()
+            if str(provider_id).strip()
+        }
+        for model_payload in models_document.values():
+            if not isinstance(model_payload, dict):
+                continue
+            provider_key = str(model_payload.get("provider") or "").strip().lower()
+            if provider_key:
+                provider_ids.add(provider_key)
+        if active_provider:
+            provider_ids.add(active_provider)
+
+        providers: dict[str, str] = {}
+        for provider_key in sorted(provider_ids):
+            provider_payload = (
+                providers_document.get(provider_key)
+                if isinstance(providers_document.get(provider_key), dict)
+                else {}
+            )
+            provider_local = bool((provider_payload if provider_payload else {}).get("local", provider_key == "ollama"))
+            provider_enabled = bool((provider_payload if provider_payload else {}).get("enabled", bool(provider_payload)))
+            provider_health = self._normalize_health_record(
+                provider_health_state.get(provider_key) if isinstance(provider_health_state, dict) else {},
+                now_epoch=int(time.time()),
+            )
+            provider_status = str(provider_health.get("status") or "").strip().lower()
+            has_chat_model = False
+            for model_payload in models_document.values():
+                if not isinstance(model_payload, dict):
+                    continue
+                if str(model_payload.get("provider") or "").strip().lower() != provider_key:
+                    continue
+                capabilities = {
+                    str(item).strip().lower()
+                    for item in (
+                        model_payload.get("capabilities")
+                        if isinstance(model_payload.get("capabilities"), list)
+                        else []
+                    )
+                    if str(item).strip()
+                }
+                if not capabilities:
+                    capabilities = {"chat"}
+                if "chat" in capabilities:
+                    has_chat_model = True
+                    break
+            api_key_source = (
+                provider_payload.get("api_key_source")
+                if isinstance(provider_payload.get("api_key_source"), dict)
+                else None
+            )
+            auth_required = bool(provider_payload and not provider_local and api_key_source is not None)
+            secret_present = bool(self._provider_api_key(provider_payload)) if auth_required else False
+            configured = bool(provider_enabled and has_chat_model and (provider_local or not auth_required or secret_present))
+            if provider_key == active_provider and str(active_model_health.get("status") or "").strip().lower() == "ok":
+                provider_status = "ok"
+            elif provider_status not in {"ok", "degraded", "down"}:
+                if not provider_enabled and provider_payload:
+                    provider_status = "disabled"
+                elif configured:
+                    provider_status = "configured"
+                else:
+                    provider_status = "unknown"
+            providers[provider_key] = provider_status
+
+        allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
+        total_models = 0
+        visible_models = 0
+        for model_payload in models_document.values():
+            if not isinstance(model_payload, dict):
+                continue
+            total_models += 1
+            provider_key = str(model_payload.get("provider") or "").strip().lower()
+            provider_payload = (
+                providers_document.get(provider_key)
+                if isinstance(providers_document.get(provider_key), dict)
+                else {}
+            )
+            provider_local = bool((provider_payload if provider_payload else {}).get("local", provider_key == "ollama"))
+            if allow_remote_fallback or provider_local:
+                visible_models += 1
+
+        health_summary = {
+            "ok": 0,
+            "degraded": 0,
+            "down": 0,
+            "configured": 0,
+            "disabled": 0,
+            "unknown": 0,
+        }
+        for status in providers.values():
+            key = str(status or "unknown").strip().lower() or "unknown"
+            if key not in health_summary:
+                key = "unknown"
+            health_summary[key] = int(health_summary.get(key, 0)) + 1
+
+        telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
+        return {
+            "ok": True,
+            **core_status,
+            "default_provider": active_provider,
+            "default_chat_model": active_model,
+            "providers": providers,
+            "router": {
+                "visible_models": int(visible_models),
+                "total_models": int(total_models),
+                "allow_remote_fallback": allow_remote_fallback,
+            },
+            "health_summary": health_summary,
+            "telegram": {
+                **(
+                    core_status.get("telegram")
+                    if isinstance(core_status.get("telegram"), dict)
+                    else {}
+                ),
+                "status": str(observability.get("telegram_state") or "unknown"),
+            },
         }
 
     def _model_watch_hf_status_snapshot(self) -> dict[str, Any]:
@@ -3066,22 +5368,39 @@ class AgentRuntime:
         if not model_name:
             raise ValueError("model is required")
         model_id = str(raw.get("id") or f"{provider_id}:{model_name}").strip()
+        known_metadata = known_model_metadata(provider_id, model_name)
         capabilities = raw.get("capabilities") if isinstance(raw.get("capabilities"), list) else ["chat"]
         pricing_raw = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else {}
         payload = {
             "provider": provider_id,
             "model": model_name,
             "capabilities": [str(item).strip().lower() for item in capabilities if str(item).strip()],
-            "quality_rank": int(raw.get("quality_rank", 5) or 5),
-            "cost_rank": int(raw.get("cost_rank", 5) or 5),
-            "default_for": [str(item) for item in (raw.get("default_for") or ["chat"])],
+            "task_types": [
+                str(item).strip().lower()
+                for item in (raw.get("task_types") or known_metadata.get("task_types") or [])
+                if str(item).strip()
+            ],
+            "architecture_modality": (str(raw.get("architecture_modality") or "").strip().lower() or None),
+            "input_modalities": [
+                str(item).strip().lower()
+                for item in (raw.get("input_modalities") or [])
+                if str(item).strip()
+            ],
+            "output_modalities": [
+                str(item).strip().lower()
+                for item in (raw.get("output_modalities") or [])
+                if str(item).strip()
+            ],
+            "quality_rank": int(raw.get("quality_rank", known_metadata.get("quality_rank", 5)) or 5),
+            "cost_rank": int(raw.get("cost_rank", known_metadata.get("cost_rank", 5)) or 5),
+            "default_for": [str(item) for item in (raw.get("default_for") or known_metadata.get("default_for") or ["chat"])],
             "enabled": bool(raw.get("enabled", True)),
             "available": bool(raw.get("available", True)),
             "pricing": {
                 "input_per_million_tokens": pricing_raw.get("input_per_million_tokens"),
                 "output_per_million_tokens": pricing_raw.get("output_per_million_tokens"),
             },
-            "max_context_tokens": raw.get("max_context_tokens"),
+            "max_context_tokens": raw.get("max_context_tokens", known_metadata.get("max_context_tokens")),
         }
         return model_id, payload
 
@@ -3521,8 +5840,11 @@ class AgentRuntime:
                     "message": "Unable to query Ollama /api/tags.",
                     "models": [],
                 }
+        model_list_path = "/v1/models"
+        if provider_key == "openrouter" and base_url.endswith("/api/v1"):
+            model_list_path = "/models"
         try:
-            parsed = self._http_get_json(base_url + "/v1/models", timeout_seconds=timeout_seconds, headers=headers)
+            parsed = self._http_get_json(base_url + model_list_path, timeout_seconds=timeout_seconds, headers=headers)
             data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
             model_names = [
                 str(item.get("id") or "").strip()
@@ -3545,7 +5867,7 @@ class AgentRuntime:
                 "ok": False,
                 "error": "server_error",
                 "status_code": None,
-                "message": "Unable to query /v1/models.",
+                "message": f"Unable to query {model_list_path}.",
                 "models": [],
             }
 
@@ -3560,6 +5882,7 @@ class AgentRuntime:
             return False, {"ok": False, "error": "provider not found"}
 
         timeout_seconds = float(payload.get("timeout_seconds") or 6.0)
+        provider_local = bool(provider_entry.get("local", provider_key == "ollama"))
         key_override = str(payload.get("api_key") or "").strip() or None
         models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
         model_override = self._canonical_model_name(
@@ -3625,6 +5948,54 @@ class AgentRuntime:
         if key_override and hasattr(impl, "set_api_key"):
             getattr(impl, "set_api_key")(key_override)
 
+        if provider_key == "ollama" or provider_local:
+            model_probe_timeout = max(
+                timeout_seconds,
+                float(getattr(self.config, "llm_timeout_seconds", 15.0) or 15.0),
+                15.0,
+            )
+            start = time.monotonic()
+            try:
+                probe = self._probe_llm_model(
+                    provider_key,
+                    model_override,
+                    timeout_seconds=model_probe_timeout,
+                )
+            finally:
+                if key_override and hasattr(impl, "set_api_key"):
+                    getattr(impl, "set_api_key")(None)
+            probe_status = str(probe.get("status") or "").strip().lower()
+            probe_error = str(probe.get("error_kind") or "").strip().lower()
+            if probe_status == "ok" or probe_error == "not_applicable":
+                response = {
+                    "ok": True,
+                    "provider": provider_key,
+                    "model": model_override,
+                    "duration_ms": int((time.monotonic() - start) * 1000),
+                    "models_probe": models_probe,
+                    "model_probe": probe,
+                }
+                self._record_authoritative_provider_success(
+                    provider_key,
+                    str(response.get("model") or model_override or "").strip() or None,
+                )
+                self._log_request(f"/providers/{provider_key}/test", True, response)
+                return True, response
+            error_kind = probe_error or "server_error"
+            response = {
+                "ok": False,
+                "provider": provider_key,
+                "model": model_override,
+                "error": error_kind,
+                "error_kind": error_kind,
+                "status_code": probe.get("status_code"),
+                "message": str(probe.get("detail") or self._provider_test_message(error_kind)),
+                "models_probe": models_probe,
+                "model_probe": probe,
+            }
+            self._log_request(f"/providers/{provider_key}/test", False, response)
+            return False, response
+
         start = time.monotonic()
         try:
             prompt = (
@@ -3684,6 +6055,10 @@ class AgentRuntime:
             "duration_ms": int((time.monotonic() - start) * 1000),
             "models_probe": models_probe,
         }
+        self._record_authoritative_provider_success(
+            provider_key,
+            str(response.get("model") or model_override or "").strip() or None,
+        )
         self._log_request(f"/providers/{provider_key}/test", True, response)
         return True, response
 
@@ -3776,25 +6151,15 @@ class AgentRuntime:
         )
         return build_install_plan_for_model(inventory=inventory, model_ref=model_ref)
 
-    def _execute_approved_local_install(
-        self,
-        *,
-        model_ref: str,
-        approve: bool,
-        trace_id: str | None = None,
-        timeout_seconds: float = 900.0,
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        # API and ModelOps entry points share the same approval-gated install executor.
-        plan = self._approved_local_install_plan_for_model(model_ref=model_ref)
-        result = execute_install_plan(
-            config=self.config,
-            registry=self._router.registry,
-            plan=plan,
-            approve=approve,
-            trace_id=trace_id,
-            timeout_seconds=timeout_seconds,
+    def _model_manager(self) -> CanonicalModelManager:
+        return CanonicalModelManager(
+            self,
+            install_planner_fn=build_install_plan_for_model,
+            install_executor_fn=execute_install_plan,
+            inventory_builder=build_model_inventory,
+            hf_snapshot_download_fn=hf_snapshot_download,
+            subprocess_run_fn=subprocess.run,
         )
-        return plan, result
 
     def pull_ollama_model(self, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
         body = payload if isinstance(payload, dict) else {}
@@ -3820,11 +6185,15 @@ class AgentRuntime:
 
         start = time.monotonic()
         canonical_model = f"ollama:{normalized_model}"
-        _install_plan, install_result = self._execute_approved_local_install(
-            model_ref=canonical_model,
+        install_result = self._model_manager().execute_request(
+            {
+                "kind": "approved_ollama_pull",
+                "model_ref": canonical_model,
+            },
             approve=bool(body.get("confirm", False)),
             trace_id=self._modelops_trace_id("providers.ollama.pull", {"model": normalized_model}),
             timeout_seconds=float(body.get("timeout_seconds") or 1800.0),
+            source="providers.ollama.pull",
         )
         duration_ms = int((time.monotonic() - start) * 1000)
 
@@ -3841,11 +6210,12 @@ class AgentRuntime:
                 "trace_id": str(install_result.get("trace_id") or ""),
                 "verification": install_result.get("verification") if isinstance(install_result.get("verification"), dict) else {},
                 "message": str(install_result.get("message") or "Install request failed."),
+                "why": str(install_result.get("why") or "").strip() or None,
+                "next_action": str(install_result.get("next_action") or "").strip() or None,
             }
             self._log_request("/providers/ollama/pull", False, response)
             return False, response
 
-        refresh_ok, _refresh_body = self.refresh_models({"provider": "ollama"})
         already_present = not bool(install_result.get("executed", False))
         message = (
             f"Model {normalized_model} is already installed."
@@ -3853,7 +6223,7 @@ class AgentRuntime:
             else str(install_result.get("message") or f"Installed {canonical_model}.")
         )
         if not already_present:
-            if refresh_ok:
+            if bool(install_result.get("refresh_ok", False)):
                 message = f"{message} Refreshed local model catalog."
             else:
                 message = (
@@ -3885,7 +6255,7 @@ class AgentRuntime:
             models=models,
             provider_ids=provider_ids,
         )
-        return {
+        payload = {
             "routing_mode": defaults.get("routing_mode") or self._router.policy.mode,
             "default_provider": defaults.get("default_provider"),
             "chat_model": raw_chat_model,
@@ -3895,6 +6265,8 @@ class AgentRuntime:
             "resolved_default_model": resolved_default_model,
             "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
         }
+        payload = self._temporary_chat_target_effective_defaults(payload)
+        return self._safe_mode_effective_defaults(payload)
 
     def _resolved_chat_default_model(
         self,
@@ -3924,6 +6296,7 @@ class AgentRuntime:
 
         document = self.registry_document
         defaults = self._ensure_defaults(document)
+        previous_default_provider = str(defaults.get("default_provider") or "").strip().lower() or None
         previous_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
@@ -4044,9 +6417,28 @@ class AgentRuntime:
         if not saved:
             assert error is not None
             return False, error
-        return True, {"ok": True, **self.get_defaults()}
+        current_defaults = self.get_defaults()
+        current_default_provider = str(current_defaults.get("default_provider") or "").strip().lower() or None
+        current_chat_model = (
+            str(current_defaults.get("chat_model") or current_defaults.get("default_model") or "").strip() or None
+        )
+        if previous_default_provider != current_default_provider:
+            self._runtime_events.log_provider_switch(
+                previous_default_provider,
+                current_default_provider,
+                model=str(current_chat_model or "").strip() or None,
+            )
+        if previous_chat_model != current_chat_model:
+            self._runtime_events.log_default_model_change(
+                previous_chat_model,
+                current_chat_model,
+                provider=current_default_provider,
+            )
+        return True, {"ok": True, **current_defaults}
 
     def rollback_defaults(self) -> tuple[bool, dict[str, Any]]:
+        # Operator-only rollback for persisted defaults. Assistant switch-back uses
+        # controller trial state and must not route through this path.
         document = self.registry_document
         defaults = self._ensure_defaults(document)
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
@@ -4055,12 +6447,18 @@ class AgentRuntime:
 
         rollback_target = str(defaults.get("last_chat_model") or "").strip() or None
         if not rollback_target:
-            return False, {
-                "ok": False,
-                "error": "no_rollback_available",
-                "error_kind": "no_rollback_available",
-                "message": "No previous chat model is available to roll back to.",
-            }
+            return False, self._annotate_operator_surface_payload(
+                {
+                    "ok": False,
+                    "error": "no_rollback_available",
+                    "error_kind": "no_rollback_available",
+                    "message": "No previous chat model is available to roll back to.",
+                },
+                surface="/defaults/rollback",
+                canonical_assistant_surface="controller.switch_back",
+                operator_only=True,
+                separate_contract="persisted_defaults_recovery",
+            )
 
         provider_for_model = str(defaults.get("default_provider") or "").strip().lower() or None
         canonical_target = self._normalize_default_model_id(
@@ -4088,18 +6486,36 @@ class AgentRuntime:
             )
             if details is not None:
                 response["details"] = details
-            return False, response
+            return False, self._annotate_operator_surface_payload(
+                response,
+                surface="/defaults/rollback",
+                canonical_assistant_surface="controller.switch_back",
+                operator_only=True,
+                separate_contract="persisted_defaults_recovery",
+            )
 
         previous_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         ok, body = self.update_defaults({"chat_model": validated_target})
         if not ok:
             response = body if isinstance(body, dict) else {"ok": False, "error": "rollback_failed"}
             response.setdefault("error_kind", str(response.get("error") or "rollback_failed"))
-            return False, response
+            return False, self._annotate_operator_surface_payload(
+                response,
+                surface="/defaults/rollback",
+                canonical_assistant_surface="controller.switch_back",
+                operator_only=True,
+                separate_contract="persisted_defaults_recovery",
+            )
         body = body if isinstance(body, dict) else {}
         body["rolled_back_from"] = previous_chat_model
         body["rolled_back_to"] = str(body.get("chat_model") or validated_target)
-        return True, body
+        return True, self._annotate_operator_surface_payload(
+            body,
+            surface="/defaults/rollback",
+            canonical_assistant_surface="controller.switch_back",
+            operator_only=True,
+            separate_contract="persisted_defaults_recovery",
+        )
 
     @staticmethod
     def _normalize_default_model_id(
@@ -4507,17 +6923,45 @@ class AgentRuntime:
             )
 
     @staticmethod
+    def _extract_primary_user_text(payload: dict[str, Any]) -> str:
+        body = payload if isinstance(payload, dict) else {}
+        for key in ("text", "message", "content", "input", "query"):
+            raw = body.get(key)
+            if not isinstance(raw, str):
+                continue
+            value = raw.strip()
+            if value:
+                return value
+        raw_messages = body.get("messages")
+        if not isinstance(raw_messages, list):
+            return ""
+        for row in reversed(raw_messages):
+            if not isinstance(row, dict):
+                continue
+            role = str(row.get("role") or "").strip().lower() or "user"
+            if role != "user":
+                continue
+            value = AgentRuntime._memory_message_content_text(row.get("content"))
+            if value:
+                return value.strip()
+        return ""
+
+    @staticmethod
     def _normalize_messages(payload: dict[str, Any]) -> list[dict[str, str]]:
         raw = payload.get("messages") if isinstance(payload, dict) else None
-        if not isinstance(raw, list):
-            return []
         messages: list[dict[str, str]] = []
-        for item in raw:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "user").strip() or "user"
-            content = str(item.get("content") or "")
-            messages.append({"role": role, "content": content})
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role") or "user").strip() or "user"
+                content = str(item.get("content") or "")
+                messages.append({"role": role, "content": content})
+        if messages:
+            return messages
+        primary_text = AgentRuntime._extract_primary_user_text(payload)
+        if primary_text:
+            return [{"role": "user", "content": primary_text}]
         return messages
 
     @staticmethod
@@ -4539,10 +6983,9 @@ class AgentRuntime:
     def _extract_memory_query_text(payload: dict[str, Any], *, intent: str) -> str:
         if not isinstance(payload, dict):
             return ""
-        for key in ("text", "message", "content", "input", "query"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
+        primary_text = AgentRuntime._extract_primary_user_text(payload)
+        if primary_text and not isinstance(payload.get("messages"), list):
+            return primary_text
         raw_messages = payload.get("messages")
         if not isinstance(raw_messages, list):
             return ""
@@ -4590,12 +7033,97 @@ class AgentRuntime:
         trace_id: str | None = None,
         now_ts: int | None = None,
     ) -> dict[str, Any] | None:
-        if not bool(self.config.memory_v2_enabled):
-            return None
-        if self._memory_v2_store is None:
+        deterministic_configured = bool(self.config.memory_v2_enabled)
+        deterministic_enabled = deterministic_configured and self._memory_v2_store is not None
+        semantic_configured = bool(self.config.semantic_memory_enabled)
+        semantic_enabled = semantic_configured and self._semantic_memory_service is not None
+        if not deterministic_configured and not semantic_configured:
             return None
         query_text = self._extract_memory_query_text(payload, intent=intent)
+        semantic_selection = None
+        semantic_failure: dict[str, Any] | None = None
+        if semantic_enabled:
+            try:
+                semantic_selection = self._semantic_memory_service.build_context_for_payload(
+                    payload,
+                    intent=intent,
+                    now_ts=now_ts,
+                )
+            except Exception as exc:  # pragma: no cover - defensive path
+                semantic_failure = self._record_memory_issue(
+                    subsystem="semantic_memory",
+                    operation="select",
+                    error=exc.__class__.__name__,
+                    trace_id=trace_id,
+                    details={"intent": str(intent or "").strip().lower() or "chat"},
+                )
+                log_event(
+                    self.config.log_path,
+                    "semantic_memory_select_failed",
+                    {
+                        "error": exc.__class__.__name__,
+                        "intent": str(intent or "").strip().lower() or "chat",
+                        "trace_id": str(trace_id or "").strip() or None,
+                    },
+                )
+                semantic_selection = None
+        base_debug = {
+            "query": {"norm": "", "tokens": [], "entities": [], "tags": {}},
+            "selected_ids": [],
+            "selected": [],
+            "skipped": [],
+            "components": {
+                "memory_v2": {
+                    "enabled": deterministic_configured,
+                    "available": deterministic_enabled,
+                    "reason": None if deterministic_enabled or not deterministic_configured else (self._memory_v2_init_error or "memory_v2_unavailable"),
+                },
+                "semantic": {
+                    "enabled": semantic_configured,
+                    "available": semantic_enabled,
+                    "reason": None if semantic_enabled or not semantic_configured else (self._semantic_memory_init_error or "semantic_memory_unavailable"),
+                },
+            },
+        }
+        if semantic_failure is not None:
+            base_debug["semantic_error"] = dict(semantic_failure)
         if not query_text:
+            output = {
+                "selected_ids": [],
+                "levels": {
+                    MemoryLevel.EPISODIC.value: [],
+                    MemoryLevel.SEMANTIC.value: [],
+                    MemoryLevel.PROCEDURAL.value: [],
+                },
+                "debug": dict(base_debug),
+                "merged_context_text": "",
+            }
+            if semantic_selection is not None:
+                output["semantic"] = {
+                    "selected_ids": [item.id for item in semantic_selection.candidates],
+                    "debug": dict(semantic_selection.debug),
+                    "merged_context_text": semantic_selection.merged_context_text,
+                }
+            return output
+        if not deterministic_enabled:
+            if semantic_selection is not None:
+                debug = dict(base_debug)
+                debug["semantic"] = dict(semantic_selection.debug)
+                return {
+                    "selected_ids": [],
+                    "levels": {
+                        MemoryLevel.EPISODIC.value: [],
+                        MemoryLevel.SEMANTIC.value: [],
+                        MemoryLevel.PROCEDURAL.value: [],
+                    },
+                    "debug": debug,
+                    "merged_context_text": "",
+                    "semantic": {
+                        "selected_ids": [item.id for item in semantic_selection.candidates],
+                        "debug": dict(semantic_selection.debug),
+                        "merged_context_text": semantic_selection.merged_context_text,
+                    },
+                }
             return {
                 "selected_ids": [],
                 "levels": {
@@ -4603,12 +7131,7 @@ class AgentRuntime:
                     MemoryLevel.SEMANTIC.value: [],
                     MemoryLevel.PROCEDURAL.value: [],
                 },
-                "debug": {
-                    "query": {"norm": "", "tokens": [], "entities": [], "tags": {}},
-                    "selected_ids": [],
-                    "selected": [],
-                    "skipped": [],
-                },
+                "debug": dict(base_debug),
                 "merged_context_text": "",
             }
         try:
@@ -4631,13 +7154,39 @@ class AgentRuntime:
                 )
             }
             selected_ids = [item_id for level in levels.values() for item_id in level]
-            return {
+            merged_context_text = str(selection.merged_context_text or "").strip()
+            semantic_context_text = ""
+            semantic_selected_ids: list[str] = []
+            semantic_debug: dict[str, Any] = {}
+            if semantic_selection is not None:
+                semantic_context_text = str(semantic_selection.merged_context_text or "").strip()
+                semantic_selected_ids = [item.id for item in semantic_selection.candidates]
+                semantic_debug = dict(semantic_selection.debug)
+            if semantic_context_text:
+                merged_context_text = "\n\n".join(
+                    part for part in [merged_context_text, semantic_context_text] if part
+                ).strip()
+            output = {
                 "selected_ids": selected_ids,
                 "levels": levels,
                 "debug": selection.debug,
-                "merged_context_text": selection.merged_context_text,
+                "merged_context_text": merged_context_text,
             }
+            if semantic_selection is not None:
+                output["semantic"] = {
+                    "selected_ids": semantic_selected_ids,
+                    "debug": semantic_debug,
+                    "merged_context_text": semantic_context_text,
+                }
+            return output
         except Exception as exc:  # pragma: no cover - defensive path
+            memory_failure = self._record_memory_issue(
+                subsystem="memory_v2",
+                operation="select",
+                error=exc.__class__.__name__,
+                trace_id=trace_id,
+                details={"intent": str(intent or "").strip().lower() or "chat"},
+            )
             log_event(
                 self.config.log_path,
                 "memory_v2_select_failed",
@@ -4647,7 +7196,26 @@ class AgentRuntime:
                     "trace_id": str(trace_id or "").strip() or None,
                 },
             )
-            return None
+            output = {
+                "selected_ids": [],
+                "levels": {
+                    MemoryLevel.EPISODIC.value: [],
+                    MemoryLevel.SEMANTIC.value: [],
+                    MemoryLevel.PROCEDURAL.value: [],
+                },
+                "debug": {
+                    **base_debug,
+                    "memory_v2_error": dict(memory_failure),
+                },
+                "merged_context_text": "",
+            }
+            if semantic_selection is not None:
+                output["semantic"] = {
+                    "selected_ids": [item.id for item in semantic_selection.candidates],
+                    "debug": dict(semantic_selection.debug),
+                    "merged_context_text": str(semantic_selection.merged_context_text or "").strip(),
+                }
+            return output
 
     def _record_memory_event(
         self,
@@ -4657,90 +7225,223 @@ class AgentRuntime:
         source_kind: str,
         source_ref: str,
     ) -> None:
-        if not bool(self.config.memory_v2_enabled):
-            return
-        if self._memory_v2_store is None:
-            return
         normalized_text = str(text or "").strip()
         if not normalized_text:
             return
-        try:
-            self._memory_v2_store.append_episodic_event(
-                text=normalized_text,
-                tags=tags or {},
-                source_kind=source_kind,
-                source_ref=source_ref,
-                pinned=False,
-            )
-        except Exception as exc:  # pragma: no cover - defensive logging only
-            log_event(
-                self.config.log_path,
-                "memory_v2_event_write_failed",
-                {
-                    "error": exc.__class__.__name__,
-                    "source_kind": str(source_kind or "").strip() or "unknown",
-                    "source_ref": str(source_ref or "").strip() or None,
+        if bool(self.config.memory_v2_enabled) and self._memory_v2_store is not None:
+            try:
+                self._memory_v2_store.append_episodic_event(
+                    text=normalized_text,
+                    tags=tags or {},
+                    source_kind=source_kind,
+                    source_ref=source_ref,
+                    pinned=False,
+                )
+            except Exception as exc:  # pragma: no cover - defensive logging only
+                self._record_memory_issue(
+                    subsystem="memory_v2",
+                    operation="write_event",
+                    error=exc.__class__.__name__,
+                    details={
+                        "source_kind": str(source_kind or "").strip() or "unknown",
+                        "source_ref": str(source_ref or "").strip() or None,
+                    },
+                )
+                log_event(
+                    self.config.log_path,
+                    "memory_v2_event_write_failed",
+                    {
+                        "error": exc.__class__.__name__,
+                        "source_kind": str(source_kind or "").strip() or "unknown",
+                        "source_ref": str(source_ref or "").strip() or None,
+                    },
+                )
+        if bool(self.config.semantic_memory_enabled) and self._semantic_memory_service is not None:
+            try:
+                ingest = getattr(self._semantic_memory_service, "ingest_conversation_text", None)
+                if callable(ingest):
+                    ingest(
+                        source_ref=source_ref,
+                        text=normalized_text,
+                        scope=f"{str(source_kind or '').strip() or 'event'}:{str(source_ref or '').strip() or 'unknown'}",
+                        pinned=False,
+                        metadata=tags or {},
+                    )
+            except Exception as exc:  # pragma: no cover - defensive logging only
+                self._record_memory_issue(
+                    subsystem="semantic_memory",
+                    operation="write_event",
+                    error=exc.__class__.__name__,
+                    details={
+                        "source_kind": str(source_kind or "").strip() or "unknown",
+                        "source_ref": str(source_ref or "").strip() or None,
+                    },
+                )
+                log_event(
+                    self.config.log_path,
+                    "semantic_memory_event_write_failed",
+                    {
+                        "error": exc.__class__.__name__,
+                        "source_kind": str(source_kind or "").strip() or "unknown",
+                        "source_ref": str(source_ref or "").strip() or None,
+                    },
+                )
+
+    def semantic_memory_status(self) -> dict[str, Any]:
+        service = self._semantic_memory_service
+        if service is None:
+            enabled = bool(self.config.semantic_memory_enabled)
+            summary_bits = ["enabled" if enabled else "disabled", "unavailable"]
+            if self._semantic_memory_init_error:
+                summary_bits.append(f"reason={self._semantic_memory_init_error}")
+            summary_bits.append("action=rebuild semantic memory after service initialization")
+            return {
+                "enabled": enabled,
+                "configured": False,
+                "healthy": False,
+                "reason": "semantic_memory_unavailable",
+                "target": None,
+                "index_state": None,
+                "counts": None,
+                "recovery": {
+                    "state": "unavailable",
+                    "recoverable": False,
+                    "recommended_action": "rebuild semantic memory after service initialization",
+                    "needs_reindex": False,
                 },
+                "summary": "; ".join(summary_bits),
+            }
+        status = service.status()
+        report = service.report()
+        return {
+            "enabled": bool(status.enabled),
+            "configured": bool(status.configured),
+            "healthy": bool(status.healthy),
+            "reason": status.reason,
+            "target": dict(status.target),
+            "index_state": dict(status.index_state) if isinstance(status.index_state, dict) else None,
+            "counts": dict(report.get("counts") or {}),
+            "all_counts": dict(report.get("all_counts") or {}),
+            "source_kinds_enabled": list(report.get("source_kinds_enabled") or []),
+            "recovery": dict(report.get("recovery") or {}),
+            "summary": str(report.get("summary") or "").strip() or None,
+        }
+
+    def semantic_memory_report(self) -> dict[str, Any]:
+        service = self._semantic_memory_service
+        if service is None:
+            return self.semantic_memory_status()
+        report = service.report()
+        payload = {
+            **report,
+            "enabled": bool(report.get("enabled", False)),
+            "configured": bool(report.get("configured", False)),
+            "healthy": bool(report.get("healthy", False)),
+            "reason": report.get("reason"),
+            "target": dict(report.get("target") or {}),
+            "index_state": dict(report.get("index_state") or {}) if isinstance(report.get("index_state"), dict) else report.get("index_state"),
+            "summary": str(report.get("summary") or "").strip() or None,
+        }
+        return payload
+
+    def semantic_memory_ingest(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        service = self._semantic_memory_service
+        if service is None:
+            return False, {
+                "ok": False,
+                "error": "semantic_memory_unavailable",
+                "message": "semantic memory service is unavailable.",
+            }
+        source_ref = str(payload.get("source_ref") or payload.get("document_ref") or payload.get("path") or "").strip() or None
+        scope = str(payload.get("scope") or payload.get("semantic_scope") or "").strip() or None
+        title = str(payload.get("title") or "").strip() or None
+        project_id = str(payload.get("project_id") or payload.get("project") or "").strip() or None
+        thread_id = str(payload.get("thread_id") or "").strip() or None
+        pinned = bool(payload.get("pinned", False))
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        now_ts = int(time.time())
+        text = str(payload.get("text") or payload.get("content") or "").strip()
+        path = str(payload.get("path") or "").strip()
+        if path and not text:
+            result = service.ingest_document_file(
+                path=path,
+                source_ref=source_ref,
+                scope=scope,
+                title=title,
+                project_id=project_id,
+                thread_id=thread_id,
+                pinned=pinned,
+                metadata=metadata,
+                now_ts=now_ts,
             )
+        else:
+            if not text:
+                return False, {
+                    "ok": False,
+                    "ingested": False,
+                    "reason": "document_text_required",
+                    "message": "Provide text/content or a readable path.",
+                }
+            result = service.ingest_document_text(
+                source_ref=source_ref or f"document:{title or 'inline'}",
+                text=text,
+                scope=scope,
+                title=title,
+                project_id=project_id,
+                thread_id=thread_id,
+                pinned=pinned,
+                metadata=metadata,
+                now_ts=now_ts,
+            )
+        ok = bool(result.get("ok", False))
+        return ok, result
+
+    def semantic_memory_rebuild(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        service = self._semantic_memory_service
+        if service is None:
+            return False, {
+                "ok": False,
+                "error": "semantic_memory_unavailable",
+                "message": "semantic memory service is unavailable.",
+            }
+        scope = str(payload.get("scope") or payload.get("semantic_scope") or "global").strip() or "global"
+        result = service.repair_scope(scope=scope, now_ts=int(time.time()))
+        ok = bool(result.get("ok", False))
+        return ok, result
 
     def _value_policy(self, name: str) -> ValuePolicy:
         policy_name = str(name or "default").strip().lower() or "default"
         raw = self.config.premium_policy if policy_name == "premium" else self.config.default_policy
         return normalize_policy(raw if isinstance(raw, dict) else {}, name=policy_name)
 
-    def _model_policy_candidates(self) -> list[dict[str, Any]]:
-        document = self.registry_document if isinstance(self.registry_document, dict) else {}
-        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
-        models = document.get("models") if isinstance(document.get("models"), dict) else {}
-        snapshot = self._router.doctor_snapshot()
-        snapshot_rows = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
-        snapshot_by_id = {
-            str(row.get("id") or "").strip(): row
-            for row in snapshot_rows
-            if isinstance(row, dict) and str(row.get("id") or "").strip()
-        }
-        candidates: list[dict[str, Any]] = []
-        for model_id, model_row in sorted(models.items()):
-            if not isinstance(model_row, dict):
-                continue
-            provider_id = str(model_row.get("provider") or "").strip().lower()
-            provider_row = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
-            if not provider_id or not isinstance(provider_row, dict):
-                continue
-            pricing = model_row.get("pricing") if isinstance(model_row.get("pricing"), dict) else {}
-            snapshot_row = snapshot_by_id.get(str(model_id))
-            health = snapshot_row.get("health") if isinstance(snapshot_row, dict) and isinstance(snapshot_row.get("health"), dict) else {}
-            candidates.append(
-                {
-                    "model_id": str(model_id).strip(),
-                    "provider": provider_id,
-                    "local": bool(provider_row.get("local", False)),
-                    "enabled": bool(model_row.get("enabled", False)),
-                    "available": bool(model_row.get("available", False)),
-                    "routable": bool(snapshot_row.get("routable", False)) if isinstance(snapshot_row, dict) else False,
-                    "quality_rank": int(model_row.get("quality_rank", 0) or 0),
-                    "price_in": pricing.get("input_per_million_tokens"),
-                    "price_out": pricing.get("output_per_million_tokens"),
-                    "context_tokens": (
-                        int(model_row.get("max_context_tokens"))
-                        if model_row.get("max_context_tokens") is not None
-                        else None
-                    ),
-                    "health_status": str(health.get("status") or "unknown").strip().lower(),
-                }
-            )
-        return candidates
-
-    def _rank_models_for_policy(
+    def _select_chat_candidates_for_policy(
         self,
         *,
-        policy: ValuePolicy,
-        allow_remote_fallback: bool,
-    ) -> tuple[list[Any], list[Any]]:
-        return rank_candidates_by_utility(
-            self._model_policy_candidates(),
+        policy: dict[str, Any] | ValuePolicy | None = None,
+        policy_name: str = "default",
+        current_model_id: str | None = None,
+        allowed_tiers: tuple[str, ...] | None = None,
+        min_improvement: float | None = None,
+        allow_remote_fallback_override: bool | None = None,
+        candidate_model_ids: list[str] | None = None,
+        require_auth: bool = True,
+    ) -> dict[str, Any]:
+        truth = self.runtime_truth_service()
+        selector = getattr(truth, "select_chat_candidates", None)
+        if not callable(selector):
+            raise RuntimeError("runtime_truth_selector_unavailable")
+        # Canonical chat policy selection must stay on RuntimeTruthService so
+        # scout, /chat preflight, bootstrap, and operator surfaces all use the
+        # same selector/scorer without a silent fallback scorer.
+        return selector(
             policy=policy,
-            allow_remote_fallback=allow_remote_fallback,
+            policy_name=policy_name,
+            current_model_id=current_model_id,
+            allowed_tiers=allowed_tiers,
+            min_improvement=min_improvement,
+            allow_remote_fallback_override=allow_remote_fallback_override,
+            candidate_model_ids=candidate_model_ids,
+            require_auth=require_auth,
         )
 
     def _premium_override_active(self, *, now_epoch: int) -> bool:
@@ -4761,6 +7462,7 @@ class AgentRuntime:
         premium_cost: float,
         premium_cap: float,
     ) -> str:
+        recovery_store = self.operator_recovery_store()
         now_epoch = int(time.time())
         issue_hash_payload = {
             "issue_code": "premium_over_cap",
@@ -4777,7 +7479,7 @@ class AgentRuntime:
             {"id": "upgrade_once", "label": "Upgrade once", "recommended": False},
             {"id": "set_premium_1h", "label": "Set premium for 1h", "recommended": False},
         ]
-        self._llm_fixit_store.save(
+        recovery_store.save(
             {
                 "active": True,
                 "issue_hash": issue_hash,
@@ -4810,7 +7512,7 @@ class AgentRuntime:
         return RuntimeChatPreflightBridge(
             default_policy=self.config.default_policy if isinstance(self.config.default_policy, dict) else {},
             premium_policy=self.config.premium_policy if isinstance(self.config.premium_policy, dict) else {},
-            model_policy_candidates=self._model_policy_candidates,
+            select_chat_candidates=self._select_chat_candidates_for_policy,
             premium_override_active=lambda now_epoch: self._premium_override_active(now_epoch=now_epoch),
             premium_override_once=bool(self._premium_override_once),
             persist_premium_over_cap_prompt=self._persist_premium_over_cap_prompt,
@@ -4820,55 +7522,594 @@ class AgentRuntime:
             authoritative_tool_failure_text=self._authoritative_tool_failure_text,
         )
 
-    def chat(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
-        request_started_epoch = int(time.time())
-        trace_id = str(payload.get("trace_id") or "").strip() or f"chat-{request_started_epoch}"
-        messages = self._normalize_messages(payload)
-        if not messages:
-            return False, {"ok": False, "error": "messages must be a non-empty list"}
+    @staticmethod
+    def _local_model_size_billions(model_name: str) -> float:
+        normalized = str(model_name or "").strip().lower().replace("-", " ")
+        match = re.search(r"(\d+(?:\.\d+)?)\s*b\b", normalized)
+        if match is None:
+            return 0.0
+        try:
+            return max(0.0, float(match.group(1)))
+        except (TypeError, ValueError):
+            return 0.0
 
-        defaults = self.get_defaults()
-        selection_logged = False
+    @staticmethod
+    def _local_model_family_bonus(model_name: str) -> int:
+        normalized = str(model_name or "").strip().lower()
+        if "qwen" in normalized:
+            return 4
+        if "llama" in normalized:
+            return 3
+        if "mistral" in normalized:
+            return 2
+        if "gemma" in normalized:
+            return 1
+        return 0
 
-        def _log_selection_once(
-            *,
-            provider: str | None,
-            model: str | None,
-            reason: str,
-            fallback_used: bool = False,
-        ) -> None:
-            nonlocal selection_logged
-            if selection_logged:
-                return
-            identity = get_effective_llm_identity(
-                provider=provider,
-                model=model,
-                local_providers={"ollama"},
-                reason=reason,
-            )
-            runtime_mode = "READY"
-            if not bool(identity.get("known", False)):
-                runtime_mode = "DEGRADED"
-            if bool(fallback_used):
-                runtime_mode = "DEGRADED"
-            self._safe_log_event(
-                "llm.selection",
-                {
-                    "trace_id": trace_id,
-                    "surface": str(payload.get("source_surface") or "api"),
-                    "route": "chat",
-                    "runtime_mode": runtime_mode,
-                    "selected_provider": str(provider or "").strip().lower() or None,
-                    "selected_model": str(model or "").strip() or None,
-                    "known": bool(identity.get("known", False)),
-                    "selection_reason": str(reason or "").strip().lower() or "default_policy",
-                    "fallback_used": bool(fallback_used),
+    @staticmethod
+    def _setup_policy_summary() -> dict[str, Any]:
+        return {
+            "policy_id": "local_chat_bootstrap_v1",
+            "summary": (
+                "Prefer installed local chat models. Rank stronger candidates higher, prefer models that "
+                "already look routable/healthy, and validate the final choice with a real provider probe."
+            ),
+            "rules": [
+                "provider must be local and enabled",
+                "model must be enabled, available, and chat-capable",
+                "prefer models that already look routable and healthy",
+                "prefer higher quality_rank",
+                "prefer larger local model size over tiny defaults",
+                "prefer stronger model families and larger context windows",
+            ],
+        }
+
+    def runtime_truth_service(self) -> RuntimeTruthService:
+        return self._runtime_truth_service
+
+    def _record_memory_issue(
+        self,
+        *,
+        subsystem: str,
+        operation: str,
+        error: str,
+        trace_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "subsystem": str(subsystem or "").strip() or "memory",
+            "operation": str(operation or "").strip() or "unknown",
+            "error": str(error or "").strip() or "unknown_error",
+            "at": int(time.time()),
+        }
+        if trace_id:
+            payload["trace_id"] = str(trace_id).strip()
+        if isinstance(details, dict) and details:
+            payload["details"] = dict(details)
+        if payload["subsystem"] == "memory_v2":
+            self._memory_v2_last_error = payload
+        elif payload["subsystem"] == "semantic_memory":
+            self._semantic_memory_last_error = payload
+        return payload
+
+    def _ensure_memory_db(self) -> MemoryDB:
+        with self._orchestrator_lock:
+            if self._orchestrator_db is None:
+                self._orchestrator_db = MemoryDB(self.config.db_path)
+                schema_path = str(self._repo_root / "memory" / "schema.sql")
+                self._orchestrator_db.init_schema(schema_path)
+                try:
+                    setattr(self._orchestrator_db, "_memory_issue_notifier", self._record_memory_issue)
+                except Exception:
+                    pass
+            return self._orchestrator_db
+
+    def _sqlite_memory_tables_status(self, table_names: tuple[str, ...]) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "db_path": self.config.db_path,
+            "accessible": False,
+            "error": None,
+            "tables": {},
+        }
+        try:
+            conn = sqlite3.connect(self.config.db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+        except Exception as exc:
+            payload["error"] = exc.__class__.__name__
+            return payload
+        try:
+            tables: dict[str, Any] = {}
+            for table_name in table_names:
+                exists_row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+                    (str(table_name),),
+                ).fetchone()
+                exists = exists_row is not None
+                row_count: int | None = None
+                if exists:
+                    try:
+                        count_row = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
+                        row_count = int(count_row["count"]) if count_row is not None else 0
+                    except Exception:
+                        row_count = None
+                tables[str(table_name)] = {
+                    "exists": exists,
+                    "row_count": row_count,
+                }
+            payload["accessible"] = True
+            payload["tables"] = tables
+            return payload
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _memory_component_summary(*, name: str, enabled: bool, healthy: bool, reason: str | None = None) -> str:
+        if not enabled:
+            return f"{name}=disabled"
+        if healthy:
+            return f"{name}=healthy"
+        if reason:
+            return f"{name}=degraded:{reason}"
+        return f"{name}=degraded"
+
+    def memory_status(self) -> tuple[bool, dict[str, Any]]:
+        continuity: dict[str, Any]
+        continuity_reason: str | None = None
+        try:
+            continuity_runtime = MemoryRuntime(self._ensure_memory_db())
+            continuity_inspect = continuity_runtime.inspect_all_state()
+            continuity = {
+                "enabled": True,
+                "healthy": bool(continuity_inspect.get("healthy", False)),
+                "reason": None if bool(continuity_inspect.get("healthy", False)) else "continuity_memory_corrupt",
+                "storage": {
+                    "db_path": self.config.db_path,
+                    "table": "user_prefs",
+                    "key_prefix": "memory_runtime:",
                 },
-            )
-            selection_logged = True
+                "persistence_contract": {
+                    "mode": "per_key_optimistic_concurrency_control",
+                    "storage_model": "full_record_replace",
+                    "merge_on_write": False,
+                    "cross_key_atomic_snapshot": False,
+                },
+                **continuity_inspect,
+            }
+            continuity_reason = continuity.get("reason") if isinstance(continuity.get("reason"), str) else None
+        except Exception as exc:
+            continuity_reason = exc.__class__.__name__
+            continuity = {
+                "enabled": True,
+                "healthy": False,
+                "reason": "memory_db_unavailable",
+                "storage": {
+                    "db_path": self.config.db_path,
+                    "table": "user_prefs",
+                    "key_prefix": "memory_runtime:",
+                },
+                "persistence_contract": {
+                    "mode": "per_key_optimistic_concurrency_control",
+                    "storage_model": "full_record_replace",
+                    "merge_on_write": False,
+                    "cross_key_atomic_snapshot": False,
+                },
+                "error": continuity_reason,
+                "users": [],
+                "user_count": 0,
+                "degraded_user_count": 0,
+                "unknown_keys": [],
+            }
 
-        # API chat remains a thin boundary: normalize the request, delegate canonical
-        # chat preflight, then shape the response envelope around the inference result.
+        memory_v2_tables = self._sqlite_memory_tables_status(("memory_items", "memory_events", "bootstrap_state"))
+        memory_v2_counts = {
+            "memory_items_count": (
+                int(((memory_v2_tables.get("tables") or {}).get("memory_items") or {}).get("row_count") or 0)
+                if bool(memory_v2_tables.get("accessible", False))
+                else 0
+            ),
+            "episodic_events_count": (
+                int(((memory_v2_tables.get("tables") or {}).get("memory_events") or {}).get("row_count") or 0)
+                if bool(memory_v2_tables.get("accessible", False))
+                else 0
+            ),
+            "bootstrap_state_count": (
+                int(((memory_v2_tables.get("tables") or {}).get("bootstrap_state") or {}).get("row_count") or 0)
+                if bool(memory_v2_tables.get("accessible", False))
+                else 0
+            ),
+        }
+        memory_v2_reason = None
+        memory_v2_healthy = True
+        if bool(self.config.memory_v2_enabled):
+            if self._memory_v2_store is None:
+                memory_v2_healthy = False
+                memory_v2_reason = self._memory_v2_init_error or "memory_v2_unavailable"
+            elif self._memory_v2_last_error is not None:
+                memory_v2_healthy = False
+                memory_v2_reason = str(self._memory_v2_last_error.get("operation") or "memory_v2_error")
+        memory_v2 = {
+            "enabled": bool(self.config.memory_v2_enabled),
+            "available": bool(self._memory_v2_store is not None),
+            "healthy": memory_v2_healthy if bool(self.config.memory_v2_enabled) else True,
+            "reason": memory_v2_reason,
+            "storage": {
+                "db_path": self.config.db_path,
+                "tables": ["memory_items", "memory_events", "bootstrap_state"],
+            },
+            "tables": memory_v2_tables,
+            "counts": memory_v2_counts,
+            "bootstrap": dict(self._memory_v2_bootstrap_status),
+            "bootstrap_completed": self._memory_v2_bootstrap_completed() if self._memory_v2_store is not None else False,
+            "last_error": dict(self._memory_v2_last_error) if isinstance(self._memory_v2_last_error, dict) else None,
+        }
+
+        semantic_tables = self._sqlite_memory_tables_status(
+            ("semantic_sources", "semantic_chunks", "semantic_vectors", "semantic_index_state")
+        )
+        semantic_report = self.semantic_memory_report()
+        semantic = {
+            **semantic_report,
+            "available": bool(self._semantic_memory_service is not None),
+            "storage": {
+                "db_path": self.config.db_path,
+                "tables": [
+                    "semantic_sources",
+                    "semantic_chunks",
+                    "semantic_vectors",
+                    "semantic_index_state",
+                ],
+            },
+            "tables": semantic_tables,
+            "last_error": dict(self._semantic_memory_last_error) if isinstance(self._semantic_memory_last_error, dict) else None,
+        }
+        if bool(self.config.semantic_memory_enabled) and self._semantic_memory_service is None and self._semantic_memory_init_error:
+            semantic["init_error"] = self._semantic_memory_init_error
+
+        continuity_users = continuity.get("users") if isinstance(continuity.get("users"), list) else []
+        working_memory_rows = [
+            row.get("working_memory")
+            for row in continuity_users
+            if isinstance(row, dict) and isinstance(row.get("working_memory"), dict)
+        ]
+        healthy_working_memory = [
+            row for row in working_memory_rows if bool(row.get("healthy", False)) and isinstance(row.get("summary"), dict)
+        ]
+        degraded_working_memory_count = len(
+            [row for row in working_memory_rows if not bool(row.get("healthy", False))]
+        )
+        if len(healthy_working_memory) == 1:
+            working_memory = dict((healthy_working_memory[0] or {}).get("summary") or {})
+            working_memory["tracked_user_count"] = 1
+            working_memory["degraded_user_count"] = degraded_working_memory_count
+        else:
+            aggregate = {
+                "hot_tokens": 0,
+                "warm_tokens": 0,
+                "cold_tokens": 0,
+                "total_tokens": 0,
+                "emergency_trim_count": 0,
+                "hot_turn_count": 0,
+                "warm_summary_count": 0,
+                "cold_block_count": 0,
+                "pinned_turn_count": 0,
+            }
+            for row in healthy_working_memory:
+                summary_row = row.get("summary") if isinstance(row.get("summary"), dict) else {}
+                for key in aggregate:
+                    aggregate[key] += int(summary_row.get(key) or 0)
+            working_memory = {
+                **aggregate,
+                "soft_threshold": None,
+                "hard_threshold": None,
+                "panic_threshold": None,
+                "last_compaction_at": None,
+                "last_compaction_action": None,
+                "tracked_user_count": len(healthy_working_memory),
+                "degraded_user_count": degraded_working_memory_count,
+            }
+        continuity["working_memory"] = working_memory
+
+        degraded = not bool(continuity.get("healthy", False)) or (
+            bool(self.config.memory_v2_enabled) and not bool(memory_v2.get("healthy", False))
+        ) or (
+            bool(semantic.get("enabled", False)) and not bool(semantic.get("healthy", False))
+        )
+        summary = "; ".join(
+            [
+                self._memory_component_summary(
+                    name="continuity",
+                    enabled=True,
+                    healthy=bool(continuity.get("healthy", False)),
+                    reason=continuity_reason,
+                ),
+                self._memory_component_summary(
+                    name="memory_v2",
+                    enabled=bool(memory_v2.get("enabled", False)),
+                    healthy=bool(memory_v2.get("healthy", False)),
+                    reason=str(memory_v2.get("reason") or "").strip() or None,
+                ),
+                self._memory_component_summary(
+                    name="semantic",
+                    enabled=bool(semantic.get("enabled", False)),
+                    healthy=bool(semantic.get("healthy", False)),
+                    reason=str(semantic.get("reason") or semantic.get("init_error") or "").strip() or None,
+                ),
+            ]
+        )
+        return True, {
+            "ok": True,
+            "degraded": degraded,
+            "summary": summary,
+            "persistence_model": {
+                "continuity": "Thread state, pending follow-ups, and last meaningful request/action live in user_prefs under memory_runtime:* keys.",
+                "memory_v2": "Optional helper memory_v2 rows live in memory_items, memory_events, and bootstrap_state in the same SQLite DB.",
+                "semantic": "Optional semantic memory rows live in semantic_* tables in the same SQLite DB.",
+            },
+            "continuity": continuity,
+            "working_memory": working_memory,
+            "memory_v2": memory_v2,
+            "semantic": semantic,
+        }
+
+    @staticmethod
+    def _normalize_memory_reset_components(payload: dict[str, Any]) -> tuple[bool, list[str] | str]:
+        allowed = {"continuity", "memory_v2", "semantic"}
+        raw_components = payload.get("components")
+        values: list[str] = []
+        if isinstance(raw_components, list):
+            values = [str(item).strip().lower() for item in raw_components if str(item).strip()]
+        elif raw_components is not None:
+            values = [str(raw_components).strip().lower()] if str(raw_components).strip() else []
+        if not values:
+            return True, ["continuity", "memory_v2", "semantic"]
+        if "all" in values:
+            return True, ["continuity", "memory_v2", "semantic"]
+        unknown = sorted({value for value in values if value not in allowed})
+        if unknown:
+            return False, f"unknown_memory_reset_components:{','.join(unknown)}"
+        return True, sorted(dict.fromkeys(values).keys())
+
+    def memory_reset(self, payload: dict[str, Any], *, changed_by: str | None = None) -> tuple[bool, dict[str, Any]]:
+        actor = str(changed_by or "").strip() or "loopback_operator"
+        start = time.monotonic()
+        components_ok, components_value = self._normalize_memory_reset_components(payload)
+        if not components_ok:
+            error_code = str(components_value)
+            self.audit_log.append(
+                actor=actor,
+                action="memory.reset",
+                params={"payload": payload},
+                decision="deny",
+                reason=error_code,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="bad_request",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            return False, {
+                "ok": False,
+                "error": error_code,
+                "error_kind": "bad_request",
+                "message": "Invalid memory reset request.",
+                "next_question": "Use components from continuity, memory_v2, semantic, or all.",
+            }
+        components = list(components_value) if isinstance(components_value, list) else ["continuity", "memory_v2", "semantic"]
+        ok_status, status_payload = self.memory_status()
+        _ = ok_status
+        preview = {
+            "continuity": (
+                status_payload.get("continuity")
+                if "continuity" in components and isinstance(status_payload.get("continuity"), dict)
+                else None
+            ),
+            "memory_v2": (
+                status_payload.get("memory_v2")
+                if "memory_v2" in components and isinstance(status_payload.get("memory_v2"), dict)
+                else None
+            ),
+            "semantic": (
+                status_payload.get("semantic")
+                if "semantic" in components and isinstance(status_payload.get("semantic"), dict)
+                else None
+            ),
+        }
+        db_access = self._sqlite_memory_tables_status(
+            (
+                "user_prefs",
+                "memory_items",
+                "memory_events",
+                "bootstrap_state",
+                "semantic_sources",
+                "semantic_chunks",
+                "semantic_vectors",
+                "semantic_index_state",
+            )
+        )
+        resettable = bool(db_access.get("accessible", False))
+        if not bool(payload.get("confirm", False)):
+            return True, {
+                "ok": True,
+                "action": "preview",
+                "requires_confirmation": True,
+                "resettable": resettable,
+                "components": components,
+                "preview": preview,
+                "message": "Memory reset is destructive. Confirm to erase the selected memory state.",
+                "next_question": "Repeat the same request with confirm=true to erase the selected memory state.",
+            }
+        if not resettable:
+            error_code = str(db_access.get("error") or "memory_db_unavailable")
+            self.audit_log.append(
+                actor=actor,
+                action="memory.reset",
+                params={"components": components},
+                decision="deny",
+                reason=error_code,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="unavailable",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            return False, {
+                "ok": False,
+                "error": "memory_reset_unavailable",
+                "error_kind": "unavailable",
+                "message": "Memory reset could not access the local memory database safely.",
+                "details": {"db_error": error_code},
+            }
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(self.config.db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            deleted: dict[str, dict[str, int]] = {}
+            if "continuity" in components:
+                continuity_count_row = conn.execute(
+                    "SELECT COUNT(*) AS count FROM user_prefs WHERE key LIKE 'memory_runtime:%'"
+                ).fetchone()
+                continuity_count = int(continuity_count_row["count"]) if continuity_count_row is not None else 0
+                conn.execute("DELETE FROM user_prefs WHERE key LIKE 'memory_runtime:%'")
+                deleted["continuity"] = {"user_pref_keys_deleted": continuity_count}
+            if "memory_v2" in components:
+                counts = {}
+                for table_name in ("memory_items", "memory_events", "bootstrap_state"):
+                    exists_row = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+                        (table_name,),
+                    ).fetchone()
+                    if exists_row is None:
+                        counts[f"{table_name}_deleted"] = 0
+                        continue
+                    count_row = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
+                    row_count = int(count_row["count"]) if count_row is not None else 0
+                    conn.execute(f"DELETE FROM {table_name}")
+                    counts[f"{table_name}_deleted"] = row_count
+                deleted["memory_v2"] = counts
+            if "semantic" in components:
+                counts = {}
+                for table_name in ("semantic_vectors", "semantic_chunks", "semantic_sources", "semantic_index_state"):
+                    exists_row = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+                        (table_name,),
+                    ).fetchone()
+                    if exists_row is None:
+                        counts[f"{table_name}_deleted"] = 0
+                        continue
+                    count_row = conn.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
+                    row_count = int(count_row["count"]) if count_row is not None else 0
+                    conn.execute(f"DELETE FROM {table_name}")
+                    counts[f"{table_name}_deleted"] = row_count
+                deleted["semantic"] = counts
+            conn.commit()
+        except Exception as exc:
+            try:
+                if conn is not None:
+                    conn.rollback()
+            except Exception:
+                pass
+            self.audit_log.append(
+                actor=actor,
+                action="memory.reset",
+                params={"components": components},
+                decision="deny",
+                reason=exc.__class__.__name__,
+                dry_run=False,
+                outcome="blocked",
+                error_kind="internal_error",
+                duration_ms=int((time.monotonic() - start) * 1000),
+            )
+            return False, {
+                "ok": False,
+                "error": "memory_reset_failed",
+                "error_kind": "internal_error",
+                "message": "Memory reset failed before the selected state could be erased safely.",
+                "details": {"error": exc.__class__.__name__},
+            }
+        finally:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+        self._memory_v2_last_error = None
+        self._semantic_memory_last_error = None
+        if "memory_v2" in components:
+            self._memory_v2_bootstrap_status = {"ran": False, "ok": False, "reason": "memory_reset"}
+        self.audit_log.append(
+            actor=actor,
+            action="memory.reset",
+            params={"components": components, "deleted": deleted},
+            decision="allow",
+            reason="memory_erased",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=int((time.monotonic() - start) * 1000),
+        )
+        return True, {
+            "ok": True,
+            "action": "reset",
+            "requires_confirmation": False,
+            "components": components,
+            "deleted": deleted,
+            "message": "Selected memory state was erased.",
+        }
+
+    def _ensure_chat_runtime_bootstrapped(self) -> Orchestrator:
+        with self._orchestrator_lock:
+            if self._orchestrator_db is None:
+                self._ensure_memory_db()
+            else:
+                try:
+                    setattr(self._orchestrator_db, "_memory_issue_notifier", self._record_memory_issue)
+                except Exception:
+                    pass
+            if self._orchestrator is None:
+                self._orchestrator = Orchestrator(
+                    db=self._orchestrator_db,
+                    skills_path=self.config.skills_path,
+                    log_path=self.config.log_path,
+                    timezone=self.config.agent_timezone,
+                    llm_client=self._router,
+                    enable_writes=self.config.enable_writes,
+                    perception_enabled=self.config.perception_enabled,
+                    perception_roots=self.config.perception_roots,
+                    perception_interval_seconds=self.config.perception_interval_seconds,
+                    runtime_truth_service=self._runtime_truth_service,
+                    chat_runtime_adapter=self,
+                    semantic_memory_service=self._semantic_memory_service,
+                )
+            else:
+                self._orchestrator.llm_client = self._router
+                self._orchestrator._semantic_memory_service = self._semantic_memory_service  # noqa: SLF001
+                try:
+                    setattr(self._orchestrator.db, "_semantic_memory_service", self._semantic_memory_service)
+                except Exception:
+                    pass
+            self._chat_runtime_bootstrap_completed = True
+            return self._orchestrator
+
+    def orchestrator(self) -> Orchestrator:
+        return self._ensure_chat_runtime_bootstrapped()
+
+    def prepare_orchestrator_chat_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(request.get("payload")) if isinstance(request.get("payload"), dict) else {}
+        if self._safe_mode_enabled():
+            pinned = self._safe_mode_pinned_chat_target()
+            pinned_provider = str(pinned.get("provider") or "").strip().lower() or None
+            pinned_model = str(pinned.get("model") or "").strip() or None
+            if pinned_provider:
+                payload["provider"] = pinned_provider
+            if pinned_model:
+                payload["model"] = pinned_model
+        messages = request.get("messages") if isinstance(request.get("messages"), list) else self._normalize_messages(payload)
+        request_started_epoch = int(request.get("request_started_epoch") or 0) or int(time.time())
+        trace_id = str(request.get("trace_id") or payload.get("trace_id") or "").strip()
+        if trace_id:
+            payload.setdefault("trace_id", trace_id)
+        source_surface = str(request.get("source_surface") or payload.get("source_surface") or "api").strip().lower() or "api"
+        payload.setdefault("source_surface", source_surface)
+        defaults = self.get_defaults()
         prepared = prepare_runtime_chat_request(
             payload=payload,
             messages=messages,
@@ -4878,78 +8119,956 @@ class AgentRuntime:
         )
         if prepared.consume_premium_override_once:
             self._premium_override_once = False
+        return {
+            "prepared": prepared,
+            "defaults": defaults,
+        }
 
-        if prepared.direct_result is not None:
-            result = dict(prepared.direct_result)
+    @staticmethod
+    def _chat_session_id(payload: dict[str, Any]) -> str | None:
+        value = str(payload.get("session_id") or "").strip()
+        return value or None
+
+    def _chat_user_id(self, payload: dict[str, Any]) -> str:
+        explicit_user_id = str(payload.get("user_id") or "").strip()
+        if explicit_user_id:
+            return explicit_user_id
+        session_id = self._chat_session_id(payload)
+        source_surface = str(payload.get("source_surface") or "api").strip().lower() or "api"
+        if session_id:
+            return f"{source_surface}:{session_id}"
+        return f"{source_surface}:default"
+
+    def _chat_thread_id(self, payload: dict[str, Any], *, user_id: str) -> str:
+        explicit_thread_id = str(payload.get("thread_id") or "").strip()
+        if explicit_thread_id:
+            return explicit_thread_id
+        return f"{user_id}:thread"
+
+    @staticmethod
+    def _payload_setup_state_hint(payload: dict[str, Any]) -> dict[str, Any]:
+        hint = payload.get("setup_state_hint")
+        if not isinstance(hint, dict):
+            return {}
+        step = str(hint.get("step") or "").strip().lower()
+        awaiting_secret = bool(hint.get("awaiting_secret")) or step == "awaiting_openrouter_key"
+        awaiting_confirmation = bool(hint.get("awaiting_confirmation")) or step in {
+            "awaiting_switch_confirm",
+            "awaiting_openrouter_reuse_confirm",
+        }
+        if not awaiting_secret and not awaiting_confirmation:
+            return {}
+        return {
+            "route": "setup_flow",
+            "step": step or None,
+            "awaiting_secret": awaiting_secret,
+            "awaiting_confirmation": awaiting_confirmation,
+        }
+
+    def chat_route_decision(self, payload: dict[str, Any], text: str | None = None) -> dict[str, Any]:
+        input_text = str(text or "").strip() or self._extract_primary_user_text(payload)
+        user_id = self._chat_user_id(payload)
+        setup_hint = self._payload_setup_state_hint(payload)
+        pending_hint: dict[str, Any] = {}
+        try:
+            orchestrator = self.orchestrator()
+            if callable(getattr(orchestrator, "runtime_setup_state_hint", None)):
+                pending_hint = orchestrator.runtime_setup_state_hint(user_id)
+        except Exception:
+            pending_hint = {}
+        awaiting_secret = bool(pending_hint.get("awaiting_secret")) or bool(setup_hint.get("awaiting_secret"))
+        awaiting_confirmation = bool(pending_hint.get("awaiting_confirmation")) or bool(setup_hint.get("awaiting_confirmation"))
+        return classify_runtime_chat_route(
+            input_text,
+            awaiting_secret=awaiting_secret,
+            awaiting_confirmation=awaiting_confirmation,
+        )
+
+    def _log_chat_route_decision(
+        self,
+        *,
+        trace_id: str,
+        source_surface: str,
+        route: str,
+        route_reason: str | None,
+        generic_fallback_allowed: bool,
+        generic_fallback_reason: str | None,
+    ) -> None:
+        self._safe_log_event(
+            "chat.route",
+            {
+                "trace_id": trace_id,
+                "source_surface": str(source_surface or "api").strip().lower() or "api",
+                "route": str(route or "generic_chat").strip().lower() or "generic_chat",
+                "route_reason": str(route_reason or "").strip().lower() or None,
+                "generic_fallback_allowed": bool(generic_fallback_allowed),
+                "generic_fallback_reason": str(generic_fallback_reason or "").strip() or None,
+            },
+        )
+
+    def _chat_runtime_snapshot(self) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        router_snapshot = self._canonical_runtime_router_snapshot()
+        runtime_snapshot = build_runtime_model_snapshot(
+            config=self.config,
+            registry=self._router.registry,
+            router_snapshot=router_snapshot,
+        )
+        defaults = self.get_defaults()
+        return router_snapshot, runtime_snapshot, defaults
+
+    @staticmethod
+    def _setup_provider_label(provider_id: str | None) -> str:
+        normalized = str(provider_id or "").strip().lower()
+        if normalized == "openrouter":
+            return "OpenRouter"
+        if normalized == "openai":
+            return "OpenAI"
+        if normalized == "ollama":
+            return "Ollama"
+        if not normalized:
+            return "Unknown provider"
+        return normalized.replace("_", " ").title()
+
+    @staticmethod
+    def _provider_status_model_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+        health_status = str(row.get("health_status") or "unknown").strip().lower()
+        health_rank = 0 if health_status == "ok" else 1 if health_status == "unknown" else 2
+        return (
+            0 if bool(row.get("routable", False)) else 1,
+            health_rank,
+            -int(row.get("quality_rank") or 0),
+            str(row.get("model_id") or ""),
+        )
+
+    def _provider_status_snapshot(self, provider_id: str) -> dict[str, Any]:
+        provider_key = str(provider_id or "").strip().lower()
+        _router_snapshot, runtime_snapshot, defaults = self._chat_runtime_snapshot()
+        providers_doc = (
+            self.registry_document.get("providers")
+            if isinstance(self.registry_document.get("providers"), dict)
+            else {}
+        )
+        models_doc = (
+            self.registry_document.get("models")
+            if isinstance(self.registry_document.get("models"), dict)
+            else {}
+        )
+        runtime_provider_rows = {
+            str(row.get("id") or "").strip().lower(): row
+            for row in (runtime_snapshot.get("providers") if isinstance(runtime_snapshot.get("providers"), list) else [])
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        runtime_model_rows = {
+            str(row.get("id") or "").strip(): row
+            for row in (runtime_snapshot.get("models") if isinstance(runtime_snapshot.get("models"), list) else [])
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        provider_payload = (
+            providers_doc.get(provider_key)
+            if isinstance(providers_doc.get(provider_key), dict)
+            else {}
+        )
+        runtime_provider = (
+            runtime_provider_rows.get(provider_key)
+            if isinstance(runtime_provider_rows.get(provider_key), dict)
+            else {}
+        )
+        provider_known = bool(provider_payload) or bool(runtime_provider)
+        provider_local = bool(
+            (provider_payload if provider_payload else runtime_provider).get(
+                "local",
+                provider_key == "ollama",
+            )
+        )
+        provider_enabled = bool(
+            (provider_payload if provider_payload else runtime_provider).get(
+                "enabled",
+                provider_known,
+            )
+        )
+        provider_health = (
+            runtime_provider.get("health")
+            if isinstance(runtime_provider.get("health"), dict)
+            else {}
+        )
+        health_status = str(provider_health.get("status") or "unknown").strip().lower() or "unknown"
+        api_key_source = (
+            provider_payload.get("api_key_source")
+            if isinstance(provider_payload.get("api_key_source"), dict)
+            else None
+        )
+        auth_required = bool(provider_payload and not provider_local and api_key_source is not None)
+        secret_present = bool(self._provider_api_key(provider_payload)) if auth_required else False
+        current_model_id = (
+            str(defaults.get("resolved_default_model") or "").strip()
+            or str(defaults.get("chat_model") or "").strip()
+            or str(defaults.get("default_model") or "").strip()
+            or None
+        )
+        current_provider = (
+            str(defaults.get("default_provider") or "").strip().lower()
+            or (
+                str(current_model_id).split(":", 1)[0].strip().lower()
+                if current_model_id and ":" in str(current_model_id)
+                else None
+            )
+        )
+
+        def _row_for_model(model_id: str, model_payload: dict[str, Any], runtime_row: dict[str, Any]) -> dict[str, Any] | None:
+            capabilities_raw = runtime_row.get("capabilities") if isinstance(runtime_row.get("capabilities"), list) else model_payload.get("capabilities")
+            capabilities = {
+                str(item).strip().lower()
+                for item in (capabilities_raw if isinstance(capabilities_raw, list) else [])
+                if str(item).strip()
+            }
+            if not capabilities:
+                capabilities = {"chat"}
+            if "chat" not in capabilities:
+                return None
+            health = runtime_row.get("health") if isinstance(runtime_row.get("health"), dict) else {}
+            return {
+                "model_id": model_id,
+                "model": str(runtime_row.get("model") or model_payload.get("model") or model_id).strip(),
+                "routable": bool(runtime_row.get("routable", False)),
+                "available": bool(runtime_row.get("available", model_payload.get("available", True))),
+                "enabled": bool(model_payload.get("enabled", True)),
+                "quality_rank": int(model_payload.get("quality_rank") or runtime_row.get("quality_rank") or 0),
+                "health_status": str(health.get("status") or "unknown").strip().lower() or "unknown",
+            }
+
+        model_rows: list[dict[str, Any]] = []
+        seen_model_ids: set[str] = set()
+        for model_id, model_payload in models_doc.items():
+            if not isinstance(model_payload, dict):
+                continue
+            if str(model_payload.get("provider") or "").strip().lower() != provider_key:
+                continue
+            model_key = str(model_id).strip()
+            if not model_key:
+                continue
+            runtime_row = (
+                runtime_model_rows.get(model_key)
+                if isinstance(runtime_model_rows.get(model_key), dict)
+                else {}
+            )
+            row = _row_for_model(model_key, model_payload, runtime_row)
+            if row is None:
+                continue
+            model_rows.append(row)
+            seen_model_ids.add(model_key)
+        for model_id, runtime_row in runtime_model_rows.items():
+            if model_id in seen_model_ids:
+                continue
+            if str(runtime_row.get("provider") or "").strip().lower() != provider_key:
+                continue
+            row = _row_for_model(model_id, {}, runtime_row)
+            if row is None:
+                continue
+            model_rows.append(row)
+            seen_model_ids.add(model_id)
+
+        preferred_row = None
+        if current_provider == provider_key and current_model_id:
+            preferred_row = next(
+                (row for row in model_rows if str(row.get("model_id") or "") == str(current_model_id)),
+                None,
+            )
+        if preferred_row is None and model_rows:
+            preferred_row = sorted(model_rows, key=self._provider_status_model_sort_key)[0]
+        preferred_model_id = str((preferred_row or {}).get("model_id") or "").strip() or None
+        configured = bool(
+            provider_known
+            and provider_enabled
+            and model_rows
+            and (provider_local or not auth_required or secret_present)
+        )
+        return {
+            "provider": provider_key,
+            "provider_label": self._setup_provider_label(provider_key),
+            "known": provider_known,
+            "enabled": provider_enabled,
+            "local": provider_local,
+            "configured": configured,
+            "active": bool(current_provider == provider_key and current_model_id),
+            "secret_present": secret_present,
+            "health_status": health_status,
+            "model_id": preferred_model_id,
+            "model_ids": [str(row.get("model_id") or "").strip() for row in sorted(model_rows, key=self._provider_status_model_sort_key)],
+            "current_provider": current_provider,
+            "current_model_id": current_model_id,
+        }
+
+    def choose_best_local_chat_model(self, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+        request = payload if isinstance(payload, dict) else {}
+        pinned = self._safe_mode_pinned_chat_target()
+        pinned_model = str(pinned.get("model") or "").strip() or None
+        if self._safe_mode_enabled() and pinned_model:
+            document = self.registry_document if isinstance(self.registry_document, dict) else {}
+            models = document.get("models") if isinstance(document.get("models"), dict) else {}
+            row = models.get(pinned_model) if isinstance(models.get(pinned_model), dict) else {}
+            if isinstance(row, dict):
+                candidate = {
+                    "model_id": pinned_model,
+                    "provider_id": str(pinned.get("provider") or "ollama").strip().lower() or "ollama",
+                    "local": True,
+                    "quality_rank": int(row.get("quality_rank") or 0),
+                    "routable": True,
+                    "available": bool(row.get("available", True)),
+                    "enabled": bool(row.get("enabled", True)),
+                }
+                return True, {
+                    "ok": True,
+                    "candidate": candidate,
+                    "candidates": [candidate],
+                    "policy": self._setup_policy_summary(),
+                    "selection_policy": {
+                        "policy_name": "safe_mode_pinned_local",
+                        "selected_candidate": dict(candidate),
+                        "recommended_candidate": dict(candidate),
+                        "current_candidate": dict(candidate),
+                        "switch_recommended": False,
+                        "decision_reason": "safe_mode_pinned_local",
+                        "decision_detail": f"Safe mode pins chat to {pinned_model}.",
+                    },
+                    "safe_mode": True,
+                }
+        if bool(request.get("refresh", True)):
+            self.refresh_models({"provider": "ollama"})
+        policy_result = self._select_chat_candidates_for_policy(
+            allowed_tiers=("local",),
+            allow_remote_fallback_override=False,
+        )
+        candidates = policy_result.get("ordered_candidates") if isinstance(policy_result.get("ordered_candidates"), list) else []
+        if not candidates:
+            return False, {
+                "ok": False,
+                "error": "no_local_chat_model",
+                "message": "I could not find an installed local chat model to use.",
+                "policy": self._setup_policy_summary(),
+                "candidates": [],
+            }
+        return True, {
+            "ok": True,
+            "candidate": candidates[0],
+            "candidates": candidates,
+            "policy": self._setup_policy_summary(),
+            "selection_policy": policy_result,
+        }
+
+    def set_default_chat_model(self, model_id: str) -> tuple[bool, dict[str, Any]]:
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
+        requested_model = str(model_id or "").strip()
+        provider_hint = (
+            str(requested_model.split(":", 1)[0]).strip().lower()
+            if ":" in requested_model and str(requested_model.split(":", 1)[0]).strip().lower() in provider_ids
+            else None
+        )
+        resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
+            requested_model,
+            provider_id=provider_hint,
+            require_available=False,
+        )
+        if not resolved_ok:
+            return False, resolved_body if isinstance(resolved_body, dict) else {"ok": False, "error": "default_model not found"}
+        normalized_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
+        provider_id = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
+        if not normalized_model or not provider_id:
+            return False, {"ok": False, "error": "default_model not found"}
+        switch_allowed, blocked_response = self._guard_switch_target_allowed(
+            resolved_body if isinstance(resolved_body, dict) else {},
+            requested_model=normalized_model,
+        )
+        if not switch_allowed:
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(normalized_model)
+        ok, body = self.update_defaults(
+            {
+                "default_provider": provider_id,
+                "chat_model": normalized_model,
+            }
+        )
+        if not ok:
+            return False, body if isinstance(body, dict) else {"ok": False, "error": "set_default_failed"}
+        self._temporary_chat_target_override = None
+        response = body if isinstance(body, dict) else {"ok": True}
+        response["provider"] = provider_id
+        response["model_id"] = normalized_model
+        response["message"] = f"Now using {normalized_model} for chat."
+        return True, response
+
+    def set_confirmed_chat_model_target(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
+            model_id,
+            provider_id=provider_id,
+            require_available=True,
+            require_usable=True,
+        )
+        if not resolved_ok:
+            return False, resolved_body if isinstance(resolved_body, dict) else {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
+        applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
+        switch_allowed, blocked_response = self._guard_switch_target_allowed(
+            resolved_body if isinstance(resolved_body, dict) else {},
+            requested_model=applied_model or model_id,
+        )
+        if not switch_allowed:
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+        if not applied_model or not applied_provider:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        previous_override = (
+            dict(self._safe_mode_explicit_chat_target_override)
+            if isinstance(self._safe_mode_explicit_chat_target_override, dict)
+            else None
+        )
+        previous_temporary_override = (
+            dict(self._temporary_chat_target_override)
+            if isinstance(self._temporary_chat_target_override, dict)
+            else None
+        )
+        if self._safe_mode_enabled():
+            self._safe_mode_explicit_chat_target_override = {
+                "provider": applied_provider,
+                "model": applied_model,
+            }
         else:
-            result = route_inference(
-                llm_client=self._router,
-                messages=prepared.messages,
-                user_text=prepared.last_user_text,
-                task_hint=prepared.last_user_text,
-                purpose=str(payload.get("purpose") or "chat"),
-                task_type=str(payload.get("task_type") or payload.get("purpose") or "chat"),
-                trace_id=trace_id,
-                provider_override=prepared.provider_override,
-                model_override=prepared.model_override,
-                require_tools=prepared.require_tools,
-                require_json=bool(payload.get("require_json")),
-                require_vision=bool(payload.get("require_vision")),
-                min_context_tokens=int(payload.get("min_context_tokens") or 0) or None,
-                timeout_seconds=float(payload.get("timeout_seconds") or 0) or None,
-                metadata={
-                    "trace_id": trace_id,
-                    "selection_reason": prepared.selection_reason,
-                    "source_surface": str(payload.get("source_surface") or "api"),
+            self._temporary_chat_target_override = None
+        ok, body = self.update_defaults(
+            {
+                "default_provider": applied_provider,
+                "chat_model": applied_model,
+            }
+        )
+        if not ok:
+            self._safe_mode_explicit_chat_target_override = previous_override
+            self._temporary_chat_target_override = previous_temporary_override
+            return False, body if isinstance(body, dict) else {"ok": False, "error": "set_default_failed"}
+        response = body if isinstance(body, dict) else {"ok": True}
+        response["provider"] = applied_provider
+        response["model_id"] = applied_model
+        response["message"] = f"Now using {applied_model} for chat."
+        return True, response
+
+    def set_temporary_chat_model_target(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
+            model_id,
+            provider_id=provider_id,
+            require_available=True,
+            require_usable=True,
+        )
+        if not resolved_ok:
+            return False, resolved_body if isinstance(resolved_body, dict) else {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
+        applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
+        switch_allowed, blocked_response = self._guard_switch_target_allowed(
+            resolved_body if isinstance(resolved_body, dict) else {},
+            requested_model=applied_model or model_id,
+        )
+        if not switch_allowed:
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+        if not applied_model or not applied_provider:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        if self._safe_mode_enabled():
+            self._safe_mode_explicit_chat_target_override = {
+                "provider": applied_provider,
+                "model": applied_model,
+            }
+            return True, {
+                "ok": True,
+                "provider": applied_provider,
+                "model_id": applied_model,
+                "message": f"Temporarily using {applied_model} for chat.",
+            }
+        stored_default = self._stored_chat_default_target()
+        default_model = str((stored_default or {}).get("model") or "").strip() or None
+        default_provider = str((stored_default or {}).get("provider") or "").strip().lower() or None
+        if applied_model == default_model and applied_provider == default_provider:
+            self._temporary_chat_target_override = None
+        else:
+            self._temporary_chat_target_override = {
+                "provider": applied_provider,
+                "model": applied_model,
+            }
+        return True, {
+            "ok": True,
+            "provider": applied_provider,
+            "model_id": applied_model,
+            "message": f"Temporarily using {applied_model} for chat.",
+        }
+
+    def restore_temporary_chat_model_target(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
+            model_id,
+            provider_id=provider_id,
+            require_available=True,
+            require_usable=True,
+        )
+        if not resolved_ok:
+            return False, resolved_body if isinstance(resolved_body, dict) else {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
+        applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
+        switch_allowed, blocked_response = self._guard_switch_target_allowed(
+            resolved_body if isinstance(resolved_body, dict) else {},
+            requested_model=applied_model or model_id,
+        )
+        if not switch_allowed:
+            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+        if not applied_model or not applied_provider:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        if self._safe_mode_enabled():
+            document = self.registry_document if isinstance(self.registry_document, dict) else {}
+            defaults = self._ensure_defaults(document)
+            models = document.get("models") if isinstance(document.get("models"), dict) else {}
+            providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+            provider_ids = {str(provider_key).strip().lower() for provider_key in providers.keys()}
+            default_model = self._resolved_chat_default_model(
+                defaults=defaults,
+                models=models,
+                provider_ids=provider_ids,
+            )
+            default_provider = (
+                str(defaults.get("default_provider") or "").strip().lower()
+                or (
+                    str(default_model).split(":", 1)[0].strip().lower()
+                    if default_model and ":" in str(default_model)
+                    else None
+                )
+            )
+            if applied_model == default_model and applied_provider == default_provider:
+                self._safe_mode_explicit_chat_target_override = None
+            else:
+                self._safe_mode_explicit_chat_target_override = {
+                    "provider": applied_provider,
+                    "model": applied_model,
+                }
+            return True, {
+                "ok": True,
+                "provider": applied_provider,
+                "model_id": applied_model,
+                "message": f"Now using {applied_model} for chat.",
+            }
+        stored_default = self._stored_chat_default_target()
+        default_model = str((stored_default or {}).get("model") or "").strip() or None
+        default_provider = str((stored_default or {}).get("provider") or "").strip().lower() or None
+        if applied_model == default_model and applied_provider == default_provider:
+            self._temporary_chat_target_override = None
+        else:
+            self._temporary_chat_target_override = {
+                "provider": applied_provider,
+                "model": applied_model,
+            }
+        return True, {
+            "ok": True,
+            "provider": applied_provider,
+            "model_id": applied_model,
+            "message": f"Now using {applied_model} for chat.",
+        }
+
+    def configure_local_chat_model(self, model_id: str) -> tuple[bool, dict[str, Any]]:
+        requested = str(model_id or "").strip()
+        if not requested:
+            return False, {"ok": False, "error": "model is required"}
+        self.refresh_models({"provider": "ollama"})
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
+        canonical_model = self._normalize_default_model_id(
+            requested,
+            provider_for_model="ollama",
+            models=models,
+            provider_ids=provider_ids,
+        )
+        if canonical_model is None and ":" not in requested:
+            added_ok, added_body = self.add_provider_model(
+                "ollama",
+                {
+                    "model": requested,
+                    "capabilities": ["chat"],
+                    "available": True,
                 },
             )
-        raw_selection_reason = str(result.get("selection_reason") or "").strip()
-        effective_selection_reason = raw_selection_reason or prepared.selection_reason or "router_default"
-        if raw_selection_reason == "router_default" and prepared.selection_reason != "default_policy":
-            effective_selection_reason = prepared.selection_reason
-        log_reason = str(prepared.log_reason or effective_selection_reason or "router_default").strip() or "router_default"
-        log_fallback_used = (
-            bool(prepared.log_fallback_used)
-            if prepared.log_fallback_used is not None
-            else bool(result.get("fallback_used"))
+            if not added_ok:
+                return False, added_body if isinstance(added_body, dict) else {"ok": False, "error": "model_not_found"}
+            canonical_model = f"ollama:{requested}"
+        if canonical_model is None:
+            return False, {"ok": False, "error": "default_model not found"}
+        valid_default, validated_model, validation_error = validate_default_model(
+            canonical_model,
+            models,
+            purpose="chat",
         )
-        _log_selection_once(
-            provider=str(result.get("provider") or prepared.provider_override or ""),
-            model=str(result.get("model") or prepared.model_override or ""),
-            reason=log_reason if bool(result.get("ok")) else "routing_failure",
-            fallback_used=log_fallback_used,
-        )
+        if not valid_default or not validated_model:
+            return False, validation_error if isinstance(validation_error, dict) else {"ok": False, "error": "chat_model_not_chat_capable"}
 
-        selection_policy = build_chat_selection_policy_meta(
-            prepared=prepared,
-            result=result,
-            defaults=defaults,
-        )
+        ok_test, test_body = self.test_provider("ollama", {"model": validated_model})
+        if not ok_test:
+            response = test_body if isinstance(test_body, dict) else {"ok": False, "error": "provider_test_failed"}
+            response["message"] = str(response.get("message") or "I could not verify that local model yet.")
+            return False, response
 
-        meta: dict[str, Any] = {
-            "provider": result.get("provider"),
-            "model": result.get("model"),
-            "route": "chat",
-            "source_surface": str(payload.get("source_surface") or "api"),
-            "fallback_used": bool(result.get("fallback_used")),
-            "attempts": result.get("attempts") or [],
-            "duration_ms": int(result.get("duration_ms") or 0),
-            "error": result.get("error_kind") or result.get("error_class"),
-            "autopilot": self._chat_autopilot_meta(request_started_epoch),
+        ok_default, default_body = self.set_default_chat_model(validated_model)
+        if not ok_default:
+            return False, default_body if isinstance(default_body, dict) else {"ok": False, "error": "set_default_failed"}
+        response = default_body if isinstance(default_body, dict) else {"ok": True}
+        response["provider_test"] = test_body if isinstance(test_body, dict) else {}
+        response["policy"] = self._setup_policy_summary()
+        response["message"] = f"I switched chat to your local model {validated_model}."
+        return True, response
+
+    def configure_openrouter(self, api_key: str, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+        request = payload if isinstance(payload, dict) else {}
+        normalized_key = str(api_key or "").strip()
+        if not normalized_key:
+            return False, {"ok": False, "error": "api_key is required"}
+        started_at = time.monotonic()
+        timings_ms: dict[str, int] = {}
+
+        def _mark(label: str, step_started_at: float) -> None:
+            timings_ms[str(label)] = int(max(0.0, time.monotonic() - step_started_at) * 1000)
+
+        default_headers = {
+            "HTTP-Referer": {"from_env": "OPENROUTER_SITE_URL"},
+            "X-Title": {"from_env": "OPENROUTER_APP_NAME"},
         }
-        if selection_policy is not None:
-            meta["selection_policy"] = selection_policy
+        provider_step_started = time.monotonic()
+        if "openrouter" not in (
+            self.registry_document.get("providers")
+            if isinstance(self.registry_document.get("providers"), dict)
+            else {}
+        ):
+            add_ok, add_body = self.add_provider(
+                {
+                    "id": "openrouter",
+                    "provider_type": "openai_compat",
+                    "base_url": str(self.config.openrouter_base_url or "https://openrouter.ai/api/v1").strip() or "https://openrouter.ai/api/v1",
+                    "chat_path": "/chat/completions",
+                    "local": False,
+                    "enabled": True,
+                    "default_headers": default_headers,
+                }
+            )
+            if not add_ok:
+                return False, add_body if isinstance(add_body, dict) else {"ok": False, "error": "provider_config_failed"}
+        else:
+            update_ok, update_body = self.update_provider(
+                "openrouter",
+                {
+                    "base_url": str(self.config.openrouter_base_url or "https://openrouter.ai/api/v1").strip() or "https://openrouter.ai/api/v1",
+                    "chat_path": "/chat/completions",
+                    "local": False,
+                    "enabled": True,
+                    "default_headers": default_headers,
+                },
+            )
+            if not update_ok:
+                return False, update_body if isinstance(update_body, dict) else {"ok": False, "error": "provider_config_failed"}
+        _mark("provider_config", provider_step_started)
 
+        secret_step_started = time.monotonic()
+        secret_ok, secret_body = self.set_provider_secret("openrouter", {"api_key": normalized_key})
+        if not secret_ok:
+            return False, secret_body if isinstance(secret_body, dict) else {"ok": False, "error": "secret_store_failed"}
+        _mark("secret_store", secret_step_started)
+
+        provider_test_started = time.monotonic()
+        test_ok, test_body = self.test_provider("openrouter", {"api_key": normalized_key})
+        _mark("provider_test", provider_test_started)
+        if not test_ok:
+            response = test_body if isinstance(test_body, dict) else {"ok": False, "error": "provider_test_failed"}
+            response["message"] = str(response.get("message") or "OpenRouter setup failed during the provider test.")
+            response["timings_ms"] = dict(timings_ms)
+            response["total_duration_ms"] = int(max(0.0, time.monotonic() - started_at) * 1000)
+            self._safe_log_event(
+                "runtime.configure_openrouter",
+                {
+                    "ok": False,
+                    "provider": "openrouter",
+                    "make_default": bool(request.get("make_default", False)),
+                    "defer_model_refresh": bool(request.get("defer_model_refresh", False)),
+                    "timings_ms": dict(timings_ms),
+                    "total_duration_ms": response["total_duration_ms"],
+                    "error": str(response.get("error") or "provider_test_failed"),
+                },
+            )
+            return False, response
+
+        refresh_deferred = bool(request.get("defer_model_refresh", False))
+        refresh_result: dict[str, Any] | None = None
+        if not refresh_deferred:
+            refresh_step_started = time.monotonic()
+            refresh_ok, refresh_body = self.refresh_models({"provider": "openrouter"})
+            _mark("model_refresh", refresh_step_started)
+            refresh_result = refresh_body if isinstance(refresh_body, dict) else {"ok": bool(refresh_ok)}
+        tested_model = str((test_body if isinstance(test_body, dict) else {}).get("model") or "").strip()
+        if tested_model and ":" not in tested_model:
+            canonical_model = f"openrouter:{tested_model}"
+        else:
+            canonical_model = tested_model
+        if canonical_model:
+            models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
+            if canonical_model not in models:
+                add_model_started = time.monotonic()
+                add_model_ok, add_model_body = self.add_provider_model(
+                    "openrouter",
+                    {
+                        "id": canonical_model,
+                        "model": tested_model.split(":", 1)[1] if ":" in tested_model else tested_model,
+                        "capabilities": ["chat"],
+                        "available": True,
+                    },
+                )
+                _mark("model_registry_update", add_model_started)
+                if not add_model_ok:
+                    return False, add_model_body if isinstance(add_model_body, dict) else {"ok": False, "error": "model_add_failed"}
+        self._record_authoritative_provider_success("openrouter", canonical_model or tested_model or None)
+
+        make_default = bool(request.get("make_default", False))
+        switched = False
+        if canonical_model and make_default:
+            default_step_started = time.monotonic()
+            default_ok, default_body = self.set_default_chat_model(canonical_model)
+            _mark("default_switch", default_step_started)
+            if not default_ok:
+                return False, default_body if isinstance(default_body, dict) else {"ok": False, "error": "set_default_failed"}
+            switched = True
+
+        total_duration_ms = int(max(0.0, time.monotonic() - started_at) * 1000)
         response = {
-            "ok": bool(result.get("ok")),
-            "assistant": {
-                "role": "assistant",
-                "content": result.get("text") or "",
-            },
-            "meta": meta,
+            "ok": True,
+            "provider": "openrouter",
+            "model_id": canonical_model or None,
+            "provider_test": test_body if isinstance(test_body, dict) else {},
+            "refresh_deferred": refresh_deferred,
+            "refresh_result": refresh_result,
+            "timings_ms": dict(timings_ms),
+            "total_duration_ms": total_duration_ms,
+            "switched": switched,
+            "message": (
+                f"OpenRouter is ready and now set as your chat model ({canonical_model})."
+                if switched and canonical_model
+                else (
+                    f"OpenRouter is ready. I tested it with {canonical_model}."
+                    if canonical_model
+                    else "OpenRouter is ready."
+                )
+            ),
         }
-        self._log_request("/chat", bool(result.get("ok")), response["meta"])
-        return bool(result.get("ok")), response
+        self._safe_log_event(
+            "runtime.configure_openrouter",
+            {
+                "ok": True,
+                "provider": "openrouter",
+                "model_id": canonical_model or None,
+                "make_default": make_default,
+                "refresh_deferred": refresh_deferred,
+                "timings_ms": dict(timings_ms),
+                "total_duration_ms": total_duration_ms,
+            },
+        )
+        return True, response
+
+    def _auto_bootstrap_local_chat_model(self) -> dict[str, Any] | None:
+        if self._safe_mode_enabled():
+            return None
+        defaults = self.get_defaults()
+        current_model = (
+            str(defaults.get("resolved_default_model") or "").strip()
+            or str(defaults.get("chat_model") or "").strip()
+            or str(defaults.get("default_model") or "").strip()
+            or None
+        )
+        current_provider = (
+            str(defaults.get("default_provider") or "").strip().lower()
+            or (
+                str(current_model).split(":", 1)[0].strip().lower()
+                if current_model and ":" in str(current_model)
+                else None
+            )
+        )
+        if current_model and current_provider:
+            snapshot = self._canonical_runtime_router_snapshot()
+            provider_rows = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
+            model_rows = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
+            provider_row = next(
+                (
+                    row
+                    for row in provider_rows
+                    if isinstance(row, dict) and str(row.get("id") or "").strip().lower() == current_provider
+                ),
+                None,
+            )
+            model_row = next(
+                (
+                    row
+                    for row in model_rows
+                    if isinstance(row, dict) and str(row.get("id") or "").strip() == current_model
+                ),
+                None,
+            )
+            provider_health = (
+                provider_row.get("health")
+                if isinstance(provider_row, dict) and isinstance(provider_row.get("health"), dict)
+                else {}
+            )
+            model_health = (
+                model_row.get("health")
+                if isinstance(model_row, dict) and isinstance(model_row.get("health"), dict)
+                else {}
+            )
+            provider_ready = str(provider_health.get("status") or "").strip().lower() == "ok"
+            model_ready = str(model_health.get("status") or "").strip().lower() == "ok"
+            if provider_ready and model_ready:
+                return None
+
+        truth = self.runtime_truth_service()
+        now_epoch = int(time.time())
+        if self._local_chat_bootstrap_last_attempt_ts and now_epoch - self._local_chat_bootstrap_last_attempt_ts < 20:
+            return None
+        self._local_chat_bootstrap_last_attempt_ts = now_epoch
+        choose_ok, choose_body = truth.choose_best_local_chat_model({"refresh": True})
+        if not choose_ok:
+            return None
+        candidates = choose_body.get("candidates") if isinstance(choose_body.get("candidates"), list) else []
+        for row in candidates:
+            if not isinstance(row, dict):
+                continue
+            configure_ok, configure_body = truth.configure_local_chat_model(str(row.get("model_id") or ""))
+            if configure_ok:
+                return configure_body if isinstance(configure_body, dict) else {"ok": True}
+        return None
+
+    @staticmethod
+    def _skip_bootstrap_for_chat_route(decision: dict[str, Any]) -> bool:
+        route = str(decision.get("route") or "").strip().lower()
+        if route and route != "generic_chat":
+            return True
+        return False
+
+    def chat(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        # /chat is now an adapter only. Keep transport/session normalization,
+        # bootstrap compatibility, logging, and serializer invocation here;
+        # all chat decisions live in the orchestrator.
+        request_started_epoch = int(time.time())
+        trace_id = str(payload.get("trace_id") or "").strip() or f"chat-{request_started_epoch}"
+        request_id = str(payload.get("request_id") or "").strip() or uuid.uuid4().hex
+        messages = self._normalize_messages(payload)
+        if not messages:
+            return False, {"ok": False, "error": "messages must be a non-empty list"}
+
+        source_surface = str(payload.get("source_surface") or "api").strip().lower() or "api"
+        last_user_text = str(messages[-1].get("content") or "").strip()
+        route_decision = self.chat_route_decision(payload, last_user_text)
+
+        if not self._skip_bootstrap_for_chat_route(route_decision):
+            _ = self._auto_bootstrap_local_chat_model()
+        user_id = self._chat_user_id(payload)
+        thread_id = self._chat_thread_id(payload, user_id=user_id)
+        chat_context = {
+            "payload": dict(payload),
+            "messages": messages,
+            "trace_id": trace_id,
+            "request_id": request_id,
+            "source_surface": source_surface,
+            "channel": source_surface if source_surface in {"telegram", "api", "cli"} else "api",
+            "purpose": str(payload.get("purpose") or "chat"),
+            "task_type": str(payload.get("task_type") or payload.get("purpose") or "chat"),
+            "request_started_epoch": request_started_epoch,
+            "memory_context_text": str(payload.get("memory_context_text") or "").strip(),
+            "thread_id": thread_id,
+        }
+        chat_started = time.monotonic()
+        self._runtime_events.log_chat_request_start(
+            request_id,
+            source_surface,
+            trace_id=trace_id,
+            route_hint=str(route_decision.get("route") or "").strip().lower() or None,
+            thread_id=thread_id,
+            user_id=user_id,
+        )
+        try:
+            orchestrator_response = self.orchestrator().handle_message(
+                last_user_text,
+                user_id=user_id,
+                chat_context=chat_context,
+            )
+            serialized = serialize_orchestrator_chat_response(
+                orchestrator_response,
+                source_surface=source_surface,
+                user_id=user_id,
+                thread_id=thread_id,
+                autopilot_meta=self._chat_autopilot_meta(request_started_epoch),
+            )
+        except Exception:
+            self._runtime_events.log_chat_request_end(
+                request_id,
+                int(max(0.0, time.monotonic() - chat_started) * 1000),
+                "error",
+                trace_id=trace_id,
+                source=source_surface,
+            )
+            raise
+        meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
+        self._runtime_events.log_chat_request_end(
+            request_id,
+            int(max(0.0, time.monotonic() - chat_started) * 1000),
+            "ok" if bool(serialized.ok) else "error",
+            trace_id=trace_id,
+            source=source_surface,
+            route=serialized.route,
+            model_selected=str(meta.get("model") or "").strip() or None,
+            provider=str(meta.get("provider") or "").strip().lower() or None,
+        )
+
+        self._log_chat_route_decision(
+            trace_id=trace_id,
+            source_surface=source_surface,
+            route=serialized.route,
+            route_reason=serialized.route_reason,
+            generic_fallback_allowed=serialized.generic_fallback_allowed,
+            generic_fallback_reason=serialized.generic_fallback_reason,
+        )
+        self._log_request("/chat", serialized.ok, meta)
+        return serialized.ok, serialized.body
 
     @staticmethod
     def _http_get_json(
@@ -5041,8 +9160,11 @@ class AgentRuntime:
                     names_from_tags = set()
                     tags_ok = False
             else:
+                model_list_path = "/v1/models"
+                if provider_id == "openrouter" and base_url.endswith("/api/v1"):
+                    model_list_path = "/models"
                 try:
-                    parsed = self._http_get_json(base_url + "/v1/models", headers=request_headers)
+                    parsed = self._http_get_json(base_url + model_list_path, headers=request_headers)
                     data = parsed.get("data") if isinstance(parsed.get("data"), list) else []
                     for item in data:
                         if not isinstance(item, dict):
@@ -5098,9 +9220,13 @@ class AgentRuntime:
                     "provider": provider_id,
                     "model": model_name,
                     "capabilities": capabilities,
-                    "quality_rank": int(existing.get("quality_rank", 2) or 2),
-                    "cost_rank": int(existing.get("cost_rank", 0) or 0),
-                    "default_for": list(existing.get("default_for") or ["chat"]),
+                    "task_types": list(existing.get("task_types") or known_model_metadata(provider_id, model_name).get("task_types") or []),
+                    "architecture_modality": existing.get("architecture_modality"),
+                    "input_modalities": list(existing.get("input_modalities") or []),
+                    "output_modalities": list(existing.get("output_modalities") or []),
+                    "quality_rank": int(existing.get("quality_rank", known_model_metadata(provider_id, model_name).get("quality_rank", 2)) or 2),
+                    "cost_rank": int(existing.get("cost_rank", known_model_metadata(provider_id, model_name).get("cost_rank", 0)) or 0),
+                    "default_for": list(existing.get("default_for") or known_model_metadata(provider_id, model_name).get("default_for") or ["chat"]),
                     "enabled": bool(existing.get("enabled", True)),
                     "available": available,
                     "pricing": existing.get("pricing")
@@ -5108,7 +9234,7 @@ class AgentRuntime:
                         "input_per_million_tokens": None,
                         "output_per_million_tokens": None,
                     },
-                    "max_context_tokens": existing.get("max_context_tokens"),
+                    "max_context_tokens": existing.get("max_context_tokens", known_model_metadata(provider_id, model_name).get("max_context_tokens")),
                 }
                 if next_payload != existing:
                     changed = True
@@ -5237,6 +9363,7 @@ class AgentRuntime:
             model_name = str(row.get("model") or "").strip()
             if not model_id or not provider_id or not model_name:
                 continue
+            known_metadata = known_model_metadata(provider_id, model_name)
             provider_payload = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else None
             if not isinstance(provider_payload, dict):
                 continue
@@ -5246,7 +9373,12 @@ class AgentRuntime:
                 for item in (row.get("capabilities") or [])
                 if str(item).strip()
             ] or ["chat"]
-            default_for = list(existing.get("default_for") or (["chat"] if "chat" in capabilities else ["embedding"]))
+            default_for = list(
+                existing.get("default_for")
+                or row.get("default_for")
+                or known_metadata.get("default_for")
+                or (["chat"] if "chat" in capabilities else ["embedding"])
+            )
             pricing_payload = {
                 "input_per_million_tokens": row.get("input_cost_per_million_tokens"),
                 "output_per_million_tokens": row.get("output_cost_per_million_tokens"),
@@ -5256,13 +9388,32 @@ class AgentRuntime:
                 "provider": provider_id,
                 "model": model_name,
                 "capabilities": capabilities,
-                "quality_rank": int(existing.get("quality_rank", 2) or 2),
-                "cost_rank": int(existing.get("cost_rank", 0) or 0),
+                "task_types": [
+                    str(item).strip().lower()
+                    for item in (existing.get("task_types") or row.get("task_types") or known_metadata.get("task_types") or [])
+                    if str(item).strip()
+                ],
+                "architecture_modality": (
+                    str(existing.get("architecture_modality") or row.get("architecture_modality") or "").strip().lower()
+                    or None
+                ),
+                "input_modalities": [
+                    str(item).strip().lower()
+                    for item in (existing.get("input_modalities") or row.get("input_modalities") or [])
+                    if str(item).strip()
+                ],
+                "output_modalities": [
+                    str(item).strip().lower()
+                    for item in (existing.get("output_modalities") or row.get("output_modalities") or [])
+                    if str(item).strip()
+                ],
+                "quality_rank": int(existing.get("quality_rank", known_metadata.get("quality_rank", 2)) or 2),
+                "cost_rank": int(existing.get("cost_rank", known_metadata.get("cost_rank", 0)) or 0),
                 "default_for": default_for,
                 "enabled": bool(existing.get("enabled", True)),
                 "available": bool(existing.get("available", True)),
                 "pricing": pricing_payload,
-                "max_context_tokens": row.get("max_context_tokens"),
+                "max_context_tokens": row.get("max_context_tokens") or known_metadata.get("max_context_tokens"),
             }
             if next_payload != existing:
                 changed = True
@@ -5822,18 +9973,38 @@ class AgentRuntime:
         return drift
 
     def _canonical_runtime_router_snapshot(self) -> dict[str, Any]:
+        if self.router is None:
+            return {
+                "routing_mode": str(self.get_defaults().get("routing_mode") or self.config.llm_routing_mode or "auto"),
+                "defaults": {},
+                "providers": [],
+                "models": [],
+                "env": {"present": [], "missing": []},
+                "circuits": {},
+                "usage_stats": {},
+            }
         snapshot = self._router.doctor_snapshot()
         if not isinstance(snapshot, dict):
             return {}
         provider_rows = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
-        if not provider_rows:
+        model_rows = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
+        if not provider_rows and not model_rows:
             return dict(snapshot)
+        health_state = self._health_monitor.state if isinstance(self._health_monitor.state, dict) else {}
+        provider_health_state = health_state.get("providers") if isinstance(health_state.get("providers"), dict) else {}
+        model_health_state = health_state.get("models") if isinstance(health_state.get("models"), dict) else {}
         normalized_rows: list[dict[str, Any]] = []
         for row in provider_rows:
             if not isinstance(row, dict):
                 continue
             provider_id = str(row.get("id") or "").strip().lower()
-            health_raw = row.get("health") if isinstance(row.get("health"), dict) else {}
+            health_raw = (
+                provider_health_state.get(provider_id)
+                if isinstance(provider_health_state.get(provider_id), dict)
+                else row.get("health")
+            )
+            if not isinstance(health_raw, dict):
+                health_raw = {}
             effective_health = self._effective_provider_health(provider_id, health_raw)
             normalized_rows.append(
                 {
@@ -5841,9 +10012,26 @@ class AgentRuntime:
                     "health": dict(effective_health) if isinstance(effective_health, dict) else {},
                 }
             )
+        normalized_models: list[dict[str, Any]] = []
+        for row in model_rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            health_raw = (
+                model_health_state.get(model_id)
+                if isinstance(model_health_state.get(model_id), dict)
+                else row.get("health")
+            )
+            normalized_models.append(
+                {
+                    **row,
+                    "health": dict(health_raw) if isinstance(health_raw, dict) else {},
+                }
+            )
         return {
             **snapshot,
             "providers": normalized_rows,
+            "models": normalized_models,
         }
 
     def _autopilot_notify_state_snapshot(self) -> dict[str, Any]:
@@ -6194,11 +10382,12 @@ class AgentRuntime:
         status_payload: dict[str, Any],
         decision: WizardDecision,
     ) -> dict[str, Any]:
+        recovery_store = self.operator_recovery_store()
         now_epoch = int(time.time())
         existing_state = (
-            self._llm_fixit_store.state
-            if isinstance(self._llm_fixit_store.state, dict)
-            else self._llm_fixit_store.empty_state()
+            recovery_store.state
+            if isinstance(recovery_store.state, dict)
+            else recovery_store.empty_state()
         )
         openrouter_last_test = (
             existing_state.get("openrouter_last_test")
@@ -6222,17 +10411,15 @@ class AgentRuntime:
             "openrouter_last_test": openrouter_last_test,
         }
         try:
-            return self._llm_fixit_store.save(state_to_save)
+            return recovery_store.save(state_to_save)
         except Exception:
-            return (
-                existing_state if isinstance(existing_state, dict) else self._llm_fixit_store.empty_state()
-            )
+            return existing_state if isinstance(existing_state, dict) else recovery_store.empty_state()
 
     def _autopilot_notification_message_and_fixit(
         self,
         raw_message: str,
     ) -> tuple[str, dict[str, Any] | None]:
-        status_payload = self.llm_status()
+        status_payload = self._llm_fixit_status_payload()
         decision = evaluate_wizard_decision(status_payload)
         if decision.status != "ok":
             state = self._persist_fixit_prompt_state_for_notification(
@@ -7575,43 +11762,131 @@ class AgentRuntime:
     ) -> dict[str, Any]:
         health_payload = health_summary if isinstance(health_summary, dict) else self.llm_health_summary()
         health = health_payload.get("health") if isinstance(health_payload.get("health"), dict) else {}
-        effective_router_snapshot = (
-            router_snapshot
-            if isinstance(router_snapshot, dict)
-            else self._canonical_runtime_router_snapshot()
+        truth = self.runtime_truth_service()
+        current_truth = (
+            truth.current_chat_target_status()
+            if callable(getattr(truth, "current_chat_target_status", None))
+            else {}
         )
-        runtime_snapshot = build_runtime_model_snapshot(
-            config=self.config,
-            registry=self._router.registry,
-            router_snapshot=effective_router_snapshot,
+        providers_payload = (
+            truth.providers_status()
+            if callable(getattr(truth, "providers_status", None))
+            else {}
+        )
+        readiness_payload = (
+            truth.model_readiness_status()
+            if callable(getattr(truth, "model_readiness_status", None))
+            else {}
         )
         defaults = self.get_defaults()
         document = self.registry_document if isinstance(self.registry_document, dict) else {}
-        defaults_raw = self._ensure_defaults(document)
         models_document = document.get("models") if isinstance(document.get("models"), dict) else {}
         providers_document = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         provider_ids = {str(provider_id).strip().lower() for provider_id in providers_document.keys()}
         drift = health.get("drift") if isinstance(health.get("drift"), dict) else {}
         drift_details = drift.get("details") if isinstance(drift.get("details"), dict) else {}
         resolved_default_model = (
-            str(drift_details.get("resolved_default_model") or "").strip()
+            str(current_truth.get("model") or "").strip()
+            or str(defaults.get("resolved_default_model") or "").strip()
             or self._resolved_chat_default_model(
-                defaults=defaults_raw,
+                defaults=defaults,
                 models=models_document,
                 provider_ids=provider_ids,
             )
+            or str(drift_details.get("resolved_default_model") or "").strip()
             or None
         )
         default_provider = (
-            str(defaults.get("default_provider") or "").strip().lower()
+            str(current_truth.get("provider") or "").strip().lower()
+            or str(defaults.get("default_provider") or "").strip().lower()
             or (
                 str(resolved_default_model or "").split(":", 1)[0].strip().lower()
                 if resolved_default_model and ":" in str(resolved_default_model)
                 else None
             )
         )
-        providers = runtime_snapshot.get("providers") if isinstance(runtime_snapshot.get("providers"), list) else []
-        models = runtime_snapshot.get("models") if isinstance(runtime_snapshot.get("models"), list) else []
+        provider_truth_rows = (
+            providers_payload.get("providers")
+            if isinstance(providers_payload.get("providers"), list)
+            else []
+        )
+        readiness_rows = (
+            readiness_payload.get("models")
+            if isinstance(readiness_payload.get("models"), list)
+            else []
+        )
+        readiness_by_provider: dict[str, list[dict[str, Any]]] = {}
+        for row in readiness_rows:
+            if not isinstance(row, dict):
+                continue
+            provider_id = str(row.get("provider_id") or "").strip().lower()
+            if not provider_id:
+                continue
+            readiness_by_provider.setdefault(provider_id, []).append(dict(row))
+
+        providers: list[dict[str, Any]] = []
+        models: list[dict[str, Any]] = []
+        for provider_truth in provider_truth_rows:
+            if not isinstance(provider_truth, dict):
+                continue
+            if not self._operator_surface_provider_in_scope(provider_truth):
+                continue
+            provider_id = str(provider_truth.get("provider") or "").strip().lower()
+            if not provider_id:
+                continue
+            provider_payload = (
+                providers_document.get(provider_id)
+                if isinstance(providers_document.get(provider_id), dict)
+                else {}
+            )
+            public_payload = self._provider_public_payload(provider_id, provider_payload)
+            providers.append(
+                {
+                    **public_payload,
+                    "enabled": bool(provider_truth.get("enabled", public_payload.get("enabled", True))),
+                    "local": bool(provider_truth.get("local", public_payload.get("local", False))),
+                    "configured": bool(provider_truth.get("configured", False)),
+                    "active": bool(provider_truth.get("active", False)),
+                    "effective_active": bool(provider_truth.get("effective_active", False)),
+                    "health": self._operator_provider_health_payload(provider_id, provider_truth),
+                }
+            )
+            for readiness_row in readiness_by_provider.get(provider_id, []):
+                registry_model_payload = (
+                    models_document.get(str(readiness_row.get("model_id") or "").strip())
+                    if isinstance(models_document.get(str(readiness_row.get("model_id") or "").strip()), dict)
+                    else {}
+                )
+                models.append(
+                    self._operator_provider_model_payload(
+                        readiness_row,
+                        registry_model_payload=registry_model_payload,
+                    )
+                )
+
+        compat_fallback_used = not models
+        if compat_fallback_used and self.router is not None:
+            effective_router_snapshot = (
+                router_snapshot
+                if isinstance(router_snapshot, dict)
+                else self._canonical_runtime_router_snapshot()
+            )
+            runtime_snapshot = build_runtime_model_snapshot(
+                config=self.config,
+                registry=self._router.registry,
+                router_snapshot=effective_router_snapshot,
+            )
+            if not providers:
+                providers = (
+                    runtime_snapshot.get("providers")
+                    if isinstance(runtime_snapshot.get("providers"), list)
+                    else []
+                )
+            models = (
+                runtime_snapshot.get("models")
+                if isinstance(runtime_snapshot.get("models"), list)
+                else []
+            )
         allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
         local_provider_lookup = {
             str(row.get("id") or "").strip().lower(): bool(row.get("local", False))
@@ -7636,9 +11911,14 @@ class AgentRuntime:
             for row in providers
             if isinstance(row, dict) and str(row.get("id") or "").strip()
         }
-        model_lookup = {
+        visible_model_lookup = {
             str(row.get("id") or "").strip(): row
             for row in visible_models
+            if isinstance(row, dict) and str(row.get("id") or "").strip()
+        }
+        model_lookup = {
+            str(row.get("id") or "").strip(): row
+            for row in models
             if isinstance(row, dict) and str(row.get("id") or "").strip()
         }
         active_provider_row = provider_lookup.get(default_provider or "") if default_provider else None
@@ -7646,13 +11926,31 @@ class AgentRuntime:
         active_provider_health = (
             active_provider_row.get("health")
             if isinstance(active_provider_row, dict) and isinstance(active_provider_row.get("health"), dict)
-            else {}
+            else {
+                "status": str(current_truth.get("provider_health_status") or "unknown").strip().lower() or "unknown",
+            }
         )
         active_model_health = (
             active_model_row.get("health")
             if isinstance(active_model_row, dict) and isinstance(active_model_row.get("health"), dict)
-            else {}
+            else {
+                "status": str(current_truth.get("health_status") or "unknown").strip().lower() or "unknown",
+            }
         )
+        active_model_status = str(active_model_health.get("status") or "").strip().lower() or "unknown"
+        active_provider_status = str(active_provider_health.get("status") or "").strip().lower() or "unknown"
+        if default_provider and active_model_status == "ok" and active_provider_status != "ok":
+            active_provider_health = self._normalize_health_record(
+                {
+                    **dict(active_provider_health),
+                    "status": "ok",
+                    "last_checked_at": active_model_health.get("last_checked_at")
+                    or active_provider_health.get("last_checked_at"),
+                    "last_ts": active_model_health.get("last_ts")
+                    or active_provider_health.get("last_ts"),
+                },
+                now_epoch=int(time.time()),
+            )
         safe_mode = self._safe_mode_health_payload()
         visible_counts = {
             "total": visible_models_count,
@@ -7689,6 +11987,11 @@ class AgentRuntime:
             model=resolved_default_model,
             local_providers=local_providers,
         )
+        policy = (
+            truth.model_controller_policy_status()
+            if callable(getattr(truth, "model_controller_policy_status", None))
+            else self._chat_control_policy()
+        )
         return {
             "ok": True,
             "default_provider": default_provider,
@@ -7700,10 +12003,12 @@ class AgentRuntime:
             "routing_mode": defaults.get("routing_mode"),
             "allow_remote_fallback": allow_remote_fallback,
             "safe_mode": safe_mode,
+            "policy": dict(policy) if isinstance(policy, dict) else {},
             "active_provider_health": active_provider_health,
             "active_model_health": active_model_health,
             "providers": providers,
             "models": visible_models,
+            "active_model_visible": bool(str(resolved_default_model or "") in visible_model_lookup),
             "hidden_models_by_provider": dict(sorted(hidden_models_by_provider.items())),
             "total_models_count": total_models_count,
             "visible_models_count": visible_models_count,
@@ -7711,9 +12016,42 @@ class AgentRuntime:
             "runtime_mode": str(runtime_status.get("runtime_mode") or "DEGRADED"),
             "next_action": runtime_status.get("next_action"),
             "runtime_status": runtime_status,
+            "canonical_truth_source": (
+                "runtime_truth.current_chat_target_status+runtime_truth.providers_status+runtime_truth.model_readiness_status"
+            ),
+            "canonical_policy_source": "runtime_truth.model_controller_policy_status",
+            "compat_fallback_used": bool(compat_fallback_used),
         }
 
+    def _llm_fixit_status_payload(self) -> dict[str, Any]:
+        # Compatibility/operator recovery wizard input. Keep its envelope stable,
+        # but derive it directly from canonical runtime truth and policy rather
+        # than routing through the public /llm/status helper surface.
+        self._auto_bootstrap_local_chat_model()
+        router_snapshot = self._canonical_runtime_router_snapshot()
+        health_summary = self.llm_health_summary(router_snapshot=router_snapshot)
+        status = self._llm_status_payload(
+            health_summary=health_summary,
+            router_snapshot=router_snapshot,
+        )
+        truth = self.runtime_truth_service()
+        policy = (
+            truth.model_controller_policy_status()
+            if callable(getattr(truth, "model_controller_policy_status", None))
+            else {}
+        )
+        status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
+        status["policy"] = dict(policy) if isinstance(policy, dict) else {}
+        status.setdefault("canonical_policy_source", "runtime_truth.model_controller_policy_status")
+        status.setdefault("compat_only", True)
+        status.setdefault("operator_surface", True)
+        status.setdefault("non_canonical_for_assistant", True)
+        return status
+
+    # Public/operator status surface. Assistant runtime decisions must use
+    # RuntimeTruthService instead of this aggregated snapshot helper.
     def llm_status(self) -> dict[str, Any]:
+        self._auto_bootstrap_local_chat_model()
         router_snapshot = self._canonical_runtime_router_snapshot()
         health_summary = self.llm_health_summary(router_snapshot=router_snapshot)
         status = self._llm_status_payload(
@@ -7721,25 +12059,62 @@ class AgentRuntime:
             router_snapshot=router_snapshot,
         )
         status["health"] = health_summary.get("health") if isinstance(health_summary.get("health"), dict) else {}
-        return status
+        status["memory"] = {
+            "memory_v2_enabled": bool(self.config.memory_v2_enabled),
+            "memory_v2_available": bool(self._memory_v2_store is not None),
+            "semantic": self.semantic_memory_status(),
+        }
+        return self._annotate_operator_surface_payload(
+            status,
+            surface="/llm/status",
+            canonical_assistant_surface=(
+                "runtime_truth.current_chat_target_status+runtime_truth.providers_status+runtime_truth.model_readiness_status"
+            ),
+            operator_only=False,
+            compat_only=True,
+        )
 
     def public_llm_identity_string(self) -> str:
         try:
-            status = self.llm_status()
+            truth = self.runtime_truth_service()
+            current = (
+                truth.current_chat_target_status()
+                if callable(getattr(truth, "current_chat_target_status", None))
+                else {}
+            )
+            providers_payload = (
+                truth.providers_status()
+                if callable(getattr(truth, "providers_status", None))
+                else {}
+            )
         except Exception:
-            identity = get_public_identity(provider=None, model=None, local_providers={"ollama"})
+            identity = get_public_identity(
+                provider=None,
+                model=None,
+                local_providers={"ollama"},
+                assistant_name=self.config.assistant_name,
+                user_name=self.config.user_name,
+            )
             return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
-        if not isinstance(status, dict):
-            identity = get_public_identity(provider=None, model=None, local_providers={"ollama"})
+        if not isinstance(current, dict):
+            identity = get_public_identity(
+                provider=None,
+                model=None,
+                local_providers={"ollama"},
+                assistant_name=self.config.assistant_name,
+                user_name=self.config.user_name,
+            )
             return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
-        provider = str(status.get("default_provider") or "").strip().lower()
-        model = (
-            str(status.get("resolved_default_model") or "").strip()
-            or str(status.get("default_model") or "").strip()
+        provider = str(current.get("provider") or "").strip().lower()
+        model = str(current.get("model") or "").strip()
+        provider_rows = (
+            providers_payload.get("providers")
+            if isinstance(providers_payload, dict) and isinstance(providers_payload.get("providers"), list)
+            else []
         )
         local_providers = {
-            str((row or {}).get("id") or "").strip().lower()
-            for row in (status.get("providers") if isinstance(status.get("providers"), list) else [])
+            str((row or {}).get("provider") or "").strip().lower()
+            for row in provider_rows
             if isinstance(row, dict) and bool(row.get("local", False))
         }
         if not local_providers:
@@ -7748,6 +12123,8 @@ class AgentRuntime:
             provider=provider if provider and provider != "unknown" else None,
             model=model if model and model != "unknown" else None,
             local_providers=local_providers,
+            assistant_name=self.config.assistant_name,
+            user_name=self.config.user_name,
         )
         return str(identity.get("summary") or "I’m running inside your Personal Agent. The active model is currently unknown.")
 
@@ -7890,21 +12267,22 @@ class AgentRuntime:
             "summary_line": summary_line,
         }
 
+    # Public/operator status surface. Assistant model answers must use
+    # RuntimeTruthService rather than this compatibility-heavy snapshot.
     def model_status(self) -> dict[str, Any]:
         self._ensure_fresh_ollama_probe_state(ttl_seconds=30, timeout_seconds=2.0)
+        truth = self.runtime_truth_service()
         status = self.llm_status()
-        current_model = (
-            str(status.get("resolved_default_model") or "").strip()
-            or str(status.get("default_model") or "").strip()
-            or None
+        current_truth = (
+            truth.current_chat_target_status()
+            if callable(getattr(truth, "current_chat_target_status", None))
+            else {}
         )
+        current_model = str(current_truth.get("model") or status.get("resolved_default_model") or status.get("default_model") or "").strip() or None
         current_provider = (
-            str(status.get("default_provider") or "").strip().lower()
-            or (
-                str(current_model).split(":", 1)[0].strip().lower()
-                if current_model and ":" in str(current_model)
-                else None
-            )
+            str(current_truth.get("provider") or "").strip().lower()
+            or str(status.get("default_provider") or "").strip().lower()
+            or (str(current_model).split(":", 1)[0].strip().lower() if current_model and ":" in str(current_model) else None)
         )
         providers_rows = status.get("providers") if isinstance(status.get("providers"), list) else []
         providers_doc = (
@@ -8003,7 +12381,7 @@ class AgentRuntime:
             )
         )
         model_watch_summary = self._latest_model_watch_summary()
-        return {
+        payload = {
             "ok": True,
             "identity": self.public_llm_identity_string(),
             "current": {
@@ -8043,6 +12421,16 @@ class AgentRuntime:
                 "openrouter": openrouter_payload,
             },
         }
+        return self._annotate_operator_surface_payload(
+            payload,
+            surface="/model",
+            canonical_assistant_surface=(
+                "runtime_truth.current_chat_target_status+runtime_truth.model_controller_policy_status+runtime_truth.model_lifecycle_status"
+            ),
+            operator_only=False,
+            compat_only=True,
+            separate_contract="assistant switch-back is controller trial state; /defaults/rollback remains operator recovery",
+        )
 
     def llm_availability_state(self) -> dict[str, Any]:
         try:
@@ -8075,6 +12463,110 @@ class AgentRuntime:
             return {"available": False, "reason": "model_unhealthy"}
         return {"available": True, "reason": "ok"}
 
+    def llm_control_mode_status(self) -> dict[str, Any]:
+        truth = self.runtime_truth_service()
+        payload = (
+            truth.model_controller_policy_status()
+            if callable(getattr(truth, "model_controller_policy_status", None))
+            else self._chat_control_policy()
+        )
+        response = {"ok": True, **(dict(payload) if isinstance(payload, dict) else {})}
+        response.setdefault("source", "runtime_truth.model_controller_policy_status")
+        response.setdefault("canonical_assistant_surface", "runtime_truth.model_controller_policy_status")
+        return response
+
+    def llm_control_mode_set(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        start = time.monotonic()
+        actor = str(payload.get("actor") or "user").strip() or "user"
+        confirm = bool(payload.get("confirm") is True)
+        requested = str(payload.get("mode") or payload.get("control_mode") or "").strip().lower()
+        baseline_aliases = {"baseline", "default", "inherit", "clear", "reset", "config"}
+
+        if not confirm:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="llm.control_mode.set",
+                params={"mode": requested or None, "modified_ids": []},
+                decision="deny",
+                reason="confirm_required",
+                dry_run=False,
+                outcome="blocked",
+                error_kind="confirm_required",
+                duration_ms=duration_ms,
+            )
+            return False, self._confirm_required_payload(
+                what_happened="Control mode was not changed",
+                why="Changing the control mode mutates runtime policy.",
+                next_action='Resend with {"confirm": true} if you want to proceed.',
+            )
+
+        if requested in {"safe", "controlled"}:
+            target_override = requested
+        elif requested in baseline_aliases:
+            target_override = None
+        else:
+            return False, {
+                "ok": False,
+                "error": "invalid_mode",
+                "error_kind": "invalid_mode",
+                "message": 'mode must be "safe", "controlled", or "baseline".',
+            }
+
+        previous_policy = self._chat_control_policy()
+        previous_override = self._chat_control_mode_override()
+        document = self.registry_document if isinstance(self.registry_document, dict) else {}
+        defaults = self._ensure_defaults(document)
+        defaults["chat_control_mode_override"] = target_override
+        document["defaults"] = defaults
+        saved, error = self._persist_registry_document(document)
+        if not saved:
+            assert error is not None
+            return False, error
+
+        current_policy = self.llm_control_mode_status()
+        current_override = self._chat_control_mode_override()
+        changed = (
+            previous_override != current_override
+            or str(previous_policy.get("mode") or "").strip().lower()
+            != str(current_policy.get("mode") or "").strip().lower()
+        )
+        current_mode = str(current_policy.get("mode") or "safe").strip().lower() or "safe"
+        current_label = str(current_policy.get("mode_label") or ("SAFE MODE" if current_mode == "safe" else "Controlled Mode")).strip() or ("SAFE MODE" if current_mode == "safe" else "Controlled Mode")
+        if target_override is None:
+            message = f"{current_label} is now following the config baseline."
+        elif current_mode == "safe":
+            message = (
+                "SAFE MODE is now active. Remote switching and install/download/import are blocked."
+                if changed
+                else "SAFE MODE is already active."
+            )
+        else:
+            message = (
+                "Controlled Mode is now active. Remote recommendations, explicit remote switching, and explicit acquisition/install are available with approval."
+                if changed
+                else "Controlled Mode is already active."
+            )
+
+        duration_ms = int((time.monotonic() - start) * 1000)
+        self.audit_log.append(
+            actor=actor,
+            action="llm.control_mode.set",
+            params={"mode": requested or None, "override_mode": current_override, "modified_ids": []},
+            decision="allow",
+            reason="allowed",
+            dry_run=False,
+            outcome="success",
+            error_kind=None,
+            duration_ms=duration_ms,
+        )
+        return True, {
+            "ok": True,
+            "changed": changed,
+            "message": message,
+            "policy": current_policy,
+        }
+
     def llm_available(self) -> bool:
         state = self.llm_availability_state()
         return bool(state.get("available", False))
@@ -8101,6 +12593,366 @@ class AgentRuntime:
             "choices": [],
             "created_ts": None,
             "expires_ts": None,
+        }
+
+    @staticmethod
+    def _intent_choice_key(*, source: str, user_id: str) -> str:
+        source_key = str(source or "").strip().lower() or "api"
+        user_key = str(user_id or "").strip() or "default"
+        return f"{source_key}:{user_key}"
+
+    @staticmethod
+    def _binary_clarification_key(*, source: str, user_id: str) -> str:
+        source_key = str(source or "").strip().lower() or "api"
+        user_key = str(user_id or "").strip() or "default"
+        return f"{source_key}:{user_key}"
+
+    @staticmethod
+    def _normalize_binary_choice_text(text: str | None) -> str:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        normalized = re.sub(r"^[^a-z0-9]+|[^a-z0-9]+$", "", normalized)
+        return normalized
+
+    def set_binary_clarification_prompt(
+        self,
+        *,
+        source: str,
+        user_id: str,
+        question: str,
+        option_a_label: str,
+        option_b_label: str,
+        option_a_kind: str = "status",
+        option_b_kind: str = "task",
+        ttl_seconds: int = 300,
+    ) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        ttl = max(30, int(ttl_seconds))
+        state = {
+            "active": True,
+            "source": str(source or "").strip().lower() or "api",
+            "user_id": str(user_id or "").strip() or "default",
+            "question": str(question or "").strip(),
+            "option_a_label": str(option_a_label or "").strip() or "A",
+            "option_b_label": str(option_b_label or "").strip() or "B",
+            "option_a_kind": str(option_a_kind or "status").strip().lower() or "status",
+            "option_b_kind": str(option_b_kind or "task").strip().lower() or "task",
+            "created_ts": now_epoch,
+            "expires_ts": now_epoch + ttl,
+        }
+        self._binary_clarification_state[
+            self._binary_clarification_key(source=source, user_id=user_id)
+        ] = state
+        self.record_runtime_event(
+            "clarification_state_set",
+            source=str(source or "").strip().lower() or "api",
+            user_id=str(user_id or "").strip() or "default",
+            clarification_kind="binary_choice",
+        )
+        return dict(state)
+
+    def clear_binary_clarification_prompt(self, *, source: str, user_id: str) -> None:
+        self._binary_clarification_state.pop(
+            self._binary_clarification_key(source=source, user_id=user_id),
+            None,
+        )
+
+    def clear_chat_clarification_prompts(self, *, source: str, user_id: str) -> None:
+        self.clear_clarify_recovery_prompt()
+        self.clear_binary_clarification_prompt(source=source, user_id=user_id)
+        self.clear_intent_choice_prompt(source=source, user_id=user_id)
+        self.clear_thread_integrity_prompt(source=source, user_id=user_id)
+
+    @staticmethod
+    def _thread_integrity_key(*, source: str, user_id: str) -> str:
+        normalized_source = str(source or "").strip().lower() or "api"
+        normalized_user = str(user_id or "").strip() or "default"
+        return f"{normalized_source}:{normalized_user}"
+
+    @staticmethod
+    def _normalize_thread_integrity_choice(text: str | None) -> str:
+        return " ".join(str(text or "").strip().lower().split())
+
+    def set_thread_integrity_prompt(
+        self,
+        *,
+        source: str,
+        user_id: str,
+        pending_text: str,
+        payload_template: dict[str, Any],
+        ttl_seconds: int = 300,
+    ) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        ttl = max(30, int(ttl_seconds))
+        state = {
+            "active": True,
+            "source": str(source or "").strip().lower() or "api",
+            "user_id": str(user_id or "").strip() or "default",
+            "pending_text": str(pending_text or "").strip(),
+            "payload_template": dict(payload_template) if isinstance(payload_template, dict) else {},
+            "created_ts": now_epoch,
+            "expires_ts": now_epoch + ttl,
+        }
+        self._thread_integrity_state[self._thread_integrity_key(source=source, user_id=user_id)] = state
+        self.record_runtime_event(
+            "clarification_state_set",
+            source=str(source or "").strip().lower() or "api",
+            user_id=str(user_id or "").strip() or "default",
+            clarification_kind="thread_integrity",
+        )
+        return dict(state)
+
+    def clear_thread_integrity_prompt(self, *, source: str, user_id: str) -> None:
+        self._thread_integrity_state.pop(
+            self._thread_integrity_key(source=source, user_id=user_id),
+            None,
+        )
+
+    def consume_thread_integrity_choice(
+        self,
+        *,
+        source: str,
+        user_id: str,
+        text: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        key = self._thread_integrity_key(source=source, user_id=user_id)
+        state = self._thread_integrity_state.get(key)
+        if not isinstance(state, dict) or not bool(state.get("active", False)):
+            return False, {}
+        now_epoch = int(time.time())
+        expires_ts = int(state.get("expires_ts") or 0)
+        if expires_ts and now_epoch > expires_ts:
+            self.clear_thread_integrity_prompt(source=source, user_id=user_id)
+            return True, {
+                "kind": "expired",
+                "message": "That thread question expired. Send your request again and I’ll handle it directly.",
+            }
+        normalized = self._normalize_thread_integrity_choice(text)
+        same_tokens = {
+            "same",
+            "same thread",
+            "continue",
+            "continue thread",
+            "keep context",
+            "keep the context",
+            "current thread",
+        }
+        new_tokens = {
+            "new",
+            "new thread",
+            "start new",
+            "start a new thread",
+            "new request",
+            "fresh",
+            "fresh thread",
+        }
+        if normalized in same_tokens:
+            choice = "same"
+        elif normalized in new_tokens:
+            choice = "new"
+        else:
+            return False, {}
+        payload = dict(state.get("payload_template")) if isinstance(state.get("payload_template"), dict) else {}
+        pending_text = str(state.get("pending_text") or "").strip()
+        self.clear_thread_integrity_prompt(source=source, user_id=user_id)
+        self.record_runtime_event(
+            "clarification_state_consumed",
+            source=str(source or "").strip().lower() or "api",
+            user_id=str(user_id or "").strip() or "default",
+            clarification_kind="thread_integrity",
+            choice=choice,
+        )
+        payload["messages"] = [{"role": "user", "content": pending_text}]
+        payload["user_id"] = str(payload.get("user_id") or user_id or "").strip() or "api:default"
+        payload.setdefault("source_surface", str(source or "").strip().lower() or "api")
+        if choice == "new":
+            thread_base = str(payload.get("thread_id") or f"{payload['user_id']}:thread").strip() or f"{payload['user_id']}:thread"
+            payload["thread_id"] = f"{thread_base}:new:{now_epoch}"
+        payload.pop("trace_id", None)
+        payload.pop("request_id", None)
+        return True, {
+            "kind": "resume",
+            "choice": choice,
+            "resume_payload": payload,
+        }
+
+    def consume_binary_clarification_choice(
+        self,
+        *,
+        source: str,
+        user_id: str,
+        text: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        key = self._binary_clarification_key(source=source, user_id=user_id)
+        state = self._binary_clarification_state.get(key)
+        if not isinstance(state, dict) or not bool(state.get("active", False)):
+            return False, {}
+        now_epoch = int(time.time())
+        expires_ts = int(state.get("expires_ts") or 0)
+        if expires_ts and now_epoch > expires_ts:
+            self.clear_binary_clarification_prompt(source=source, user_id=user_id)
+            return True, {
+                "ok": True,
+                "intent": "chat",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": "That clarification expired. Ask again and I will restate the options.",
+                "next_question": "That clarification expired. Ask again and I will restate the options.",
+                "actions": [],
+                "errors": ["needs_clarification"],
+            }
+
+        normalized = self._normalize_binary_choice_text(text)
+        option_a_label = self._normalize_binary_choice_text(str(state.get("option_a_label") or "A"))
+        option_b_label = self._normalize_binary_choice_text(str(state.get("option_b_label") or "B"))
+        if normalized in {"1", "a", option_a_label}:
+            choice_kind = str(state.get("option_a_kind") or "status").strip().lower() or "status"
+        elif normalized in {"2", "b", option_b_label}:
+            choice_kind = str(state.get("option_b_kind") or "task").strip().lower() or "task"
+        else:
+            return False, {}
+
+        self.clear_binary_clarification_prompt(source=source, user_id=user_id)
+        self.record_runtime_event(
+            "clarification_state_consumed",
+            source=str(source or "").strip().lower() or "api",
+            user_id=str(user_id or "").strip() or "default",
+            clarification_kind="binary_choice",
+            choice=choice_kind,
+        )
+
+        if choice_kind == "status":
+            truth = self.runtime_truth_service()
+            status_payload = truth.runtime_status("runtime_status")
+            message = (
+                str(status_payload.get("summary") or "").strip()
+                or str(self.ready_status().get("message") or "").strip()
+                or "Agent status ready."
+            )
+            return True, {
+                "ok": True,
+                "intent": "chat",
+                "confidence": 1.0,
+                "did_work": True,
+                "error_kind": None,
+                "message": message,
+                "next_question": None,
+                "actions": [],
+                "errors": [],
+            }
+
+        message = "Okay — tell me the specific task you want me to work on."
+        return True, {
+            "ok": True,
+            "intent": "chat",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": message,
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+        }
+
+    def set_intent_choice_prompt(
+        self,
+        *,
+        source: str,
+        user_id: str,
+        ttl_seconds: int = 300,
+    ) -> dict[str, Any]:
+        now_epoch = int(time.time())
+        ttl = max(30, int(ttl_seconds))
+        state = {
+            "active": True,
+            "source": str(source or "").strip().lower() or "api",
+            "user_id": str(user_id or "").strip() or "default",
+            "created_ts": now_epoch,
+            "expires_ts": now_epoch + ttl,
+        }
+        self._intent_choice_state[self._intent_choice_key(source=source, user_id=user_id)] = state
+        self.record_runtime_event(
+            "clarification_state_set",
+            source=str(source or "").strip().lower() or "api",
+            user_id=str(user_id or "").strip() or "default",
+            clarification_kind="intent_choice",
+        )
+        return dict(state)
+
+    def clear_intent_choice_prompt(self, *, source: str, user_id: str) -> None:
+        self._intent_choice_state.pop(
+            self._intent_choice_key(source=source, user_id=user_id),
+            None,
+        )
+
+    def consume_intent_choice(
+        self,
+        *,
+        source: str,
+        user_id: str,
+        text: str,
+    ) -> tuple[bool, dict[str, Any]]:
+        key = self._intent_choice_key(source=source, user_id=user_id)
+        state = self._intent_choice_state.get(key)
+        if not isinstance(state, dict) or not bool(state.get("active", False)):
+            return False, {}
+        now_epoch = int(time.time())
+        expires_ts = int(state.get("expires_ts") or 0)
+        if expires_ts and now_epoch > expires_ts:
+            self.clear_intent_choice_prompt(source=source, user_id=user_id)
+            return True, {
+                "ok": True,
+                "intent": "chat",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": "That clarification expired. Ask again and I will restate the options.",
+                "next_question": "That clarification expired. Ask again and I will restate the options.",
+                "actions": [],
+                "errors": ["needs_clarification"],
+            }
+        normalized = " ".join(str(text or "").strip().lower().split())
+        choice_map = {
+            "1": "chat",
+            "a": "chat",
+            "chat": "chat",
+            "2": "ask",
+            "b": "ask",
+            "ask": "ask",
+            "3": "model_check_switch",
+            "c": "model_check_switch",
+            "model": "model_check_switch",
+            "model check": "model_check_switch",
+            "model switch": "model_check_switch",
+            "check switch": "model_check_switch",
+        }
+        choice = choice_map.get(normalized)
+        if not choice:
+            return False, {}
+        self.clear_intent_choice_prompt(source=source, user_id=user_id)
+        self.record_runtime_event(
+            "clarification_state_consumed",
+            source=str(source or "").strip().lower() or "api",
+            user_id=str(user_id or "").strip() or "default",
+            clarification_kind="intent_choice",
+            choice=choice,
+        )
+        if choice == "chat":
+            message = "Okay — I’ll treat your next message as regular chat."
+        elif choice == "ask":
+            message = "Okay — I’ll treat your next message as a direct question."
+        else:
+            message = "Okay — tell me which model or provider you want to inspect or switch."
+        return True, {
+            "ok": True,
+            "intent": "chat",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": message,
+            "next_question": None,
+            "actions": [],
+            "errors": [],
         }
 
     def _llm_status_summary_line(self) -> str:
@@ -8227,6 +13079,42 @@ class AgentRuntime:
         blocked: list[dict[str, Any]] = []
         failed: list[dict[str, Any]] = []
         provider_tests: dict[str, dict[str, Any]] = {}
+        hf_manager_request = build_model_manager_request_from_hf_plan_rows(plan_rows)
+        if isinstance(hf_manager_request, dict):
+            result = self._model_manager().execute_request(
+                hf_manager_request,
+                approve=True,
+                trace_id=f"fixit-hf-{int(time.time())}",
+                source="llm_fixit",
+            )
+            if bool(result.get("ok", False)):
+                executed.append(
+                    {
+                        "id": "hf_model_manager",
+                        "action": "model_manager.execute",
+                        "model_id": result.get("model_id"),
+                        "artifact_id": result.get("artifact_id"),
+                    }
+                )
+            else:
+                failed.append(
+                    {
+                        "id": "hf_model_manager",
+                        "action": "model_manager.execute",
+                        "error": str(result.get("error_kind") or "install_failed"),
+                        "error_kind": str(result.get("error_kind") or "install_failed"),
+                        "message": str(result.get("message") or ""),
+                        "model": result.get("model_id") or result.get("artifact_id"),
+                    }
+                )
+            ok = not failed
+            return ok, {
+                "ok": ok,
+                "executed_steps": executed,
+                "blocked_steps": blocked,
+                "failed_steps": failed,
+                "provider_tests": provider_tests,
+            }
         for row in sorted(
             [item for item in plan_rows if isinstance(item, dict)],
             key=lambda item: str(item.get("id") or ""),
@@ -8406,219 +13294,12 @@ class AgentRuntime:
                 executed.append({"id": str(row.get("id") or ""), "action": action})
                 continue
 
-            if action == "hf.snapshot_download":
-                repo_id = str(params.get("repo_id") or "").strip()
-                revision = str(params.get("revision") or "").strip() or "main"
-                target_dir = str(params.get("target_dir") or "").strip()
-                allow_patterns = (
-                    [str(item).strip() for item in params.get("allow_patterns", []) if str(item).strip()]
-                    if isinstance(params.get("allow_patterns"), list)
-                    else []
-                )
-                if not repo_id or not target_dir:
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": "repo_id_and_target_dir_required",
-                        }
-                    )
-                    continue
-                try:
-                    downloaded_path = hf_snapshot_download(
-                        repo_id=repo_id,
-                        revision=revision,
-                        target_dir=target_dir,
-                        allow_patterns=allow_patterns,
-                    )
-                except Exception as exc:
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": f"snapshot_download_failed:{exc.__class__.__name__}",
-                        }
-                    )
-                    continue
-                executed.append(
+            if action.startswith("hf."):
+                failed.append(
                     {
                         "id": str(row.get("id") or ""),
                         "action": action,
-                        "repo_id": repo_id,
-                        "revision": revision,
-                        "download_path": str(downloaded_path),
-                    }
-                )
-                continue
-
-            if action == "hf.generate_modelfile":
-                selected_gguf = str(params.get("selected_gguf") or "").strip()
-                target_dir = str(params.get("target_dir") or "").strip()
-                modelfile_path = str(params.get("modelfile_path") or "").strip()
-                if not selected_gguf or not target_dir or not modelfile_path:
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": "selected_gguf_target_dir_modelfile_path_required",
-                        }
-                    )
-                    continue
-                gguf_path = (Path(target_dir).expanduser().resolve() / selected_gguf).resolve()
-                if not gguf_path.is_file():
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": "selected_gguf_missing",
-                            "gguf_path": str(gguf_path),
-                        }
-                    )
-                    continue
-                modelfile_target = Path(modelfile_path).expanduser().resolve()
-                modelfile_target.parent.mkdir(parents=True, exist_ok=True)
-                modelfile_content = f"FROM {str(gguf_path)}\n"
-                fd = -1
-                tmp_path = ""
-                try:
-                    fd, tmp_path = tempfile.mkstemp(
-                        prefix=f".{modelfile_target.name}.",
-                        suffix=".tmp",
-                        dir=str(modelfile_target.parent),
-                    )
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        handle.write(modelfile_content)
-                        handle.flush()
-                        os.fsync(handle.fileno())
-                    fd = -1
-                    os.replace(tmp_path, modelfile_target)
-                    tmp_path = ""
-                except Exception as exc:
-                    if fd >= 0:
-                        try:
-                            os.close(fd)
-                        except OSError:
-                            pass
-                    if tmp_path:
-                        try:
-                            os.unlink(tmp_path)
-                        except OSError:
-                            pass
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": f"modelfile_write_failed:{exc.__class__.__name__}",
-                        }
-                    )
-                    continue
-                executed.append(
-                    {
-                        "id": str(row.get("id") or ""),
-                        "action": action,
-                        "modelfile_path": str(modelfile_target),
-                    }
-                )
-                continue
-
-            if action == "hf.ollama_create":
-                modelfile_path = str(params.get("modelfile_path") or "").strip()
-                ollama_model_name = str(params.get("ollama_model_name") or "").strip()
-                if not modelfile_path or not ollama_model_name:
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": "modelfile_path_and_ollama_model_name_required",
-                        }
-                    )
-                    continue
-                try:
-                    completed = subprocess.run(
-                        ["ollama", "create", ollama_model_name, "-f", modelfile_path],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                        timeout=900,
-                    )
-                except Exception as exc:
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": f"ollama_create_failed:{exc.__class__.__name__}",
-                            "model": ollama_model_name,
-                        }
-                    )
-                    continue
-                if int(completed.returncode) != 0:
-                    stderr_text = str((completed.stderr or "").strip() or "ollama_create_failed")
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": "ollama_create_failed",
-                            "model": ollama_model_name,
-                            "detail": stderr_text[:240],
-                        }
-                    )
-                    continue
-                executed.append(
-                    {
-                        "id": str(row.get("id") or ""),
-                        "action": action,
-                        "model": ollama_model_name,
-                    }
-                )
-                continue
-
-            if action == "hf.refresh_ollama_registry":
-                ok, body = self.refresh_models({"provider": "ollama"})
-                if not ok:
-                    failed.append(
-                        {
-                            "id": str(row.get("id") or ""),
-                            "action": action,
-                            "error": str((body or {}).get("error") or "refresh_models_failed"),
-                        }
-                    )
-                    continue
-                executed.append({"id": str(row.get("id") or ""), "action": action})
-                continue
-
-            if action == "hf.mark_download_only":
-                repo_id = str(params.get("repo_id") or "").strip()
-                revision = str(params.get("revision") or "").strip()
-                target_dir = str(params.get("target_dir") or "").strip()
-                if target_dir:
-                    try:
-                        marker_path = (Path(target_dir).expanduser().resolve() / ".personal-agent-download-only.json").resolve()
-                        marker_path.parent.mkdir(parents=True, exist_ok=True)
-                        marker_payload = {
-                            "repo_id": repo_id,
-                            "revision": revision,
-                            "status": "download_only",
-                        }
-                        marker_bytes = (
-                            json.dumps(marker_payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n"
-                        ).encode("utf-8")
-                        marker_path.write_bytes(marker_bytes)
-                    except Exception as exc:
-                        failed.append(
-                            {
-                                "id": str(row.get("id") or ""),
-                                "action": action,
-                                "error": f"download_marker_failed:{exc.__class__.__name__}",
-                            }
-                        )
-                        continue
-                executed.append(
-                    {
-                        "id": str(row.get("id") or ""),
-                        "action": action,
-                        "repo_id": repo_id,
-                        "revision": revision,
-                        "target_dir": target_dir or None,
+                        "error": "hf_actions_must_run_through_model_manager",
                     }
                 )
                 continue
@@ -8642,9 +13323,12 @@ class AgentRuntime:
         }
 
     def llm_fixit(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        # Compatibility/operator recovery wizard. Assistant /chat must stay on the
+        # assistant-first SAFE MODE path and never route here.
+        recovery_store = self.operator_recovery_store()
         actor = str(payload.get("actor") or "user").strip() or "user"
         now_epoch = int(time.time())
-        wizard_state = self._llm_fixit_store.state if isinstance(self._llm_fixit_store.state, dict) else self._llm_fixit_store.empty_state()
+        wizard_state = recovery_store.state if isinstance(recovery_store.state, dict) else recovery_store.empty_state()
         openrouter_last_test = (
             wizard_state.get("openrouter_last_test")
             if isinstance(wizard_state.get("openrouter_last_test"), dict)
@@ -8661,7 +13345,7 @@ class AgentRuntime:
         def _current_decision() -> tuple[dict[str, Any], WizardDecision, str]:
             nonlocal status_payload, decision, issue_hash
             if status_payload is None or decision is None or issue_hash is None:
-                status_payload = self.llm_status()
+                status_payload = self._llm_fixit_status_payload()
                 decision = evaluate_wizard_decision(status_payload, context=decision_context)
                 issue_hash = wizard_decision_issue_hash(decision, status_payload)
             return status_payload, decision, issue_hash
@@ -8679,7 +13363,7 @@ class AgentRuntime:
             return str(_current_decision()[2] or "")
 
         def _save_idle_state(*, last_test: dict[str, Any] | None) -> None:
-            self._llm_fixit_store.save(
+            recovery_store.save(
                 {
                     "active": False,
                     "issue_hash": None,
@@ -8708,7 +13392,7 @@ class AgentRuntime:
             prompt = render_wizard_prompt(decision_obj)
             choices_json = wizard_decision_to_json(decision_obj).get("choices", [])
             issue_hash_value = wizard_decision_issue_hash(decision_obj, status_obj)
-            self._llm_fixit_store.save(
+            recovery_store.save(
                 {
                     "active": True,
                     "issue_hash": issue_hash_value,
@@ -8729,29 +13413,37 @@ class AgentRuntime:
 
         openrouter_api_key = str(payload.get("openrouter_api_key") or "").strip()
         if openrouter_api_key:
-            ok_secret, secret_body = self.set_provider_secret("openrouter", {"api_key": openrouter_api_key})
-            if not ok_secret:
+            configured_ok, configured_body = self.configure_openrouter(
+                openrouter_api_key,
+                {"make_default": False},
+            )
+            if not configured_ok:
                 return True, {
                     "ok": True,
                     "intent": "llm_fixit",
                     "confidence": 0.0,
                     "did_work": False,
                     "error_kind": "needs_clarification",
-                    "message": str(secret_body.get("error") or "Unable to save OpenRouter key."),
+                    "message": str((configured_body if isinstance(configured_body, dict) else {}).get("message") or "Unable to save OpenRouter key."),
                     "next_question": "Please send a valid OpenRouter API key.",
                     "actions": [],
-                    "errors": [str(secret_body.get("error") or "needs_clarification")],
+                    "errors": [str((configured_body if isinstance(configured_body, dict) else {}).get("error") or "needs_clarification")],
                     "status": "needs_clarification",
                     "issue_code": _issue_code_fallback(),
                     "trace_id": f"fixit-{now_epoch}",
                 }
-            ok_test, test_body = self.test_provider("openrouter", {})
+            test_body = (
+                (configured_body if isinstance(configured_body, dict) else {}).get("provider_test")
+                if isinstance((configured_body if isinstance(configured_body, dict) else {}).get("provider_test"), dict)
+                else {}
+            )
+            ok_test = True
             test_summary = self._summarize_provider_test_result(
                 provider_id="openrouter",
                 ok=ok_test,
                 body=test_body if isinstance(test_body, dict) else {},
             )
-            status_after = self.llm_status()
+            status_after = self._llm_fixit_status_payload()
             decision_after = evaluate_wizard_decision(
                 status_after,
                 context={
@@ -8846,7 +13538,7 @@ class AgentRuntime:
 
             pending_expires_ts = int(wizard_state.get("pending_expires_ts") or 0)
             if pending_expires_ts > 0 and now_epoch > pending_expires_ts:
-                self._llm_fixit_store.clear()
+                recovery_store.clear()
                 return True, {
                     "ok": True,
                     "intent": "llm_fixit",
@@ -8866,7 +13558,7 @@ class AgentRuntime:
                 [row for row in pending_plan if isinstance(row, dict)]
             )
             if recomputed_token != expected_token:
-                self._llm_fixit_store.clear()
+                recovery_store.clear()
                 return True, {
                     "ok": True,
                     "intent": "llm_fixit",
@@ -8922,7 +13614,7 @@ class AgentRuntime:
                 else openrouter_last_test
             )
             if isinstance(openrouter_test, dict):
-                status_after = self.llm_status()
+                status_after = self._llm_fixit_status_payload()
                 decision_after = evaluate_wizard_decision(
                     status_after,
                     context={
@@ -9157,7 +13849,7 @@ class AgentRuntime:
                     confirm_token = wizard_confirm_token_for_plan_rows(
                         [row for row in pending_plan_rows if isinstance(row, dict)]
                     )
-                    self._llm_fixit_store.save(
+                    recovery_store.save(
                         {
                             "active": True,
                             "issue_hash": _issue_hash_fallback(),
@@ -9262,7 +13954,7 @@ class AgentRuntime:
                         "trace_id": f"fixit-{now_epoch}",
                     }
             if selected in {"add_openrouter_key", "update_openrouter_key"}:
-                self._llm_fixit_store.save(
+                recovery_store.save(
                     {
                         "active": True,
                         "issue_hash": current_issue_hash,
@@ -9407,7 +14099,7 @@ class AgentRuntime:
                 "proposal_type": str(wizard_state.get("proposal_type") or "").strip().lower() or None,
                 "proposal_details": str(wizard_state.get("proposal_details") or "").strip() or None,
             }
-            self._llm_fixit_store.save(state_to_save)
+            recovery_store.save(state_to_save)
             return True, {
                 "ok": True,
                 "intent": "llm_fixit",
@@ -9474,11 +14166,27 @@ class AgentRuntime:
             "trace_id": f"fixit-{now_epoch}",
         }
 
+    def operator_recovery(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        # Generic operator recovery wrapper for non-assistant integrations such as
+        # Telegram reply handling. /llm/fixit remains the public compat endpoint.
+        return self.llm_fixit(payload if isinstance(payload, dict) else {})
+
+    def operator_recovery_store(self) -> OperatorRecoveryStore:
+        # Expose prompt state through a neutral operator-recovery accessor so
+        # integrations do not need to depend on the legacy fix-it attribute name.
+        return self._llm_fixit_store
+
     def run_llm_health(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
         start = time.monotonic()
+        previous_statuses = self._provider_health_status_snapshot()
         try:
             summary = self._health_monitor.run_once(self.registry_document)
             self._router.set_external_health_state(self._health_monitor.state)
+            self._emit_provider_health_transition_events(
+                previous_statuses,
+                self._provider_health_status_snapshot(),
+                source=f"health_run:{trigger}",
+            )
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
             self.audit_log.append(
@@ -9525,18 +14233,14 @@ class AgentRuntime:
         )
         return True, {"ok": True, "health": summary, "trigger": trigger}
 
-    def model_scout_sources(self) -> dict[str, Any]:
-        if hasattr(self.model_scout, "sources"):
-            payload = getattr(self.model_scout, "sources")()
-            return {"ok": True, "sources": payload}
-        return {"ok": True, "sources": {"ollama": False, "openrouter": False, "huggingface": False}}
-
     def llm_autoconfig_plan(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         start = time.monotonic()
         disable_auth_failed = bool(payload.get("disable_auth_failed_providers", True))
         plan = build_autoconfig_plan(
             self.registry_document,
             self._health_monitor.summary(self.registry_document),
+            config=self.config,
+            router_snapshot=self._router.doctor_snapshot(),
             secret_lookup=self.secret_store.get_secret,
             disable_auth_failed_providers=disable_auth_failed,
         )
@@ -9563,6 +14267,8 @@ class AgentRuntime:
         raw_plan = build_autoconfig_plan(
             self.registry_document,
             self._health_monitor.summary(self.registry_document),
+            config=self.config,
+            router_snapshot=self._router.doctor_snapshot(),
             secret_lookup=self.secret_store.get_secret,
             disable_auth_failed_providers=bool(payload.get("disable_auth_failed_providers", True)),
         )
@@ -10362,6 +15068,7 @@ class AgentRuntime:
         plan = build_self_heal_plan(
             self.registry_document,
             health_summary,
+            config=self.config,
             router_snapshot=router_snapshot,
         )
         modified_ids = self._plan_modified_ids(plan)
@@ -10397,6 +15104,7 @@ class AgentRuntime:
         raw_plan = build_self_heal_plan(
             self.registry_document,
             health_summary,
+            config=self.config,
             router_snapshot=router_snapshot,
         )
         plan, safe_mode_blocked = self._apply_safe_mode_to_plan(action="llm.self_heal.apply", plan=raw_plan)
@@ -10644,27 +15352,6 @@ class AgentRuntime:
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
-        }
-
-    def model_scout_status(self) -> dict[str, Any]:
-        allowed, denied = self._model_scout_pack_gate(iface="model_scout.status")
-        if not allowed:
-            return dict(denied or {"ok": False, "error": "pack_permission_denied"})
-        status = self.model_scout.status()
-        return {
-            "ok": True,
-            "enabled": bool(self.config.model_scout_enabled),
-            "status": status,
-        }
-
-    def model_scout_suggestions(self) -> dict[str, Any]:
-        allowed, denied = self._model_scout_pack_gate(iface="model_scout.suggestions")
-        if not allowed:
-            return dict(denied or {"ok": False, "error": "pack_permission_denied"})
-        suggestions = self.model_scout.list_suggestions(limit=200)
-        return {
-            "ok": True,
-            "suggestions": suggestions,
         }
 
     @staticmethod
@@ -10968,6 +15655,11 @@ class AgentRuntime:
         to_model = str(event.get("to_model") or "").strip() or from_model
         provider = str(event.get("provider") or "").strip().lower() or "ollama"
         reason = self._model_scout_reason_human(str(event.get("reason") or ""))
+        target_truth = {}
+        try:
+            target_truth = self.runtime_truth_service().chat_target_truth()
+        except Exception:
+            target_truth = {}
         apply_payload = json.dumps(
             {"default_model": to_model, "default_provider": provider},
             ensure_ascii=True,
@@ -10981,7 +15673,12 @@ class AgentRuntime:
         )
         lines = [
             f"Model Scout update: {reason}.",
-            f"Current default: {from_model}",
+            f"Configured default: {str(target_truth.get('configured_model') or from_model).strip() or from_model}",
+            (
+                f"Effective healthy target: {str(target_truth.get('effective_model') or '').strip()}"
+                if str(target_truth.get("effective_model") or "").strip()
+                else "Effective healthy target: unavailable"
+            ),
             f"Recommended default: {to_model}",
             f"Apply: {apply_cmd}",
         ]
@@ -11016,70 +15713,6 @@ class AgentRuntime:
         trigger: str,
         event: dict[str, Any],
     ) -> dict[str, Any]:
-        telegram = self.telegram_status()
-        state = str(telegram.get("state") or "").strip().lower()
-        if state != "running":
-            self.audit_log.append(
-                actor=actor,
-                action="llm.model_scout.notify",
-                params={
-                    "trigger": trigger,
-                    "reason": str(event.get("reason") or ""),
-                    "provider": str(event.get("provider") or ""),
-                },
-                decision="allow",
-                reason="telegram_not_running",
-                dry_run=False,
-                outcome="skipped",
-                error_kind="telegram_not_running",
-                duration_ms=0,
-            )
-            return {"emitted": False, "reason": "telegram_not_running"}
-
-        token, chat_id = self._resolve_telegram_target()
-        if not token or not chat_id:
-            self.audit_log.append(
-                actor=actor,
-                action="llm.model_scout.notify",
-                params={
-                    "trigger": trigger,
-                    "reason": str(event.get("reason") or ""),
-                    "provider": str(event.get("provider") or ""),
-                },
-                decision="allow",
-                reason="telegram_not_configured_or_no_chat",
-                dry_run=False,
-                outcome="skipped",
-                error_kind="telegram_not_configured_or_no_chat",
-                duration_ms=0,
-            )
-            return {"emitted": False, "reason": "telegram_not_configured_or_no_chat"}
-
-        message = self._format_model_scout_change_message(event)
-        start = time.monotonic()
-        try:
-            self._send_telegram_message(token, chat_id, message)
-        except Exception as exc:
-            duration_ms = int((time.monotonic() - start) * 1000)
-            self.audit_log.append(
-                actor=actor,
-                action="llm.model_scout.notify",
-                params={
-                    "trigger": trigger,
-                    "reason": str(event.get("reason") or ""),
-                    "provider": str(event.get("provider") or ""),
-                    "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
-                },
-                decision="allow",
-                reason=f"telegram_send_failed:{exc.__class__.__name__}",
-                dry_run=False,
-                outcome="failed",
-                error_kind=f"telegram_send_failed:{exc.__class__.__name__}",
-                duration_ms=duration_ms,
-            )
-            return {"emitted": False, "reason": f"telegram_send_failed:{exc.__class__.__name__}"}
-
-        duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
             actor=actor,
             action="llm.model_scout.notify",
@@ -11087,18 +15720,30 @@ class AgentRuntime:
                 "trigger": trigger,
                 "reason": str(event.get("reason") or ""),
                 "provider": str(event.get("provider") or ""),
-                "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
             },
             decision="allow",
-            reason="sent",
+            reason="suppressed_by_control_plane_policy",
             dry_run=False,
-            outcome="sent",
-            error_kind=None,
-            duration_ms=duration_ms,
+            outcome="skipped",
+            error_kind="suppressed_by_control_plane_policy",
+            duration_ms=0,
         )
-        return {"emitted": True, "reason": "sent"}
+        return {"emitted": False, "reason": "suppressed_by_control_plane_policy"}
 
+    # Internal scheduler/pack surface. Assistant does not route through this path,
+    # and the legacy /model_scout/* HTTP endpoints have been retired.
     def run_model_scout(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
+        if self._safe_mode_enabled() and trigger == "scheduler":
+            body = {
+                "ok": True,
+                "skipped": True,
+                "reason": "safe_mode",
+                "trigger": trigger,
+                "notification_emitted": False,
+                "notification_reason": "safe_mode",
+            }
+            self._log_request("/model_scout/run", True, body)
+            return True, body
         allowed, denied = self._model_scout_pack_gate(iface="model_scout.run")
         if not allowed:
             body = dict(denied or {"ok": False, "error": "pack_permission_denied"})
@@ -11158,28 +15803,6 @@ class AgentRuntime:
             "notification_reason": str(notify_result.get("reason") or "no_change"),
         }
 
-    def dismiss_model_scout_suggestion(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
-        allowed, denied = self._model_scout_pack_gate(iface="model_scout.dismiss")
-        if not allowed:
-            return False, dict(denied or {"ok": False, "error": "pack_permission_denied"})
-        target = urllib.parse.unquote(str(suggestion_id or "")).strip()
-        if not target:
-            return False, {"ok": False, "error": "suggestion id is required"}
-        if not self.model_scout.dismiss(target):
-            return False, {"ok": False, "error": "suggestion not found"}
-        return True, {"ok": True, "id": target, "status": "dismissed"}
-
-    def mark_model_scout_installed(self, suggestion_id: str) -> tuple[bool, dict[str, Any]]:
-        allowed, denied = self._model_scout_pack_gate(iface="model_scout.mark_installed")
-        if not allowed:
-            return False, dict(denied or {"ok": False, "error": "pack_permission_denied"})
-        target = urllib.parse.unquote(str(suggestion_id or "")).strip()
-        if not target:
-            return False, {"ok": False, "error": "suggestion id is required"}
-        if not self.model_scout.mark_installed(target):
-            return False, {"ok": False, "error": "suggestion not found"}
-        return True, {"ok": True, "id": target, "status": "installed"}
-
     @staticmethod
     def _model_watch_enabled_provider_set(registry_document: dict[str, Any]) -> frozenset[str]:
         providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
@@ -11188,39 +15811,6 @@ class AgentRuntime:
             for provider_id, row in sorted(providers.items())
             if isinstance(row, dict) and bool(row.get("enabled", False))
         )
-
-    @staticmethod
-    def _model_watch_scoring_candidate(
-        *,
-        model_id: str,
-        row: dict[str, Any],
-        provider_row: dict[str, Any],
-    ) -> dict[str, Any]:
-        pricing = row.get("pricing") if isinstance(row.get("pricing"), dict) else {}
-        provider_id = str(row.get("provider") or "").strip().lower()
-        available = bool(row.get("enabled", False)) and bool(row.get("available", False))
-        routable = bool(row.get("routable", available))
-        if "routable" in row:
-            available = available and bool(row.get("routable", False))
-            routable = bool(row.get("routable", False))
-        context_tokens = None
-        try:
-            context_tokens = int(row.get("max_context_tokens")) if row.get("max_context_tokens") is not None else None
-        except (TypeError, ValueError):
-            context_tokens = None
-        return {
-            "provider": provider_id,
-            "model_id": str(model_id).strip(),
-            "context_tokens": context_tokens,
-            "local": bool(provider_row.get("local", False)),
-            "enabled": bool(row.get("enabled", False)),
-            "available": bool(available),
-            "routable": bool(routable),
-            "quality_rank": int(row.get("quality_rank", 0) or 0),
-            "price_in": pricing.get("input_per_million_tokens"),
-            "price_out": pricing.get("output_per_million_tokens"),
-            "health_status": "unknown",
-        }
 
     def _build_model_watch_proposal(
         self,
@@ -11240,7 +15830,6 @@ class AgentRuntime:
         registry_document = self.registry_document if isinstance(self.registry_document, dict) else {}
         defaults = registry_document.get("defaults") if isinstance(registry_document.get("defaults"), dict) else {}
         models = registry_document.get("models") if isinstance(registry_document.get("models"), dict) else {}
-        providers = registry_document.get("providers") if isinstance(registry_document.get("providers"), dict) else {}
         current_model = str(defaults.get("default_model") or "").strip()
         if not current_model:
             self._model_watch_last_proposal_evaluation["reason"] = "default_model_missing"
@@ -11260,67 +15849,50 @@ class AgentRuntime:
             self._model_watch_last_proposal_evaluation["reason"] = "no_delta_candidates"
             return None
         delta_id_set = {item for item in delta_model_ids if item}
+        watch_candidate_ids = sorted({current_model, *delta_model_ids})
 
-        candidate_ids = sorted({current_model, *delta_model_ids})
-        candidate_rows: list[dict[str, Any]] = []
-        for model_id in candidate_ids:
-            row = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
-            if not isinstance(row, dict):
-                continue
-            provider_id = str(row.get("provider") or "").strip().lower()
-            provider_row = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
-            if not provider_id or not isinstance(provider_row, dict):
-                continue
-            candidate_rows.append(
-                self._model_watch_scoring_candidate(
-                    model_id=model_id,
-                    row=row,
-                    provider_row=provider_row,
-                )
-            )
-        if not candidate_rows:
-            self._model_watch_last_proposal_evaluation["reason"] = "no_scoring_candidates"
-            return None
-
-        default_policy = self._value_policy("default")
-        allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
-        allowed_rows, rejected_rows = rank_candidates_by_utility(
-            candidate_rows,
-            policy=default_policy,
-            allow_remote_fallback=allow_remote_fallback,
+        policy_result = self._select_chat_candidates_for_policy(
+            candidate_model_ids=watch_candidate_ids,
+            min_improvement=float(self.config.model_watch_min_improvement),
+            current_model_id=current_model,
+            require_auth=True,
         )
-        all_rows_by_id = {str(row.model_id): row for row in [*allowed_rows, *rejected_rows]}
-        current_row = all_rows_by_id.get(current_model)
+        current_row = (
+            policy_result.get("current_candidate")
+            if isinstance(policy_result.get("current_candidate"), dict)
+            else None
+        )
         if current_row is None:
             self._model_watch_last_proposal_evaluation["reason"] = "default_not_routable"
             return None
-
-        delta_allowed = [
-            row for row in allowed_rows if str(row.model_id) in delta_id_set and str(row.model_id) != current_model
-        ]
-        delta_rejected = [
-            row for row in rejected_rows if str(row.model_id) in delta_id_set and str(row.model_id) != current_model
-        ]
+        top_new = (
+            policy_result.get("recommended_candidate")
+            if isinstance(policy_result.get("recommended_candidate"), dict)
+            else None
+        )
         rejected_candidates = [
-            {"model_id": str(row.model_id), "rejected_by": str(row.rejected_by or "unknown")}
-            for row in delta_rejected
+            {
+                "model_id": str(row.get("model_id") or ""),
+                "rejected_by": str(row.get("reason") or "unknown"),
+            }
+            for row in (policy_result.get("rejected_candidates") or [])
+            if isinstance(row, dict) and str(row.get("model_id") or "") in delta_id_set
         ]
         policy_rejections = sorted(
             {
-                str(row.rejected_by or "unknown")
-                for row in delta_rejected
-                if str(row.rejected_by or "").strip()
+                str(row.get("rejected_by") or "unknown")
+                for row in rejected_candidates
+                if str(row.get("rejected_by") or "").strip()
             }
         )
-        top_new = delta_allowed[0] if delta_allowed else None
-        improvement_ratio = utility_delta(current=current_row, candidate=top_new)
+        improvement_ratio = round(float(policy_result.get("utility_delta") or 0.0), 6)
         quality_delta = (
-            round(float(top_new.quality) - float(current_row.quality), 4)
+            round(float(top_new.get("utility_quality") or 0.0) - float(current_row.get("utility_quality") or 0.0), 4)
             if top_new is not None
             else 0.0
         )
         expected_cost_delta = (
-            round(float(top_new.expected_cost_per_1m) - float(current_row.expected_cost_per_1m), 4)
+            round(float(top_new.get("expected_cost_per_1m") or 0.0) - float(current_row.get("expected_cost_per_1m") or 0.0), 4)
             if top_new is not None
             else 0.0
         )
@@ -11329,16 +15901,16 @@ class AgentRuntime:
             "status": "evaluated",
             "reason": "evaluated",
             "current_model": current_model,
-            "current_utility": round(float(current_row.utility), 6),
+            "current_utility": round(float(current_row.get("utility") or 0.0), 6),
             "min_improvement": round(float(min_improvement), 4),
             "top_candidate": (
                 {
-                    "model_id": str(top_new.model_id),
-                    "provider": str(top_new.provider),
+                    "model_id": str(top_new.get("model_id") or ""),
+                    "provider": str(top_new.get("provider_id") or ""),
                     "utility_delta": round(float(improvement_ratio), 6),
                     "quality_delta": round(float(quality_delta), 6),
                     "expected_cost_delta": round(float(expected_cost_delta), 6),
-                    "expected_cost_per_1m": round(float(top_new.expected_cost_per_1m), 6),
+                    "expected_cost_per_1m": round(float(top_new.get("expected_cost_per_1m") or 0.0), 6),
                 }
                 if top_new is not None
                 else None
@@ -11346,29 +15918,47 @@ class AgentRuntime:
             "rejected_candidates": rejected_candidates,
             "policy_rejections": policy_rejections,
         }
-        if top_new is None:
-            self._model_watch_last_proposal_evaluation["reason"] = "no_allowed_delta_candidate"
+        if top_new is None or str(top_new.get("model_id") or "") == current_model:
+            mapped_reason = str(policy_result.get("decision_reason") or "no_candidate")
+            self._model_watch_last_proposal_evaluation["reason"] = (
+                "improvement_below_threshold"
+                if mapped_reason in {"current_already_best", "current_higher_priority_tier", "improvement_below_threshold"}
+                else "no_allowed_delta_candidate"
+            )
             return None
         if improvement_ratio < min_improvement:
             self._model_watch_last_proposal_evaluation["reason"] = "improvement_below_threshold"
             return None
+        if not bool(policy_result.get("switch_recommended")):
+            self._model_watch_last_proposal_evaluation["reason"] = "improvement_below_threshold"
+            return None
 
         from_model = current_model
-        to_model = str(top_new.model_id)
-        to_provider = str(top_new.provider)
+        to_model = str(top_new.get("model_id") or "")
+        to_provider = str(top_new.get("provider_id") or "")
         score_delta = round(improvement_ratio, 4)
         tradeoffs: list[str] = []
         if expected_cost_delta > 0:
             tradeoffs.append("higher_expected_cost")
-        if float(top_new.latency) > float(current_row.latency):
+        if float(top_new.get("utility_latency") or 0.0) > float(current_row.get("utility_latency") or 0.0):
             tradeoffs.append("higher_latency")
-        if float(top_new.risk) > float(current_row.risk):
+        if float(top_new.get("utility_risk") or 0.0) > float(current_row.get("utility_risk") or 0.0):
             tradeoffs.append("higher_instability_risk")
         if policy_rejections:
             tradeoffs.append(f"rejected_alternatives:{','.join(policy_rejections)}")
+        target_truth = {}
+        try:
+            target_truth = self.runtime_truth_service().chat_target_truth()
+        except Exception:
+            target_truth = {}
         details_lines = [
-            f"Current default: {from_model} (utility {float(current_row.utility):.2f})",
-            f"Proposed default: {to_model} (utility {float(top_new.utility):.2f})",
+            f"Configured default: {str(target_truth.get('configured_model') or from_model).strip() or from_model}",
+            (
+                f"Effective healthy target: {str(target_truth.get('effective_model') or '').strip()}"
+                if str(target_truth.get("effective_model") or "").strip()
+                else "Effective healthy target: unavailable"
+            ),
+            f"Proposed default: {to_model} (utility {float(top_new.get('utility') or 0.0):.2f})",
             f"Utility improvement: +{score_delta:.2f} (threshold {min_improvement:.2f})",
             f"Quality delta: {quality_delta:+.2f}",
             f"Expected cost delta per 1M tokens: {expected_cost_delta:+.2f}",
@@ -11397,7 +15987,12 @@ class AgentRuntime:
         prompt = "\n".join(
             [
                 "Model Watch found a better default candidate.",
-                f"Current default: {from_model}",
+                f"Configured default: {str(target_truth.get('configured_model') or from_model).strip() or from_model}",
+                (
+                    f"Effective healthy target: {str(target_truth.get('effective_model') or '').strip()}"
+                    if str(target_truth.get("effective_model") or "").strip()
+                    else "Effective healthy target: unavailable"
+                ),
                 f"Recommended: {to_model} (+{score_delta:.2f})",
                 f"Cost delta per 1M tokens: {expected_cost_delta:+.2f}",
                 "Reply 1 to switch, 2 to snooze, or 3 for details.",
@@ -11424,6 +16019,7 @@ class AgentRuntime:
         }
 
     def _persist_model_watch_proposal_state(self, *, proposal: dict[str, Any]) -> dict[str, Any]:
+        recovery_store = self.operator_recovery_store()
         now_epoch = int(time.time())
         proposal_type = str(proposal.get("proposal_type") or "switch_default").strip().lower()
         prompt_question = (
@@ -11459,12 +16055,12 @@ class AgentRuntime:
             "proposal_type": proposal_type,
             "proposal_details": str(proposal.get("details") or "").strip() or None,
             "openrouter_last_test": (
-                self._llm_fixit_store.state.get("openrouter_last_test")
-                if isinstance(self._llm_fixit_store.state, dict)
+                recovery_store.state.get("openrouter_last_test")
+                if isinstance(recovery_store.state, dict)
                 else None
             ),
         }
-        return self._llm_fixit_store.save(state)
+        return recovery_store.save(state)
 
     def _notify_model_watch_proposal(
         self,
@@ -11478,25 +16074,6 @@ class AgentRuntime:
             "llm.model_watch.hf_proposal_created"
             if proposal_type == "local_download"
             else "llm.model_watch.proposal_created"
-        )
-        telegram = self.telegram_status()
-        state = str(telegram.get("state") or "").strip().lower()
-        if state != "running":
-            return {"emitted": False, "reason": "telegram_not_running"}
-        token, chat_id = self._resolve_telegram_target()
-        if not token or not chat_id:
-            return {"emitted": False, "reason": "telegram_not_configured_or_no_chat"}
-        start = time.monotonic()
-        try:
-            self._send_telegram_message(token, chat_id, str(proposal.get("message") or "").strip())
-        except Exception as exc:
-            return {"emitted": False, "reason": f"telegram_send_failed:{exc.__class__.__name__}"}
-        duration_ms = int((time.monotonic() - start) * 1000)
-        self._audit_telegram_fixit_prompt_shown(
-            chat_id=chat_id,
-            status="needs_user_choice",
-            issue_code=str(proposal.get("issue_code") or "model_watch.proposal"),
-            step="awaiting_choice",
         )
         try:
             self.audit_log.append(
@@ -11512,18 +16089,17 @@ class AgentRuntime:
                     "repo_id": str(proposal.get("repo_id") or ""),
                     "revision": str(proposal.get("revision") or ""),
                     "installability": str(proposal.get("installability") or ""),
-                    "chat_id_redacted": self._redact_telegram_chat_id(chat_id),
                 },
                 decision="allow",
-                reason="proposal_created",
+                reason="suppressed_by_control_plane_policy",
                 dry_run=False,
-                outcome="sent",
-                error_kind=None,
-                duration_ms=duration_ms,
+                outcome="skipped",
+                error_kind="suppressed_by_control_plane_policy",
+                duration_ms=0,
             )
         except Exception:
             pass
-        return {"emitted": True, "reason": "sent"}
+        return {"emitted": False, "reason": "suppressed_by_control_plane_policy"}
 
     def _set_model_watch_hf_status_cache(self, payload: dict[str, Any]) -> None:
         status_payload = payload if isinstance(payload, dict) else {}
@@ -11672,6 +16248,19 @@ class AgentRuntime:
         return True, body
 
     def run_model_watch_once(self, *, trigger: str = "manual") -> tuple[bool, dict[str, Any]]:
+        if self._safe_mode_enabled() and trigger == "scheduler":
+            body = {
+                "ok": True,
+                "skipped": True,
+                "reason": "safe_mode",
+                "trigger": trigger,
+                "next_check_after_seconds": max(1, int(self.config.model_watch_interval_seconds)),
+                "proposal_created": False,
+                "proposal_notification_emitted": False,
+                "proposal_notification_reason": "safe_mode",
+            }
+            self._log_request("/model_watch/run", True, body)
+            return True, body
         now = int(time.time())
         interval_seconds = max(1, int(self.config.model_watch_interval_seconds))
         actor = "system" if trigger == "scheduler" else "user"
@@ -12381,11 +16970,11 @@ class AgentRuntime:
                 error_kind="confirm_required",
                 duration_ms=duration_ms,
             )
-            return False, {
-                "ok": False,
-                "error": "confirm_required",
-                "message": 'Set {"confirm": true} to clear safe mode pause.',
-            }
+            return False, self._confirm_required_payload(
+                what_happened="Safe mode pause was not cleared",
+                why="Clearing the pause changes runtime safety state.",
+                next_action='Resend with {"confirm": true} if you want to proceed.',
+            )
 
         if not self._autopilot_apply_pause_enabled():
             return True, {
@@ -12438,107 +17027,48 @@ class AgentRuntime:
     def _bootstrap_plan(self) -> dict[str, Any]:
         document = self.registry_document if isinstance(self.registry_document, dict) else {}
         defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
-        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
-        snapshot = self._router.doctor_snapshot()
-        model_rows = snapshot.get("models") if isinstance(snapshot.get("models"), list) else []
-        model_lookup = {
-            str(row.get("id") or "").strip(): row
-            for row in model_rows
-            if isinstance(row, dict) and str(row.get("id") or "").strip()
-        }
-        provider_lookup = {
-            str(row.get("id") or "").strip().lower(): row
-            for row in (snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else [])
-            if isinstance(row, dict) and str(row.get("id") or "").strip()
-        }
         raw_default_provider = str(defaults.get("default_provider") or "").strip().lower() or None
         raw_default_model = str(defaults.get("default_model") or "").strip() or None
         default_model_resolved = raw_default_model
-        if raw_default_model and raw_default_model not in model_lookup and raw_default_provider and ":" not in raw_default_model:
-            scoped = f"{raw_default_provider}:{raw_default_model}"
-            if scoped in model_lookup:
-                default_model_resolved = scoped
-
-        current_row = model_lookup.get(str(default_model_resolved or ""))
-        current_routable = bool((current_row or {}).get("routable", False))
-        current_health = str(((current_row or {}).get("health") or {}).get("status") or "unknown").strip().lower()
-        current_capabilities = {
-            str(item).strip().lower()
-            for item in ((current_row or {}).get("capabilities") or [])
-            if str(item).strip()
-        }
-        current_chat = "chat" in current_capabilities
-        current_ok = bool(current_row) and current_routable and current_chat and current_health == "ok"
-
-        if current_ok:
+        if raw_default_model and raw_default_provider and ":" not in raw_default_model:
+            default_model_resolved = f"{raw_default_provider}:{raw_default_model}"
+        policy_result = self._select_chat_candidates_for_policy(
+            current_model_id=default_model_resolved,
+            min_improvement=float(self.config.model_watch_min_improvement),
+            require_auth=True,
+        )
+        if not bool(policy_result.get("switch_recommended")):
+            reason = str(policy_result.get("decision_reason") or "already_configured")
+            if (policy_result.get("current_candidate") is not None) and reason in {
+                "current_already_best",
+                "current_higher_priority_tier",
+                "improvement_below_threshold",
+            }:
+                reason = "already_configured"
             return {
                 "ok": True,
                 "needs_bootstrap": False,
                 "changes": [],
-                "reasons": ["already_configured"],
-                "selected_candidate": None,
+                "reasons": [reason],
+                "selected_candidate": policy_result.get("current_candidate"),
+                "selection_policy": policy_result,
                 "impact": {"changes_count": 0},
             }
-
-        candidates: list[dict[str, Any]] = []
-        for model_id in sorted(model_lookup.keys()):
-            row = model_lookup.get(model_id) if isinstance(model_lookup.get(model_id), dict) else {}
-            provider_id = str(row.get("provider") or "").strip().lower()
-            provider_payload = providers.get(provider_id) if isinstance(providers.get(provider_id), dict) else {}
-            provider_row = provider_lookup.get(provider_id) if isinstance(provider_lookup.get(provider_id), dict) else {}
-            if not provider_id or not isinstance(provider_payload, dict):
-                continue
-            if not bool(provider_payload.get("local", False)):
-                continue
-            if not bool(provider_payload.get("enabled", True)) or not bool(provider_row.get("enabled", True)):
-                continue
-            if not bool(row.get("enabled", False)) or not bool(row.get("available", False)):
-                continue
-            if not bool(row.get("routable", False)):
-                continue
-            capabilities = {
-                str(item).strip().lower()
-                for item in (row.get("capabilities") or [])
-                if str(item).strip()
-            }
-            if "chat" not in capabilities:
-                continue
-            health_status = str((row.get("health") or {}).get("status") or "unknown").strip().lower()
-            if health_status != "ok":
-                continue
-            in_cost = row.get("input_cost_per_million_tokens")
-            out_cost = row.get("output_cost_per_million_tokens")
-            observed_cost = None
-            if isinstance(in_cost, (int, float)) and isinstance(out_cost, (int, float)):
-                observed_cost = float(in_cost) + float(out_cost)
-            max_context = int(row.get("max_context_tokens") or 0) if row.get("max_context_tokens") is not None else 0
-            candidates.append(
-                {
-                    "provider_id": provider_id,
-                    "model_id": model_id,
-                    "observed_cost": observed_cost,
-                    "max_context_tokens": max(0, max_context),
-                }
-            )
-
-        if not candidates:
+        selected = (
+            policy_result.get("recommended_candidate")
+            if isinstance(policy_result.get("recommended_candidate"), dict)
+            else None
+        )
+        if selected is None:
             return {
                 "ok": True,
                 "needs_bootstrap": False,
                 "changes": [],
-                "reasons": ["no_local_chat_candidate"],
+                "reasons": [str(policy_result.get("decision_reason") or "no_default_chat_candidate")],
                 "selected_candidate": None,
+                "selection_policy": policy_result,
                 "impact": {"changes_count": 0},
             }
-
-        def _candidate_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
-            cost = row.get("observed_cost")
-            if isinstance(cost, float):
-                return (0, float(cost), -int(row.get("max_context_tokens") or 0), str(row.get("model_id") or ""))
-            return (1, 0.0, -int(row.get("max_context_tokens") or 0), str(row.get("model_id") or ""))
-
-        candidates.sort(key=_candidate_sort_key)
-        selected = candidates[0]
         selected_provider = str(selected.get("provider_id") or "").strip().lower() or None
         selected_model = str(selected.get("model_id") or "").strip() or None
         changes: list[dict[str, Any]] = []
@@ -12563,13 +17093,14 @@ class AgentRuntime:
                 }
             )
         changes.sort(key=self._plan_change_sort_key)
-        rationale = f"picked {selected_model} because local+chat+routable+healthy"
+        rationale = str(policy_result.get("decision_detail") or f"picked {selected_model}")
         return {
             "ok": True,
             "needs_bootstrap": bool(changes),
             "changes": changes,
             "reasons": [rationale],
             "selected_candidate": selected,
+            "selection_policy": policy_result,
             "impact": {"changes_count": len(changes)},
         }
 
@@ -13157,6 +17688,7 @@ class AgentRuntime:
             return False, {"ok": False, "error": str(exc)}
 
         install_action = action == "modelops.pull_ollama_model"
+        import_action = action == "modelops.import_gguf_to_ollama"
         install_plan: dict[str, Any] | None = None
         if install_action:
             normalized_model = self._normalize_ollama_pull_model(
@@ -13194,7 +17726,7 @@ class AgentRuntime:
             )
             return False, {"ok": False, "error": str(decision["reason"] or "policy_deny"), "plan": plan}
 
-        if bool(decision["requires_confirmation"]) and not dry_run and not confirm and not install_action:
+        if bool(decision["requires_confirmation"]) and not dry_run and not confirm and not install_action and not import_action:
             duration_ms = int((time.monotonic() - start) * 1000)
             self._audit_modelops(
                 actor=actor,
@@ -13212,48 +17744,74 @@ class AgentRuntime:
         if install_action:
             install_plan = install_plan if isinstance(install_plan, dict) else {}
             candidate = install_plan.get("candidates")[0] if isinstance(install_plan.get("candidates"), list) and install_plan.get("candidates") else {}
-            result = {
-                "ok": True,
-                "executed": False,
-                "dry_run": True,
-                "model_id": str((candidate or {}).get("model_id") or "").strip() or None,
-                "install_name": str((candidate or {}).get("install_name") or "").strip() or None,
-                "trace_id": self._modelops_trace_id(action, plan.get("params") if isinstance(plan.get("params"), dict) else {}),
-                "error_kind": None,
-                "message": "planned_only",
-                "verification": {},
-                "stdout_tail": "",
-                "stderr_tail": "",
-                "install_plan": install_plan,
-            } if dry_run else execute_install_plan(
-                config=self.config,
-                registry=self._router.registry,
-                plan=install_plan,
-                approve=confirm,
-                trace_id=self._modelops_trace_id(action, plan.get("params") if isinstance(plan.get("params"), dict) else {}),
-                timeout_seconds=float(
-                    (
-                        plan.get("steps")[0].get("timeout_seconds")
-                        if isinstance(plan.get("steps"), list)
-                        and plan.get("steps")
-                        and isinstance(plan.get("steps")[0], dict)
-                        else params.get("timeout_seconds")
-                    )
-                    or 1800.0
-                ),
-            )
-            if not dry_run and isinstance(result, dict):
-                result = dict(result)
-                result["install_plan"] = install_plan
-                if bool(result.get("ok")):
-                    refresh_ok, refresh_body = self.refresh_models({"provider": "ollama"})
-                    result["refresh_ok"] = bool(refresh_ok)
-                    result["refresh_result"] = refresh_body
-                    if not refresh_ok:
-                        result["message"] = (
-                            f"{str(result.get('message') or 'Install completed.')} "
-                            "Catalog refresh did not complete; provider test will validate availability."
+            if dry_run:
+                result = {
+                    "ok": True,
+                    "executed": False,
+                    "dry_run": True,
+                    "model_id": str((candidate or {}).get("model_id") or "").strip() or None,
+                    "install_name": str((candidate or {}).get("install_name") or "").strip() or None,
+                    "trace_id": self._modelops_trace_id(action, plan.get("params") if isinstance(plan.get("params"), dict) else {}),
+                    "error_kind": None,
+                    "message": "planned_only",
+                    "verification": {},
+                    "stdout_tail": "",
+                    "stderr_tail": "",
+                    "install_plan": install_plan,
+                }
+            else:
+                result = self._model_manager().execute_request(
+                    {
+                        "kind": "approved_ollama_pull",
+                        "model_ref": f"ollama:{normalized_model}",
+                    },
+                    approve=confirm,
+                    trace_id=self._modelops_trace_id(action, plan.get("params") if isinstance(plan.get("params"), dict) else {}),
+                    timeout_seconds=float(
+                        (
+                            plan.get("steps")[0].get("timeout_seconds")
+                            if isinstance(plan.get("steps"), list)
+                            and plan.get("steps")
+                            and isinstance(plan.get("steps")[0], dict)
+                            else params.get("timeout_seconds")
                         )
+                        or 1800.0
+                    ),
+                    source=action,
+                )
+                if isinstance(result, dict):
+                    result = dict(result)
+                    result["install_plan"] = install_plan
+        elif import_action:
+            normalized_params = plan.get("params") if isinstance(plan.get("params"), dict) else {}
+            if dry_run:
+                result = {
+                    "ok": True,
+                    "executed": False,
+                    "dry_run": True,
+                    "model_id": (
+                        f"ollama:{str(normalized_params.get('model_name') or '').strip()}"
+                        if str(normalized_params.get("model_name") or "").strip()
+                        else None
+                    ),
+                    "trace_id": self._modelops_trace_id(action, normalized_params),
+                    "error_kind": None,
+                    "message": "planned_only",
+                    "verification": {},
+                    "stdout_tail": "",
+                    "stderr_tail": "",
+                }
+            else:
+                result = self._model_manager().execute_request(
+                    {
+                        "kind": "ollama_import_gguf",
+                        "model_name": str(normalized_params.get("model_name") or "").strip(),
+                        "modelfile_path": str(normalized_params.get("modelfile_path") or "").strip(),
+                    },
+                    approve=confirm,
+                    trace_id=self._modelops_trace_id(action, normalized_params),
+                    source=action,
+                )
         else:
             result = self.modelops_executor.execute_plan(plan, dry_run=dry_run)
 
@@ -13365,54 +17923,596 @@ class AgentRuntime:
         output = sorted(deduped.values(), key=lambda row: (row.provider, row.model_id))
         return output, sorted(set(warnings)), provider_counts
 
+    def _current_chat_model_for_selection(self) -> dict[str, str]:
+        defaults = self.get_defaults()
+        current_model = str(
+            defaults.get("resolved_default_model")
+            or defaults.get("chat_model")
+            or defaults.get("default_model")
+            or ""
+        ).strip()
+        current_provider = str(defaults.get("default_provider") or "").strip().lower()
+        if (not current_provider) and current_model and ":" in current_model:
+            current_provider = str(current_model.split(":", 1)[0]).strip().lower()
+        return {
+            "provider": current_provider,
+            "model_id": current_model,
+        }
+
+    def _modelops_chat_selection(
+        self,
+        *,
+        candidate_model_ids: list[str] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        current = self._current_chat_model_for_selection()
+        truth = self.runtime_truth_service()
+        scout_fn = getattr(truth, "model_scout_v2_status", None)
+        if callable(scout_fn) and candidate_model_ids is None:
+            scout_payload = scout_fn()
+            selection = scout_payload.get("selection") if isinstance(scout_payload, dict) else {}
+            if isinstance(selection, dict):
+                current_candidate = (
+                    scout_payload.get("current_candidate")
+                    if isinstance(scout_payload, dict) and isinstance(scout_payload.get("current_candidate"), dict)
+                    else {}
+                )
+                current_model_id = (
+                    str((current_candidate if isinstance(current_candidate, dict) else {}).get("model_id") or "").strip()
+                    or str(current.get("model_id") or "").strip()
+                )
+                current_provider = (
+                    str((current_candidate if isinstance(current_candidate, dict) else {}).get("provider_id") or "").strip().lower()
+                    or str(current.get("provider") or "").strip().lower()
+                )
+                return dict(selection), {
+                    "provider": current_provider,
+                    "model_id": current_model_id,
+                }
+        selection = self._select_chat_candidates_for_policy(
+            current_model_id=str(current.get("model_id") or "").strip() or None,
+            candidate_model_ids=candidate_model_ids,
+            min_improvement=0.0,
+            require_auth=True,
+        )
+        return selection, current
+
+    @staticmethod
+    def _modelops_recommendation_from_candidate(
+        row: dict[str, Any],
+        *,
+        purpose: str,
+        current_model_id: str,
+        current_utility: float,
+    ) -> dict[str, Any]:
+        canonical_model_id = str(row.get("model_id") or "").strip()
+        provider_id = str(row.get("provider_id") or "").strip().lower()
+        model_id = canonical_model_id.split(":", 1)[1] if ":" in canonical_model_id else canonical_model_id
+        score = round(float(row.get("utility") or 0.0), 6)
+        tier = str(row.get("tier") or "").strip().lower() or None
+        tradeoffs: list[str] = []
+        if not bool(row.get("local", False)):
+            tradeoffs.append("remote_provider")
+        if str(row.get("health_status") or "").strip().lower() == "degraded":
+            tradeoffs.append("degraded_health")
+        why_better: list[str] = []
+        if canonical_model_id and canonical_model_id != current_model_id and score >= current_utility + 0.10:
+            why_better.append(f"Higher policy utility ({score:.2f}) for chat selection.")
+        return {
+            "provider": provider_id,
+            "model_id": model_id,
+            "purpose": purpose,
+            "score": score,
+            "reason": str(row.get("state_reason") or row.get("tier") or "policy_selected"),
+            "tradeoffs": sorted(set(tradeoffs)),
+            "why_better_than_current": why_better,
+            "canonical_model_id": canonical_model_id,
+            "tier": tier,
+        }
+
+    @staticmethod
+    def _modelops_recommendation_role_priority(purpose: str) -> list[str]:
+        normalized_purpose = str(purpose or "chat").strip().lower() or "chat"
+        preferred = ["best_task_coding"] if normalized_purpose == "code" else ["best_task_chat"]
+        ordered = preferred + [
+            "premium_research",
+            "premium_coding",
+            "cheap_cloud",
+            "best_local",
+            "best_task_chat",
+            "best_task_coding",
+            "best_task_research",
+        ]
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in ordered:
+            normalized = str(item or "").strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    @classmethod
+    def _modelops_matching_recommendation_role(
+        cls,
+        recommendation_roles: dict[str, Any],
+        *,
+        canonical_model_id: str,
+        purpose: str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        normalized_model_id = str(canonical_model_id or "").strip()
+        if not normalized_model_id or not isinstance(recommendation_roles, dict):
+            return None, None
+        seen: set[str] = set()
+        ordered_keys = cls._modelops_recommendation_role_priority(purpose) + list(recommendation_roles.keys())
+        for role_key in ordered_keys:
+            normalized_role = str(role_key or "").strip().lower()
+            if not normalized_role or normalized_role in seen:
+                continue
+            seen.add(normalized_role)
+            resolution = recommendation_roles.get(normalized_role)
+            if not isinstance(resolution, dict):
+                continue
+            if str(resolution.get("state") or "").strip().lower() != "selected":
+                continue
+            if str(resolution.get("model_id") or "").strip() != normalized_model_id:
+                continue
+            return normalized_role, dict(resolution)
+        return None, None
+
+    def _modelops_compat_recommendation_summary(
+        self,
+        *,
+        role_key: str | None,
+        resolution: dict[str, Any] | None,
+        purpose: str,
+        current_model_id: str,
+        current_utility: float,
+        candidate_lookup: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        normalized_purpose = str(purpose or "chat").strip().lower() or "chat"
+        normalized_role = str(role_key or "").strip().lower() or None
+        summary: dict[str, Any]
+        if isinstance(resolution, dict):
+            canonical_model_id = str(resolution.get("model_id") or "").strip()
+            candidate = dict(candidate_lookup.get(canonical_model_id) or {}) if canonical_model_id else {}
+            if canonical_model_id and candidate:
+                summary = self._modelops_recommendation_from_candidate(
+                    candidate,
+                    purpose=normalized_purpose,
+                    current_model_id=current_model_id,
+                    current_utility=current_utility,
+                )
+            else:
+                provider_id = str(resolution.get("provider_id") or "").strip().lower()
+                model_id = canonical_model_id.split(":", 1)[1] if ":" in canonical_model_id else canonical_model_id
+                summary = {
+                    "provider": provider_id or None,
+                    "model_id": model_id or None,
+                    "purpose": normalized_purpose,
+                    "canonical_model_id": canonical_model_id or None,
+                }
+            summary["state"] = str(resolution.get("state") or "unavailable").strip().lower() or "unavailable"
+            summary["source_role"] = normalized_role
+            summary["compat_only"] = True
+            basis = str(resolution.get("recommendation_basis") or "").strip().lower()
+            if basis:
+                summary["recommendation_basis"] = basis
+            reason_code = str(resolution.get("reason_code") or "").strip().lower()
+            if reason_code:
+                summary["reason_code"] = reason_code
+            explanation = str(resolution.get("explanation") or "").strip()
+            if explanation:
+                summary["explanation"] = explanation
+                summary.setdefault("reason", explanation)
+            comparison = resolution.get("comparison")
+            if isinstance(comparison, dict):
+                summary["comparison"] = dict(comparison)
+            advisory_actions = resolution.get("advisory_actions")
+            if isinstance(advisory_actions, dict):
+                summary["advisory_actions"] = dict(advisory_actions)
+        else:
+            summary = {
+                "purpose": normalized_purpose,
+                "state": "unavailable",
+                "reason_code": "no_canonical_resolution",
+                "explanation": "no canonical recommendation resolution is available",
+                "source_role": normalized_role,
+                "compat_only": True,
+            }
+        summary.setdefault("tradeoffs", [])
+        summary.setdefault("why_better_than_current", [])
+        summary.setdefault("tier", None)
+        summary.setdefault("score", None)
+        return summary
+
+    @staticmethod
+    def _modelops_missing_selected_summary(
+        *,
+        canonical_model_id: str,
+        purpose: str,
+    ) -> dict[str, Any]:
+        normalized_model = str(canonical_model_id or "").strip()
+        provider_id = normalized_model.split(":", 1)[0].strip().lower() if ":" in normalized_model else None
+        model_id = normalized_model.split(":", 1)[1].strip() if ":" in normalized_model else normalized_model or None
+        return {
+            "provider": provider_id,
+            "model_id": model_id,
+            "purpose": str(purpose or "chat").strip().lower() or "chat",
+            "canonical_model_id": normalized_model or None,
+            "state": "unavailable",
+            "reason_code": "not_selected_in_canonical_roles",
+            "explanation": "requested model is not the selected result for any canonical recommendation role",
+            "source_role": None,
+            "compat_only": True,
+            "tradeoffs": [],
+            "why_better_than_current": [],
+            "tier": None,
+            "score": None,
+        }
+
+    @staticmethod
+    def _modelops_check_role_priority(purpose: str) -> list[str]:
+        normalized_purpose = str(purpose or "chat").strip().lower() or "chat"
+        if normalized_purpose == "code":
+            ordered = [
+                "best_task_coding",
+                "premium_coding",
+                "cheap_cloud",
+                "best_local",
+                "premium_research",
+                "best_task_chat",
+                "best_task_research",
+            ]
+        else:
+            ordered = [
+                "premium_coding",
+                "premium_research",
+                "cheap_cloud",
+                "best_local",
+                "best_task_chat",
+                "best_task_research",
+                "best_task_coding",
+            ]
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in ordered:
+            normalized = str(item or "").strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            result.append(normalized)
+        return result
+
+    def _modelops_recommendations_by_purpose(
+        self,
+        *,
+        purposes: list[str],
+        recommendation_roles: dict[str, Any],
+        candidate_lookup: dict[str, dict[str, Any]],
+        current_model_id: str,
+        current_utility: float,
+    ) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
+        for purpose in purposes:
+            summaries: list[dict[str, Any]] = []
+            seen_models: set[str] = set()
+            for role_key in self._modelops_check_role_priority(purpose):
+                resolution = recommendation_roles.get(role_key)
+                if not isinstance(resolution, dict):
+                    continue
+                if str(resolution.get("state") or "").strip().lower() != "selected":
+                    continue
+                canonical_model_id = str(resolution.get("model_id") or "").strip()
+                if not canonical_model_id or canonical_model_id in seen_models or canonical_model_id == current_model_id:
+                    continue
+                comparison = resolution.get("comparison") if isinstance(resolution.get("comparison"), dict) else {}
+                if str((comparison or {}).get("basis") or "").strip().lower() == "same_as_current":
+                    continue
+                summary = self._modelops_compat_recommendation_summary(
+                    role_key=role_key,
+                    resolution=resolution,
+                    purpose=purpose,
+                    current_model_id=current_model_id,
+                    current_utility=current_utility,
+                    candidate_lookup=candidate_lookup,
+                )
+                summaries.append(summary)
+                seen_models.add(canonical_model_id)
+                if len(summaries) >= 3:
+                    break
+            result[purpose] = summaries
+        return result
+
+    @staticmethod
+    def _safe_mode_remote_switch_response(model_id: str) -> dict[str, Any]:
+        blocked_model = str(model_id or "").strip()
+        why = "This surface only allows local chat targets while SAFE MODE is active."
+        next_action = "Stay on a local model, or switch to Controlled Mode explicitly before retrying."
+        return {
+            "ok": False,
+            "error": "safe_mode_remote_switch_blocked",
+            "error_kind": "safe_mode_remote_switch_blocked",
+            "message": compose_actionable_message(
+                what_happened=f"SAFE MODE is local-only right now, so I did not switch chat to remote {blocked_model}",
+                why=why,
+                next_action=next_action,
+            ),
+            "why": why,
+            "next_action": next_action,
+        }
+
+    def _guard_switch_target_allowed(
+        self,
+        resolved_body: dict[str, Any] | None,
+        *,
+        requested_model: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        policy = self._chat_control_policy()
+        if bool(policy.get("allow_remote_switch", True)):
+            return True, None
+        if bool((resolved_body or {}).get("local", False)):
+            return True, None
+        blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
+        return False, self._safe_mode_remote_switch_response(blocked_model)
+
+    @staticmethod
+    def _switch_target_not_usable_response(model_id: str, reason: str | None) -> dict[str, Any]:
+        blocked_model = str(model_id or "").strip() or "that model"
+        blocked_reason = str(reason or "").strip() or "it is not usable right now"
+        next_action = "Choose a model that is currently ready, or check runtime/model status first."
+        return {
+            "ok": False,
+            "error": "switch_target_not_usable",
+            "error_kind": "switch_target_not_usable",
+            "message": compose_actionable_message(
+                what_happened=f"I did not switch to {blocked_model}",
+                why=blocked_reason,
+                next_action=next_action,
+            ),
+            "why": blocked_reason,
+            "next_action": next_action,
+        }
+
+    def _guard_switch_target_usable(
+        self,
+        resolved_body: dict[str, Any] | None,
+        *,
+        requested_model: str,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        resolved_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
+        resolved_provider = str((resolved_body or {}).get("provider") or "").strip().lower()
+        if not resolved_model or not resolved_provider:
+            return False, {
+                "ok": False,
+                "error": "switch_target_unavailable",
+                "message": "That model is no longer available, so I couldn't switch to it.",
+            }
+        truth = self.runtime_truth_service()
+        readiness_reader = getattr(truth, "model_readiness_status", None)
+        if not callable(readiness_reader):
+            return False, self._switch_target_not_usable_response(
+                resolved_model,
+                "canonical readiness truth is unavailable",
+            )
+        readiness = readiness_reader()
+        rows = readiness.get("models") if isinstance(readiness.get("models"), list) else []
+        matched_row = next(
+            (
+                dict(row)
+                for row in rows
+                if isinstance(row, dict)
+                and str(row.get("model_id") or "").strip() == resolved_model
+                and str(row.get("provider_id") or "").strip().lower() == resolved_provider
+            ),
+            None,
+        )
+        if matched_row is None:
+            return False, self._switch_target_not_usable_response(
+                resolved_model,
+                "it is not present in the canonical runtime readiness inventory",
+            )
+        if bool(matched_row.get("usable_now", False)):
+            return True, None
+        policy = self._chat_control_policy()
+        explicit_remote_switch_allowed = bool(policy.get("allow_remote_switch", True))
+        provider_connection_state = str(
+            matched_row.get("provider_connection_state") or ""
+        ).strip().lower()
+        provider_health_status = str(
+            matched_row.get("provider_health_status") or "unknown"
+        ).strip().lower() or "unknown"
+        model_health_status = str(
+            matched_row.get("model_health_status") or "unknown"
+        ).strip().lower() or "unknown"
+        enabled = bool(matched_row.get("enabled", True))
+        available = bool(matched_row.get("available", False))
+        explicit_switch_usable = bool(
+            explicit_remote_switch_allowed
+            and enabled
+            and available
+            and provider_connection_state == "configured_and_usable"
+            and provider_health_status == "ok"
+            and model_health_status == "ok"
+        )
+        if explicit_switch_usable:
+            return True, None
+        if provider_connection_state == "configured_but_auth_missing":
+            return False, self._switch_target_not_usable_response(
+                resolved_model,
+                "provider is configured but still missing auth",
+            )
+        if provider_health_status in {"down", "degraded"}:
+            return False, self._switch_target_not_usable_response(
+                resolved_model,
+                f"provider is {provider_health_status}",
+            )
+        if model_health_status in {"down", "degraded"}:
+            return False, self._switch_target_not_usable_response(
+                resolved_model,
+                f"model health is {model_health_status}",
+            )
+        blocked_reason = (
+            str(matched_row.get("availability_reason") or "").strip()
+            or str(matched_row.get("eligibility_reason") or "").strip()
+            or str(matched_row.get("acquisition_reason") or "").strip()
+            or "it is not usable right now"
+        )
+        return False, self._switch_target_not_usable_response(resolved_model, blocked_reason)
+
+    def _resolve_switch_target_with_policy_guard(
+        self,
+        model_id: str,
+        *,
+        provider_id: str | None = None,
+        require_available: bool = True,
+        require_usable: bool = False,
+    ) -> tuple[bool, dict[str, Any]]:
+        policy = self._chat_control_policy()
+        local_only = not bool(policy.get("allow_remote_switch", True))
+        require_local = True if local_only else None
+        resolver = self._resolve_exact_chat_target_live if local_only else self._resolve_exact_chat_target
+        resolved_ok, resolved_body = resolver(
+            model_id,
+            provider_id=provider_id,
+            require_local=require_local,
+            require_available=require_available,
+        )
+        if resolved_ok:
+            switch_allowed, blocked_response = self._guard_switch_target_allowed(
+                resolved_body if isinstance(resolved_body, dict) else {},
+                requested_model=model_id,
+            )
+            if not switch_allowed:
+                return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(model_id)
+            if require_usable:
+                usable, unusable_response = self._guard_switch_target_usable(
+                    resolved_body if isinstance(resolved_body, dict) else {},
+                    requested_model=model_id,
+                )
+                if not usable:
+                    return False, (
+                        unusable_response
+                        if isinstance(unusable_response, dict)
+                        else self._switch_target_not_usable_response(model_id, None)
+                    )
+            return True, resolved_body if isinstance(resolved_body, dict) else {"ok": True}
+        if local_only:
+            remote_ok, remote_body = self._resolve_exact_chat_target_live(
+                model_id,
+                provider_id=provider_id,
+                require_local=False,
+                require_available=require_available,
+            )
+            if remote_ok:
+                blocked_model = str((remote_body if isinstance(remote_body, dict) else {}).get("model_id") or model_id).strip()
+                return False, self._safe_mode_remote_switch_response(blocked_model)
+            registry_remote_ok, registry_remote_body = self._resolve_exact_chat_target(
+                model_id,
+                provider_id=provider_id,
+                require_local=False,
+                require_available=False,
+            )
+            if registry_remote_ok:
+                blocked_model = str(
+                    (registry_remote_body if isinstance(registry_remote_body, dict) else {}).get("model_id") or model_id
+                ).strip()
+                return False, self._safe_mode_remote_switch_response(blocked_model)
+        return False, resolved_body if isinstance(resolved_body, dict) else {
+            "ok": False,
+            "error": "switch_target_unavailable",
+            "message": "That model is no longer available, so I couldn't switch to it.",
+        }
+
     def llm_models_check(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         trace_id = self._modelops_trace_id("llm_models_check", payload if isinstance(payload, dict) else {})
         purposes = self._normalize_modelops_purposes(payload if isinstance(payload, dict) else {})
-        defaults = self.get_defaults()
-        current = {
-            "provider": str(defaults.get("default_provider") or "").strip().lower(),
-            "model_id": str(defaults.get("default_model") or "").strip(),
-        }
         available, warnings, provider_counts = self._collect_modelops_available_models()
-        recommendations = recommend_models(
-            available=available,
-            current=current,
-            purposes=purposes,
-            prefer_local=bool(self.config.prefer_local),
+        truth = self.runtime_truth_service()
+        scout_status = truth.model_scout_v2_status(
+            task_request={
+                "task_type": "chat",
+                "requirements": ["chat"],
+                "preferred_local": True,
+            }
         )
+        selection = scout_status.get("selection") if isinstance(scout_status, dict) else {}
+        current_candidate = (
+            scout_status.get("current_candidate")
+            if isinstance(scout_status, dict) and isinstance(scout_status.get("current_candidate"), dict)
+            else {}
+        )
+        if isinstance(selection, dict):
+            current = {
+                "provider": (
+                    str((current_candidate if isinstance(current_candidate, dict) else {}).get("provider_id") or "").strip().lower()
+                    or str((scout_status.get("active_provider") if isinstance(scout_status, dict) else "") or "").strip().lower()
+                ),
+                "model_id": (
+                    str((current_candidate if isinstance(current_candidate, dict) else {}).get("model_id") or "").strip()
+                    or str((scout_status.get("active_model") if isinstance(scout_status, dict) else "") or "").strip()
+                ),
+            }
+        else:
+            selection, current = self._modelops_chat_selection()
+            scout_status = {}
+        policy = truth.model_controller_policy_status()
+        candidate_rows = [
+            dict(row)
+            for row in (
+                selection.get("candidate_rows")
+                if isinstance(selection.get("candidate_rows"), list)
+                else selection.get("ordered_candidates")
+            )
+            if isinstance(row, dict)
+        ]
         seen_path = self._modelops_seen_models_path()
         try:
             seen_ids = load_seen_model_ids(seen_path)
         except Exception:
             seen_ids = set()
-        current_ids = {f"{row.provider}:{row.model_id}" for row in available}
+        current_ids = {str(row.get("model_id") or "").strip() for row in candidate_rows if str(row.get("model_id") or "").strip()}
         new_ids = sorted(current_ids - seen_ids)
         try:
             save_seen_model_ids(seen_path, current_ids)
         except Exception:
             warnings = sorted(set([*warnings, "seen_state_write_failed"]))
 
-        recommendations_by_purpose: dict[str, list[dict[str, Any]]] = {}
-        for purpose in purposes:
-            rows = recommendations.get(purpose, [])
-            current_score = 0.0
-            for row in rows:
-                if f"{row.provider}:{row.model_id}" == current.get("model_id"):
-                    current_score = max(current_score, float(row.score))
-            filtered = [
-                row
-                for row in rows
-                if f"{row.provider}:{row.model_id}" in new_ids
-                or float(row.score) >= (current_score + 0.10)
-            ]
-            if not filtered:
-                filtered = rows[:1]
-            recommendations_by_purpose[purpose] = [recommendation_to_dict(row) for row in filtered[:3]]
+        recommendation_roles = (
+            dict(scout_status.get("recommendation_roles"))
+            if isinstance(scout_status, dict) and isinstance(scout_status.get("recommendation_roles"), dict)
+            else {}
+        )
+        current_utility = float(
+            (
+                selection.get("current_candidate")
+                if isinstance(selection.get("current_candidate"), dict)
+                else {}
+            ).get("utility")
+            or 0.0
+        )
+        current_model_id = str(current.get("model_id") or "").strip()
+        candidate_lookup = {
+            str(row.get("model_id") or "").strip(): dict(row)
+            for row in candidate_rows
+            if isinstance(row, dict) and str(row.get("model_id") or "").strip()
+        }
+        recommendations_by_purpose = self._modelops_recommendations_by_purpose(
+            purposes=purposes,
+            recommendation_roles=recommendation_roles,
+            candidate_lookup=candidate_lookup,
+            current_model_id=current_model_id,
+            current_utility=current_utility,
+        )
 
         total_candidates = sum(len(rows) for rows in recommendations_by_purpose.values())
-        message = f"Found {len(new_ids)} new candidate models. Want details or switch?"
+        current_label = str(current.get("model_id") or "none").strip() or "none"
+        message = (
+            f"Current model: {current_label}. I found {total_candidates} ready candidate recommendations. "
+            "This is advisory only; nothing changes automatically."
+        )
         if total_candidates == 0:
-            message = "No new candidate models were found right now."
+            message = f"Current model: {current_label}. No better ready candidates were found right now."
 
         return True, {
             "ok": True,
@@ -13422,7 +18522,7 @@ class AgentRuntime:
             "error_kind": None,
             "message": message,
             "next_question": (
-                "Do you want details for one recommendation or a switch plan?"
+                "Do you want details for one candidate or an explicit switch plan?"
                 if total_candidates > 0
                 else None
             ),
@@ -13430,16 +18530,299 @@ class AgentRuntime:
             "errors": [],
             "trace_id": trace_id,
             "envelope": {
-                "available_count": len(available),
+                "available_count": len(candidate_rows),
                 "new_models_count": len(new_ids),
+                # Compatibility summaries only. Canonical recommendation truth lives in recommendation_roles.
                 "recommendations_by_purpose": recommendations_by_purpose,
+                "recommendation_roles": recommendation_roles,
                 "current_model": {
                     "provider": current.get("provider"),
                     "model": current.get("model_id"),
                 },
+                "policy": dict(policy),
                 "warnings": warnings,
                 "provider_counts": dict(sorted(provider_counts.items())),
             },
+        }
+
+    def model_discovery_policy_entries(self) -> list[dict[str, Any]]:
+        store = getattr(self, "_model_discovery_policy_store", None)
+        list_entries = getattr(store, "list_entries", None)
+        if not callable(list_entries):
+            return []
+        try:
+            rows = list_entries()
+        except Exception:
+            return []
+        return [dict(row) for row in rows if isinstance(row, dict)]
+
+    def llm_models_policy_list(self, filters: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
+        payload = dict(filters) if isinstance(filters, dict) else {}
+        trace_id = self._modelops_trace_id("llm_models_policy_list", payload)
+        store = getattr(self, "_model_discovery_policy_store", None)
+        if store is None:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_policy_list",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "unavailable",
+                "message": "Model discovery policy storage is not available in this runtime.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["unavailable"],
+                "trace_id": trace_id,
+                "envelope": {},
+            }
+        model_id_filter = str(payload.get("model_id") or "").strip() or None
+        status_filter = str(payload.get("status") or "").strip().lower() or None
+        allowed_statuses = allowed_model_discovery_statuses()
+        if status_filter and status_filter not in allowed_statuses:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_policy_list",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "status must be one of the allowed discovery policy statuses.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "allowed_statuses": allowed_statuses,
+                },
+            }
+        rows = self.model_discovery_policy_entries()
+        if model_id_filter:
+            rows = [row for row in rows if str(row.get("model_id") or "").strip() == model_id_filter]
+        if status_filter:
+            rows = [row for row in rows if str(row.get("status") or "").strip().lower() == status_filter]
+        envelope = self._annotate_operator_surface_payload(
+            {
+                "policy_entries": rows,
+                "count": len(rows),
+                "filters": {
+                    "model_id": model_id_filter,
+                    "status": status_filter,
+                },
+                "allowed_statuses": allowed_statuses,
+                "allowed_role_hints": allowed_model_discovery_role_hints(),
+            },
+            surface="/llm/models/policy",
+            canonical_assistant_surface="runtime_truth.model_scout_v2_status.recommendation_roles",
+            operator_only=True,
+            separate_contract="model_discovery_policy_review",
+        )
+        return True, {
+            "ok": True,
+            "intent": "model_discovery_policy_list",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": "Listed curated discovery policy entries.",
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": envelope,
+        }
+
+    def llm_models_policy(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        trace_id = self._modelops_trace_id("llm_models_policy", payload if isinstance(payload, dict) else {})
+        store = getattr(self, "_model_discovery_policy_store", None)
+        if store is None:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_policy",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "unavailable",
+                "message": "Model discovery policy storage is not available in this runtime.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["unavailable"],
+                "trace_id": trace_id,
+                "envelope": {},
+            }
+        model_id = str(payload.get("model_id") or "").strip()
+        action = str(payload.get("action") or "upsert").strip().lower() or "upsert"
+        if not model_id:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_policy",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "model_id is required.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "allowed_statuses": allowed_model_discovery_statuses(),
+                    "allowed_role_hints": allowed_model_discovery_role_hints(),
+                },
+            }
+        if action not in {"upsert", "remove"}:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_policy",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "action must be 'upsert' or 'remove'.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {},
+            }
+        try:
+            if action == "remove":
+                removed = bool(store.remove_entry(model_id))
+                entry = None
+                message = (
+                    f"Removed the curated discovery policy entry for {model_id}."
+                    if removed
+                    else f"No curated discovery policy entry existed for {model_id}."
+                )
+            else:
+                status = str(payload.get("status") or "").strip().lower()
+                role_hints = payload.get("role_hints") if isinstance(payload.get("role_hints"), list) else []
+                entry = store.upsert_entry(
+                    model_id,
+                    status=status,
+                    role_hints=role_hints,
+                    notes=str(payload.get("notes") or "").strip() or None,
+                    source=str(payload.get("source") or "").strip() or None,
+                    justification=str(payload.get("justification") or "").strip() or None,
+                    reviewed_at=str(payload.get("reviewed_at") or "").strip() or None,
+                )
+                removed = False
+                message = f"Updated curated discovery policy for {model_id}."
+        except ValueError as exc:
+            error_key = str(exc).strip() or "invalid_model_discovery_policy_entry"
+            message = "Invalid model discovery policy request."
+            if error_key == "invalid_model_discovery_role_hints":
+                message = "role_hints must be chosen from the allowed discovery role hint set."
+            elif error_key == "invalid_model_discovery_policy_entry":
+                message = "status must be one of the allowed discovery policy statuses."
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_policy",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": message,
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "allowed_statuses": allowed_model_discovery_statuses(),
+                    "allowed_role_hints": allowed_model_discovery_role_hints(),
+                },
+            }
+
+        envelope = self._annotate_operator_surface_payload(
+            {
+                "entry": dict(entry) if isinstance(entry, dict) else None,
+                "removed": bool(removed),
+                "policy_entries": self.model_discovery_policy_entries(),
+                "allowed_statuses": allowed_model_discovery_statuses(),
+                "allowed_role_hints": allowed_model_discovery_role_hints(),
+            },
+            surface="/llm/models/policy",
+            canonical_assistant_surface="runtime_truth.model_scout_v2_status.recommendation_roles",
+            operator_only=True,
+            separate_contract="model_discovery_policy_review",
+        )
+        return True, {
+            "ok": True,
+            "intent": "model_discovery_policy",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": message,
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": envelope,
+        }
+
+    def llm_models_proposals(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        trace_id = self._modelops_trace_id("llm_models_proposals", payload if isinstance(payload, dict) else {})
+        provider_id = str(payload.get("provider_id") or payload.get("provider") or "").strip().lower() or None
+        source = str(payload.get("source") or "").strip().lower() or None
+        proposal_kind = str(payload.get("proposal_kind") or "").strip().lower() or None
+        allowed_sources = allowed_model_discovery_proposal_sources()
+        allowed_kinds = allowed_model_discovery_proposal_kinds()
+        if source and source not in allowed_sources:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_proposals",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "source must be one of the allowed proposal sources.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "allowed_sources": allowed_sources,
+                    "allowed_proposal_kinds": allowed_kinds,
+                },
+            }
+        if proposal_kind and proposal_kind not in allowed_kinds:
+            return False, {
+                "ok": False,
+                "intent": "model_discovery_proposals",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "proposal_kind must be one of the allowed proposal kinds.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "allowed_sources": allowed_sources,
+                    "allowed_proposal_kinds": allowed_kinds,
+                },
+            }
+        truth = self.runtime_truth_service()
+        envelope = truth.model_discovery_proposals_status(
+            provider_id=provider_id,
+            source=source,
+            proposal_kind=proposal_kind,
+        )
+        envelope = self._annotate_operator_surface_payload(
+            envelope,
+            surface="/llm/models/proposals",
+            canonical_assistant_surface="runtime_truth.model_scout_v2_status.recommendation_roles",
+            operator_only=True,
+            separate_contract="model_discovery_proposals",
+        )
+        proposal_count = int((envelope or {}).get("proposal_count") or 0)
+        return True, {
+            "ok": True,
+            "intent": "model_discovery_proposals",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": (
+                f"Found {proposal_count} non-canonical model discovery proposals for review."
+                if proposal_count > 0
+                else "No model discovery proposals are currently queued for review."
+            ),
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": envelope,
         }
 
     def llm_models_recommend(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -13464,16 +18847,61 @@ class AgentRuntime:
                 "envelope": {},
             }
 
-        defaults = self.get_defaults()
-        current = {
-            "provider": str(defaults.get("default_provider") or "").strip().lower(),
-            "model_id": str(defaults.get("default_model") or "").strip(),
-        }
-        available, warnings, _provider_counts = self._collect_modelops_available_models()
-        selected = next(
-            (row for row in available if row.provider == provider and row.model_id == model_id),
-            None,
+        _available, warnings, _provider_counts = self._collect_modelops_available_models()
+        canonical_model = f"{provider}:{model_id}"
+        truth = self.runtime_truth_service()
+        scout_status = truth.model_scout_v2_status(
+            task_request={
+                "task_type": "chat",
+                "requirements": ["chat"],
+                "preferred_local": True,
+            }
         )
+        selection = scout_status.get("selection") if isinstance(scout_status, dict) else {}
+        current_candidate = (
+            scout_status.get("current_candidate")
+            if isinstance(scout_status, dict) and isinstance(scout_status.get("current_candidate"), dict)
+            else {}
+        )
+        if isinstance(selection, dict):
+            current = {
+                "provider": (
+                    str((current_candidate if isinstance(current_candidate, dict) else {}).get("provider_id") or "").strip().lower()
+                    or str((scout_status.get("active_provider") if isinstance(scout_status, dict) else "") or "").strip().lower()
+                ),
+                "model_id": (
+                    str((current_candidate if isinstance(current_candidate, dict) else {}).get("model_id") or "").strip()
+                    or str((scout_status.get("active_model") if isinstance(scout_status, dict) else "") or "").strip()
+                ),
+            }
+        else:
+            selection, current = self._modelops_chat_selection()
+            scout_status = {}
+        policy = truth.model_controller_policy_status()
+        all_candidate_rows = [
+            dict(row)
+            for row in (
+                scout_status.get("candidate_rows")
+                if isinstance(scout_status, dict) and isinstance(scout_status.get("candidate_rows"), list)
+                else (
+                    selection.get("candidate_rows")
+                    if isinstance(selection.get("candidate_rows"), list)
+                    else selection.get("ordered_candidates")
+                )
+            )
+            if isinstance(row, dict)
+        ]
+        recommendation_roles = (
+            dict(scout_status.get("recommendation_roles"))
+            if isinstance(scout_status, dict) and isinstance(scout_status.get("recommendation_roles"), dict)
+            else {}
+        )
+        candidate_lookup = {
+            str(row.get("model_id") or "").strip(): dict(row)
+            for row in all_candidate_rows
+            if isinstance(row, dict) and str(row.get("model_id") or "").strip()
+        }
+        selected = next((row for row in all_candidate_rows if str(row.get("model_id") or "").strip() == canonical_model), None)
         if selected is None:
             return False, {
                 "ok": False,
@@ -13481,7 +18909,7 @@ class AgentRuntime:
                 "confidence": 0.0,
                 "did_work": False,
                 "error_kind": "bad_request",
-                "message": "Requested model was not found in discovered providers.",
+                "message": "Requested model was not found in the canonical chat candidate set.",
                 "next_question": None,
                 "actions": [],
                 "errors": ["bad_request"],
@@ -13489,34 +18917,67 @@ class AgentRuntime:
                 "envelope": {"warnings": warnings},
             }
 
-        per_purpose = recommend_models(
-            available=available,
-            current=current,
-            purposes=[purpose],
-            prefer_local=bool(self.config.prefer_local),
+        current_model_id = str(current.get("model_id") or "").strip()
+        current_utility = float(
+            (
+                selection.get("current_candidate")
+                if isinstance(selection.get("current_candidate"), dict)
+                else {}
+            ).get("utility")
+            or 0.0
         )
-        selected_recommendation = recommend_models(
-            available=[selected],
-            current=current,
-            purposes=[purpose],
-            prefer_local=bool(self.config.prefer_local),
-        )[purpose][0]
-        top_for_purpose = per_purpose[purpose][0] if per_purpose.get(purpose) else selected_recommendation
+        selected_role_key, selected_resolution = self._modelops_matching_recommendation_role(
+            recommendation_roles,
+            canonical_model_id=canonical_model,
+            purpose=purpose,
+        )
+        selected_recommendation = (
+            self._modelops_compat_recommendation_summary(
+                role_key=selected_role_key,
+                resolution=selected_resolution,
+                purpose=purpose,
+                current_model_id=current_model_id,
+                current_utility=current_utility,
+                candidate_lookup=candidate_lookup,
+            )
+            if isinstance(selected_resolution, dict)
+            else self._modelops_missing_selected_summary(
+                canonical_model_id=canonical_model,
+                purpose=purpose,
+            )
+        )
+        top_role_key = selected_role_key or next(iter(self._modelops_recommendation_role_priority(purpose)), None)
+        top_resolution = (
+            recommendation_roles.get(top_role_key)
+            if top_role_key and isinstance(recommendation_roles.get(top_role_key), dict)
+            else None
+        )
+        top_for_purpose = self._modelops_compat_recommendation_summary(
+            role_key=top_role_key,
+            resolution=dict(top_resolution) if isinstance(top_resolution, dict) else None,
+            purpose=purpose,
+            current_model_id=current_model_id,
+            current_utility=current_utility,
+            candidate_lookup=candidate_lookup,
+        )
         return True, {
             "ok": True,
             "intent": "modelops_recommend",
             "confidence": 1.0,
             "did_work": True,
             "error_kind": None,
-            "message": f"Recommendation details for {provider}:{model_id} ({purpose}).",
-            "next_question": "Do you want a switch plan for this model?",
+            "message": f"Recommendation details for {provider}:{model_id} ({purpose}). This is advisory only; nothing changes automatically.",
+            "next_question": "Do you want an explicit switch plan for this model?",
             "actions": [],
             "errors": [],
             "trace_id": trace_id,
             "envelope": {
                 "purpose": purpose,
-                "selected": recommendation_to_dict(selected_recommendation),
-                "top_for_purpose": recommendation_to_dict(top_for_purpose),
+                # Compatibility summaries only. Canonical recommendation truth lives in recommendation_roles.
+                "selected": selected_recommendation,
+                "top_for_purpose": top_for_purpose,
+                "recommendation_roles": recommendation_roles,
+                "policy": dict(policy),
                 "warnings": warnings,
             },
         }
@@ -13544,27 +19005,12 @@ class AgentRuntime:
                 "envelope": {},
             }
 
-        defaults_before = self.get_defaults()
-        available, warnings, _provider_counts = self._collect_modelops_available_models()
-        available_ids = {f"{row.provider}:{row.model_id}" for row in available}
         canonical_model = f"{provider}:{model_id}"
-        operations: list[dict[str, Any]] = []
-        if provider == "ollama" and canonical_model not in available_ids:
-            operations.append(
-                {
-                    "id": "pull_model",
-                    "action": "modelops.pull_ollama_model",
-                    "params": {"model": model_id},
-                }
-            )
-        operations.append(
-            {
-                "id": "set_default_model",
-                "action": "modelops.set_default_model",
-                "params": {"default_provider": provider, "default_model": canonical_model},
-            }
+        switch_action = (
+            "runtime.configure_local_chat_model"
+            if provider == "ollama"
+            else "runtime.set_confirmed_chat_model_target"
         )
-
         if not confirm:
             return True, {
                 "ok": True,
@@ -13580,68 +19026,61 @@ class AgentRuntime:
                 "envelope": {
                     "purpose": purpose,
                     "target": {"provider": provider, "model_id": model_id},
-                    "plan_steps": operations,
-                    "warnings": warnings,
+                    "plan_steps": [
+                        {
+                            "id": "set_default_model",
+                            "action": switch_action,
+                            "params": {"model_id": canonical_model},
+                        }
+                    ],
+                    "warnings": [],
                 },
             }
 
-        execution_results: list[dict[str, Any]] = []
-        for operation in operations:
-            ok, body = self.modelops_execute(
-                {
-                    "action": operation.get("action"),
-                    "params": operation.get("params"),
-                    "confirm": True,
-                    "dry_run": False,
-                    "actor": "modelops_advisor",
-                }
-            )
-            execution_results.append(
-                {
-                    "id": operation.get("id"),
-                    "action": operation.get("action"),
-                    "ok": bool(ok),
-                    "body": body if isinstance(body, dict) else {},
-                }
-            )
-            if not ok:
-                message = str((body if isinstance(body, dict) else {}).get("error") or "Model switch failed.")
-                return False, {
-                    "ok": False,
-                    "intent": "modelops_switch",
-                    "confidence": 0.0,
-                    "did_work": False,
-                    "error_kind": classify_error_kind(payload={"ok": False, "error": message}),
-                    "message": message,
-                    "next_question": None,
-                    "actions": [],
-                    "errors": ["switch_failed"],
-                    "trace_id": trace_id,
-                    "envelope": {
-                        "purpose": purpose,
-                        "target": {"provider": provider, "model_id": model_id},
-                        "execution": execution_results,
-                        "rollback": {
-                            "default_provider": defaults_before.get("default_provider"),
-                            "default_model": defaults_before.get("default_model"),
-                        },
-                    },
-                }
+        if provider == "ollama":
+            ok, body = self.configure_local_chat_model(canonical_model)
+        else:
+            ok, body = self.set_confirmed_chat_model_target(canonical_model, provider_id=provider)
+        message = str((body if isinstance(body, dict) else {}).get("message") or "Model switch failed.")
+        if not ok:
+            failure_error_kind = str(
+                (body if isinstance(body, dict) else {}).get("error_kind")
+                or (body if isinstance(body, dict) else {}).get("error")
+                or classify_error_kind(payload={"ok": False, "error": message})
+            ).strip() or "switch_failed"
+            return False, {
+                "ok": False,
+                "intent": "modelops_switch",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": failure_error_kind,
+                "message": message,
+                "next_question": None,
+                "actions": [],
+                "errors": [failure_error_kind],
+                "trace_id": trace_id,
+                "envelope": {
+                    "purpose": purpose,
+                    "target": {"provider": provider, "model_id": model_id},
+                    "execution": [
+                        {
+                            "id": "set_default_model",
+                            "action": switch_action,
+                            "ok": False,
+                            "body": body if isinstance(body, dict) else {},
+                        }
+                    ],
+                },
+            }
 
-        rollback_payload = {
-            "action": "modelops.set_default_model",
-            "params": {
-                "default_provider": defaults_before.get("default_provider"),
-                "default_model": defaults_before.get("default_model"),
-            },
-            "confirm": True,
-        }
+        applied_model = str((body if isinstance(body, dict) else {}).get("model_id") or canonical_model).strip() or canonical_model
+        applied_provider = str((body if isinstance(body, dict) else {}).get("provider") or provider).strip().lower() or provider
         self._record_memory_event(
-            text=f"Switched default model to {canonical_model} for {purpose}.",
+            text=f"Switched default model to {applied_model} for {purpose}.",
             tags={
                 "project": "personal-agent",
                 "topic": "modelops",
-                "provider": provider,
+                "provider": applied_provider,
                 "purpose": purpose,
             },
             source_kind="api",
@@ -13653,7 +19092,7 @@ class AgentRuntime:
             "confidence": 1.0,
             "did_work": True,
             "error_kind": None,
-            "message": f"Switched to {canonical_model} for {purpose}.",
+            "message": f"Switched to {applied_model} for {purpose}.",
             "next_question": None,
             "actions": [],
             "errors": [],
@@ -13661,9 +19100,15 @@ class AgentRuntime:
             "envelope": {
                 "purpose": purpose,
                 "target": {"provider": provider, "model_id": model_id},
-                "execution": execution_results,
-                "rollback_suggestion": rollback_payload,
-                "warnings": warnings,
+                "execution": [
+                    {
+                        "id": "set_default_model",
+                        "action": switch_action,
+                        "ok": True,
+                        "body": body if isinstance(body, dict) else {},
+                    }
+                ],
+                "warnings": [],
             },
         }
 
@@ -13671,6 +19116,7 @@ class AgentRuntime:
         return (
             "<!doctype html>"
             "<html><head><meta charset='utf-8'><meta name='personal-agent-webui' content='1'>"
+            f"{self._webui_build_metadata_html()}"
             "<title>Personal Agent Web UI (Dev)</title></head>"
             "<body style='font-family: sans-serif; padding: 2rem;'>"
             "<h1>Personal Agent Web UI (Dev Mode)</h1>"
@@ -13683,6 +19129,7 @@ class AgentRuntime:
         return (
             "<!doctype html>"
             "<html><head><meta charset='utf-8'><meta name='personal-agent-webui' content='1'>"
+            f"{self._webui_build_metadata_html()}"
             "<title>Personal Agent Web UI</title></head>"
             "<body style='font-family: sans-serif; padding: 2rem;'>"
             "<h1>Personal Agent Web UI</h1>"
@@ -13691,6 +19138,30 @@ class AgentRuntime:
             "<pre>./scripts/build_webui.sh</pre>"
             "</body></html>"
         )
+
+    def _webui_build_metadata_html(self) -> str:
+        payload = {
+            "version": str(self.version or "unknown"),
+            "version_source": str(self.version_source or "unknown"),
+            "git_commit": str(self.git_commit or "unknown"),
+        }
+        version_value = html.escape(payload["version"], quote=True)
+        source_value = html.escape(payload["version_source"], quote=True)
+        commit_value = html.escape(payload["git_commit"], quote=True)
+        return (
+            f"<meta name='personal-agent-version' content='{version_value}'>"
+            f"<meta name='personal-agent-version-source' content='{source_value}'>"
+            f"<meta name='personal-agent-git-commit' content='{commit_value}'>"
+            f"<script>window.__PERSONAL_AGENT_BUILD__={json.dumps(payload, ensure_ascii=True, sort_keys=True)};</script>"
+        )
+
+    def inject_webui_build_metadata(self, html_text: str) -> str:
+        if "personal-agent-version" in html_text:
+            return html_text
+        snippet = self._webui_build_metadata_html()
+        if "</head>" in html_text:
+            return html_text.replace("</head>", f"{snippet}</head>", 1)
+        return f"{snippet}{html_text}"
 
     def resolve_webui_file(self, request_path: str) -> tuple[Path, str] | None:
         clean_path = (request_path or "/").split("?", 1)[0].split("#", 1)[0]
@@ -13727,16 +19198,41 @@ class APIServerHandler(BaseHTTPRequestHandler):
         _ = format
         _ = args
 
+    def _write_response_body(self, body: bytes) -> bool:
+        try:
+            self.wfile.write(body)
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError) as exc:
+            runtime = getattr(self, "runtime", None)
+            config = getattr(runtime, "config", None)
+            log_path = getattr(config, "log_path", None)
+            log_event(
+                log_path,
+                "http.response.disconnected",
+                {
+                    "path": str(getattr(self, "path", "") or "").strip() or None,
+                    "error": exc.__class__.__name__,
+                },
+            )
+            return False
+
     def _send_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
         self.send_response(status)
+        self.close_connection = True
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            return
+        self._write_response_body(body)
 
     def _send_bytes(
         self,
@@ -13747,12 +19243,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
         cache_control: str | None = None,
     ) -> None:
         self.send_response(status)
+        self.close_connection = True
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Connection", "close")
         if cache_control:
             self.send_header("Cache-Control", cache_control)
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.end_headers()
+            self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            return
+        self._write_response_body(body)
 
     def _read_json(self) -> dict[str, Any]:
         self._last_json_error = None
@@ -13805,26 +19307,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _extract_user_text_for_low_confidence(payload: dict[str, Any]) -> str:
-        body = payload if isinstance(payload, dict) else {}
-        for key in ("text", "message", "content", "input", "query"):
-            raw = body.get(key)
-            if not isinstance(raw, str):
-                continue
-            value = raw.strip()
-            if value:
-                return value
-        raw_messages = body.get("messages")
-        if isinstance(raw_messages, list):
-            for row in reversed(raw_messages):
-                if not isinstance(row, dict):
-                    continue
-                role = str(row.get("role") or "").strip().lower() or "user"
-                if role != "user":
-                    continue
-                value = APIServerHandler._message_content_text(row.get("content"))
-                if value:
-                    return value
-        return ""
+        return AgentRuntime._extract_primary_user_text(payload)
 
     @staticmethod
     def _has_explicit_user_message(payload: dict[str, Any]) -> bool:
@@ -13841,6 +19324,20 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if APIServerHandler._message_content_text(row.get("content")):
                 return True
         return False
+
+    @staticmethod
+    def _has_conversation_history(payload: dict[str, Any]) -> bool:
+        body = payload if isinstance(payload, dict) else {}
+        raw_messages = body.get("messages")
+        if not isinstance(raw_messages, list):
+            return False
+        normalized_rows = [
+            row for row in raw_messages
+            if isinstance(row, dict) and APIServerHandler._message_content_text(row.get("content"))
+        ]
+        if len(normalized_rows) > 1:
+            return True
+        return any(str(row.get("role") or "").strip().lower() == "assistant" for row in normalized_rows)
 
     @staticmethod
     def _extract_recent_context_for_thread_integrity(payload: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -13865,6 +19362,88 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 last_assistant_message = normalized
         last_user_message = user_messages[-2] if len(user_messages) >= 2 else None
         return last_user_message, last_assistant_message
+
+    @staticmethod
+    def _looks_like_short_factual_query(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        tokens = normalized.rstrip("?").split()
+        if len(tokens) > 8:
+            return False
+        return bool(
+            normalized.endswith("?")
+            or any(
+                normalized.startswith(prefix)
+                for prefix in (
+                    "what ",
+                    "what's ",
+                    "whats ",
+                    "which ",
+                    "is ",
+                    "are ",
+                    "can ",
+                    "do ",
+                    "does ",
+                    "how much ",
+                    "how many ",
+                    "when ",
+                    "where ",
+                )
+            )
+        )
+
+    def _suppress_thread_integrity_prompt(
+        self,
+        *,
+        input_text: str | None,
+        runtime_route: dict[str, Any] | None,
+        user_id: str | None = None,
+    ) -> bool:
+        route_name = str((runtime_route or {}).get("route") or "generic_chat").strip().lower() or "generic_chat"
+        if route_name != "generic_chat":
+            return True
+        if self._looks_like_short_factual_query(input_text):
+            return True
+        if user_id:
+            try:
+                orchestrator = self.runtime.orchestrator()
+                hint = (
+                    orchestrator.assistant_followup_hint(user_id, str(input_text or ""))
+                    if callable(getattr(orchestrator, "assistant_followup_hint", None))
+                    else {}
+                )
+                if isinstance(hint, dict) and str(hint.get("kind") or "").strip():
+                    return True
+            except Exception:
+                return False
+        return False
+
+    def _suppress_intent_choice_prompt(
+        self,
+        *,
+        input_text: str | None,
+        runtime_route: dict[str, Any] | None,
+        user_id: str | None = None,
+    ) -> bool:
+        route_name = str((runtime_route or {}).get("route") or "generic_chat").strip().lower() or "generic_chat"
+        if route_name != "generic_chat":
+            return True
+        if self._looks_like_short_factual_query(input_text):
+            return True
+        if user_id:
+            try:
+                orchestrator = self.runtime.orchestrator()
+                hint = (
+                    orchestrator.assistant_followup_hint(user_id, str(input_text or ""))
+                    if callable(getattr(orchestrator, "assistant_followup_hint", None))
+                    else {}
+                )
+                if isinstance(hint, dict) and str(hint.get("kind") or "").strip():
+                    return True
+            except Exception:
+                return False
+        return False
 
     @staticmethod
     def _thread_integrity_payload(
@@ -14032,6 +19611,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
         envelope_payload["next_question"] = text
         updated["envelope"] = envelope_payload
         return updated
+
+    @staticmethod
+    def _binary_clarify_option_labels(message: str) -> tuple[str | None, str | None]:
+        option_a: str | None = None
+        option_b: str | None = None
+        for raw_line in str(message or "").splitlines():
+            line = raw_line.strip()
+            lower = line.lower()
+            if lower.startswith("a)"):
+                option_a = line[2:].strip() or None
+            elif lower.startswith("b)"):
+                option_b = line[2:].strip() or None
+        return option_a, option_b
 
     @staticmethod
     def _intent_assessment_obj(assessment: IntentAssessment) -> dict[str, Any]:
@@ -14208,6 +19800,24 @@ class APIServerHandler(BaseHTTPRequestHandler):
             return True
         return bool(self.runtime._host_is_loopback(host))
 
+    def _reject_non_loopback_operator_surface(self, *, path: str) -> bool:
+        if self._request_is_loopback():
+            return False
+        runtime_payload_builder = getattr(self.runtime, "_operator_only_error_payload", None)
+        payload = (
+            runtime_payload_builder(path=path)
+            if callable(runtime_payload_builder)
+            else {
+                "ok": False,
+                "error": "forbidden",
+                "error_kind": "forbidden",
+                "message": f"{path} is operator-only.",
+                "operator_only": True,
+            }
+        )
+        self._send_json(403, payload)
+        return True
+
     def do_OPTIONS(self) -> None:  # noqa: N802
         try:
             self._send_json(200, {"ok": True})
@@ -14219,6 +19829,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
             path, parts = self._path_parts()
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
+                return
+            if path == "/runtime":
+                self._send_json(200, self.runtime.runtime_snapshot())
+                return
+            if path == "/runtime/history":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                limit_raw = query.get("limit", [20])[0]
+                try:
+                    limit = int(limit_raw)
+                except (TypeError, ValueError):
+                    limit = 20
+                self._send_json(200, self.runtime.runtime_event_history(limit=limit))
                 return
             if path == "/health":
                 self._send_json(200, self.runtime.health())
@@ -14235,6 +19857,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/models":
                 self._send_json(200, self.runtime.models())
                 return
+            if path == "/llm/models/lifecycle":
+                self._send_json(200, self.runtime.model_lifecycle_status())
+                return
             if path == "/config":
                 self._send_json(200, self.runtime.get_config())
                 return
@@ -14249,6 +19874,71 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/packs":
                 self._send_json(200, self.runtime.list_packs())
+                return
+            if path == "/pack_sources":
+                self._send_json(200, self.runtime.list_pack_sources())
+                return
+            if path == "/pack_sources/catalog":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.get_pack_sources_catalog()
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/pack_sources/policy":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.get_pack_sources_policy()
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/packs/compare":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                ok, body = self.runtime.compare_packs(
+                    str(query.get("from", [""])[0] or "").strip(),
+                    str(query.get("to", [""])[0] or "").strip(),
+                )
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[2] == "packs":
+                ok, body = self.runtime.list_pack_source_packs(parts[1])
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.get_pack_source_catalog_entry(parts[2])
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[2] == "policy":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.get_pack_source_policy(parts[1])
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[2] == "search":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                ok, body = self.runtime.search_pack_source(parts[1], str(query.get("q", [""])[0] or "").strip())
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 5 and parts[0] == "pack_sources" and parts[2] == "packs" and parts[4] == "preview":
+                ok, body = self.runtime.preview_pack_source_listing(parts[1], parts[3])
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 2 and parts[0] == "packs":
+                ok, body = self.runtime.get_pack_details(parts[1])
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 3 and parts[0] == "packs" and parts[2] == "history":
+                ok, body = self.runtime.get_pack_history(parts[1])
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/skill-governance/status":
+                self._send_json(200, self.runtime.skill_governance_status())
+                return
+            if path == "/skill-governance/adapters":
+                self._send_json(200, self.runtime.managed_adapters_status())
+                return
+            if path == "/skill-governance/background-tasks":
+                self._send_json(200, self.runtime.background_tasks_status())
                 return
             if path == "/audit":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -14284,15 +19974,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     limit = 20
                 self._send_json(200, self.runtime.llm_registry_snapshots(limit=limit))
                 return
-            if path == "/model_scout/status":
-                self._send_json(200, self.runtime.model_scout_status())
-                return
-            if path == "/model_scout/suggestions":
-                self._send_json(200, self.runtime.model_scout_suggestions())
-                return
-            if path == "/model_scout/sources":
-                self._send_json(200, self.runtime.model_scout_sources())
-                return
             if path == "/model_watch/latest":
                 self._send_json(200, self.runtime.model_watch_latest())
                 return
@@ -14304,6 +19985,32 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/llm/status":
                 self._send_json(200, self.runtime.llm_status())
+                return
+            if path == "/semantic/status":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                self._send_json(200, self.runtime.semantic_memory_report())
+                return
+            if path == "/memory/status":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.memory_status()
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/control_mode":
+                self._send_json(200, self.runtime.llm_control_mode_status())
+                return
+            if path == "/llm/models/policy":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                ok, body = self.runtime.llm_models_policy_list(
+                    {
+                        "model_id": str(query.get("model_id", [""])[0] or "").strip() or None,
+                        "status": str(query.get("status", [""])[0] or "").strip().lower() or None,
+                    }
+                )
+                self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/catalog":
                 query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -14400,6 +20107,13 @@ class APIServerHandler(BaseHTTPRequestHandler):
         content_type = guessed_content_type or "application/octet-stream"
         if content_type.startswith("text/") or content_type in {"application/javascript", "application/json"}:
             content_type = f"{content_type}; charset=utf-8"
+        if file_path.name == "index.html" and "text/html" in content_type:
+            try:
+                html_text = body.decode("utf-8")
+            except UnicodeError:
+                html_text = ""
+            if html_text:
+                body = self.runtime.inject_webui_build_metadata(html_text).encode("utf-8")
 
         self._send_bytes(200, body, content_type=content_type, cache_control=cache_control)
 
@@ -14413,6 +20127,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             intent_assessment: IntentAssessment | None = None
             memory_debug_payload: dict[str, Any] | None = None
+            authoritative_runtime_route = False
             json_error = str(getattr(self, "_last_json_error", "") or "").strip().lower() or None
             if path in {"/chat", "/ask", "/done"} and json_error in {"content_type_not_json", "invalid_json_body"}:
                 trace_id = self._request_trace_id(payload)
@@ -14445,59 +20160,261 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path in {"/chat", "/ask"}:
                 trace_id = self._request_trace_id(payload)
                 input_text = self._extract_user_text_for_low_confidence(payload)
+                chat_user_id = self.runtime._chat_user_id(payload) if path == "/chat" else ""
                 low_confidence = detect_low_confidence(input_text)
                 intent_name = "ask" if path == "/ask" else "chat"
                 norm_text = str(low_confidence.debug.get("norm") or "")
-                handled_choice, choice_payload = self.runtime.consume_clarify_recovery_choice(
+                has_conversation_history = path == "/chat" and self._has_conversation_history(payload)
+                assistant_frontdoor_active = False
+                assistant_frontdoor_generic = False
+                assistant_followup_hint: dict[str, Any] = {}
+                legacy_clarification_allowed = True
+                suppress_thread_integrity_prompt = False
+                suppress_intent_choice_prompt = False
+                runtime_route: dict[str, Any] = {}
+                if path == "/chat":
+                    runtime_route = self.runtime.chat_route_decision(payload, input_text)
+                    route_name = str(runtime_route.get("route") or "generic_chat").strip().lower() or "generic_chat"
+                    authoritative_runtime_route = route_name != "generic_chat"
+                    assistant_frontdoor_active = bool(
+                        self.runtime.should_use_assistant_frontdoor(
+                            text=input_text,
+                            route_decision=runtime_route,
+                            is_user_chat=True,
+                        )
+                    )
+                    assistant_frontdoor_generic = bool(assistant_frontdoor_active and route_name == "generic_chat")
+                    try:
+                        orchestrator = self.runtime.orchestrator()
+                        assistant_followup_hint = (
+                            orchestrator.assistant_followup_hint(chat_user_id, str(input_text or ""))
+                            if callable(getattr(orchestrator, "assistant_followup_hint", None))
+                            else {}
+                        )
+                    except Exception:
+                        assistant_followup_hint = {}
+                    legacy_clarification_allowed = not assistant_frontdoor_active
+                    suppress_thread_integrity_prompt = self._suppress_thread_integrity_prompt(
+                        input_text=input_text,
+                        runtime_route=runtime_route,
+                        user_id=chat_user_id,
+                    )
+                    suppress_intent_choice_prompt = self._suppress_intent_choice_prompt(
+                        input_text=input_text,
+                        runtime_route=runtime_route,
+                        user_id=chat_user_id,
+                    )
+                # Legacy chooser/fix-it compatibility is only allowed off the
+                # assistant-first /chat frontdoor. Thread-choice resume remains
+                # below as an explicit compat continuation path.
+                if legacy_clarification_allowed:
+                    handled_choice, choice_payload = self.runtime.consume_clarify_recovery_choice(
+                        source="api",
+                        text=input_text,
+                    )
+                    if handled_choice and isinstance(choice_payload, dict):
+                        message = str(choice_payload.get("message") or "").strip() or "Done."
+                        response = {
+                            "ok": bool(choice_payload.get("ok", True)),
+                            "intent": str(choice_payload.get("intent") or intent_name),
+                            "confidence": float(choice_payload.get("confidence", 0.0)),
+                            "did_work": bool(choice_payload.get("did_work", False)),
+                            "error_kind": (
+                                str(choice_payload.get("error_kind") or "").strip()
+                                or ("needs_clarification" if not bool(choice_payload.get("did_work", False)) else None)
+                            ),
+                            "message": message,
+                            "next_question": choice_payload.get("next_question"),
+                            "actions": [],
+                            "errors": [
+                                str(item).strip()
+                                for item in (
+                                    choice_payload.get("errors")
+                                    if isinstance(choice_payload.get("errors"), list)
+                                    else []
+                                )
+                                if str(item).strip()
+                            ],
+                            "trace_id": trace_id,
+                        }
+                        response["envelope"] = validate_envelope(
+                            {
+                                "ok": bool(response.get("ok", True)),
+                                "intent": str(response.get("intent") or intent_name),
+                                "confidence": float(response.get("confidence", 0.0)),
+                                "did_work": bool(response.get("did_work", False)),
+                                "error_kind": response.get("error_kind"),
+                                "message": message,
+                                "next_question": response.get("next_question"),
+                                "actions": [],
+                                "errors": (
+                                    list(response.get("errors") or [])
+                                    if isinstance(response.get("errors"), list)
+                                    else []
+                                ),
+                                "trace_id": trace_id,
+                            }
+                        )
+                        self._send_json(200, response)
+                        return
+                    handled_binary_choice, binary_choice_payload = self.runtime.consume_binary_clarification_choice(
+                        source="api",
+                        user_id=chat_user_id,
+                        text=input_text,
+                    )
+                    if handled_binary_choice and isinstance(binary_choice_payload, dict):
+                        message = str(binary_choice_payload.get("message") or "").strip() or "Done."
+                        response = {
+                            "ok": bool(binary_choice_payload.get("ok", True)),
+                            "intent": str(binary_choice_payload.get("intent") or intent_name),
+                            "confidence": float(binary_choice_payload.get("confidence", 0.0)),
+                            "did_work": bool(binary_choice_payload.get("did_work", False)),
+                            "error_kind": (
+                                str(binary_choice_payload.get("error_kind") or "").strip()
+                                or ("needs_clarification" if not bool(binary_choice_payload.get("did_work", False)) else None)
+                            ),
+                            "message": message,
+                            "next_question": binary_choice_payload.get("next_question"),
+                            "actions": [],
+                            "errors": [
+                                str(item).strip()
+                                for item in (
+                                    binary_choice_payload.get("errors")
+                                    if isinstance(binary_choice_payload.get("errors"), list)
+                                    else []
+                                )
+                                if str(item).strip()
+                            ],
+                            "trace_id": trace_id,
+                        }
+                        response["envelope"] = validate_envelope(
+                            {
+                                "ok": bool(response.get("ok", True)),
+                                "intent": str(response.get("intent") or intent_name),
+                                "confidence": float(response.get("confidence", 0.0)),
+                                "did_work": bool(response.get("did_work", False)),
+                                "error_kind": response.get("error_kind"),
+                                "message": message,
+                                "next_question": response.get("next_question"),
+                                "actions": [],
+                                "errors": (
+                                    list(response.get("errors") or [])
+                                    if isinstance(response.get("errors"), list)
+                                    else []
+                                ),
+                                "trace_id": trace_id,
+                            }
+                        )
+                        self._send_json(200, response)
+                        return
+                    handled_intent_choice, intent_choice_payload = self.runtime.consume_intent_choice(
+                        source="api",
+                        user_id=chat_user_id,
+                        text=input_text,
+                    )
+                    if handled_intent_choice and isinstance(intent_choice_payload, dict):
+                        message = str(intent_choice_payload.get("message") or "").strip() or "Done."
+                        response = {
+                            "ok": bool(intent_choice_payload.get("ok", True)),
+                            "intent": str(intent_choice_payload.get("intent") or intent_name),
+                            "confidence": float(intent_choice_payload.get("confidence", 0.0)),
+                            "did_work": bool(intent_choice_payload.get("did_work", False)),
+                            "error_kind": (
+                                str(intent_choice_payload.get("error_kind") or "").strip()
+                                or ("needs_clarification" if not bool(intent_choice_payload.get("did_work", False)) else None)
+                            ),
+                            "message": message,
+                            "next_question": intent_choice_payload.get("next_question"),
+                            "actions": [],
+                            "errors": [
+                                str(item).strip()
+                                for item in (
+                                    intent_choice_payload.get("errors")
+                                    if isinstance(intent_choice_payload.get("errors"), list)
+                                    else []
+                                )
+                                if str(item).strip()
+                            ],
+                            "trace_id": trace_id,
+                        }
+                        response["envelope"] = validate_envelope(
+                            {
+                                "ok": bool(response.get("ok", True)),
+                                "intent": str(response.get("intent") or intent_name),
+                                "confidence": float(response.get("confidence", 0.0)),
+                                "did_work": bool(response.get("did_work", False)),
+                                "error_kind": response.get("error_kind"),
+                                "message": message,
+                                "next_question": response.get("next_question"),
+                                "actions": [],
+                                "errors": (
+                                    list(response.get("errors") or [])
+                                    if isinstance(response.get("errors"), list)
+                                    else []
+                                ),
+                                "trace_id": trace_id,
+                            }
+                        )
+                        self._send_json(200, response)
+                        return
+                handled_thread_choice, thread_choice_payload = self.runtime.consume_thread_integrity_choice(
                     source="api",
+                    user_id=chat_user_id,
                     text=input_text,
                 )
-                if handled_choice and isinstance(choice_payload, dict):
-                    message = str(choice_payload.get("message") or "").strip() or "Done."
-                    response = {
-                        "ok": bool(choice_payload.get("ok", True)),
-                        "intent": str(choice_payload.get("intent") or intent_name),
-                        "confidence": float(choice_payload.get("confidence", 0.0)),
-                        "did_work": bool(choice_payload.get("did_work", False)),
-                        "error_kind": (
-                            str(choice_payload.get("error_kind") or "").strip()
-                            or ("needs_clarification" if not bool(choice_payload.get("did_work", False)) else None)
-                        ),
-                        "message": message,
-                        "next_question": choice_payload.get("next_question"),
-                        "actions": [],
-                        "errors": [
-                            str(item).strip()
-                            for item in (
-                                choice_payload.get("errors")
-                                if isinstance(choice_payload.get("errors"), list)
-                                else []
-                            )
-                            if str(item).strip()
-                        ],
-                        "trace_id": trace_id,
-                    }
-                    response["envelope"] = validate_envelope(
+                if handled_thread_choice and isinstance(thread_choice_payload, dict):
+                    if str(thread_choice_payload.get("kind") or "").strip().lower() == "resume":
+                        resumed_payload = (
+                            dict(thread_choice_payload.get("resume_payload"))
+                            if isinstance(thread_choice_payload.get("resume_payload"), dict)
+                            else {}
+                        )
+                        ok_chat, body = self.runtime.chat(resumed_payload)
+                        self._send_json(200 if ok_chat else 500, body if isinstance(body, dict) else {"ok": False, "error": "thread_resume_failed"})
+                        return
+                    message = str(thread_choice_payload.get("message") or "").strip() or "That thread question expired."
+                    envelope = validate_envelope(
                         {
-                            "ok": bool(response.get("ok", True)),
-                            "intent": str(response.get("intent") or intent_name),
-                            "confidence": float(response.get("confidence", 0.0)),
-                            "did_work": bool(response.get("did_work", False)),
-                            "error_kind": response.get("error_kind"),
+                            "ok": True,
+                            "intent": intent_name,
+                            "confidence": 0.0,
+                            "did_work": False,
+                            "error_kind": "needs_clarification",
                             "message": message,
-                            "next_question": response.get("next_question"),
+                            "next_question": message,
                             "actions": [],
-                            "errors": (
-                                list(response.get("errors") or [])
-                                if isinstance(response.get("errors"), list)
-                                else []
-                            ),
+                            "errors": ["needs_clarification"],
                             "trace_id": trace_id,
                         }
                     )
-                    self._send_json(200, response)
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "intent": intent_name,
+                            "confidence": 0.0,
+                            "did_work": False,
+                            "error_kind": "needs_clarification",
+                            "message": message,
+                            "next_question": message,
+                            "actions": [],
+                            "errors": ["needs_clarification"],
+                            "trace_id": trace_id,
+                            "envelope": envelope,
+                        },
+                    )
                     return
-                if low_confidence.is_low_confidence and not self._has_explicit_user_message(payload):
+                if assistant_frontdoor_active and chat_user_id:
+                    self.runtime.clear_chat_clarification_prompts(
+                        source="api",
+                        user_id=chat_user_id,
+                    )
+                if (
+                    low_confidence.is_low_confidence
+                    and not self._has_explicit_user_message(payload)
+                    and not (assistant_frontdoor_generic and str(input_text or "").strip())
+                    and not (path == "/chat" and isinstance(assistant_followup_hint, dict) and str(assistant_followup_hint.get("kind") or "").strip())
+                ):
                     clarification_payload = self._clarification_payload(
                         intent=intent_name,
                         trace_id=trace_id,
@@ -14517,85 +20434,86 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         clarification_payload,
                     )
                     return
-                last_user_text_norm, last_assistant_text_norm = self._extract_recent_context_for_thread_integrity(payload)
-                thread_integrity = detect_thread_drift(
-                    user_text_raw=input_text,
-                    user_text_norm=norm_text,
-                    intent=intent_name,
-                    last_user_text_norm=last_user_text_norm,
-                    last_assistant_text_norm=last_assistant_text_norm,
-                )
-                if thread_integrity.is_thread_drift:
-                    self._send_json(
-                        200,
-                        self._thread_integrity_payload(
-                            intent=intent_name,
-                            trace_id=trace_id,
-                            user_text_norm=norm_text,
-                            drift_reason=thread_integrity.reason,
-                            thread_debug=thread_integrity.debug,
-                        ),
-                    )
-                    return
-                ambiguity = classify_ambiguity(input_text)
-                if ambiguity.ambiguous:
-                    availability = self.runtime.llm_availability_state()
-                    if bool(availability.get("available", False)):
-                        clarify_message = build_clarify_message(input_text)
+                if (
+                    legacy_clarification_allowed
+                    and not authoritative_runtime_route
+                    and not assistant_frontdoor_generic
+                    and not suppress_intent_choice_prompt
+                    and not has_conversation_history
+                ):
+                    ambiguity = classify_ambiguity(input_text)
+                    if ambiguity.ambiguous:
+                        availability = self.runtime.llm_availability_state()
+                        if bool(availability.get("available", False)):
+                            clarify_message = build_clarify_message(input_text)
+                            if path == "/chat" and chat_user_id:
+                                option_a_label, option_b_label = self._binary_clarify_option_labels(clarify_message)
+                                self.runtime.set_binary_clarification_prompt(
+                                    source="api",
+                                    user_id=chat_user_id,
+                                    question=clarify_message,
+                                    option_a_label=option_a_label or "A",
+                                    option_b_label=option_b_label or "B",
+                                )
+                            self._send_json(
+                                200,
+                                self._ambiguity_payload(
+                                    intent=intent_name,
+                                    trace_id=trace_id,
+                                    mode="clarify",
+                                    message=clarify_message,
+                                    reason=ambiguity.reason,
+                                ),
+                            )
+                            return
+                        reason = str(availability.get("reason") or "llm_unavailable").strip().lower()
+                        self.runtime.set_clarify_recovery_prompt(source="api", reason=reason)
+                        suggest_message = build_suggest_message(availability_reason=reason)
                         self._send_json(
                             200,
                             self._ambiguity_payload(
                                 intent=intent_name,
                                 trace_id=trace_id,
-                                mode="clarify",
-                                message=clarify_message,
-                                reason=ambiguity.reason,
+                                mode="suggest",
+                                message=suggest_message,
+                                reason=reason,
                             ),
                         )
                         return
-                    reason = str(availability.get("reason") or "llm_unavailable").strip().lower()
-                    self.runtime.set_clarify_recovery_prompt(source="api", reason=reason)
-                    suggest_message = build_suggest_message(availability_reason=reason)
-                    self._send_json(
-                        200,
-                        self._ambiguity_payload(
-                            intent=intent_name,
-                            trace_id=trace_id,
-                            mode="suggest",
-                            message=suggest_message,
-                            reason=reason,
-                        ),
+                    intent_assessment = assess_intent_deterministic(
+                        user_text_raw=input_text,
+                        user_text_norm=norm_text,
+                        route_intent=intent_name,
+                        context={"low_confidence": False, "thread_integrity": False},
                     )
-                    return
-                intent_assessment = assess_intent_deterministic(
-                    user_text_raw=input_text,
-                    user_text_norm=norm_text,
-                    route_intent=intent_name,
-                    context={"low_confidence": False, "thread_integrity": False},
-                )
-                if bool(self.runtime.config.intent_llm_rerank_enabled):
-                    reranked_candidates = rerank_intents_with_llm(
-                        candidates=list(intent_assessment.candidates),
-                        user_text=norm_text,
-                        runtime=self.runtime,
-                    )
-                    intent_assessment = rebuild_assessment_from_candidates(
-                        candidates=reranked_candidates,
-                        debug={
-                            **dict(intent_assessment.debug),
-                            "reranked": True,
-                        },
-                    )
-                if intent_assessment.decision == "clarify":
-                    self._send_json(
-                        200,
-                        self._intent_ambiguity_payload(
-                            intent=intent_name,
-                            trace_id=trace_id,
-                            assessment=intent_assessment,
-                        ),
-                    )
-                    return
+                    if bool(self.runtime.config.intent_llm_rerank_enabled):
+                        reranked_candidates = rerank_intents_with_llm(
+                            candidates=list(intent_assessment.candidates),
+                            user_text=norm_text,
+                            runtime=self.runtime,
+                        )
+                        intent_assessment = rebuild_assessment_from_candidates(
+                            candidates=reranked_candidates,
+                            debug={
+                                **dict(intent_assessment.debug),
+                                "reranked": True,
+                            },
+                        )
+                    if intent_assessment.decision == "clarify":
+                        if path == "/chat":
+                            self.runtime.set_intent_choice_prompt(
+                                source="api",
+                                user_id=chat_user_id,
+                            )
+                        self._send_json(
+                            200,
+                            self._intent_ambiguity_payload(
+                                intent=intent_name,
+                                trace_id=trace_id,
+                                assessment=intent_assessment,
+                            ),
+                        )
+                        return
             if path in {"/ask", "/done"}:
                 command = path
                 prompt_text = (
@@ -14652,34 +20570,34 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
             if path == "/chat":
                 trace_id = self._request_trace_id(payload)
-                # Keep memory selection at the HTTP boundary only because the /chat
-                # envelope exposes selection/debug details to the caller. Chat
-                # execution consumes only the prebuilt context text via canonical
-                # preflight; it does not re-run retrieval policy inside AgentRuntime.chat().
-                memory_context_payload = self.runtime.build_memory_context_for_payload(
-                    payload,
-                    intent=str(original_path).lstrip("/") or "chat",
-                    trace_id=trace_id,
-                )
-                if isinstance(memory_context_payload, dict):
-                    selected_ids_raw = memory_context_payload.get("selected_ids")
-                    if not isinstance(selected_ids_raw, list):
-                        selected_ids_raw = []
-                    levels_raw = memory_context_payload.get("levels")
-                    if not isinstance(levels_raw, dict):
-                        levels_raw = {}
-                    debug_raw = memory_context_payload.get("debug")
-                    if not isinstance(debug_raw, dict):
-                        debug_raw = {}
-                    memory_debug_payload = {
-                        "selected_ids": [str(item) for item in selected_ids_raw],
-                        "levels": dict(levels_raw),
-                        "debug": dict(debug_raw),
-                    }
-                    context_text = str(memory_context_payload.get("merged_context_text") or "").strip()
-                    if context_text:
-                        payload = dict(payload)
-                        payload["memory_context_text"] = context_text
+                # Deterministic runtime/setup routes do not need memory retrieval.
+                # Keep selection at the HTTP boundary only for ordinary chat where
+                # the caller still expects memory debug details.
+                if not authoritative_runtime_route:
+                    memory_context_payload = self.runtime.build_memory_context_for_payload(
+                        payload,
+                        intent=str(original_path).lstrip("/") or "chat",
+                        trace_id=trace_id,
+                    )
+                    if isinstance(memory_context_payload, dict):
+                        selected_ids_raw = memory_context_payload.get("selected_ids")
+                        if not isinstance(selected_ids_raw, list):
+                            selected_ids_raw = []
+                        levels_raw = memory_context_payload.get("levels")
+                        if not isinstance(levels_raw, dict):
+                            levels_raw = {}
+                        debug_raw = memory_context_payload.get("debug")
+                        if not isinstance(debug_raw, dict):
+                            debug_raw = {}
+                        memory_debug_payload = {
+                            "selected_ids": [str(item) for item in selected_ids_raw],
+                            "levels": dict(levels_raw),
+                            "debug": dict(debug_raw),
+                        }
+                        context_text = str(memory_context_payload.get("merged_context_text") or "").strip()
+                        if context_text:
+                            payload = dict(payload)
+                            payload["memory_context_text"] = context_text
                 chat_result: tuple[bool, dict[str, Any]] | None = None
 
                 def _run_chat() -> dict[str, Any]:
@@ -14864,16 +20782,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/defaults/rollback":
-                if not self._request_is_loopback():
-                    self._send_json(
-                        403,
-                        {
-                            "ok": False,
-                            "error": "forbidden",
-                            "error_kind": "forbidden",
-                            "message": "This endpoint is restricted to loopback requests.",
-                        },
-                    )
+                if self._reject_non_loopback_operator_surface(path=path):
                     return
                 ok, body = self.runtime.rollback_defaults()
                 self._send_json(200 if ok else 400, body)
@@ -14886,14 +20795,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
             if path == "/telegram/test":
                 ok, body = self.runtime.test_telegram()
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/model_scout/run":
-                ok, body = self.runtime.run_model_scout()
-                self._send_json(200 if ok else 400, body)
-                return
-            if path == "/llm/scout/run":
-                ok, body = self.runtime.run_model_scout()
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/model_watch/run":
@@ -15112,8 +21013,29 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.llm_models_check(payload)
                 self._send_json(200 if ok else 400, body)
                 return
+            if path == "/pack_sources/catalog":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.create_pack_source_catalog(
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
             if path == "/llm/models/recommend":
                 ok, body = self.runtime.llm_models_recommend(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/models/policy":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.llm_models_policy(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/models/proposals":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.llm_models_proposals(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/models/switch":
@@ -15121,7 +21043,26 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/fixit":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
                 ok, body = self.runtime.llm_fixit(payload)
+                body = self.runtime._annotate_operator_surface_payload(
+                    body,
+                    surface="/llm/fixit",
+                    canonical_assistant_surface=(
+                        "runtime_truth.current_chat_target_status+runtime_truth.providers_status+"
+                        "runtime_truth.model_readiness_status+runtime_truth.model_controller_policy_status"
+                    ),
+                    operator_only=True,
+                    compat_only=True,
+                    separate_contract="operator_recovery_wizard",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/llm/control_mode":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.llm_control_mode_set(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/llm/health/run":
@@ -15185,6 +21126,27 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.llm_notifications_prune(payload)
                 self._send_json(200 if ok else 400, body)
                 return
+            if path == "/semantic/documents/ingest":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.semantic_memory_ingest(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/semantic/rebuild":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.semantic_memory_rebuild(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/memory/reset":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.memory_reset(
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
             if path == "/llm/support/remediate/plan":
                 ok, body = self.runtime.llm_support_remediate_plan(payload)
                 self._send_json(200 if ok else 400, body)
@@ -15237,16 +21199,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
 
             if len(parts) == 3 and parts[0] == "providers" and parts[1] == "ollama" and parts[2] == "pull":
-                if not self._request_is_loopback():
-                    self._send_json(
-                        403,
-                        {
-                            "ok": False,
-                            "error": "forbidden",
-                            "error_kind": "forbidden",
-                            "message": "This endpoint is restricted to loopback requests.",
-                        },
-                    )
+                if self._reject_non_loopback_operator_surface(path=path):
                     return
                 ok, body = self.runtime.pull_ollama_model(payload)
                 self._send_json(200 if ok else 400, body)
@@ -15257,27 +21210,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.refresh_models({"provider": provider_id, **payload})
                 self._send_json(200 if ok else 400, body)
                 return
-            if (
-                len(parts) == 4
-                and parts[0] == "model_scout"
-                and parts[1] == "suggestions"
-                and parts[3] == "dismiss"
-            ):
-                suggestion_id = parts[2]
-                ok, body = self.runtime.dismiss_model_scout_suggestion(suggestion_id)
-                self._send_json(200 if ok else 400, body)
-                return
-            if (
-                len(parts) == 4
-                and parts[0] == "model_scout"
-                and parts[1] == "suggestions"
-                and parts[3] == "mark_installed"
-            ):
-                suggestion_id = parts[2]
-                ok, body = self.runtime.mark_model_scout_installed(suggestion_id)
-                self._send_json(200 if ok else 400, body)
-                return
-
             self._send_json(404, {"ok": False, "error": "not_found"})
         except Exception as exc:
             self._handle_internal_error("POST", exc)
@@ -15286,6 +21218,38 @@ class APIServerHandler(BaseHTTPRequestHandler):
         try:
             path, parts = self._path_parts()
             payload = self._read_json()
+
+            if path == "/pack_sources/policy":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.update_pack_sources_policy(
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[2] == "policy":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.update_pack_source_policy(
+                    parts[1],
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
+
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.update_pack_source_catalog(
+                    parts[2],
+                    payload,
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
 
             if path == "/config":
                 ok, body = self.runtime.update_config(payload)
@@ -15314,6 +21278,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
+            if len(parts) == 3 and parts[0] == "pack_sources" and parts[1] == "catalog":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.delete_pack_source_catalog(
+                    parts[2],
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
             if len(parts) == 2 and parts[0] == "providers":
                 provider_id = parts[1]
                 ok, body = self.runtime.delete_provider(provider_id)
@@ -15350,7 +21323,7 @@ def run_server(host: str, port: int) -> None:
     server_started = time.monotonic()
     _startup_stdout_event("server.start.begin", host=host, port=int(port))
     runtime = build_runtime(defer_bootstrap_warmup=True)
-    resolved_git_commit = str(runtime.git_commit or "").strip() or runtime._read_git_commit() or "unknown"
+    resolved_git_commit = str(runtime.git_commit or "").strip() or "unknown"
     _startup_stdout_event(
         "server.start.code_identity",
         module_path=str(Path(__file__).resolve()),

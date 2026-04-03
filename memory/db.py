@@ -96,6 +96,7 @@ class MemoryDB:
         self._ensure_reminder_columns()
         self._ensure_preference_columns()
         self._ensure_user_prefs_table()
+        self._ensure_user_pref_columns()
         self._ensure_thread_prefs_table()
         self._ensure_thread_anchors_table()
         self._ensure_thread_labels_table()
@@ -312,10 +313,17 @@ class MemoryDB:
             CREATE TABLE IF NOT EXISTS user_prefs (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                revision INTEGER NOT NULL DEFAULT 0
             )
             """
         )
+
+    def _ensure_user_pref_columns(self) -> None:
+        cur = self._conn.execute("PRAGMA table_info(user_prefs)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "revision" not in cols:
+            self._conn.execute("ALTER TABLE user_prefs ADD COLUMN revision INTEGER NOT NULL DEFAULT 0")
 
     def _ensure_thread_prefs_table(self) -> None:
         self._conn.execute(
@@ -480,14 +488,64 @@ class MemoryDB:
         now = self._now_iso()
         self._conn.execute(
             """
-            INSERT INTO user_prefs (key, value, updated_at) VALUES (?, ?, ?)
+            INSERT INTO user_prefs (key, value, updated_at, revision) VALUES (?, ?, ?, 1)
             ON CONFLICT(key) DO UPDATE SET
                 value = excluded.value,
-                updated_at = excluded.updated_at
+                updated_at = excluded.updated_at,
+                revision = user_prefs.revision + 1
             """,
             (key, value, now),
         )
         self._commit_if_needed()
+
+    def set_user_pref_if_revision(self, key: str, value: str, expected_revision: int) -> dict[str, Any]:
+        normalized_revision = max(int(expected_revision), 0)
+        now = self._now_iso()
+        cur = self._conn.execute(
+            """
+            UPDATE user_prefs
+            SET value = ?, updated_at = ?, revision = revision + 1
+            WHERE key = ? AND revision = ?
+            """,
+            (value, now, key, normalized_revision),
+        )
+        if int(cur.rowcount) > 0:
+            self._commit_if_needed()
+            row = self.get_user_pref_entry(key)
+            return {
+                "ok": True,
+                "conflict": False,
+                "revision": int((row or {}).get("revision") or normalized_revision + 1),
+                "updated_at": (row or {}).get("updated_at"),
+            }
+        if normalized_revision == 0:
+            try:
+                self._conn.execute(
+                    "INSERT INTO user_prefs (key, value, updated_at, revision) VALUES (?, ?, ?, 1)",
+                    (key, value, now),
+                )
+            except sqlite3.IntegrityError:
+                row = self.get_user_pref_entry(key)
+                return {
+                    "ok": False,
+                    "conflict": True,
+                    "revision": int((row or {}).get("revision") or 0) if row else None,
+                    "updated_at": (row or {}).get("updated_at"),
+                }
+            self._commit_if_needed()
+            return {
+                "ok": True,
+                "conflict": False,
+                "revision": 1,
+                "updated_at": now,
+            }
+        row = self.get_user_pref_entry(key)
+        return {
+            "ok": False,
+            "conflict": True,
+            "revision": int((row or {}).get("revision") or 0) if row else None,
+            "updated_at": (row or {}).get("updated_at"),
+        }
 
     def get_user_pref(self, key: str) -> str | None:
         cur = self._conn.execute(
@@ -497,9 +555,28 @@ class MemoryDB:
         row = cur.fetchone()
         return row["value"] if row else None
 
+    def get_user_pref_entry(self, key: str) -> dict[str, Any] | None:
+        cur = self._conn.execute(
+            "SELECT key, value, updated_at, revision FROM user_prefs WHERE key = ?",
+            (key,),
+        )
+        row = cur.fetchone()
+        return dict(row) if row else None
+
     def list_user_prefs(self) -> list[dict[str, Any]]:
-        cur = self._conn.execute("SELECT key, value, updated_at FROM user_prefs ORDER BY key ASC")
+        cur = self._conn.execute("SELECT key, value, updated_at, revision FROM user_prefs ORDER BY key ASC")
         return [dict(row) for row in cur.fetchall()]
+
+    def delete_user_pref(self, key: str) -> bool:
+        cur = self._conn.execute("DELETE FROM user_prefs WHERE key = ?", (key,))
+        self._commit_if_needed()
+        return int(cur.rowcount) > 0
+
+    def delete_user_prefs_by_prefix(self, prefix: str) -> int:
+        normalized = str(prefix or "")
+        cur = self._conn.execute("DELETE FROM user_prefs WHERE key LIKE ?", (f"{normalized}%",))
+        self._commit_if_needed()
+        return int(cur.rowcount)
 
     def clear_user_prefs(self) -> None:
         self._conn.execute("DELETE FROM user_prefs")

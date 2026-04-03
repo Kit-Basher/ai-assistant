@@ -2,10 +2,11 @@
 
 ## Source Priority
 
+- Product-facing overview: `README.md`
 - Product/runtime contract: `PRODUCT_RUNTIME_SPEC.md`
 - Current branch reality: `PROJECT_STATUS.md`
-- Mission/behavior contract: `docs/design/CANONICAL_HANDOFF_V3.md`
-- Setup/API/UI details: `README.md`
+- Install/recovery path: `docs/operator/SETUP.md`
+- Doctor/diagnostics path: `docs/operator/doctor.md`
 
 ## Runtime Modes
 
@@ -24,6 +25,24 @@
 User service:
 - `systemctl --user status personal-agent-api.service`
 - `systemctl --user restart personal-agent-api.service`
+- `systemctl --user enable --now personal-agent-api.service`
+- reboot resilience: `loginctl enable-linger "$USER"`
+
+Canonical local paths:
+- code: `~/personal-agent`
+- state/logs/secrets: `~/.local/share/personal-agent`
+- config/policy: `~/.config/personal-agent`
+- service unit symlink: `~/.config/systemd/user/personal-agent-api.service`
+
+Legacy `install.sh`, `uninstall.sh`, and `doctor.sh` are retired and fail
+closed. Use `docs/operator/SETUP.md` for install, upgrade, recovery, and
+uninstall.
+
+Canonical support/debug path:
+
+- inspect: `python -m agent doctor`
+- collect/share redacted diagnostics: `python -m agent doctor --collect-diagnostics`
+- repair safe local state: `python -m agent doctor --fix`
 
 ## Quick Diagnostics
 
@@ -39,16 +58,28 @@ User service:
 - Doctor checks:
   - `.venv/bin/python -m agent doctor`
   - JSON: `.venv/bin/python -m agent doctor --json`
+  - collect diagnostics: `.venv/bin/python -m agent doctor --collect-diagnostics`
   - safe local fixes: `.venv/bin/python -m agent doctor --fix`
   - strict mode (legacy timer checks): `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1 .venv/bin/python scripts/doctor.py`
 - Test sweep:
-  - `. .venv/bin/activate && pytest -q`
+  - canonical release gate: `python scripts/release_smoke.py`
+  - heavier follow-up validation: `python scripts/release_validation_extended.py`
 
 Runtime mode contract (all surfaces):
 - `READY`: normal operation.
 - `BOOTSTRAP_REQUIRED`: setup path.
 - `DEGRADED`: partial operation with one next action.
 - `FAILED`: deterministic error block with trace id.
+
+Canonical runtime status surfaces:
+- `GET /health`
+  - fast service/runtime lifecycle view
+- `GET /ready`
+  - richest readiness / recovery view
+- `GET /runtime`
+  - operator runtime snapshot
+- All three now surface explicit startup/warmup/degraded state instead of
+  leaving early-runtime behavior implicit.
 
 Onboarding/recovery contract:
 - first-run command: `python -m agent setup`
@@ -64,8 +95,25 @@ Tool execution contract:
 Continuity contract:
 - Thread/pending summary and follow-up resolution live in `agent/memory_runtime.py`.
 - Use `python -m agent memory` or Telegram `what are we doing?` for current resumable state.
+- `GET /memory/status` is the canonical loopback-only inspect surface for continuity memory, optional `memory_v2`, and optional semantic memory.
+- Continuity persistence is full-record replace with per-key optimistic concurrency control at the storage write boundary.
+- Stale cross-runtime writes are rejected instead of silently overwriting newer state.
+- There is no merge-on-write and no cross-key atomic snapshot.
+- After a rejected stale write, the runtime must reload before retrying.
+- `/memory/status` shows current continuity revisions, last attempted write outcome, last successful write outcome, and last stale-write conflict metadata.
+- Conflict metadata is observable; it is not auto-resolved.
+- `POST /memory/reset` is the canonical loopback-only erase surface. It previews first and only clears selected components after explicit confirmation.
+- If continuity memory is corrupt or unavailable, `/memory` reports that degradation plainly instead of silently healing it.
 - Follow-up actions never cross threads silently; ambiguous follow-ups are rejected.
 - Meta summary actions (`memory/setup/status/doctor/resume`) do not overwrite last meaningful action.
+
+External pack safety:
+- discovery is read-only and untrusted
+- preview never installs
+- fetch always goes to quarantine before classification, scanning, normalization,
+  and review
+- portable text skills are the only safe-import class supported today
+- foreign code/plugin packs are blocked from execution
 
 ## Timers
 
@@ -91,7 +139,9 @@ Telegram `setup/status` readiness semantics are sourced from the same runtime tr
 
 ## Logs
 
-- Default app log: `logs/agent.jsonl`
+- Default app log: `~/.local/share/personal-agent/agent.jsonl`
+- Older repo-local `logs/agent.jsonl` installs are auto-detected until
+  `python -m agent doctor --fix` copies them into the canonical state dir.
 - Supported runtime model: entrypoints bootstrap stdout logging automatically, so journald/stdout should always show runtime logs unless an explicit external logging config replaces it.
 - System journal:
   - user scope: `journalctl --user -u personal-agent-api.service -n 200 --no-pager`
