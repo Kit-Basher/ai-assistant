@@ -5012,6 +5012,223 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("openrouter:vendor/tiny-gemma", response.text.lower())
         self.assertNotIn("runtime state", response.text.lower())
 
+    def test_fuzzy_discovery_prompts_route_to_discovery_and_stay_user_facing(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+
+        def _discovery_payload(query: str | None = None, filters: dict[str, object] | None = None) -> dict[str, object]:
+            _ = filters
+            q = str(query or "").strip().lower()
+            if "gemma" in q:
+                models = [
+                    {
+                        "id": "huggingface:google/gemma-2-2b-it",
+                        "provider": "huggingface",
+                        "source": "huggingface",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.91,
+                        "match_band": "likely",
+                    },
+                    {
+                        "id": "ollama:qwen3.5:4b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.84,
+                        "match_band": "related",
+                    },
+                    {
+                        "id": "openrouter:google/gemma-3-4b-it",
+                        "provider": "openrouter",
+                        "source": "openrouter",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.8,
+                        "match_band": "likely",
+                    }
+                ]
+                message = "Grouped discovery results."
+            elif "vision" in q:
+                models = [
+                    {
+                        "id": "ollama:llava:7b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "capabilities": ["vision"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.88,
+                        "match_band": "likely",
+                    },
+                    {
+                        "id": "ollama:qwen3.5:4b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.83,
+                        "match_band": "related",
+                    },
+                    {
+                        "id": "huggingface:moondream2",
+                        "provider": "huggingface",
+                        "source": "huggingface",
+                        "capabilities": ["vision"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.78,
+                        "match_band": "likely",
+                    }
+                ]
+                message = "Grouped discovery results."
+            elif "newer than" in q or "qwen2.5 3b" in q:
+                models = [
+                    {
+                        "id": "ollama:qwen3.5:4b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.84,
+                        "match_band": "likely",
+                    },
+                    {
+                        "id": "openrouter:vendor/qwen2.5-7b",
+                        "provider": "openrouter",
+                        "source": "openrouter",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.86,
+                        "match_band": "related",
+                    },
+                    {
+                        "id": "openrouter:vendor/qwen2.5-3b-instruct",
+                        "provider": "openrouter",
+                        "source": "openrouter",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.75,
+                        "match_band": "likely",
+                    }
+                ]
+                message = "Grouped discovery results."
+            else:
+                models = [
+                    {
+                        "id": "ollama:qwen2.5-coder:7b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.9,
+                        "match_band": "likely",
+                    },
+                    {
+                        "id": "ollama:deepseek-r1:7b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.82,
+                        "match_band": "related",
+                    },
+                    {
+                        "id": "openrouter:vendor/coder-pro",
+                        "provider": "openrouter",
+                        "source": "openrouter",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.88,
+                        "match_band": "likely",
+                    }
+                ]
+                message = "Grouped discovery results."
+            return {
+                "ok": True,
+                "query": query,
+                "message": message,
+                "models": models,
+                "sources": [
+                    {"source": "huggingface", "enabled": True, "queried": True, "ok": True, "count": 1},
+                    {"source": "openrouter", "enabled": True, "queried": True, "ok": True, "count": 1},
+                    {"source": "ollama", "enabled": True, "queried": True, "ok": True, "count": 1},
+                    {"source": "external_snapshots", "enabled": True, "queried": True, "ok": True, "count": 0},
+                ],
+                "debug": {"ranking": {"broadening_used": True}},
+            }
+
+        runtime_truth.model_discovery_query = _discovery_payload  # type: ignore[assignment]
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+        )
+
+        prompts = {
+            "there is a brand new tiny Gemma 4 model, can you look into it?": {
+                "marker": "gemma",
+                "intro": "For Gemma",
+            },
+            "what's a small local coding model?": {
+                "marker": "coding",
+                "intro": "For a small local coding model",
+            },
+            "is there a lightweight vision model I could run locally?": {
+                "marker": "vision",
+                "intro": "For a lightweight local vision model",
+                "preferred": "ollama:llava:7b",
+            },
+            "what's newer than qwen2.5 3b for chat?": {
+                "marker": "qwen",
+                "intro": "For a newer chat option",
+                "exclude": "qwen2.5:3b-instruct",
+                "preferred": "qwen3.5:4b",
+            },
+        }
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            for prompt, expected in prompts.items():
+                with self.subTest(prompt=prompt):
+                    response = orchestrator.handle_message(prompt, "user1")
+                    payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+                    first_line = str(response.text or "").splitlines()[0] if str(response.text or "").strip() else ""
+                    self.assertEqual("action_tool", response.data["route"])
+                    self.assertEqual(["model_discovery_manager"], response.data["used_tools"])
+                    self.assertEqual("external_discovery", payload.get("mode"))
+                    self.assertTrue(first_line.startswith(expected["intro"]), msg=prompt)
+                    self.assertNotIn("found ", first_line.lower(), msg=prompt)
+                    self.assertNotIn("model(s)", first_line.lower(), msg=prompt)
+                    self.assertIn(expected["marker"], response.text.lower())
+                    if "exclude" in expected:
+                        self.assertNotIn(expected["exclude"], first_line.lower(), msg=prompt)
+                    if prompt.startswith("what's a small local coding model") or prompt.startswith("is there a lightweight vision model"):
+                        self.assertNotIn("openrouter:", first_line.lower(), msg=prompt)
+                    self.assertIn("Likely family match:", response.text)
+                    self.assertIn("Practical local fit:", response.text)
+                    if prompt.startswith("is there a lightweight vision model"):
+                        self.assertIn("llava:7b", first_line.lower(), msg=prompt)
+                    if prompt.startswith("what's newer than"):
+                        self.assertIn("qwen3.5:4b", first_line.lower(), msg=prompt)
+                        self.assertNotIn("qwen2.5:3b-instruct", response.text.lower(), msg=prompt)
+                    self.assertIn("Sources checked:", response.text)
+                    self.assertNotIn("no models matched", response.text.lower())
+                    self.assertNotIn("chat llm is unavailable", response.text.lower())
+                    self.assertNotIn("runtime state", response.text.lower())
+
     def test_ram_vram_prompt_renders_hardware_first_line_before_secondary_stats(self) -> None:
         orchestrator = self._orchestrator()
         with patch("agent.orchestrator.can_run_nl_skill", return_value=(True, None)), patch(

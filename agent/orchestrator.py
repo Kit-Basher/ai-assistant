@@ -3249,6 +3249,210 @@ class Orchestrator:
         return f"{title}: {model_id} ({mode_label} does not allow it right now)."
 
     @staticmethod
+    def _model_scout_discovery_query_focus(query: str | None) -> dict[str, str]:
+        normalized = normalize_setup_text(query).replace("-", " ")
+        if not normalized:
+            return {
+                "summary": "The closest matches look like",
+                "basis": "I compared family fit, locality, and task fit.",
+            }
+        if any(phrase in normalized for phrase in ("newer than", "newest than", "more recent than", "better than", "latest")) and any(
+            token in normalized for token in ("chat", "coding", "code", "vision", "reasoning", "local")
+        ):
+            return {
+                "summary": "For a newer chat option, the closest upgrades look like",
+                "basis": "I compared family freshness, size, and chat fit against the model you named.",
+            }
+        if any(token in normalized for token in ("vision", "image")):
+            return {
+                "summary": "For a lightweight local vision model, the closest fits look like",
+                "basis": "I compared vision capability, local practicality, and size.",
+            }
+        if any(token in normalized for token in ("coding", "code", "coder")):
+            return {
+                "summary": "For a small local coding model, the closest local fits look like",
+                "basis": "I compared coding fit, local practicality, and size.",
+            }
+        if "gemma" in normalized:
+            return {
+                "summary": "For Gemma, the closest family matches look like",
+                "basis": "I compared Gemma-family fit, recency, and size.",
+            }
+        if any(token in normalized for token in ("local", "ollama")):
+            return {
+                "summary": "For a local model, the closest local fits look like",
+                "basis": "I compared local practicality and task fit.",
+            }
+        return {
+            "summary": "The closest matches look like",
+            "basis": "I compared family fit, locality, and task fit.",
+        }
+
+    @staticmethod
+    def _model_scout_discovery_group_lines(
+        *,
+        query: str | None,
+        models: list[dict[str, Any]],
+    ) -> tuple[str | None, list[str]]:
+        normalized = normalize_setup_text(query).replace("-", " ").lower()
+        comparative = any(token in normalized for token in ("newer than", "newest than", "more recent than", "better than", "latest"))
+        local_preferred = any(token in normalized for token in ("local", "ollama"))
+        baseline_tokens: list[str] = []
+        baseline_signature = ""
+        if comparative:
+            match = re.search(
+                r"\b(?:newer than|newest than|more recent than|better than|latest)\s+(?P<baseline>.+?)(?:\s+for\s+|\s+than\s+|$)",
+                normalized,
+            )
+            if match is not None:
+                baseline = str(match.group("baseline") or "").strip().lower()
+                baseline_tokens = [token for token in re.findall(r"[a-z0-9]+(?:\.[a-z0-9]+)?", baseline) if token]
+                baseline_signature = re.sub(r"[^a-z0-9]+", "", baseline)
+        likely_family: list[str] = []
+        practical_local: list[str] = []
+        related: list[str] = []
+        row_lookup: dict[str, dict[str, Any]] = {}
+        query_terms = [
+            term
+            for term in ("gemma", "qwen", "llama", "mistral", "deepseek", "coder", "vision", "chat")
+            if term in normalized
+        ]
+        for row in models:
+            model_id = str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+            if not model_id:
+                continue
+            model_text = model_id.lower()
+            model_signature = re.sub(r"[^a-z0-9]+", "", model_text)
+            match_band = str(row.get("match_band") or "").strip().lower()
+            row_lookup[model_id] = row
+            if comparative and baseline_signature and baseline_signature in model_signature:
+                continue
+            if comparative and baseline_tokens and all(token in model_text for token in baseline_tokens):
+                continue
+            if any(term in model_text for term in query_terms) and model_id not in likely_family:
+                likely_family.append(model_id)
+            if bool(row.get("local", False)) and model_id not in practical_local:
+                practical_local.append(model_id)
+            if model_id not in likely_family and model_id not in practical_local and match_band in {"likely", "related"} and model_id not in related:
+                related.append(model_id)
+            if len(likely_family) >= 3 and len(practical_local) >= 3 and len(related) >= 3:
+                break
+
+        if not likely_family and models:
+            likely_family = [
+                str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+                for row in models[:3]
+                if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+            ]
+        if not practical_local:
+            practical_local = [
+                str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+                for row in models
+                if isinstance(row, dict) and bool(row.get("local", False))
+            ][:3]
+        if not related:
+            related = [
+                str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+                for row in models[:5]
+                if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+            ]
+
+        def _size_b(model_id: str) -> float | None:
+            match = re.search(r"(?<!\w)(\d+(?:\.\d+)?)\s*[bB](?!\w)", model_id)
+            if match is None:
+                return None
+            try:
+                return float(match.group(1))
+            except (TypeError, ValueError):
+                return None
+
+        def _task_hint() -> str | None:
+            if any(token in normalized for token in ("vision", "image")):
+                return "vision"
+            if any(token in normalized for token in ("coding", "code", "coder")):
+                return "coding"
+            if "chat" in normalized:
+                return "chat"
+            if any(token in normalized for token in ("reasoning", "research", "analysis", "analyze", "deeper")):
+                return "reasoning"
+            return None
+
+        def _score(model_id: str, *, local: bool = False) -> tuple[int, float, str]:
+            model_text = model_id.lower()
+            row = row_lookup.get(model_id) if isinstance(row_lookup.get(model_id), dict) else {}
+            capability_text = " ".join(
+                str(item).strip().lower()
+                for item in (row.get("capabilities") if isinstance(row, dict) and isinstance(row.get("capabilities"), list) else [])
+                if str(item).strip()
+            )
+            task_hint = _task_hint()
+            score = 0
+            if comparative:
+                model_signature = re.sub(r"[^a-z0-9]+", "", model_text)
+                if baseline_signature and baseline_signature in model_signature:
+                    score -= 1000
+                elif baseline_tokens and all(token in model_text for token in baseline_tokens):
+                    score -= 1000
+                if any(token in model_text for token in ("qwen3", "gemma3", "llama3.2", "llama-3.2", "mistral-nemo")):
+                    score += 80
+                if any(token in model_text for token in ("qwen3.5", "gemma-3", "llava", "moondream", "deepseek")):
+                    score += 50
+                if any(token in model_text for token in ("qwen2.5", "gemma-2", "llama3", "mistral")):
+                    score += 20
+            if local_preferred:
+                score += 70 if local else -20
+                if task_hint == "vision" and (any(token in capability_text for token in ("vision", "image", "multimodal")) or any(token in model_text for token in ("vision", "llava", "moondream"))):
+                    score += 55
+                elif task_hint == "coding" and (any(token in capability_text for token in ("code", "coding", "coder")) or any(token in model_text for token in ("coder", "code", "qwen2.5-coder", "codellama"))):
+                    score += 45
+                elif task_hint == "chat" and ("chat" in capability_text or "chat" in model_text):
+                    score += 20
+                elif task_hint == "reasoning" and (any(token in capability_text for token in ("reasoning", "analysis")) or any(token in model_text for token in ("r1", "reasoning", "analysis", "deepseek"))):
+                    score += 35
+                size_b = _size_b(model_id)
+                if size_b is not None:
+                    if size_b <= 4.0:
+                        score += 20
+                    elif size_b <= 8.0:
+                        score += 10
+                    else:
+                        score -= 10
+            else:
+                size_b = _size_b(model_id)
+                if size_b is not None and size_b <= 8.0:
+                    score += 5
+            return (-score, _size_b(model_id) or 999.0, model_text)
+
+        likely_family.sort(key=lambda item: _score(item, local=local_preferred))
+        practical_local.sort(key=lambda item: _score(item, local=True))
+        related.sort(key=lambda item: _score(item, local=bool(item in practical_local)))
+
+        lead_candidate = None
+        if comparative and likely_family:
+            lead_candidate = likely_family[0]
+        elif local_preferred and practical_local:
+            lead_candidate = practical_local[0]
+        elif likely_family:
+            lead_candidate = likely_family[0]
+        elif practical_local:
+            lead_candidate = practical_local[0]
+        elif related:
+            lead_candidate = related[0]
+
+        lines: list[str] = []
+        if local_preferred and practical_local:
+            lines.append(f"Practical local fit: {', '.join(practical_local[:3])}.")
+        if likely_family:
+            lines.append(f"Likely family match: {', '.join(likely_family[:3])}.")
+        if not local_preferred and practical_local:
+            lines.append(f"Practical local fit: {', '.join(practical_local[:3])}.")
+        if related:
+            related_filtered = [item for item in related[:3] if item not in likely_family[:3] and item not in practical_local[:3]]
+            if related_filtered:
+                lines.append(f"Related alternative: {', '.join(related_filtered)}.")
+        return lead_candidate, lines
+
+    @staticmethod
     def _model_scout_acquisition_line(
         candidate: dict[str, Any] | None,
         *,
@@ -3911,23 +4115,50 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="action_tool",
                 reason="runtime_truth_service_unavailable",
-            )
+        )
         discovery = truth.model_discovery_query(query=query, filters={})
         models = [dict(row) for row in (discovery.get("models") if isinstance(discovery.get("models"), list) else []) if isinstance(row, dict)]
         sources = [dict(row) for row in (discovery.get("sources") if isinstance(discovery.get("sources"), list) else []) if isinstance(row, dict)]
-        preview = ", ".join(
-            str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
-            for row in models[:3]
-            if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+        focus = self._model_scout_discovery_query_focus(query)
+        lead_candidate, candidate_lines = self._model_scout_discovery_group_lines(query=query, models=models)
+        debug = discovery.get("debug") if isinstance(discovery, dict) else {}
+        ranking = debug.get("ranking") if isinstance(debug, dict) and isinstance(debug.get("ranking"), dict) else {}
+        broadening_used = bool(ranking.get("broadening_used", False))
+        broadening_variants = [
+            str(item).strip()
+            for item in (ranking.get("broadening_variants") if isinstance(ranking.get("broadening_variants"), list) else [])
+            if str(item).strip()
+        ]
+        source_names = [
+            str(row.get("source") or "").strip()
+            for row in sources
+            if str(row.get("source") or "").strip()
+        ]
+        source_summary = ", ".join(sorted(dict.fromkeys(source_names)))
+        source_errors = debug.get("source_errors") if isinstance(debug, dict) and isinstance(debug.get("source_errors"), dict) else {}
+        source_error_text = ", ".join(
+            f"{source}: {detail.get('error') or detail.get('error_kind') or 'unknown_error'}"
+            for source, detail in source_errors.items()
+            if isinstance(detail, dict)
         )
-        message = str(discovery.get("message") or "").strip()
-        if models and not message:
-            if query:
-                message = f"I found {len(models)} model(s) matching '{query}'."
-            else:
-                message = f"I found {len(models)} candidate model(s)."
-        if models and preview and preview not in message:
-            message = f"{message} Top matches: {preview}."
+        first_line = focus["summary"]
+        if lead_candidate:
+            first_line = f"{first_line} {lead_candidate}"
+        elif query:
+            first_line = f"{first_line} {str(query).strip()}."
+        else:
+            first_line = f"{first_line}."
+        message_lines = [first_line]
+        message_lines.extend(candidate_lines)
+        if focus.get("basis"):
+            message_lines.append(str(focus["basis"]))
+        if broadening_used and broadening_variants:
+            message_lines.append(f"Broadened search: {', '.join(broadening_variants[:4])}.")
+        if source_summary:
+            message_lines.append(f"Sources checked: {source_summary} ({len(source_names)} queried).")
+        if source_error_text:
+            message_lines.append(f"Source errors: {source_error_text}.")
+        message = "\n".join(line for line in message_lines if str(line).strip())
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
