@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from unittest import mock
 
 import io
 import zipfile
+from pathlib import Path
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
@@ -258,6 +260,60 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["quarantine_path"])
         self.assertTrue(install_payload["pack"]["normalized_path"])
         self.assertIn("I fetched a snapshot", install_payload["review"]["summary"])
+
+    def test_external_pack_is_usable_through_chat_and_removed_cleanly(self) -> None:
+        fixture_root = Path(__file__).parent / "fixtures" / "reference_packs" / "anthropic_clean_skill" / "source"
+        source_dir = Path(self.tmpdir.name) / "clean_source"
+        shutil.copytree(fixture_root, source_dir)
+
+        install_handler = _HandlerForTest(self.runtime, "/packs/install", {"source": str(source_dir)})
+        install_handler.do_POST()
+        install_payload = json.loads(install_handler.body.decode("utf-8"))
+        self.assertEqual(200, install_handler.status_code)
+        self.assertTrue(install_payload["ok"])
+
+        canonical_id = str(install_payload["pack"]["canonical_id"] or "").strip()
+        self.assertTrue(canonical_id)
+        normalized_path = Path(str(install_payload["pack"]["normalized_path"] or "").strip())
+        quarantine_path = Path(str(install_payload["pack"]["quarantine_path"] or "").strip())
+        self.assertTrue(normalized_path.is_dir())
+        self.assertTrue(quarantine_path.exists())
+
+        fake_llm = mock.Mock()
+        fake_llm.enabled.return_value = True
+        fake_llm.chat.return_value = {"ok": True, "text": "LLM reply", "provider": "ollama", "model": "llama3"}
+        self.runtime.router = fake_llm
+        orchestrator = self.runtime.orchestrator()
+        orchestrator.llm_client = fake_llm
+        with mock.patch.object(orchestrator, "_llm_chat_available", return_value=True):
+            response = orchestrator.handle_message("What is Repo Helper for?", "user-a")
+        self.assertIn("safe imported text pack", response.text.lower())
+        self.assertIn("repo helper", response.text.lower())
+
+        orchestrator._pack_store._conn.execute("BEGIN")
+        orchestrator._pack_store.list_external_packs()
+
+        delete_handler = _HandlerForTest(self.runtime, f"/packs/{canonical_id}")
+        delete_handler.do_DELETE()
+        delete_payload = json.loads(delete_handler.body.decode("utf-8"))
+        self.assertEqual(200, delete_handler.status_code)
+        self.assertTrue(delete_payload["ok"])
+
+        list_handler = _HandlerForTest(self.runtime, "/packs")
+        list_handler.do_GET()
+        list_payload = json.loads(list_handler.body.decode("utf-8"))
+        pack_ids = [row["pack_id"] for row in list_payload["packs"]]
+        self.assertNotIn(canonical_id, pack_ids)
+        self.assertFalse(normalized_path.exists())
+        self.assertFalse(quarantine_path.exists())
+
+        with mock.patch.object(orchestrator, "_llm_chat_available", return_value=True):
+            after_removal = orchestrator.handle_message("What is Repo Helper for?", "user-a")
+        self.assertIsNotNone(orchestrator._external_pack_knowledge_response("user-a", "What is Repo Helper for?"))
+        self.assertIn("removed", after_removal.text.lower())
+        self.assertIn("reinstall", after_removal.text.lower())
+        self.assertNotIn("safe imported text pack", after_removal.text.lower())
+        self.assertNotIn("example prompts:", after_removal.text.lower())
         self.assertIn("quarantined and normalized", install_payload["message"].lower())
         self.assertIn("metadata/normalization.json", install_payload["why"])
 

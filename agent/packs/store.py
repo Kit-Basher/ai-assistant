@@ -5,11 +5,15 @@ import os
 import sqlite3
 import threading
 import time
+import shutil
 from pathlib import Path
 from typing import Any
 
 from agent.packs.diffing import build_pack_diff, build_pack_version_ref
 from agent.packs.manifest import PackManifest, compute_permissions_hash, normalize_permissions
+
+
+_EXTERNAL_PACK_REMOVAL_CACHE: dict[str, set[str]] = {}
 
 
 class PackStore:
@@ -74,6 +78,27 @@ class PackStore:
             )
             self._conn.execute(
                 """
+            CREATE TABLE IF NOT EXISTS external_pack_removals (
+                    pack_id TEXT PRIMARY KEY,
+                    canonical_json TEXT NOT NULL,
+                    risk_json TEXT NOT NULL,
+                    review_json TEXT NOT NULL,
+                    skill_text TEXT,
+                    normalized_path TEXT,
+                    quarantine_path TEXT,
+                    removed_by TEXT,
+                    reason TEXT,
+                    removed_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                )
+                """
+            )
+            try:
+                self._conn.execute("ALTER TABLE external_pack_removals ADD COLUMN skill_text TEXT")
+            except sqlite3.OperationalError:
+                pass
+            self._conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS external_pack_registry_cache (
                     source_id TEXT PRIMARY KEY,
                     source_json TEXT NOT NULL,
@@ -119,6 +144,29 @@ class PackStore:
         if isinstance(value, tuple):
             return list(value)
         return []
+
+    def _refresh_read_snapshot(self) -> None:
+        try:
+            self._conn.rollback()
+        except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError):
+            pass
+
+    def _external_pack_removal_cache(self) -> set[str]:
+        return _EXTERNAL_PACK_REMOVAL_CACHE.setdefault(self.db_path, set())
+
+    def _mark_external_pack_removed(self, pack_id: str) -> None:
+        normalized = str(pack_id or "").strip()
+        if normalized:
+            self._external_pack_removal_cache().add(normalized)
+
+    def _forget_external_pack_removed(self, pack_id: str) -> None:
+        normalized = str(pack_id or "").strip()
+        if normalized:
+            self._external_pack_removal_cache().discard(normalized)
+
+    def _is_external_pack_removed(self, pack_id: str) -> bool:
+        normalized = str(pack_id or "").strip()
+        return bool(normalized and normalized in self._external_pack_removal_cache())
 
     @staticmethod
     def _external_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -180,6 +228,7 @@ class PackStore:
 
     def get_pack(self, pack_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._refresh_read_snapshot()
             cur = self._conn.execute(
                 """
                 SELECT pack_id, version, trust, manifest_path, permissions_json, permissions_hash,
@@ -199,6 +248,7 @@ class PackStore:
 
     def list_runtime_packs(self) -> list[dict[str, Any]]:
         with self._lock:
+            self._refresh_read_snapshot()
             cur = self._conn.execute(
                 """
                 SELECT pack_id, version, trust, manifest_path, permissions_json, permissions_hash,
@@ -217,6 +267,7 @@ class PackStore:
 
     def list_external_packs(self) -> list[dict[str, Any]]:
         with self._lock:
+            self._refresh_read_snapshot()
             cur = self._conn.execute(
                 """
                 SELECT pack_id, pack_name, version, pack_type, classification, status,
@@ -230,12 +281,15 @@ class PackStore:
         out: list[dict[str, Any]] = []
         for row in rows:
             parsed = self._external_row_to_dict(row)
-            if parsed is not None:
+            if parsed is not None and not self._is_external_pack_removed(str(parsed.get("pack_id") or "")):
                 out.append(parsed)
         return out
 
     def get_external_pack(self, pack_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._refresh_read_snapshot()
+            if self._is_external_pack_removed(pack_id):
+                return None
             cur = self._conn.execute(
                 """
                 SELECT pack_id, pack_name, version, pack_type, classification, status,
@@ -249,8 +303,69 @@ class PackStore:
             row = cur.fetchone()
         return self._external_row_to_dict(row)
 
+    def get_external_pack_removal(self, pack_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            self._refresh_read_snapshot()
+            cur = self._conn.execute(
+                """
+                SELECT pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path,
+                       quarantine_path, removed_by, reason, removed_at, updated_at
+                FROM external_pack_removals
+                WHERE pack_id = ?
+                """,
+                (pack_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        try:
+            canonical = json.loads(str(row["canonical_json"] or "{}"))
+        except json.JSONDecodeError:
+            canonical = {}
+        try:
+            risk = json.loads(str(row["risk_json"] or "{}"))
+        except json.JSONDecodeError:
+            risk = {}
+        try:
+            review = json.loads(str(row["review_json"] or "{}"))
+        except json.JSONDecodeError:
+            review = {}
+        return {
+            "pack_id": str(row["pack_id"]),
+            "canonical_pack": canonical if isinstance(canonical, dict) else {},
+            "risk_report": risk if isinstance(risk, dict) else {},
+            "review_envelope": review if isinstance(review, dict) else {},
+            "skill_text": str(row["skill_text"] or "").strip() or None,
+            "normalized_path": str(row["normalized_path"] or "").strip() or None,
+            "quarantine_path": str(row["quarantine_path"] or "").strip() or None,
+            "removed_by": str(row["removed_by"] or "").strip() or None,
+            "reason": str(row["reason"] or "").strip() or None,
+            "removed_at": int(row["removed_at"] or 0),
+            "updated_at": int(row["updated_at"] or 0),
+        }
+
+    def list_external_pack_removals(self) -> list[dict[str, Any]]:
+        with self._lock:
+            self._refresh_read_snapshot()
+            cur = self._conn.execute(
+                """
+                SELECT pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path,
+                       quarantine_path, removed_by, reason, removed_at, updated_at
+                FROM external_pack_removals
+                ORDER BY removed_at ASC, pack_id ASC
+                """
+            )
+            rows = cur.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            parsed = self.get_external_pack_removal(str(row["pack_id"]))
+            if parsed is not None:
+                out.append(parsed)
+        return out
+
     def _get_external_pack_diff_row(self, from_pack_id: str, to_pack_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._refresh_read_snapshot()
             cur = self._conn.execute(
                 """
                 SELECT from_pack_id, to_pack_id, diff_json, created_at, updated_at
@@ -276,6 +391,7 @@ class PackStore:
 
     def get_registry_source_cache(self, source_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._refresh_read_snapshot()
             cur = self._conn.execute(
                 """
                 SELECT source_id, source_json, listings_json, fetched_at, expires_at, updated_at
@@ -303,6 +419,31 @@ class PackStore:
             "expires_at": int(row["expires_at"] or 0),
             "updated_at": int(row["updated_at"] or 0),
         }
+
+    @staticmethod
+    def _path_within_root(path_value: str | None, root: Path) -> Path | None:
+        normalized = str(path_value or "").strip()
+        if not normalized:
+            return None
+        try:
+            resolved = Path(normalized).expanduser().resolve()
+        except OSError:
+            return None
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            return None
+        return resolved
+
+    @staticmethod
+    def _remove_tree(path: Path | None) -> None:
+        if path is None:
+            return
+        try:
+            if path.exists():
+                shutil.rmtree(path, ignore_errors=True)
+        except OSError:
+            pass
 
     def set_registry_source_cache(
         self,
@@ -341,6 +482,87 @@ class PackStore:
         cached = self.get_registry_source_cache(source_id)
         assert cached is not None
         return cached
+
+    def remove_external_pack(
+        self,
+        pack_id: str,
+        *,
+        removed_by: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.get_external_pack(pack_id)
+        if current is None:
+            return None
+        now_ts = self._now_ts()
+        canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
+        risk_report = current.get("risk_report") if isinstance(current.get("risk_report"), dict) else {}
+        review_envelope = current.get("review_envelope") if isinstance(current.get("review_envelope"), dict) else {}
+        normalized_root = Path(self.external_storage_root())
+        normalized_path = self._path_within_root(current.get("normalized_path"), normalized_root)
+        quarantine_path = self._path_within_root(current.get("quarantine_path"), normalized_root)
+        skill_text = ""
+        if normalized_path is not None:
+            try:
+                skill_text = (normalized_path / "SKILL.md").read_text(encoding="utf-8")
+            except OSError:
+                skill_text = ""
+        removal_payload = {
+            "pack_id": str(current.get("pack_id") or pack_id),
+            "canonical_json": canonical_pack,
+            "risk_json": risk_report,
+            "review_json": review_envelope,
+            "skill_text": skill_text or None,
+            "normalized_path": str(current.get("normalized_path") or "").strip() or None,
+            "quarantine_path": str(current.get("quarantine_path") or "").strip() or None,
+            "removed_by": str(removed_by or "").strip() or "loopback_operator",
+            "reason": str(reason or "").strip() or "removed_by_operator",
+            "removed_at": now_ts,
+            "updated_at": now_ts,
+        }
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO external_pack_removals (
+                    pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path, quarantine_path,
+                    removed_by, reason, removed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(pack_id) DO UPDATE SET
+                    canonical_json = excluded.canonical_json,
+                    risk_json = excluded.risk_json,
+                    review_json = excluded.review_json,
+                    skill_text = excluded.skill_text,
+                    normalized_path = excluded.normalized_path,
+                    quarantine_path = excluded.quarantine_path,
+                    removed_by = excluded.removed_by,
+                    reason = excluded.reason,
+                    removed_at = excluded.removed_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    removal_payload["pack_id"],
+                    json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                    json.dumps(risk_report, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                    json.dumps(review_envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                    skill_text or None,
+                    removal_payload["normalized_path"],
+                    removal_payload["quarantine_path"],
+                    removal_payload["removed_by"],
+                    removal_payload["reason"],
+                    removal_payload["removed_at"],
+                    removal_payload["updated_at"],
+                ),
+            )
+            self._conn.execute("DELETE FROM external_pack_diffs WHERE from_pack_id = ? OR to_pack_id = ?", (pack_id, pack_id))
+            self._conn.execute("DELETE FROM external_packs WHERE pack_id = ?", (pack_id,))
+            self._conn.commit()
+        self._mark_external_pack_removed(pack_id)
+        self._remove_tree(normalized_path)
+        self._remove_tree(quarantine_path)
+        return {
+            "removed": True,
+            "removal": removal_payload,
+            "pack": current,
+        }
 
     def _store_external_pack_diff(self, from_pack_id: str, to_pack_id: str, diff_payload: dict[str, Any]) -> dict[str, Any]:
         existing = self._get_external_pack_diff_row(from_pack_id, to_pack_id)
@@ -770,6 +992,7 @@ class PackStore:
                 ),
             )
             self._conn.commit()
+        self._forget_external_pack_removed(pack_id)
         updated = self.get_external_pack(pack_id)
         assert updated is not None
         if prior_same_source is not None:

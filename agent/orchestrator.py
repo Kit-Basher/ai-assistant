@@ -15,6 +15,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 import time
 from zoneinfo import ZoneInfo
+from pathlib import Path
 
 from agent.intent_router import route_message
 from agent.intent.low_confidence import detect_low_confidence
@@ -1506,7 +1507,7 @@ class Orchestrator:
         used_memory: bool = False,
         reason: str | None = None,
     ) -> OrchestratorResponse:
-        message = "I couldn't read that from the runtime state."
+        message = "I can't read a clean runtime status from the current state yet."
         return self._runtime_truth_response(
             text=message,
             route=route,
@@ -1996,7 +1997,7 @@ class Orchestrator:
         payload_type = str(payload.get("type") or "").strip().lower()
         remember_setup_flow = route == "setup_flow" and payload_type in {"provider_repair", "provider_repair_options"}
         if route not in {"operational_status", "runtime_status", "provider_status", "model_status"} and not remember_setup_flow and not (
-            route == "action_tool" and payload_type in {"model_scout", "model_controller"}
+            route == "action_tool" and payload_type in {"model_scout", "model_controller", "external_pack_knowledge"}
         ):
             return
         used_tools = [str(item).strip() for item in (response_data.get("used_tools") if isinstance(response_data.get("used_tools"), list) else []) if str(item).strip()]
@@ -4987,6 +4988,9 @@ class Orchestrator:
         if not self._assistant_frontdoor_engaged(text):
             return None
         used_memory = bool(self._current_runtime_setup_state(user_id))
+        external_pack_response = self._external_pack_knowledge_response(user_id, text)
+        if external_pack_response is not None:
+            return external_pack_response
         truth = self._runtime_truth()
         normalized = normalize_setup_text(text).replace("/", " ")
 
@@ -5026,6 +5030,317 @@ class Orchestrator:
                 reason=str(low_confidence.reason or "unclear_input"),
             )
         return None
+
+    @staticmethod
+    def _external_pack_snippet(text: str | None, *, max_chars: int = 260) -> str:
+        cleaned = " ".join(str(text or "").strip().split())
+        if not cleaned:
+            return ""
+        if len(cleaned) <= max_chars:
+            return cleaned
+        cut = cleaned[:max_chars].rsplit(" ", 1)[0].strip()
+        return cut + "..."
+
+    @staticmethod
+    def _external_pack_display_name(value: str | None) -> str:
+        cleaned = " ".join(str(value or "").strip().replace("_", "-").split())
+        if not cleaned:
+            return "Imported pack"
+        if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)+", cleaned):
+            return " ".join(part.capitalize() for part in cleaned.split("-"))
+        return cleaned
+
+    @staticmethod
+    def _external_pack_query_tokens(text: str | None) -> list[str]:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "for",
+            "how",
+            "i",
+            "is",
+            "it",
+            "me",
+            "my",
+            "of",
+            "on",
+            "or",
+            "should",
+            "the",
+            "to",
+            "use",
+            "what",
+            "when",
+            "with",
+            "you",
+        }
+        return [
+            token
+            for token in re.findall(r"[a-z0-9][a-z0-9._-]*", normalized)
+            if token and token not in stopwords
+        ]
+
+    @staticmethod
+    def _external_pack_sections(skill_text: str) -> dict[str, str]:
+        sections: dict[str, list[str]] = {}
+        current: str | None = None
+        for raw_line in str(skill_text or "").splitlines():
+            match = re.match(r"^#{1,3}\s+(?P<title>.+?)\s*$", raw_line.strip())
+            if match is not None:
+                current = str(match.group("title") or "").strip().lower()
+                sections.setdefault(current, [])
+                continue
+            if current is not None:
+                sections.setdefault(current, []).append(raw_line)
+        return {
+            key: " ".join(line.strip() for line in lines if line.strip()).strip()
+            for key, lines in sections.items()
+        }
+
+    def _external_pack_knowledge_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        query_tokens = self._external_pack_query_tokens(text)
+        if not query_tokens:
+            return None
+        normalized_query = normalize_setup_text(text).replace("/", " ")
+        removed_packs = self._pack_store.list_external_pack_removals()
+        removed_best: dict[str, Any] | None = None
+        removed_best_score = 0.0
+        for row in removed_packs:
+            if not isinstance(row, dict):
+                continue
+            review_envelope = row.get("review_envelope") if isinstance(row.get("review_envelope"), dict) else {}
+            canonical_pack = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
+            canonical_source = canonical_pack.get("source") if isinstance(canonical_pack.get("source"), dict) else {}
+            skill_text = str(row.get("skill_text") or "").strip()
+            pack_name_raw = str(
+                review_envelope.get("pack_name")
+                or canonical_pack.get("display_name")
+                or canonical_pack.get("name")
+                or canonical_source.get("display_name")
+                or canonical_source.get("name")
+                or canonical_source.get("title")
+                or canonical_source.get("repo")
+                or ""
+            ).strip()
+            pack_name = self._external_pack_display_name(pack_name_raw)
+            summary = str(
+                canonical_pack.get("capabilities", {}).get("summary")
+                if isinstance(canonical_pack.get("capabilities"), dict)
+                else ""
+            ).strip()
+            sections = self._external_pack_sections(skill_text) if skill_text else {}
+            corpus = " ".join(
+                part
+                for part in (
+                    pack_name,
+                    summary,
+                    sections.get("purpose"),
+                    sections.get("when to use"),
+                    sections.get("inputs"),
+                    sections.get("behavior"),
+                    sections.get("constraints"),
+                    sections.get("response style"),
+                    sections.get("example prompts"),
+                    str(canonical_source.get("display_name") or ""),
+                    str(canonical_source.get("name") or ""),
+                    str(canonical_source.get("title") or ""),
+                    str(canonical_source.get("repo") or ""),
+                    str(canonical_source.get("origin") or ""),
+                    str(row.get("reason") or ""),
+                    str(row.get("removed_by") or ""),
+                )
+                if part
+            ).lower()
+            score = 0.0
+            if pack_name and pack_name.lower() in normalized_query:
+                score += 1.0
+            score += min(0.4, 0.1 * sum(1 for token in query_tokens if token in corpus))
+            if score > removed_best_score:
+                removed_best_score = score
+                removed_best = {
+                    "row": row,
+                    "pack_name": pack_name,
+                    "summary": summary,
+                }
+        if removed_best is not None and removed_best_score >= 0.35:
+            row = removed_best["row"]
+            pack_name = str(removed_best.get("pack_name") or "").strip() or "That pack"
+            summary = str(removed_best.get("summary") or "").strip()
+            lines = [
+                f"{pack_name} was removed, so I can’t use it through chat anymore.",
+            ]
+            if summary:
+                lines.append(f"Removed pack summary: {summary}.")
+            lines.append("Reinstall it if you want to use it again, or ask /packs to see what is still installed.")
+            message = " ".join(lines).strip()
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["external_pack_lookup"],
+                payload={
+                    "type": "external_pack_removed_notice",
+                    "summary": message,
+                    "pack_id": str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None,
+                    "pack_name": pack_name,
+                    "status": "removed",
+                },
+            )
+        packs = self._pack_store.list_external_packs()
+        best: dict[str, Any] | None = None
+        best_score = 0.0
+        for row in packs:
+            if not isinstance(row, dict):
+                continue
+            pack_id = str(row.get("pack_id") or row.get("canonical_id") or "").strip()
+            if pack_id and callable(getattr(self._pack_store, "get_external_pack_removal", None)):
+                try:
+                    if self._pack_store.get_external_pack_removal(pack_id) is not None:
+                        continue
+                except Exception:
+                    pass
+            review_envelope = row.get("review_envelope") if isinstance(row.get("review_envelope"), dict) else {}
+            pack_name_raw = str(
+                review_envelope.get("pack_name")
+                or (row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}).get("display_name")
+                or row.get("name")
+                or ""
+            ).strip()
+            pack_name = self._external_pack_display_name(pack_name_raw)
+            canonical_pack = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
+            summary = str(
+                (canonical_pack.get("capabilities") if isinstance(canonical_pack.get("capabilities"), dict) else {}).get("summary")
+                or row.get("summary")
+                or row.get("review_summary")
+                or ""
+            ).strip()
+            normalized_path = str(row.get("normalized_path") or "").strip()
+            skill_text = ""
+            if normalized_path:
+                try:
+                    skill_path = Path(normalized_path) / "SKILL.md"
+                    skill_text = skill_path.read_text(encoding="utf-8")
+                except OSError:
+                    skill_text = ""
+            sections = self._external_pack_sections(skill_text)
+            corpus = " ".join(
+                part
+                for part in (
+                    pack_name,
+                    summary,
+                    sections.get("purpose"),
+                    sections.get("when to use"),
+                    sections.get("inputs"),
+                    sections.get("behavior"),
+                    sections.get("constraints"),
+                    sections.get("response style"),
+                    sections.get("example prompts"),
+                    str(row.get("classification") or ""),
+                )
+                if part
+            ).lower()
+            if not corpus:
+                continue
+            score = 0.0
+            if pack_name and pack_name.lower() in normalized_query:
+                score += 0.75
+            if summary and any(token in summary.lower() for token in query_tokens):
+                score += 0.18
+            score += min(0.35, 0.08 * sum(1 for token in query_tokens if token in corpus))
+            if str(row.get("status") or "").strip().lower() == "blocked":
+                score -= 0.06
+            if score > best_score:
+                best_score = score
+                best = {
+                    "row": row,
+                    "sections": sections,
+                    "summary": summary,
+                    "score": score,
+                }
+        if best is None or best_score < 0.22:
+            return None
+        row = best["row"]
+        sections = best["sections"] if isinstance(best.get("sections"), dict) else {}
+        review_envelope = row.get("review_envelope") if isinstance(row.get("review_envelope"), dict) else {}
+        pack_name = self._external_pack_display_name(
+            str(
+                review_envelope.get("pack_name")
+                or (row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}).get("display_name")
+                or row.get("name")
+                or ""
+            ).strip()
+        )
+        status = str(row.get("status") or "").strip().lower()
+        summary = str(best.get("summary") or "").strip()
+        purpose = self._external_pack_snippet(sections.get("purpose") or summary or f"{pack_name} is a safe imported text pack.")
+        when_to_use = self._external_pack_snippet(sections.get("when to use"))
+        inputs = self._external_pack_snippet(sections.get("inputs"))
+        behavior = self._external_pack_snippet(sections.get("behavior"))
+        constraints = self._external_pack_snippet(sections.get("constraints"))
+        examples = self._external_pack_snippet(sections.get("example prompts"))
+        lines: list[str] = []
+        if status == "blocked":
+            lines.append(f"{pack_name} is blocked, so I cannot use it through chat.")
+            if summary:
+                lines.append(f"Reason: {summary}.")
+        else:
+            lines.append(f"{pack_name} is a safe imported text pack for {purpose}.")
+            if when_to_use:
+                lines.append(f"Use it when {when_to_use}.")
+            if inputs:
+                lines.append(f"Inputs: {inputs}.")
+            if behavior:
+                lines.append(f"Behavior: {behavior}.")
+            if constraints:
+                lines.append(f"Constraints: {constraints}.")
+            if examples:
+                lines.append(f"Example prompts: {examples}.")
+            if status == "partial_safe_import":
+                lines.append("Some unsafe files were stripped during import.")
+        message = " ".join(lines).strip()
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["external_pack_lookup"],
+            payload={
+                "type": "external_pack_knowledge",
+                "summary": message,
+                "pack_id": str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None,
+                "pack_name": pack_name,
+                "status": status or None,
+            },
+        )
+
+    def forget_external_pack_activation(self, *, pack_id: str | None = None, pack_name: str | None = None) -> int:
+        normalized_pack_id = str(pack_id or "").strip()
+        normalized_pack_name = self._external_pack_display_name(pack_name).lower()
+        if not normalized_pack_id and not normalized_pack_name:
+            return 0
+        removed = 0
+        for user_key, state in list(self._last_interpretable_result.items()):
+            if not isinstance(state, dict):
+                continue
+            payload = state.get("payload") if isinstance(state.get("payload"), dict) else {}
+            if str(payload.get("type") or "").strip().lower() != "external_pack_knowledge":
+                continue
+            payload_pack_id = str(payload.get("pack_id") or "").strip()
+            payload_pack_name = self._external_pack_display_name(str(payload.get("pack_name") or "")).lower()
+            response_text = str(state.get("response_text") or "").strip().lower()
+            if normalized_pack_id and payload_pack_id == normalized_pack_id:
+                self._last_interpretable_result.pop(user_key, None)
+                removed += 1
+                continue
+            if normalized_pack_name and (
+                payload_pack_name == normalized_pack_name or normalized_pack_name in response_text
+            ):
+                self._last_interpretable_result.pop(user_key, None)
+                removed += 1
+        return removed
 
     def _current_runtime_setup_state(self, user_id: str) -> dict[str, Any]:
         state = self._runtime_setup_state.get(user_id)
@@ -5751,7 +6066,7 @@ class Orchestrator:
                 reason="runtime_truth_service_unavailable",
             )
         status_payload = truth.runtime_status(kind)
-        message = str(status_payload.get("summary") or "").strip() or "I couldn't read that from the runtime state."
+        message = str(status_payload.get("summary") or "").strip() or "I can't read a clean runtime status from the current state yet."
         return self._runtime_truth_response(
             text=message,
             route="runtime_status",
@@ -9400,6 +9715,9 @@ class Orchestrator:
         containment_response = self._safe_mode_containment_response(user_id, text)
         if containment_response is not None:
             return containment_response
+        external_pack_response = self._external_pack_knowledge_response(user_id, text)
+        if external_pack_response is not None:
+            return external_pack_response
         unmatched_response = self._assistant_unmatched_input_response(user_id, text)
         if unmatched_response is not None:
             return unmatched_response
@@ -13900,7 +14218,7 @@ class Orchestrator:
 
         report = build_changed_report_from_system_facts(self.db, user_id)
         if report.baseline_created:
-            text = "Baseline created. I'll report changes next time."
+            text = "I have a baseline now. I'll report changes next time."
             return OrchestratorResponse(text, {"baseline_created": True})
 
         lines: list[str] = []

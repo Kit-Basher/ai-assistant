@@ -1734,6 +1734,44 @@ class AgentRuntime:
             "version_count": int(history.get("version_count") or 0),
         }
 
+    def delete_external_pack(self, canonical_id: str, *, changed_by: str | None = None) -> tuple[bool, dict[str, Any]]:
+        removed = self.pack_store.remove_external_pack(
+            canonical_id,
+            removed_by=changed_by,
+            reason="operator_requested_removal",
+        )
+        if removed is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"external pack not found: {canonical_id}",
+                next_question="Use a canonical external pack id returned by /packs or /packs/install.",
+        )
+        pack = removed.get("pack") if isinstance(removed.get("pack"), dict) else {}
+        removal = removed.get("removal") if isinstance(removed.get("removal"), dict) else {}
+        try:
+            orchestrator = self.orchestrator()
+            forget_activation = getattr(orchestrator, "forget_external_pack_activation", None)
+            if callable(forget_activation):
+                forget_activation(
+                    pack_id=str(pack.get("pack_id") or canonical_id).strip() or canonical_id,
+                    pack_name=str(pack.get("name") or "").strip() or None,
+                )
+        except Exception:
+            pass
+        message = compose_actionable_message(
+            what_happened=f"I removed external pack {str(pack.get('name') or canonical_id).strip() or canonical_id}",
+            why="I removed the canonical pack record and cleaned up the installed artifacts.",
+            next_action="Use /packs to confirm it is gone, or reinstall it later if needed.",
+        )
+        return True, {
+            "ok": True,
+            "message": message,
+            "pack": pack,
+            "removal": removal,
+            "next_action": "Use /packs to confirm it is gone, or reinstall it later if needed.",
+        }
+
     def compare_packs(self, from_pack_id: str, to_pack_id: str) -> tuple[bool, dict[str, Any]]:
         if not from_pack_id or not to_pack_id:
             return self._pack_error(
@@ -19408,6 +19446,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
         if user_id:
             try:
                 orchestrator = self.runtime.orchestrator()
+                if callable(getattr(orchestrator, "_external_pack_knowledge_response", None)):
+                    if orchestrator._external_pack_knowledge_response(user_id, str(input_text or "")) is not None:
+                        return True
                 hint = (
                     orchestrator.assistant_followup_hint(user_id, str(input_text or ""))
                     if callable(getattr(orchestrator, "assistant_followup_hint", None))
@@ -19434,6 +19475,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
         if user_id:
             try:
                 orchestrator = self.runtime.orchestrator()
+                if callable(getattr(orchestrator, "_external_pack_knowledge_response", None)):
+                    if orchestrator._external_pack_knowledge_response(user_id, str(input_text or "")) is not None:
+                        return True
                 hint = (
                     orchestrator.assistant_followup_hint(user_id, str(input_text or ""))
                     if callable(getattr(orchestrator, "assistant_followup_hint", None))
@@ -21283,6 +21327,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     return
                 ok, body = self.runtime.delete_pack_source_catalog(
                     parts[2],
+                    changed_by=self._request_client_host() or "loopback_operator",
+                )
+                self._send_json(200 if ok else 400, body)
+                return
+            if len(parts) == 2 and parts[0] == "packs":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.delete_external_pack(
+                    parts[1],
                     changed_by=self._request_client_host() or "loopback_operator",
                 )
                 self._send_json(200 if ok else 400, body)
