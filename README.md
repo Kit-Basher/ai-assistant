@@ -4,6 +4,9 @@ Personal Agent is a local-first AI assistant that answers from real runtime
 state, uses bounded native skills, and previews any mutating action before it
 executes it.
 
+It is exposed through the HTTP API, the browser/web UI served by the API
+server, the CLI, and the optional Telegram adapter.
+
 It can inspect the current model/runtime, recommend better model choices, read
 and search safe parts of the filesystem, run a small set of bounded shell
 operations, safely ingest downloaded text-based skill packs, and carry out
@@ -60,6 +63,9 @@ explicit confirmation step.
 
 ### Discovery / Proposals / Policy
 - Discovery output is non-canonical and review-only.
+- Discovery now flows through a thin provider-agnostic `ModelDiscoveryManager`
+  over Hugging Face, OpenRouter, Ollama, and external snapshot sources; the
+  richer per-source metadata is preserved.
 - `POST /llm/models/proposals` lists proposals and supports filtering.
 - Proposals remain `proposed`, `non_canonical`, `review_required`, and
   `not_adopted`.
@@ -225,6 +231,8 @@ Canonical install path:
 7. Run the release smoke suite:
    - if you are validating this install or preparing a release:
      - `python scripts/release_smoke.py`
+   - for a live answer-shape check of RAM/VRAM observation:
+     - `python scripts/hardware_observe_smoke.py`
 
 Upgrade path:
 - `cd ~/personal-agent`
@@ -397,6 +405,11 @@ main safety/recovery gates are intact.
 
 If you want the heavier follow-up validation path, run:
 - `python scripts/release_validation_extended.py`
+
+For live, non-blocking operator smoke checks on a running system, use:
+- `python scripts/hardware_observe_smoke.py`
+- `python scripts/live_product_smoke.py`
+- `python scripts/webui_smoke.py`
 
 That extended suite adds slower checks such as fresh wheel-install validation
 and extra deferred-startup/restart coverage without bloating the main smoke

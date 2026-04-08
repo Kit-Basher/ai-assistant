@@ -7,9 +7,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.llm.model_discovery_manager import ModelDiscoveryManager
+from agent.memory_runtime import MemoryRuntime
 from agent.orchestrator import Orchestrator
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.telegram_bridge import handle_telegram_text
+from agent.working_memory import append_turn
 from memory.db import MemoryDB
 
 
@@ -35,6 +37,9 @@ class _BehavioralRuntimeTruth:
         self.allow_remote_recommendation = False
         self.allow_remote_switch = False
         self.allow_install_pull = False
+        self.controller_mode = "safe"
+        self.openrouter_invalid_config = False
+        self.installed_model_ids = {self.current_model}
         self.discovery_payload: dict[str, object] = {
             "ok": True,
             "query": None,
@@ -212,13 +217,39 @@ class _BehavioralRuntimeTruth:
 
     def model_controller_policy_status(self) -> dict[str, object]:
         self.calls.append(("model_controller_policy_status", None))
+        mode = str(self.controller_mode or "safe").strip().lower() or "safe"
+        allow_override = mode == "controlled"
         return {
-            "mode": "safe",
-            "mode_label": "SAFE MODE",
-            "mode_source": "config_default",
-            "allow_remote_recommendation": self.allow_remote_recommendation,
-            "allow_remote_fallback": self.allow_remote_recommendation,
-            "allow_install_pull": self.allow_install_pull,
+            "mode": mode,
+            "mode_label": "CONTROLLED MODE" if mode == "controlled" else "SAFE MODE",
+            "mode_source": "explicit_override" if allow_override else "config_default",
+            "allow_remote_recommendation": self.allow_remote_recommendation or allow_override,
+            "allow_remote_fallback": self.allow_remote_recommendation or allow_override,
+            "allow_remote_switch": self.allow_remote_switch or allow_override,
+            "allow_install_pull": self.allow_install_pull or allow_override,
+        }
+
+    def model_readiness_status(self) -> dict[str, object]:
+        self.calls.append(("model_readiness_status", None))
+        ready_rows = []
+        for model_id in sorted(self.installed_model_ids):
+            provider_id = model_id.split(":", 1)[0] if ":" in model_id else self.current_provider
+            ready_rows.append(
+                {
+                    "model_id": model_id,
+                    "provider_id": provider_id,
+                    "status": "ok",
+                    "reason": "installed" if model_id != self.current_model else "active",
+                }
+            )
+        return {
+            "active_model": self.current_model,
+            "ready_now_models": ready_rows,
+            "other_ready_now_models": [],
+            "not_ready_models": [],
+            "usable_models": ready_rows,
+            "other_usable_models": [],
+            "summary": "Models ready to use now.",
         }
 
     def model_policy_status(self) -> dict[str, object]:
@@ -301,7 +332,14 @@ class _BehavioralRuntimeTruth:
 
     def configure_openrouter(self, api_key: str | None, options: dict[str, object] | None = None) -> tuple[bool, dict[str, object]]:
         self.calls.append(("configure_openrouter", {"api_key": api_key, "options": dict(options or {})}))
-        if not str(api_key or "").strip():
+        if self.openrouter_invalid_config:
+            return False, {
+                "ok": False,
+                "error": "invalid_provider_config",
+                "error_kind": "invalid_provider_config",
+                "message": "OpenRouter provider config is invalid. Check the base URL and try again.",
+            }
+        if not str(api_key or "").strip() and not self.openrouter_secret_present:
             return False, {
                 "ok": False,
                 "error": "missing_api_key",
@@ -316,6 +354,7 @@ class _BehavioralRuntimeTruth:
         self.effective_provider = "openrouter"
         self.effective_model = self.current_model
         self._current_ready = True
+        self.installed_model_ids.add(self.current_model)
         return True, {
             "ok": True,
             "provider": "openrouter",
@@ -332,6 +371,7 @@ class _BehavioralRuntimeTruth:
             self.current_provider = self.current_model.split(":", 1)[0] if ":" in self.current_model else self.current_provider
         self.effective_provider = self.current_provider
         self.effective_model = self.current_model
+        self.installed_model_ids.add(self.current_model)
         return True, {
             "ok": True,
             "provider": self.current_provider,
@@ -350,6 +390,7 @@ class _BehavioralRuntimeTruth:
             self.current_provider = str(provider_id).strip().lower() or self.current_provider
         else:
             self.current_provider = self.current_model.split(":", 1)[0] if ":" in self.current_model else self.current_provider
+        self.installed_model_ids.add(self.current_model)
         return True, {
             "ok": True,
             "provider": self.current_provider,
@@ -359,10 +400,13 @@ class _BehavioralRuntimeTruth:
 
     def acquire_chat_model_target(self, model_id: str, provider_id: str | None = None) -> tuple[bool, dict[str, object]]:
         self.calls.append(("acquire_chat_model_target", {"model_id": model_id, "provider_id": provider_id}))
+        normalized_model = str(model_id or "").strip()
+        if normalized_model:
+            self.installed_model_ids.add(normalized_model)
         return True, {
             "ok": True,
             "provider": str(provider_id or "").strip().lower() or "ollama",
-            "model_id": str(model_id or "").strip(),
+            "model_id": normalized_model,
             "message": f"Started acquiring {model_id} through the canonical model manager.",
         }
 
@@ -454,9 +498,21 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.db.close()
         self.tmpdir.cleanup()
 
-    def _chat(self, text: str, *, user_id: str = "user1") -> object:
+    def _chat(
+        self,
+        text: str,
+        *,
+        user_id: str = "user1",
+        expect_transport_ok: bool | None = True,
+        expect_body_ok: bool | None = True,
+    ) -> object:
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
-            return self.orchestrator.handle_message(text, user_id)
+            response = self.orchestrator.handle_message(text, user_id)
+        if expect_body_ok is True and isinstance(response.data, dict):
+            self.assertTrue(bool(response.data.get("ok")), msg=str(response.data))
+        elif expect_body_ok is False and isinstance(response.data, dict):
+            self.assertFalse(bool(response.data.get("ok")), msg=str(response.data))
+        return response
 
     def _telegram(self, text: str, *, chat_id: str = "42") -> dict[str, object]:
         def _proxy(payload: dict[str, object]) -> dict[str, object]:
@@ -546,12 +602,30 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         ):
             self.orchestrator.skills["resource_governor"].functions["resource_report"].handler = lambda ctx, user_id=None: {
                 "status": "ok",
-                "text": "CPU load 1m 0.42; memory 41.0% used",
-                "payload": {"loads": {"1m": 0.42}, "memory": {"used": 22, "total": 64}},
+                "text": "CPU load 1m 8.25; memory 96.9% used",
+                "payload": {
+                    "loads": {"1m": 8.25},
+                    "memory": {"used": 62, "total": 64},
+                    "processes": [
+                        {"pid": 4102, "name": "render-worker", "cpu_pct": 82.1},
+                        {"pid": 5120, "name": "indexer", "cpu_pct": 74.6},
+                    ],
+                },
                 "cards_payload": {
-                    "cards": [{"title": "Live machine stats", "lines": ["CPU load 1m=0.42", "Memory in use: 41%"], "severity": "ok"}],
+                    "cards": [
+                        {
+                            "title": "Live machine stats",
+                            "lines": [
+                                "CPU load 1m=8.25",
+                                "Memory in use: 96.9%",
+                                "Top CPU: render-worker (pid 4102)",
+                                "Top CPU: indexer (pid 5120)",
+                            ],
+                            "severity": "warn",
+                        }
+                    ],
                     "raw_available": True,
-                    "summary": "CPU load 1m 0.42; memory 41.0% used",
+                    "summary": "CPU load 1m 8.25; memory 96.9% used",
                     "confidence": 1.0,
                     "next_questions": ["What is using memory right now?"],
                 },
@@ -559,7 +633,7 @@ class TestBehavioralEvalBattery(unittest.TestCase):
             cpu_response = self._chat(cpu_prompt)
 
         cpu_first_line = _first_line(str(getattr(cpu_response, "text", "")))
-        self.assertTrue(cpu_first_line.startswith("CPU load 1m 0.42; memory 34.4% used"), cpu_first_line)
+        self.assertTrue(cpu_first_line.startswith("CPU load 1m 8.25; memory 96.9% used"), cpu_first_line)
         self.assertNotIn("System health", cpu_first_line)
         self.assertNotIn("PID", cpu_first_line)
         self.assertNotIn("process", cpu_first_line.lower())
@@ -626,6 +700,63 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertIn("huggingface: hf timeout", text)
 
         self.truth.discovery_payload = {
+            "ok": True,
+            "query": None,
+            "message": "I can check external sources and snapshots if you want me to look further.",
+            "models": [
+                {
+                    "id": "openrouter:vendor/tiny-gemma",
+                    "provider": "openrouter",
+                    "source": "openrouter",
+                    "capabilities": ["chat"],
+                    "local": False,
+                    "installable": False,
+                    "confidence": 0.66,
+                }
+            ],
+            "sources": [
+                {
+                    "source": "huggingface",
+                    "enabled": False,
+                    "queried": False,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": "disabled",
+                    "error": None,
+                },
+                {
+                    "source": "openrouter",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 1,
+                    "error_kind": None,
+                    "error": None,
+                },
+                {
+                    "source": "ollama",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": False,
+                    "count": 0,
+                    "error_kind": "down",
+                    "error": "ollama unavailable",
+                },
+            ],
+            "debug": {
+                "source_registry": ["huggingface", "openrouter", "ollama", "external_snapshots"],
+                "source_errors": {"ollama": {"error_kind": "down", "error": "ollama unavailable"}},
+                "source_counts": {"openrouter": 1, "ollama": 0},
+                "matched_count": 1,
+            },
+        }
+        unknown_prompt = "there is a brand new tiny Gemma 4 model, can you look into it?"
+        unknown_response = self._chat(unknown_prompt)
+        unknown_text = str(getattr(unknown_response, "text", ""))
+        self.assertIn("can check external sources", unknown_text.lower())
+        self.assertNotIn("does not exist", unknown_text.lower())
+
+        self.truth.discovery_payload = {
             "ok": False,
             "query": None,
             "message": "No discovery sources are enabled. Enable Hugging Face/OpenRouter/Ollama in the registry or point AGENT_MODEL_WATCH_CATALOG_PATH at a snapshot.",
@@ -640,7 +771,7 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         }
         disabled_prompt = "look for information on a new model from hugging face"
         self.assertEqual("action_tool", classify_runtime_chat_route(disabled_prompt).get("route"))
-        response = self._chat(disabled_prompt)
+        response = self._chat(disabled_prompt, expect_body_ok=False)
         text = str(getattr(response, "text", ""))
         self.assertIn("No discovery sources are enabled.", text)
         self.assertIn("Enable Hugging Face/OpenRouter/Ollama", text)
@@ -683,13 +814,29 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertIn("Paste your OpenRouter API key", setup_text)
         self.assertIn("finish the setup", setup_text)
 
+        self.truth.openrouter_secret_present = True
+        self.truth.openrouter_invalid_config = True
+        reuse_prompt = "configure openrouter"
+        reuse_response = self._chat(reuse_prompt, user_id="user2")
+        reuse_text = str(getattr(reuse_response, "text", ""))
+        self.assertIn("already have an OpenRouter API key stored", reuse_text)
+        invalid_response = self._chat(
+            "yes",
+            user_id="user2",
+            expect_transport_ok=None,
+            expect_body_ok=False,
+        )
+        invalid_text = str(getattr(invalid_response, "text", ""))
+        self.assertIn("provider config is invalid", invalid_text.lower())
+        self.assertNotIn("need more context", invalid_text.lower())
+
         provider_prompt = "is openrouter configured?"
         self.assertEqual("provider_status", classify_runtime_chat_route(provider_prompt).get("route"))
         provider_response = self._chat(provider_prompt)
         provider_text = str(getattr(provider_response, "text", ""))
         self.assertIn("OpenRouter", provider_text)
-        self.assertIn("not set up yet", provider_text.lower())
-        self.assertIn("api key", provider_text.lower())
+        self.assertIn("partly set up", provider_text.lower())
+        self.assertIn("chat model ready", provider_text.lower())
 
         runtime_prompt = "what is the runtime status?"
         self.assertEqual("runtime_status", classify_runtime_chat_route(runtime_prompt).get("route"))
@@ -697,6 +844,41 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         runtime_text = str(getattr(runtime_response, "text", ""))
         self.assertIn("The runtime is healthy and ready.", runtime_text)
         self.assertNotIn("{", _first_line(runtime_text))
+
+    def test_memory_transcripts_surface_conflicts_and_keep_user_language(self) -> None:
+        runtime_a = MemoryRuntime(self.db)
+        runtime_b = MemoryRuntime(self.db)
+        runtime_c = MemoryRuntime(self.db)
+        state_a, issue_a = runtime_a.load_working_memory_state("user1")
+        state_b, issue_b = runtime_b.load_working_memory_state("user1")
+        self.assertIsNone(issue_a)
+        self.assertIsNone(issue_b)
+        append_turn(state_a, role="user", text="runtime a saved this first")
+        self.assertTrue(runtime_a.save_working_memory_state("user1", state_a))
+        append_turn(state_b, role="user", text="runtime b stale write")
+        self.assertFalse(runtime_b.save_working_memory_state("user1", state_b))
+        state_c, issue_c = runtime_c.load_working_memory_state("user1")
+        self.assertIsNone(issue_c)
+        append_turn(state_c, role="assistant", text="runtime c recovered save")
+        self.assertTrue(runtime_c.save_working_memory_state("user1", state_c))
+        snapshot = MemoryRuntime(self.db).inspect_all_state()
+
+        response = self._chat("what do you remember about me?")
+        text = str(getattr(response, "text", ""))
+        self.assertIn("useful memory", text.lower())
+        self.assertNotIn("{", _first_line(text))
+        users = snapshot.get("users") if isinstance(snapshot, dict) and isinstance(snapshot.get("users"), list) else []
+        user_row = next(
+            (
+                row
+                for row in users
+                if isinstance(row, dict) and str(row.get("user_id") or "").strip() == "user1"
+            ),
+            {},
+        )
+        persistence = user_row.get("persistence") if isinstance(user_row.get("persistence"), dict) else {}
+        self.assertEqual("stale_write_conflict", (persistence.get("last_conflict") or {}).get("reason"))
+        self.assertFalse(bool(persistence.get("active_conflict")))
 
     def test_telegram_bridge_uses_the_same_user_visible_answer_shape(self) -> None:
         ram_prompt = "what do i have for ram and vram right now?"

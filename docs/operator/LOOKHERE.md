@@ -11,7 +11,8 @@
 ## Runtime Modes
 
 - Canonical runtime: `personal-agent-api.service` (core runtime brain)
-- Native UI is primary user surface.
+- Browser/web UI served from `/` by the API server is the primary local user
+  surface.
 - Telegram is optional transport adapter; it must not become a second brain.
 - Telegram is disabled by default; inspect/control it with:
   - `python -m agent telegram_status`
@@ -64,6 +65,9 @@ Canonical support/debug path:
 - Test sweep:
   - canonical release gate: `python scripts/release_smoke.py`
   - heavier follow-up validation: `python scripts/release_validation_extended.py`
+  - live hardware answer-shape smoke: `python scripts/hardware_observe_smoke.py`
+  - live product-path smoke family: `python scripts/live_product_smoke.py`
+  - live web UI smoke: `python scripts/webui_smoke.py`
 
 Runtime mode contract (all surfaces):
 - `READY`: normal operation.

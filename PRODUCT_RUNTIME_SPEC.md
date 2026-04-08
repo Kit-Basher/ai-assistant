@@ -29,6 +29,8 @@ wins.
 - The controller owns explicit model actions.
 - The canonical model manager owns install/acquire execution.
 - Native skills are controller-backed and bounded.
+- The API server also serves the browser/web UI from `/` when the built web
+  assets are present; Telegram remains an optional transport adapter.
 - Canonical operator/runtime path:
   - repo checkout: `~/personal-agent`
   - user service: `personal-agent-api.service`
@@ -128,6 +130,8 @@ wins.
 
 ## 8. Discovery / Proposal / Policy Model
 - Discovery is separate from canonical selector truth.
+- `ModelDiscoveryManager` is the thin provider-agnostic fan-out layer over
+  Hugging Face, OpenRouter, Ollama, and external snapshots.
 - Proposals are non-canonical, review-required, and not auto-adopted.
 - Curated policy is the reviewed operator layer.
 - Reviewed policy may describe:

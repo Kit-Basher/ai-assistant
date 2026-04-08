@@ -10,6 +10,8 @@ product-facing overview; use this file for current-state and handover truth.
   - user `/chat` flows through `api_server -> orchestrator -> deterministic assistant handlers`
   - assistant wording is grounded in canonical runtime truth and controller
     results; it must not hallucinate state or actions
+  - the same API server also serves the browser/web UI from `/` when the built
+    web assets are present; there is no separate desktop app in this repo
 - Runtime truth:
   - `RuntimeTruthService` is the single runtime truth source for inventory,
     provider usability, readiness, lifecycle, mode policy, scout output, and
@@ -28,6 +30,8 @@ product-facing overview; use this file for current-state and handover truth.
     path
 - Discovery / proposal / policy:
   - discovery is separate from selector truth
+  - `ModelDiscoveryManager` is the thin provider-agnostic fan-out layer over
+    Hugging Face, OpenRouter, Ollama, and external snapshots
   - proposals are non-canonical review objects
   - curated policy is a small reviewed operator layer, not automatic adoption
 - External pack ingestion:
@@ -57,6 +61,8 @@ product-facing overview; use this file for current-state and handover truth.
       first-run and recovery path
     - `python -m agent doctor --collect-diagnostics` as the canonical redacted
       diagnostics bundle path
+    - `python scripts/hardware_observe_smoke.py` as a non-blocking live
+      answer-shape smoke for RAM/VRAM observation
     - legacy root/system-service scripts retired and fail closed
 
 ## 2. Mode Contract
