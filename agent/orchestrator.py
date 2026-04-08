@@ -14466,7 +14466,28 @@ class Orchestrator:
                 )
                 if str(item).strip()
             ]
-            summary = str(data.get("text") or "").strip() or "Hardware inventory is ready."
+            payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+            memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+            gpu = payload.get("gpu") if isinstance(payload.get("gpu"), dict) else {}
+            ram_total = float(memory.get("total_bytes") or 0.0)
+            ram_available = float(memory.get("available_bytes") or 0.0)
+            ram_total_gib = ram_total / float(1024**3) if ram_total else 0.0
+            ram_available_gib = ram_available / float(1024**3) if ram_available else 0.0
+            gpu_available = bool(gpu.get("available", False))
+            gpu_rows = gpu.get("gpus") if isinstance(gpu.get("gpus"), list) else []
+            first_gpu = gpu_rows[0] if gpu_rows and isinstance(gpu_rows[0], dict) else {}
+            gpu_name = str(first_gpu.get("name") or "GPU").strip()
+            vram_total_mb = int(first_gpu.get("memory_total_mb") or 0)
+            vram_used_mb = int(first_gpu.get("memory_used_mb") or 0)
+            vram_free_mb = max(vram_total_mb - vram_used_mb, 0) if vram_total_mb else 0
+            if ram_total_gib > 0:
+                summary = f"You have {ram_total_gib:.0f} GiB of RAM with {ram_available_gib:.0f} GiB available."
+            else:
+                summary = "RAM availability is unavailable right now."
+            if gpu_available and vram_total_mb > 0:
+                summary += f" VRAM is available on {gpu_name} with {vram_free_mb} MiB free out of {vram_total_mb} MiB total."
+            else:
+                summary += " VRAM is unavailable right now."
             return summary, next_questions or [
                 "How much memory am I using?",
                 "How is my storage?",

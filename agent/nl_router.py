@@ -71,6 +71,8 @@ _DAILY_BRIEF_STATUS = re.compile(
 )
 _CHITCHAT = re.compile(r"^(hi|hello|hey|thanks|thank you)\b", re.IGNORECASE)
 _HARDWARE_INVENTORY_PHRASES = (
+    "what do i have for ram and vram right now",
+    "how much ram and vram do i have",
     "what cpu do i have",
     "what gpu do i have",
     "what cpu and gpu do i have",
@@ -82,6 +84,7 @@ _HARDWARE_INVENTORY_PHRASES = (
     "what specs do i have",
     "what hardware do i have",
 )
+_RAM_VRAM_REQUEST_RE = re.compile(r"\bram\b.*\bvram\b|\bvram\b.*\bram\b", re.IGNORECASE)
 _MACHINE_BROAD_PHRASES = (
     "what other pc stats can you find",
     "other pc stats",
@@ -112,7 +115,7 @@ def _contains_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
 
 
 def _hardware_inventory_requested(text: str) -> bool:
-    return _contains_any_phrase(text, _HARDWARE_INVENTORY_PHRASES)
+    return _contains_any_phrase(text, _HARDWARE_INVENTORY_PHRASES) or bool(_RAM_VRAM_REQUEST_RE.search(text))
 
 
 def _machine_broad_requested(text: str) -> bool:
@@ -190,6 +193,8 @@ def select_observe_skills(text: str) -> list[dict[str, str]]:
         _append_skill(selected, "storage_governor", "storage_report")
     elif hardware_requested:
         _append_skill(selected, "hardware_report", "hardware_report")
+        if bool(_OBSERVE_RESOURCE.search(lowered)):
+            _append_skill(selected, "resource_governor", "resource_report")
     else:
         if machine_requested:
             _append_skill(selected, "hardware_report", "hardware_report")

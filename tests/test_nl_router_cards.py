@@ -44,6 +44,7 @@ class TestNLRouterCards(unittest.TestCase):
 
     def test_machine_and_hardware_prompts_select_expected_skills(self) -> None:
         broad = nl_route("what other pc stats can you find?")
+        ram_vram = nl_route("what do i have for ram and vram right now?")
         hardware = nl_route("can you tell what CPU and GPU I have?")
         gpu = nl_route("can you see the GPU?")
         deeper = nl_route("can you run a check and see if you can learn more?")
@@ -58,7 +59,15 @@ class TestNLRouterCards(unittest.TestCase):
                 {"skill": "storage_governor", "function": "storage_report"},
             ],
         )
-        self.assertEqual(hardware["skills"], [{"skill": "hardware_report", "function": "hardware_report"}])
+        self.assertEqual(ram_vram["skills"][0], {"skill": "hardware_report", "function": "hardware_report"})
+        self.assertIn({"skill": "resource_governor", "function": "resource_report"}, ram_vram["skills"])
+        self.assertEqual(
+            hardware["skills"],
+            [
+                {"skill": "hardware_report", "function": "hardware_report"},
+                {"skill": "resource_governor", "function": "resource_report"},
+            ],
+        )
         self.assertEqual(gpu["skills"], [{"skill": "hardware_report", "function": "hardware_report"}])
         self.assertEqual(
             deeper["skills"],

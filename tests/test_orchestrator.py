@@ -4967,6 +4967,95 @@ class TestOrchestrator(unittest.TestCase):
         self.assertNotIn("runtime status", response.text.lower())
         self.assertIn(("model_watch_hf_status", None), runtime_truth.calls)
 
+    def test_model_scout_discovery_routes_brand_new_tiny_model_prompt_without_runtime_dead_end(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.model_discovery_query = lambda query=None, filters=None: {  # type: ignore[assignment]
+            "ok": True,
+            "query": query,
+            "message": "Found 1 model(s) across 3 source(s).",
+            "models": [
+                {
+                    "id": "openrouter:vendor/tiny-gemma",
+                    "provider": "openrouter",
+                    "source": "openrouter",
+                    "capabilities": ["chat"],
+                    "local": False,
+                    "installable": False,
+                    "confidence": 0.8,
+                }
+            ],
+            "sources": [
+                {"source": "openrouter", "enabled": True, "queried": True, "ok": True, "count": 1},
+            ],
+            "debug": {"source_errors": {}, "source_counts": {"openrouter": 1}},
+        }
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+        )
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "there is a brand new tiny Gemma 4 model, can you look into it?",
+                "user1",
+            )
+
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["model_discovery_manager"], response.data["used_tools"])
+        self.assertEqual("external_discovery", payload.get("mode"))
+        self.assertIn("openrouter:vendor/tiny-gemma", response.text.lower())
+        self.assertNotIn("runtime state", response.text.lower())
+
+    def test_ram_vram_prompt_renders_hardware_first_line_before_secondary_stats(self) -> None:
+        orchestrator = self._orchestrator()
+        with patch("agent.orchestrator.can_run_nl_skill", return_value=(True, None)), patch(
+            "agent.nl_router.select_observe_skills",
+            return_value=[{"skill": "hardware_report", "function": "hardware_report"}],
+        ):
+            orchestrator.skills["hardware_report"].functions["hardware_report"].handler = lambda ctx, user_id=None: {
+                "status": "ok",
+                "text": "You have 64 GiB of RAM and 12 GiB of VRAM available right now.",
+                "payload": {
+                    "memory": {
+                        "total_bytes": 64 * 1024**3,
+                        "used_bytes": 22 * 1024**3,
+                        "available_bytes": 42 * 1024**3,
+                        "used_pct": 34.4,
+                    },
+                    "gpu": {
+                        "available": True,
+                        "gpus": [
+                            {
+                                "name": "NVIDIA RTX 4080",
+                                "memory_used_mb": 4096,
+                                "memory_total_mb": 12288,
+                                "utilization_gpu_pct": 17.0,
+                                "temperature_c": 54,
+                            }
+                        ],
+                    },
+                },
+                "cards_payload": {
+                    "cards": [{"title": "Hardware inventory", "lines": ["RAM: 64 GiB total", "VRAM: 12 GiB available"], "severity": "ok"}],
+                    "raw_available": True,
+                    "summary": "You have 64 GiB of RAM and 12 GiB of VRAM available right now.",
+                    "confidence": 1.0,
+                    "next_questions": ["How much memory am I using?"],
+                },
+            }
+            response = orchestrator.handle_message("what do i have for ram and vram right now?", "user1")
+
+        self.assertEqual("operational_status", response.data["route"])
+        self.assertIn("You have 64 GiB of RAM with 42 GiB available.", response.text)
+        self.assertIn("VRAM is available on NVIDIA RTX 4080", response.text)
+        self.assertFalse(response.text.startswith("CPU load"))
+
     def test_runtime_configure_ollama_routes_to_setup_flow_without_llm(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
