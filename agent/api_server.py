@@ -1839,26 +1839,26 @@ class AgentRuntime:
             },
         )
         if normalization_result.status == "normalized":
-            why = "I kept only safe text and reference content, and granted no permissions."
+            why = "I kept only safe text and reference content after quarantine, scanning, and normalization, and granted no permissions."
             next_action = "Review the imported pack details before relying on it."
             message = compose_actionable_message(
-                what_happened=f"I imported {normalization_result.pack.name} as a portable text skill",
+                what_happened=f"Normalized safe text import: I quarantined and normalized {normalization_result.pack.name} as a portable text skill",
                 why=why,
                 next_action=next_action,
             )
         elif normalization_result.status == "partial_safe_import":
-            why = "The source included executable or otherwise unsafe files, so I stripped them and kept only safe text/assets."
+            why = "The source included executable or otherwise unsafe files, so I quarantined it, stripped those parts, and kept only safe text/assets."
             next_action = "Use the imported safe content, or request advanced review if you need anything else from the pack."
             message = compose_actionable_message(
-                what_happened=f"I only imported the safe parts of {normalization_result.pack.name}",
+                what_happened=f"Partial safe import: I quarantined {normalization_result.pack.name} and kept only the safe parts",
                 why=why,
                 next_action=next_action,
             )
         else:
-            why = "The pack needs behavior that the current safe import policy does not allow."
+            why = "The pack needs executable or unsupported behavior that the current safe import policy does not allow."
             next_action = "Review the pack summary, or recreate a safe local text-only version."
             message = compose_actionable_message(
-                what_happened=f"I blocked {normalization_result.pack.name} after quarantine and review",
+                what_happened=f"Blocked install: I quarantined and blocked {normalization_result.pack.name} after review",
                 why=why,
                 next_action=next_action,
             )

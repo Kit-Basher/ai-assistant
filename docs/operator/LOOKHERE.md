@@ -67,6 +67,7 @@ Canonical support/debug path:
   - heavier follow-up validation: `python scripts/release_validation_extended.py`
   - live hardware answer-shape smoke: `python scripts/hardware_observe_smoke.py`
   - live product-path smoke family: `python scripts/live_product_smoke.py`
+  - live pack-route smoke: `python scripts/pack_route_smoke.py`
   - live web UI smoke: `python scripts/webui_smoke.py`
 
 Runtime mode contract (all surfaces):

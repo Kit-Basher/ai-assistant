@@ -409,6 +409,7 @@ If you want the heavier follow-up validation path, run:
 For live, non-blocking operator smoke checks on a running system, use:
 - `python scripts/hardware_observe_smoke.py`
 - `python scripts/live_product_smoke.py`
+- `python scripts/pack_route_smoke.py`
 - `python scripts/webui_smoke.py`
 
 That extended suite adds slower checks such as fresh wheel-install validation

@@ -527,7 +527,7 @@ class PackRegistryDiscoveryService:
 
     def preview(self, source_id: str, remote_id: str) -> dict[str, Any]:
         source, effective_policy = self._queryable_source(source_id)
-        listings, meta = self._load_listings(source, effective_policy=effective_policy)
+        listings, meta = self._load_listings(source, effective_policy=effective_policy, persist_cache=False)
         listing = next((row for row in listings if str(row.get("remote_id") or "") == remote_id), None)
         if listing is None:
             raise KeyError(f"registry listing not found: {source_id}/{remote_id}")
@@ -1128,6 +1128,7 @@ class PackRegistryDiscoveryService:
         source: RegistrySource,
         *,
         effective_policy: RegistrySourcePolicy,
+        persist_cache: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         now_ts = int(time.time())
         cached = self.pack_store.get_registry_source_cache(source.id)
@@ -1140,12 +1141,19 @@ class PackRegistryDiscoveryService:
         try:
             raw_catalog = self._fetch_catalog(source)
             listings = self._normalize_catalog(source, raw_catalog)
-            cached = self.pack_store.set_registry_source_cache(
-                source_id=source.id,
-                source_payload=source.to_dict(),
-                listings_payload=listings,
-                ttl_seconds=int(effective_policy.cache_ttl_seconds),
-            )
+            if persist_cache:
+                cached = self.pack_store.set_registry_source_cache(
+                    source_id=source.id,
+                    source_payload=source.to_dict(),
+                    listings_payload=listings,
+                    ttl_seconds=int(effective_policy.cache_ttl_seconds),
+                )
+            else:
+                cached = {
+                    "listings": list(listings),
+                    "fetched_at": now_ts,
+                    "expires_at": now_ts + max(int(effective_policy.cache_ttl_seconds), 0),
+                }
             return list(cached.get("listings") if isinstance(cached.get("listings"), list) else []), {
                 "from_cache": False,
                 "stale": False,
@@ -1387,10 +1395,14 @@ class PackRegistryDiscoveryService:
             latest_ref_hint = str(listing.get("latest_ref_hint") or "").strip()
             if latest_ref_hint:
                 install_handoff["ref"] = latest_ref_hint
-        summary = policy_hint + " "
+        summary = (
+            "Read-only preview: metadata only for now. If you install it, I will fetch it into quarantine, "
+            "scan it, and normalize the snapshot before anything becomes usable. "
+        )
+        summary += policy_hint + " "
         if related_local_pack is not None:
             summary += "A local version exists, but identity is tied to content, not this listing. "
-        summary += "This entry has not been fetched yet. I can preview metadata now or fetch it into quarantine for inspection."
+        summary += "The fetched snapshot is what would be scanned and normalized."
         preview = RegistryPackPreview(
             source=source.to_dict(),
             listing=listing,
