@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import urllib.request
 import subprocess
 from typing import Any
 
@@ -70,10 +72,49 @@ def list_models_ollama() -> list[ModelInfo]:
 
 
 def list_models_openrouter(api_key: str) -> list[ModelInfo]:
-    _ = api_key
-    # Baseline deterministic path: OpenRouter discovery stays opt-in until provider
-    # catalog refresh is integrated directly into ModelOps Advisor.
-    return []
+    key = str(api_key or "").strip()
+    if not key:
+        return []
+    try:
+        request = urllib.request.Request(
+            "https://openrouter.ai/api/v1/models",
+            method="GET",
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {key}",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+        parsed = json.loads(raw or "{}")
+    except Exception:
+        return []
+
+    rows = parsed.get("data") if isinstance(parsed, dict) else []
+    output: list[ModelInfo] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        model_id = str(row.get("id") or "").strip()
+        if not model_id:
+            continue
+        output.append(
+            ModelInfo(
+                provider="openrouter",
+                model_id=model_id,
+                display_name=model_id,
+                context_tokens=None,
+                tags=_tags_for_model_name(model_id),
+                created_at=None,
+                metadata={
+                    "source": "openrouter_models",
+                    "pricing": row.get("pricing") if isinstance(row.get("pricing"), dict) else {},
+                    "raw": row,
+                },
+            )
+        )
+    output.sort(key=lambda row: (row.provider, row.model_id))
+    return output
 
 
 __all__ = ["ModelInfo", "list_models_ollama", "list_models_openrouter"]

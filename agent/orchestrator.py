@@ -3905,115 +3905,44 @@ class Orchestrator:
             },
         )
 
-    def _model_scout_discovery_response(self) -> OrchestratorResponse:
+    def _model_scout_discovery_response(self, query: str | None = None) -> OrchestratorResponse:
         truth = self._runtime_truth()
         if truth is None:
             return self._runtime_state_unavailable_response(
                 route="action_tool",
                 reason="runtime_truth_service_unavailable",
             )
-        status_fn = getattr(truth, "model_watch_hf_status", None)
-        scan_fn = getattr(truth, "model_watch_hf_scan", None)
-        if not callable(status_fn) or not callable(scan_fn):
-            message = (
-                "I do not have a Hugging Face discovery path available in this runtime yet. "
-                "I can still compare the models that are already available right now."
-            )
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=True,
-                used_tools=["model_scout"],
-                payload={
-                    "type": "model_scout",
-                    "mode": "external_discovery",
-                    "summary": message,
-                    "source": "runtime_truth.hf_unavailable",
-                },
-            )
-        status = status_fn()
-        if not bool(status.get("enabled", False)):
-            message = (
-                "The Hugging Face discovery path is not enabled right now, so I can't check for downloadable model candidates automatically. "
-                "If you want, I can still compare the models that are already available right now."
-            )
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=True,
-                used_tools=["model_scout"],
-                payload={
-                    "type": "model_scout",
-                    "mode": "external_discovery",
-                    "summary": message,
-                    "hf_status": dict(status),
-                    "source": "runtime_truth.model_watch_hf_status",
-                },
-            )
-        scan_ok, scan_body = scan_fn(
-            trigger="manual",
-            notify_proposal=False,
-            persist_proposal=False,
+        discovery = truth.model_discovery_query(query=query, filters={})
+        models = [dict(row) for row in (discovery.get("models") if isinstance(discovery.get("models"), list) else []) if isinstance(row, dict)]
+        sources = [dict(row) for row in (discovery.get("sources") if isinstance(discovery.get("sources"), list) else []) if isinstance(row, dict)]
+        preview = ", ".join(
+            str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+            for row in models[:3]
+            if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
         )
-        if not scan_ok:
-            message = (
-                "I tried the Hugging Face discovery path, but it did not complete cleanly just now. "
-                "I can still compare the models that are already available right now."
-            )
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=True,
-                used_tools=["model_scout"],
-                ok=False,
-                error_kind=str(scan_body.get("error") or "hf_scan_failed").strip() or "hf_scan_failed",
-                payload={
-                    "type": "model_scout",
-                    "mode": "external_discovery",
-                    "summary": message,
-                    "hf_status": dict(status),
-                    "hf_scan": dict(scan_body),
-                    "source": "runtime_truth.model_watch_hf_scan",
-                },
-            )
-        proposal = scan_body.get("proposal") if isinstance(scan_body.get("proposal"), dict) else None
-        scan_payload = scan_body.get("scan") if isinstance(scan_body.get("scan"), dict) else {}
-        updates = [
-            dict(row)
-            for row in (scan_payload.get("updates") if isinstance(scan_payload.get("updates"), list) else [])
-            if isinstance(row, dict)
-        ]
-        if isinstance(proposal, dict):
-            repo_id = str(proposal.get("repo_id") or "").strip() or "that model"
-            installability = str(proposal.get("installability") or "download_only").strip().lower()
-            action_text = "download and install locally through Ollama" if installability == "installable_ollama" else "download for offline inspection"
-            message = (
-                f"I found a promising downloadable candidate: {repo_id}. "
-                f"It is not installed yet. Right now the best next step would be to {action_text}. "
-                "If you want, I can help you prepare that next."
-            )
-        elif updates:
-            repo_preview = ", ".join(str(row.get("repo_id") or "").strip() for row in updates[:3] if str(row.get("repo_id") or "").strip())
-            message = (
-                f"I found some promising downloadable candidates: {repo_preview}. "
-                "None of them is installed yet."
-            )
-        else:
-            message = (
-                "I checked the Hugging Face discovery path and did not find a better downloadable model candidate right now."
-            )
+        message = str(discovery.get("message") or "").strip()
+        if models and not message:
+            if query:
+                message = f"I found {len(models)} model(s) matching '{query}'."
+            else:
+                message = f"I found {len(models)} candidate model(s)."
+        if models and preview and preview not in message:
+            message = f"{message} Top matches: {preview}."
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
             used_runtime_state=True,
-            used_tools=["model_scout"],
+            used_tools=["model_discovery_manager"],
+            ok=bool(discovery.get("ok", False)),
             payload={
-                "type": "model_scout",
+                "type": "model_discovery",
                 "mode": "external_discovery",
                 "summary": message,
-                "hf_status": dict(status),
-                "hf_scan": dict(scan_body),
-                "source": "runtime_truth.model_watch_hf_scan",
+                "query": query,
+                "models": models[:10],
+                "sources": sources,
+                "debug": discovery.get("debug") if isinstance(discovery, dict) else {},
+                "source": "runtime_truth.model_discovery_query",
             },
         )
 
@@ -4607,7 +4536,7 @@ class Orchestrator:
         normalized = normalize_setup_text(text).replace("/", " ")
         focus_terms = self._model_scout_focus_terms(text, context)
         if self._model_scout_discovery_requested(normalized):
-            return self._model_scout_discovery_response()
+            return self._model_scout_discovery_response(text)
         if self._model_scout_followup_requested(normalized) and not focus_terms and not self._is_model_context(context):
             question = "Do you want me to run Model Scout on the models we were just discussing?"
             return self._runtime_truth_response(
@@ -8138,8 +8067,40 @@ class Orchestrator:
             },
         )
 
-    def _find_ollama_models_response(self) -> OrchestratorResponse:
-        return self._model_inventory_response(local_only=True, provider_id="ollama")
+    def _find_ollama_models_response(self, query: str | None = None) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="model_status",
+                reason="runtime_truth_service_unavailable",
+            )
+        discovery = truth.model_discovery_query(query=query, filters={"sources": ["ollama"]})
+        models = [dict(row) for row in (discovery.get("models") if isinstance(discovery.get("models"), list) else []) if isinstance(row, dict)]
+        preview = ", ".join(
+            str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+            for row in models[:5]
+            if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+        )
+        message = str(discovery.get("message") or "").strip()
+        if models and preview and preview not in message:
+            message = f"{message} Installed Ollama models: {preview}."
+        return self._runtime_truth_response(
+            text=message,
+            route="model_status",
+            used_runtime_state=True,
+            used_tools=["model_discovery_manager"],
+            ok=bool(discovery.get("ok", False)),
+            payload={
+                "type": "model_discovery",
+                "mode": "local_only",
+                "summary": message,
+                "query": query,
+                "models": models[:10],
+                "sources": discovery.get("sources") if isinstance(discovery, dict) else [],
+                "debug": discovery.get("debug") if isinstance(discovery, dict) else {},
+                "source": "runtime_truth.model_discovery_query",
+            },
+        )
 
     def _execute_switch_better_local_model(
         self,
@@ -9022,7 +8983,7 @@ class Orchestrator:
         if kind == "model_scout_strategy":
             return self._model_scout_strategy_response(user_id, text)
         if kind == "model_scout_discovery":
-            return self._model_scout_discovery_response()
+            return self._model_scout_discovery_response(text)
         if kind == "recommend_local_model":
             return self._model_scout_strategy_response(
                 user_id,
@@ -9042,7 +9003,7 @@ class Orchestrator:
             provider_hint = str(decision.get("provider_id") or "").strip().lower() or None
             return self._model_inventory_response(local_only=True, provider_id=provider_hint)
         if kind == "find_ollama_models":
-            return self._find_ollama_models_response()
+            return self._find_ollama_models_response(text)
         if kind == "switch_better_local_model":
             return self._switch_better_local_model_response(user_id)
         if kind == "model_acquisition_request":

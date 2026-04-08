@@ -16,6 +16,7 @@ from agent.llm.model_discovery import (
     build_model_discovery_proposals,
 )
 from agent.llm.model_discovery_external import load_external_model_discovery_rows
+from agent.llm.model_discovery_manager import ModelDiscoveryManager
 from agent.llm.model_latency import infer_parameter_size_b, resolve_speed_class
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_manager import (
@@ -68,6 +69,19 @@ class RuntimeTruthService:
         )
         self._shell_skill_cache = skill
         return skill
+
+    def _model_discovery_manager(self) -> ModelDiscoveryManager:
+        cached = getattr(self, "_model_discovery_manager_cache", None)
+        if isinstance(cached, ModelDiscoveryManager):
+            return cached
+        secret_store = getattr(self.runtime, "secret_store", None)
+        secret_lookup = getattr(secret_store, "get_secret", None)
+        manager = ModelDiscoveryManager(
+            runtime=self.runtime,
+            secret_lookup=secret_lookup if callable(secret_lookup) else None,
+        )
+        self._model_discovery_manager_cache = manager
+        return manager
 
     def _defaults_snapshot(self) -> dict[str, Any]:
         defaults = self.runtime.get_defaults() if callable(getattr(self.runtime, "get_defaults", None)) else {}
@@ -3700,6 +3714,13 @@ class RuntimeTruthService:
             persist_proposal=persist_proposal,
         )
         return bool(ok), dict(body) if isinstance(body, dict) else {"ok": bool(ok)}
+
+    def model_discovery_query(
+        self,
+        query: str | None = None,
+        filters: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._model_discovery_manager().query(query, filters)
 
     def model_policy_status(
         self,
