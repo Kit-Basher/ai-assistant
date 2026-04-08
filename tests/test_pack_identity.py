@@ -136,6 +136,7 @@ class TestPackIdentityAndTrustAnchoring(unittest.TestCase):
         assert isinstance(first_row, dict)
         assert isinstance(second_row, dict)
         self.assertEqual(first_row["canonical_id"], second_row["canonical_id"])
+        self.assertEqual(first_row["version"], second_row["version"])
         self.assertNotEqual(first_row["source_fingerprint"], second_row["source_fingerprint"])
         self.assertEqual(1, len(self.store.list_external_packs()))
         merged = self.store.get_external_pack(str(first_row["canonical_id"]))
@@ -161,6 +162,7 @@ class TestPackIdentityAndTrustAnchoring(unittest.TestCase):
         first_result = first["result"]
         second_result = second["result"]
         self.assertNotEqual(first_result.pack.id, second_result.pack.id)
+        self.assertNotEqual(first_result.pack.version, second_result.pack.version)
 
     def test_upstream_mutation_increases_risk_and_records_diff(self) -> None:
         source_url = "https://github.com/example/repo/archive/main.zip"
@@ -189,6 +191,7 @@ class TestPackIdentityAndTrustAnchoring(unittest.TestCase):
         self.assertIn("upstream_content_changed", second_row["risk_flags"])
         self.assertIn("changed since the last time it was seen", second_row["review_envelope"]["summary"])
         self.assertEqual(first_row["canonical_id"], second_row["previous_version"]["canonical_id"])
+        self.assertNotEqual(first_row["version"], second_row["version"])
         change_summary = second_row["change_summary"]
         self.assertIn("references/updated.md", change_summary["new_files"])
         self.assertIn("references/original.md", change_summary["removed_files"])

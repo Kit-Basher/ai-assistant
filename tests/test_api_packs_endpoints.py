@@ -188,6 +188,7 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["non_executable"])
         self.assertTrue(install_payload["pack"]["normalized_path"])
         self.assertEqual("Portable Pack", install_payload["review"]["pack_name"])
+        self.assertIn("metadata/normalization.json", install_payload["why"])
 
         list_handler = _HandlerForTest(self.runtime, "/packs")
         list_handler.do_GET()
@@ -221,6 +222,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["non_executable"])
         self.assertIn("blocked", str(install_payload["message"] or "").lower())
         self.assertIn("current safe import policy", str(install_payload["why"] or "").lower())
+        self.assertIn("metadata/normalization.json", install_payload["why"])
+        self.assertIn("quarantined", str(install_payload["message"] or "").lower())
         self.assertTrue(str(install_payload["next_action"] or "").strip())
 
     def test_remote_install_persists_and_returns_provenance(self) -> None:
@@ -255,6 +258,49 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["quarantine_path"])
         self.assertTrue(install_payload["pack"]["normalized_path"])
         self.assertIn("I fetched a snapshot", install_payload["review"]["summary"])
+        self.assertIn("quarantined and normalized", install_payload["message"].lower())
+        self.assertIn("metadata/normalization.json", install_payload["why"])
+
+    def test_remote_install_deduplicates_identical_content_across_sources(self) -> None:
+        archive = _zip_bytes(
+            {
+                "repo-main/SKILL.md": b"# Remote Skill\n\nUse the repository notes.\n",
+                "repo-main/references/guide.md": b"# Guide\n\nReference text.\n",
+            }
+        )
+        first_url = "https://github.com/example/repo/archive/main.zip"
+        second_url = "https://github.com/another-owner/repo/archive/main.zip"
+        first_fetcher = RemotePackFetcher(
+            self.runtime.pack_store.external_storage_root(),
+            opener=_FakeOpener(
+                {
+                    first_url: _FakeResponse(archive, url=first_url),
+                    second_url: _FakeResponse(archive, url=second_url),
+                }
+            ),
+        )
+        with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=first_fetcher):
+            first_handler = _HandlerForTest(
+                self.runtime,
+                "/packs/install",
+                {"source": first_url, "source_kind": "github_archive", "ref": "main"},
+            )
+            first_handler.do_POST()
+            first_payload = json.loads(first_handler.body.decode("utf-8"))
+            second_handler = _HandlerForTest(
+                self.runtime,
+                "/packs/install",
+                {"source": second_url, "source_kind": "github_archive", "ref": "main"},
+            )
+            second_handler.do_POST()
+            second_payload = json.loads(second_handler.body.decode("utf-8"))
+
+        self.assertEqual(200, first_handler.status_code)
+        self.assertEqual(200, second_handler.status_code)
+        self.assertTrue(first_payload["ok"])
+        self.assertTrue(second_payload["ok"])
+        self.assertEqual(first_payload["pack"]["canonical_id"], second_payload["pack"]["canonical_id"])
+        self.assertEqual(1, len(self.runtime.pack_store.list_external_packs()))
 
     def test_remote_install_returns_changed_upstream_review_when_source_mutates(self) -> None:
         remote_url = "https://github.com/example/repo/archive/main.zip"

@@ -26,11 +26,19 @@ def _safe_path_text(root: str | None, rel_path: str) -> str | None:
     base = Path(str(root or "").strip())
     if not base:
         return None
+    candidates = [
+        base / rel_path,
+        base / "assets" / "source" / rel_path,
+    ]
     try:
-        path = (base / rel_path).resolve()
-        if not path.is_file():
+        for candidate in candidates:
+            path = candidate.resolve()
+            if not path.is_file():
+                continue
+            raw = path.read_bytes()[:256 * 1024]
+            break
+        else:
             return None
-        raw = path.read_bytes()[:256 * 1024]
     except OSError:
         return None
     try:

@@ -1839,7 +1839,7 @@ class AgentRuntime:
             },
         )
         if normalization_result.status == "normalized":
-            why = "I kept only safe text and reference content after quarantine, scanning, and normalization, and granted no permissions."
+            why = "I kept only safe text and reference content after quarantine, scanning, and normalization, recorded dropped items in metadata/normalization.json, and granted no permissions."
             next_action = "Review the imported pack details before relying on it."
             message = compose_actionable_message(
                 what_happened=f"Normalized safe text import: I quarantined and normalized {normalization_result.pack.name} as a portable text skill",
@@ -1847,7 +1847,7 @@ class AgentRuntime:
                 next_action=next_action,
             )
         elif normalization_result.status == "partial_safe_import":
-            why = "The source included executable or otherwise unsafe files, so I quarantined it, stripped those parts, and kept only safe text/assets."
+            why = "The source included executable or otherwise unsafe files, so I quarantined it, stripped those parts, kept only safe text/assets, and recorded the dropped items in metadata/normalization.json."
             next_action = "Use the imported safe content, or request advanced review if you need anything else from the pack."
             message = compose_actionable_message(
                 what_happened=f"Partial safe import: I quarantined {normalization_result.pack.name} and kept only the safe parts",
@@ -1855,7 +1855,7 @@ class AgentRuntime:
                 next_action=next_action,
             )
         else:
-            why = "The pack needs executable or unsupported behavior that the current safe import policy does not allow."
+            why = "The pack needs executable or unsupported behavior that the current safe import policy does not allow, and I recorded the blocked categories in metadata/normalization.json."
             next_action = "Review the pack summary, or recreate a safe local text-only version."
             message = compose_actionable_message(
                 what_happened=f"Blocked install: I quarantined and blocked {normalization_result.pack.name} after review",

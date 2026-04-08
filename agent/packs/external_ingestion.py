@@ -290,6 +290,114 @@ def _component_identity_payload(
     }
 
 
+def _canonical_outcome_category(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == STATUS_NORMALIZED:
+        return "normalized_safe_text"
+    if normalized == STATUS_PARTIAL_SAFE_IMPORT:
+        return "partial_safe_import"
+    return "blocked_install"
+
+
+def _squash_blank_lines(text: str) -> str:
+    lines = [line.rstrip() for line in str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")]
+    squashed: list[str] = []
+    previous_blank = False
+    for line in lines:
+        blank = not line.strip()
+        if blank:
+            if previous_blank:
+                continue
+            squashed.append("")
+            previous_blank = True
+            continue
+        squashed.append(line)
+        previous_blank = False
+    return "\n".join(squashed).strip()
+
+
+def _text_excerpt(text: str, *, max_chars: int = 1200) -> str:
+    cleaned = _squash_blank_lines(text)
+    if len(cleaned) <= max_chars:
+        return cleaned
+    excerpt = cleaned[:max_chars].rstrip()
+    cut = excerpt.rfind("\n\n")
+    if cut > 400:
+        excerpt = excerpt[:cut].rstrip()
+    return excerpt + "\n\n..."
+
+
+def _is_example_source(rel_path: str, text: str) -> bool:
+    lowered_path = str(rel_path or "").lower()
+    lowered_text = str(text or "").lower()
+    if any(token in lowered_path for token in ("example", "examples", "sample", "demo")):
+        return True
+    if "```" in lowered_text:
+        return True
+    if re.search(r"(?mi)^\s*(example|examples|sample|prompt examples?)\s*[:\-]", lowered_text):
+        return True
+    return False
+
+
+def _looks_like_strong_skill_markdown(text: str) -> bool:
+    lowered = str(text or "").lower()
+    markers = (
+        "purpose",
+        "when to use",
+        "inputs",
+        "behavior",
+        "constraints",
+        "response style",
+        "example prompts",
+    )
+    score = 0
+    for marker in markers:
+        if re.search(rf"(?mi)^#{1,3}\s+{re.escape(marker)}\b", lowered):
+            score += 1
+    return score >= 4
+
+
+def _default_skill_section(title: str, body: str) -> str:
+    return f"## {title}\n\n{_squash_blank_lines(body).strip()}\n"
+
+
+def _path_is_metadata(rel_path: str) -> bool:
+    lowered = str(rel_path or "").lower()
+    return lowered in {"metadata.json", "metadata.yaml", "metadata.yml"}
+
+
+def _has_prompt_like_text_layout(file_records: list["PackFileRecord"]) -> bool:
+    strong_tokens = (
+        "prompt",
+        "instruction",
+        "instructions",
+        "example",
+        "examples",
+        "guide",
+        "workflow",
+        "task",
+    )
+    strong_names = {
+        "prompt.md",
+        "prompts.md",
+        "instruction.md",
+        "instructions.md",
+        "example.md",
+        "examples.md",
+        "guide.md",
+        "workflow.md",
+        "task.md",
+    }
+    for record in file_records:
+        rel_lower = str(record.rel_path or "").lower()
+        name_lower = Path(rel_lower).name.lower()
+        if name_lower in strong_names:
+            return True
+        if any(token in rel_lower for token in strong_tokens):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class PackComponent:
     path: str
@@ -528,6 +636,569 @@ class ExternalPackIngestor:
             integrity["archive_sha256"] = str(archive_sha256)
         return integrity
 
+    @staticmethod
+    def _canonical_source_snapshot_path(rel_path: str) -> str:
+        cleaned = str(rel_path or "").strip().lstrip("/")
+        return str(Path("assets") / "source" / cleaned) if cleaned else "assets/source"
+
+    @staticmethod
+    def _canonical_text_source_path(rel_path: str) -> str:
+        cleaned = str(rel_path or "").strip().lstrip("/")
+        return str(Path("assets") / "source" / cleaned) if cleaned else "assets/source"
+
+    @staticmethod
+    def _canonical_asset_target_path(rel_path: str) -> str:
+        cleaned = str(rel_path or "").strip().lstrip("/")
+        if cleaned.lower().startswith("assets/"):
+            cleaned = cleaned[7:]
+        return str(Path("assets") / cleaned) if cleaned else "assets"
+
+    def _canonical_source_docs(
+        self,
+        file_records: list[PackFileRecord],
+    ) -> dict[str, Any]:
+        main_sections: list[dict[str, str]] = []
+        example_sections: list[dict[str, str]] = []
+        kept_snapshot_paths: list[str] = []
+        dropped_paths: list[str] = []
+        blocked_categories: set[str] = set()
+        text_sources: list[str] = []
+        for record in sorted(file_records, key=lambda item: item.rel_path):
+            rel_path = str(record.rel_path or "").strip()
+            lower_path = rel_path.lower()
+            suffix = Path(rel_path).suffix.lower()
+            name_lower = Path(rel_path).name.lower()
+            if _path_is_metadata(rel_path):
+                continue
+            if lower_path == "skill.md":
+                if record.is_text:
+                    full_text, _ = _load_text_file(Path(record.absolute_path), max_bytes=1024 * 1024)
+                    parsed_meta, parsed_body = _parse_frontmatter(full_text or record.text_preview or "")
+                    text_body = parsed_body.strip() or str(record.text_preview or "").strip()
+                    if text_body:
+                        text_sources.append(text_body)
+                        main_sections.append(
+                            {
+                                "path": "SKILL.md source",
+                                "text": _text_excerpt(text_body, max_chars=1800),
+                            }
+                        )
+                        if isinstance(parsed_meta, dict) and parsed_meta:
+                            meta_lines = [f"- {key}: {value}" for key, value in sorted(parsed_meta.items()) if value not in (None, "", [], {})]
+                            if meta_lines:
+                                main_sections.append(
+                                    {
+                                        "path": "SKILL.md frontmatter",
+                                        "text": "\n".join(meta_lines),
+                                    }
+                                )
+                continue
+            if name_lower in EXECUTABLE_FILE_NAMES or suffix in EXECUTABLE_EXTENSIONS:
+                dropped_paths.append(rel_path)
+                blocked_categories.add("executable")
+                continue
+            if record.file_type == "symlink":
+                dropped_paths.append(rel_path)
+                blocked_categories.add("symlink")
+                continue
+            if not record.is_text and record.file_type == "file" and suffix not in STATIC_ASSET_EXTENSIONS:
+                dropped_paths.append(rel_path)
+                blocked_categories.add("binary_or_unknown")
+                continue
+            if not record.text_preview and not (suffix in STATIC_ASSET_EXTENSIONS or record.file_type == "file"):
+                dropped_paths.append(rel_path)
+                blocked_categories.add("unsupported")
+                continue
+            source_path = self._canonical_source_snapshot_path(rel_path)
+            kept_snapshot_paths.append(source_path)
+            if record.is_text:
+                full_text, _ = _load_text_file(Path(record.absolute_path), max_bytes=1024 * 1024)
+                parsed_meta, parsed_body = _parse_frontmatter(full_text or record.text_preview or "")
+                text_body = parsed_body.strip() or str(record.text_preview or "").strip()
+                if not text_body:
+                    continue
+                text_sources.append(text_body)
+                destination = example_sections if _is_example_source(rel_path, text_body) else main_sections
+                destination.append(
+                    {
+                        "path": rel_path,
+                        "text": _text_excerpt(text_body, max_chars=1800),
+                    }
+                )
+                if isinstance(parsed_meta, dict) and parsed_meta:
+                    meta_lines = [f"- {key}: {value}" for key, value in sorted(parsed_meta.items()) if value not in (None, "", [], {})]
+                    if meta_lines:
+                        main_sections.append(
+                            {
+                                "path": f"{rel_path} frontmatter",
+                                "text": "\n".join(meta_lines),
+                            }
+                        )
+            else:
+                kept_snapshot_paths.append(source_path)
+        # collapse duplicates while preserving order
+        def _dedupe(items: list[dict[str, str]]) -> list[dict[str, str]]:
+            seen: set[str] = set()
+            out: list[dict[str, str]] = []
+            for item in items:
+                key = _squash_blank_lines(f"{item.get('path')}\n{item.get('text')}")
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(item)
+            return out
+
+        return {
+            "main_sections": _dedupe(main_sections),
+            "example_sections": _dedupe(example_sections),
+            "kept_snapshot_paths": list(dict.fromkeys(kept_snapshot_paths)),
+            "dropped_paths": list(dict.fromkeys(dropped_paths)),
+            "blocked_categories": sorted(blocked_categories),
+            "text_sources": text_sources,
+        }
+
+    def _build_canonical_skill_markdown(
+        self,
+        *,
+        display_name: str,
+        summary: str,
+        skill_body: str,
+        main_sections: list[dict[str, str]],
+        example_sections: list[dict[str, str]],
+        capabilities: dict[str, Any],
+    ) -> tuple[str, bool]:
+        normalized_skill_body = _squash_blank_lines(skill_body)
+        if normalized_skill_body and _looks_like_strong_skill_markdown(normalized_skill_body):
+            return normalized_skill_body + "\n", True
+
+        main_text = "\n\n".join(
+            f"### {section['path']}\n\n{section['text']}".strip()
+            for section in main_sections[:8]
+            if section.get("text")
+        ).strip()
+        example_text = "\n\n".join(
+            f"### {section['path']}\n\n{section['text']}".strip()
+            for section in example_sections[:6]
+            if section.get("text")
+        ).strip()
+        declared_capabilities = ", ".join(
+            str(item).strip()
+            for item in (
+                capabilities.get("declared") if isinstance(capabilities.get("declared"), list) else []
+            )
+            if str(item).strip()
+        )
+        inferred_capabilities = ", ".join(
+            str(item).strip()
+            for item in (
+                capabilities.get("inferred") if isinstance(capabilities.get("inferred"), list) else []
+            )
+            if str(item).strip()
+        )
+        sections = [
+            f"# {display_name}",
+            _default_skill_section("Purpose", summary or f"{display_name} is a safe normalized pack."),
+            _default_skill_section(
+                "When to use",
+                "Use this pack when the user asks for the task or guidance this pack describes, and stay within the safe text and asset content that was imported.",
+            ),
+            _default_skill_section(
+                "Inputs",
+                "User prompts, the safe instructions in this pack, and any preserved reference materials or assets.",
+            ),
+            _default_skill_section(
+                "Behavior",
+                main_text
+                or "Use the preserved source instructions and the safe reference materials in this pack.",
+            ),
+            _default_skill_section(
+                "Constraints",
+                "Do not execute imported code or shell instructions. Use only safe text and assets. Ignore anything that was dropped during normalization.",
+            ),
+            _default_skill_section(
+                "Response style",
+                "Be concise, grounded, and explicit about uncertainty.",
+            ),
+            _default_skill_section(
+                "Example prompts",
+                example_text or "No explicit examples were found in the imported source.",
+            ),
+        ]
+        if declared_capabilities or inferred_capabilities:
+            sections.append(
+                _default_skill_section(
+                    "Capabilities",
+                    f"Declared: {declared_capabilities or 'none'}\nInferred: {inferred_capabilities or 'none'}",
+                )
+            )
+        return "\n\n".join(section.rstrip() for section in sections if section.strip()) + "\n", False
+
+    def _build_prompts_markdown(
+        self,
+        *,
+        display_name: str,
+        summary: str,
+        skill_body: str,
+        main_sections: list[dict[str, str]],
+        example_sections: list[dict[str, str]],
+    ) -> tuple[str, str]:
+        normalized_skill_body = _squash_blank_lines(skill_body)
+        main_chunks: list[str] = []
+        if normalized_skill_body:
+            main_chunks.append(f"## Primary skill text\n\n{normalized_skill_body}")
+        for section in main_sections[:12]:
+            text = str(section.get("text") or "").strip()
+            if not text:
+                continue
+            title = str(section.get("path") or "source").strip()
+            main_chunks.append(f"## {title}\n\n{text}")
+        if not main_chunks:
+            main_chunks.append(summary or f"{display_name} has no extracted text material.")
+        main_text = f"# {display_name} prompt material\n\n" + "\n\n".join(main_chunks).strip() + "\n"
+
+        example_chunks: list[str] = []
+        for section in example_sections[:10]:
+            text = str(section.get("text") or "").strip()
+            if not text:
+                continue
+            title = str(section.get("path") or "example").strip()
+            example_chunks.append(f"## {title}\n\n{text}")
+        if not example_chunks:
+            example_chunks.append("No explicit example prompts were found in the imported source.")
+        example_text = "# Example prompts\n\n" + "\n\n".join(example_chunks).strip() + "\n"
+        return main_text, example_text
+
+    def _build_pack_markdown(
+        self,
+        *,
+        display_name: str,
+        summary: str,
+        canonical_id: str,
+        version: str,
+        classification: str,
+        status: str,
+        risk_report: PackRiskReport,
+        kept_snapshot_paths: list[str],
+        dropped_paths: list[str],
+        source_origin: str,
+        source_url: str | None,
+        source_ref: str | None,
+    ) -> str:
+        state_label = _canonical_outcome_category(status).replace("_", " ")
+        kept_preview = ", ".join(kept_snapshot_paths[:6]) if kept_snapshot_paths else "none"
+        dropped_preview = ", ".join(dropped_paths[:6]) if dropped_paths else "none"
+        lines = [
+            f"# {display_name}",
+            "",
+            summary or f"{display_name} normalized as a safe pack.",
+            "",
+            "## Pack details",
+            f"- Pack ID: `{canonical_id}`",
+            f"- Version: `{version}`",
+            f"- Classification: `{classification}`",
+            f"- Outcome: `{state_label}`",
+            f"- Risk level: `{risk_report.level}`",
+            f"- Risk score: `{float(risk_report.score):.4f}`",
+            "",
+            "## Import notes",
+            f"- Source origin: `{source_origin}`",
+            f"- Source URL: `{source_url or 'n/a'}`",
+            f"- Source ref: `{source_ref or 'n/a'}`",
+            f"- Kept snapshot files: {kept_preview}",
+            f"- Dropped files: {dropped_preview}",
+            "",
+            "## Next step",
+        ]
+        if status == STATUS_NORMALIZED:
+            lines.append("Review the canonical `SKILL.md` and `prompts/` files before using the pack.")
+        elif status == STATUS_PARTIAL_SAFE_IMPORT:
+            lines.append("Use the safe text and assets only, and treat the dropped files as unavailable.")
+        else:
+            lines.append("Keep the audit snapshot only, or rebuild a safe text-only pack manually.")
+        return "\n".join(lines).strip() + "\n"
+
+    def _write_canonical_pack_tree(
+        self,
+        root: Path,
+        *,
+        display_name: str,
+        summary: str,
+        canonical_id: str,
+        version: str,
+        upstream_version: str | None,
+        classification: str,
+        pack_type: str,
+        status: str,
+        risk_report: PackRiskReport,
+        source_origin: str,
+        source_url: str | None,
+        source_ref: str | None,
+        source_url_resolved: str | None,
+        source_commit: str | None,
+        source_key: str,
+        source_fingerprint: str,
+        quarantine_path: str | None,
+        source_history: list[dict[str, Any]],
+        file_records: list[PackFileRecord],
+        components: list[dict[str, Any]],
+        assets: list[dict[str, Any]],
+        capabilities: dict[str, Any],
+        permissions_granted: list[str],
+        main_sections: list[dict[str, str]],
+        example_sections: list[dict[str, str]],
+        kept_snapshot_paths: list[str],
+        dropped_paths: list[str],
+        blocked_categories: list[str],
+        normalized_integrity: dict[str, Any],
+        content_hash: str,
+        raw_archive_path: str | None,
+    ) -> dict[str, Any]:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "prompts").mkdir(parents=True, exist_ok=True)
+        (root / "assets" / "source").mkdir(parents=True, exist_ok=True)
+        (root / "metadata").mkdir(parents=True, exist_ok=True)
+        source_snapshot_targets: list[str] = list(dict.fromkeys(kept_snapshot_paths))
+        normalization_decisions: list[dict[str, Any]] = []
+        for record in sorted(file_records, key=lambda item: item.rel_path):
+            rel_path = str(record.rel_path or "").strip()
+            if not rel_path:
+                continue
+            source_target_rel = self._canonical_source_snapshot_path(rel_path)
+            source_target_path = root / source_target_rel
+            source_target_path.parent.mkdir(parents=True, exist_ok=True)
+            if record.file_type == "symlink":
+                normalization_decisions.append(
+                    {
+                        "source_path": rel_path,
+                        "action": "dropped",
+                        "target_path": None,
+                        "reason": "symlink",
+                    }
+                )
+                continue
+            if record.is_text or Path(rel_path).suffix.lower() in STATIC_ASSET_EXTENSIONS:
+                try:
+                    shutil.copy2(record.absolute_path, source_target_path)
+                    source_snapshot_targets.append(source_target_rel)
+                    if Path(rel_path).suffix.lower() in STATIC_ASSET_EXTENSIONS:
+                        asset_target_rel = self._canonical_asset_target_path(rel_path)
+                        asset_target_path = root / asset_target_rel
+                        asset_target_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(record.absolute_path, asset_target_path)
+                    normalization_decisions.append(
+                        {
+                            "source_path": rel_path,
+                            "action": "kept",
+                            "target_path": source_target_rel,
+                            "reason": "safe_text" if record.is_text else "static_asset",
+                        }
+                    )
+                except OSError:
+                    normalization_decisions.append(
+                        {
+                            "source_path": rel_path,
+                            "action": "dropped",
+                            "target_path": None,
+                            "reason": "copy_failed",
+                        }
+                    )
+                continue
+            if rel_path.lower() not in {"skill.md"}:
+                normalization_decisions.append(
+                    {
+                        "source_path": rel_path,
+                        "action": "dropped",
+                        "target_path": None,
+                        "reason": "unsupported_or_executable",
+                    }
+                )
+        skill_source_body = self._extract_primary_skill_body(file_records)
+        skill_body, preserved_skill = self._build_canonical_skill_markdown(
+            display_name=display_name,
+            summary=summary,
+            skill_body=skill_source_body,
+            main_sections=main_sections,
+            example_sections=example_sections,
+            capabilities=capabilities,
+        )
+        main_markdown, examples_markdown = self._build_prompts_markdown(
+            display_name=display_name,
+            summary=summary,
+            skill_body=skill_body,
+            main_sections=main_sections,
+            example_sections=example_sections,
+        )
+        canonical_skill_path = root / "SKILL.md"
+        canonical_skill_path.write_text(skill_body, encoding="utf-8")
+        (root / "prompts" / "main.md").write_text(main_markdown, encoding="utf-8")
+        (root / "prompts" / "examples.md").write_text(examples_markdown, encoding="utf-8")
+        pack_md = self._build_pack_markdown(
+            display_name=display_name,
+            summary=summary,
+            canonical_id=canonical_id,
+            version=version,
+            classification=classification,
+            status=status,
+            risk_report=risk_report,
+            kept_snapshot_paths=source_snapshot_targets,
+            dropped_paths=list(dropped_paths),
+            source_origin=source_origin,
+            source_url=source_url,
+            source_ref=source_ref,
+        )
+        (root / "PACK.md").write_text(pack_md, encoding="utf-8")
+
+        manifest = {
+            "schema_version": 1,
+            "pack_id": canonical_id,
+            "version": version,
+            "display_name": display_name,
+            "summary": summary,
+            "kind": pack_type,
+            "classification": classification,
+            "import_mode": status,
+            "source": {
+                "origin": source_origin,
+                "url": source_url,
+                "resolved_url": source_url_resolved,
+                "ref": source_ref,
+                "commit_hash": source_commit,
+                "upstream_version": upstream_version,
+                "source_key": source_key,
+                "source_fingerprint": source_fingerprint,
+                "archive_sha256": normalized_integrity.get("archive_sha256"),
+                "raw_archive_path": raw_archive_path,
+                "quarantine_path": quarantine_path,
+                "normalized_path": str(root),
+                "fetched_at": _now_iso(),
+            },
+            "trust": {
+                "level": "review_required" if status != STATUS_BLOCKED else "blocked",
+                "import_mode": status,
+                "risk_level": risk_report.level,
+                "risk_score": round(float(risk_report.score), 4),
+                "flags": list(risk_report.flags),
+                "blocked_reasons": list(risk_report.hard_block_reasons),
+                "review_required": True,
+            },
+            "permissions_granted": list(permissions_granted),
+            "contents": {
+                "pack_md": "PACK.md",
+                "skill_md": "SKILL.md",
+                "prompts": ["prompts/main.md", "prompts/examples.md"],
+                "source_snapshot": list(dict.fromkeys(source_snapshot_targets)),
+                "kept_files": list(
+                    dict.fromkeys(
+                        [item["path"] for item in components if bool(item.get("included", False))]
+                        + [item["path"] for item in assets if bool(item.get("included", False))]
+                        + source_snapshot_targets
+                    )
+                ),
+                "dropped_files": list(dict.fromkeys(dropped_paths)),
+            },
+            "capabilities": {
+                "declared": list(capabilities.get("declared") if isinstance(capabilities.get("declared"), list) else []),
+                "inferred": list(capabilities.get("inferred") if isinstance(capabilities.get("inferred"), list) else []),
+                "summary": str(capabilities.get("summary") or "").strip() or summary,
+            },
+        }
+        (root / "manifest.json").write_text(_safe_json(manifest) + "\n", encoding="utf-8")
+
+        source_payload = {
+            "schema_version": 1,
+            "pack_id": canonical_id,
+            "version": version,
+            "source": {
+                "origin": source_origin,
+                "url": source_url,
+                "resolved_url": source_url_resolved,
+                "ref": source_ref,
+                "commit_hash": source_commit,
+                "upstream_version": upstream_version,
+                "source_key": source_key,
+                "source_fingerprint": source_fingerprint,
+                "archive_sha256": normalized_integrity.get("archive_sha256"),
+                "raw_archive_path": raw_archive_path,
+                "quarantine_path": quarantine_path,
+                "normalized_path": str(root),
+                "fetched_at": _now_iso(),
+            },
+            "source_history": source_history,
+        }
+        normalization_payload = {
+            "schema_version": 1,
+            "pack_id": canonical_id,
+            "version": version,
+            "kind": pack_type,
+            "files_seen": [record.rel_path for record in sorted(file_records, key=lambda item: item.rel_path)],
+            "files_kept": list(
+                dict.fromkeys(
+                    [item["path"] for item in components if bool(item.get("included", False))]
+                    + [item["path"] for item in assets if bool(item.get("included", False))]
+                )
+            ),
+            "files_dropped": list(dict.fromkeys(dropped_paths)),
+            "blocked_categories": list(blocked_categories),
+            "normalization_decisions": normalization_decisions,
+            "canonical_files": [
+                "PACK.md",
+                "manifest.json",
+                "SKILL.md",
+                "prompts/main.md",
+                "prompts/examples.md",
+                "metadata/source.json",
+                "metadata/normalization.json",
+                "metadata/review.json",
+            ],
+        }
+        review_payload = {
+            "schema_version": 1,
+            "pack_id": canonical_id,
+            "version": version,
+            "kind": pack_type,
+            "outcome_category": _canonical_outcome_category(status),
+            "review_required": True,
+            "warnings": list(risk_report.flags) + list(risk_report.hard_block_reasons),
+            "next_step": (
+                "Review the canonical `SKILL.md` and `prompts/` files before using the pack."
+                if status == STATUS_NORMALIZED
+                else "Use the safe text and assets only, and treat dropped files as unavailable."
+                if status == STATUS_PARTIAL_SAFE_IMPORT
+                else "Keep the audit snapshot only, or rebuild a safe text-only pack manually."
+            ),
+            "confidence": round(max(0.0, 1.0 - float(risk_report.score)), 4),
+            "risk_level": risk_report.level,
+            "risk_score": round(float(risk_report.score), 4),
+            "summary": (
+                "Normalized safe text import."
+                if status == STATUS_NORMALIZED
+                else "Partial safe import."
+                if status == STATUS_PARTIAL_SAFE_IMPORT
+                else "Blocked install."
+            ),
+        }
+        (root / "metadata" / "source.json").write_text(_safe_json(source_payload) + "\n", encoding="utf-8")
+        (root / "metadata" / "normalization.json").write_text(_safe_json(normalization_payload) + "\n", encoding="utf-8")
+        (root / "metadata" / "review.json").write_text(_safe_json(review_payload) + "\n", encoding="utf-8")
+        return {
+            "manifest": manifest,
+            "source": source_payload,
+            "normalization": normalization_payload,
+            "review": review_payload,
+        }
+
+    @staticmethod
+    def _extract_primary_skill_body(file_records: list[PackFileRecord]) -> str:
+        skill_record = next((record for record in file_records if record.rel_path.lower() == "skill.md"), None)
+        if skill_record and skill_record.text_preview is not None:
+            full_text, _ = _load_text_file(Path(skill_record.absolute_path), max_bytes=1024 * 1024)
+            parsed_meta, parsed_body = _parse_frontmatter(full_text or skill_record.text_preview)
+            if parsed_body.strip():
+                return parsed_body.strip()
+            if skill_record.text_preview:
+                return skill_record.text_preview.strip()
+        return ""
+
     def _inventory(self, root: Path) -> list[PackFileRecord]:
         out: list[PackFileRecord] = []
         for current_root, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
@@ -604,7 +1275,7 @@ class ExternalPackIngestor:
         )
         if has_package_manifest or has_binary or (has_executable_code and not has_skill_md):
             return CLASS_NATIVE_CODE_PACK
-        if has_skill_md:
+        if has_skill_md or _has_prompt_like_text_layout(file_records):
             return CLASS_PORTABLE_TEXT_SKILL
         if has_experience_signals:
             return CLASS_EXPERIENCE_PACK
@@ -897,23 +1568,6 @@ class ExternalPackIngestor:
             adaptation_strategy = "blocked_by_policy"
             adaptation_notes = "This pack was preserved for review but not imported as a runnable skill."
 
-        normalized_records = self._inventory(normalized_dir)
-        normalized_sha_by_path = {
-            record.rel_path: str(record.sha256 or "").strip()
-            for record in normalized_records
-            if str(record.sha256 or "").strip()
-        }
-        for component in components:
-            if bool(component.get("included", False)):
-                normalized_sha = normalized_sha_by_path.get(str(component.get("path") or ""))
-                if normalized_sha:
-                    component["sha256"] = normalized_sha
-        for asset in assets:
-            if bool(asset.get("included", False)):
-                normalized_sha = normalized_sha_by_path.get(str(asset.get("path") or ""))
-                if normalized_sha:
-                    asset["sha256"] = normalized_sha
-
         source_ref = str(remote_source.ref or "").strip() or None if remote_source else None
         source_path_value = str(quarantined_path)
         content_hash = str(integrity.get("sha256") or "").strip()
@@ -928,7 +1582,7 @@ class ExternalPackIngestor:
             source_url=source_url,
             source_path=source_path_value if source_origin == "local_path" else None,
         )
-        normalized_integrity = self._aggregate_integrity(normalized_records)
+        normalized_integrity = self._aggregate_integrity(file_records, archive_sha256=str(integrity.get("archive_sha256") or "").strip() or None)
         canonical_id = str(normalized_integrity.get("sha256") or "").strip() or _sha256_text(
             _safe_json(
                 _component_identity_payload(
@@ -939,10 +1593,22 @@ class ExternalPackIngestor:
             )
         )
         final_normalized_dir = self.normalized_root / canonical_id
+        existing_source_history: list[dict[str, Any]] = []
+        existing_source_json = final_normalized_dir / "metadata" / "source.json"
+        if existing_source_json.exists():
+            try:
+                existing_payload = json.loads(existing_source_json.read_text(encoding="utf-8"))
+                existing_source_history = [
+                    dict(item)
+                    for item in (
+                        existing_payload.get("source_history") if isinstance(existing_payload, dict) and isinstance(existing_payload.get("source_history"), list) else []
+                    )
+                    if isinstance(item, dict)
+                ]
+            except (OSError, json.JSONDecodeError):
+                existing_source_history = []
         if final_normalized_dir.exists():
             shutil.rmtree(final_normalized_dir)
-        shutil.move(str(normalized_dir), str(final_normalized_dir))
-        normalized_dir = final_normalized_dir
         source_history_entry = {
             "source_key": source_key,
             "source_fingerprint": source_fingerprint,
@@ -964,7 +1630,7 @@ class ExternalPackIngestor:
         canonical_pack = CanonicalPack(
             id=canonical_id,
             name=name,
-            version=version,
+            version=content_hash or version,
             type=pack_type,
             pack_identity={
                 "canonical_id": canonical_id,
@@ -1030,10 +1696,47 @@ class ExternalPackIngestor:
             },
         )
 
-        metadata_path = normalized_dir / "canonical_pack.json"
-        metadata_path.write_text(_safe_json(canonical_pack.to_dict()) + "\n", encoding="utf-8")
-        risk_path = normalized_dir / "risk_report.json"
-        risk_path.write_text(_safe_json(risk_report.to_dict()) + "\n", encoding="utf-8")
+        source_docs = self._canonical_source_docs(file_records)
+        self._write_canonical_pack_tree(
+            final_normalized_dir,
+            display_name=name,
+            summary=description,
+            canonical_id=canonical_id,
+            version=content_hash or version,
+            upstream_version=version,
+            classification=classification,
+            pack_type=pack_type,
+            status=status,
+            risk_report=risk_report,
+            source_origin=source_origin,
+            source_url=source_url,
+            source_ref=source_ref,
+            source_url_resolved=(str(remote_source.resolved_url or "").strip() or None) if remote_source else None,
+            source_commit=commit_hash,
+            source_key=source_key,
+            source_fingerprint=source_fingerprint,
+            quarantine_path=str(quarantined_path),
+            source_history=existing_source_history + [source_history_entry],
+            file_records=file_records,
+            components=components,
+            assets=assets,
+            capabilities={
+                "declared": list(declared_capabilities),
+                "inferred": list(dict.fromkeys(inferred_capabilities)),
+                "summary": description,
+            },
+            permissions_granted=granted_permissions,
+            main_sections=list(source_docs["main_sections"]),
+            example_sections=list(source_docs["example_sections"]),
+            kept_snapshot_paths=list(source_docs["kept_snapshot_paths"]),
+            dropped_paths=list(source_docs["dropped_paths"]),
+            blocked_categories=list(source_docs["blocked_categories"]),
+            normalized_integrity=normalized_integrity,
+            content_hash=content_hash,
+            raw_archive_path=raw_archive_path,
+        )
+        if normalized_dir.exists():
+            shutil.rmtree(normalized_dir)
 
         blocked_reasons = list(risk_report.hard_block_reasons)
         if classification == CLASS_EXPERIENCE_PACK:
@@ -1047,7 +1750,7 @@ class ExternalPackIngestor:
             risk_report=risk_report,
             blocked_reasons=tuple(sorted(set(blocked_reasons))),
             stripped_components=tuple(sorted(set(stripped_components))),
-            normalized_path=str(normalized_dir),
+            normalized_path=str(final_normalized_dir),
         )
 
     def _build_fetch_blocked_result(
