@@ -141,7 +141,12 @@ class RuntimeTruthService:
             }
         return {}
 
-    def _provider_disabled_by_runtime(self, provider_id: str | None) -> bool:
+    def _provider_disabled_by_runtime(
+        self,
+        provider_id: str | None,
+        *,
+        router_snapshot: dict[str, Any] | None = None,
+    ) -> bool:
         provider_key = str(provider_id or "").strip().lower()
         if not provider_key:
             return False
@@ -158,7 +163,7 @@ class RuntimeTruthService:
         provider_payload = providers_doc.get(provider_key) if isinstance(providers_doc.get(provider_key), dict) else None
         if isinstance(provider_payload, dict) and not bool(provider_payload.get("enabled", True)):
             return True
-        snapshot = self._router_snapshot()
+        snapshot = router_snapshot if isinstance(router_snapshot, dict) else self._router_snapshot()
         provider_rows = snapshot.get("providers") if isinstance(snapshot.get("providers"), list) else []
         for row in provider_rows:
             if not isinstance(row, dict):
@@ -174,7 +179,12 @@ class RuntimeTruthService:
                 return True
         return False
 
-    def _provider_health_row(self, provider_id: str | None) -> dict[str, Any]:
+    def _provider_health_row(
+        self,
+        provider_id: str | None,
+        *,
+        router_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         provider_key = str(provider_id or "").strip().lower()
         if not provider_key:
             return {}
@@ -191,13 +201,18 @@ class RuntimeTruthService:
                 effective = payload
             if isinstance(effective, dict):
                 payload = dict(effective)
-        if self._provider_disabled_by_runtime(provider_key):
+        if self._provider_disabled_by_runtime(provider_key, router_snapshot=router_snapshot):
             payload = dict(payload)
             payload["status"] = "down"
             payload["last_error_kind"] = "provider_disabled"
         return payload
 
-    def _model_health_row(self, model_id: str | None) -> dict[str, Any]:
+    def _model_health_row(
+        self,
+        model_id: str | None,
+        *,
+        router_snapshot: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         model_key = str(model_id or "").strip()
         if not model_key:
             return {}
@@ -218,7 +233,7 @@ class RuntimeTruthService:
         provider_id = str(model_payload.get("provider") or "").strip().lower()
         if not provider_id and ":" in model_key:
             provider_id = model_key.split(":", 1)[0].strip().lower()
-        if provider_id and self._provider_disabled_by_runtime(provider_id):
+        if provider_id and self._provider_disabled_by_runtime(provider_id, router_snapshot=router_snapshot):
             payload = dict(payload)
             payload["status"] = "down"
             payload["last_error_kind"] = "provider_disabled"
@@ -1301,6 +1316,7 @@ class RuntimeTruthService:
         provider_id: str,
         *,
         include_target_truth: bool,
+        router_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         provider_key = str(provider_id or "").strip().lower()
         target_truth = self.chat_target_truth() if include_target_truth else {}
@@ -1375,7 +1391,9 @@ class RuntimeTruthService:
             and (provider_local or not auth_required or secret_present)
         )
         provider_health = self._provider_health_row(provider_key)
-        current_model_health = self._model_health_row(current_model_id if current_provider == provider_key else preferred_model_id)
+        current_model_health = self._model_health_row(
+            current_model_id if current_provider == provider_key else preferred_model_id,
+        )
         health_status = self._health_status(provider_health)
         if health_status == "unknown" and any(str(row.get("health_status") or "") == "ok" for row in model_rows):
             health_status = "ok"
@@ -1869,6 +1887,7 @@ class RuntimeTruthService:
         inventory = self.model_inventory_status()
         policy = self._policy_flags()
         router_snapshot = self._router_snapshot()
+        self._router_snapshot_cache = router_snapshot
         provider_cache: dict[str, dict[str, Any]] = {}
         rows: list[dict[str, Any]] = []
         for inventory_row in (
@@ -1881,7 +1900,10 @@ class RuntimeTruthService:
             model_id = str(row.get("model_id") or "").strip()
             provider_status = provider_cache.get(provider_id)
             if provider_status is None:
-                provider_status = self._provider_status_snapshot(provider_id, include_target_truth=False)
+                provider_status = self._provider_status_snapshot(
+                    provider_id,
+                    include_target_truth=False,
+                )
                 provider_cache[provider_id] = provider_status
             configured = bool(provider_status.get("configured", False))
             provider_connection_state = str(provider_status.get("connection_state") or "discovered_but_not_usable").strip().lower() or "discovered_but_not_usable"
@@ -2096,7 +2118,7 @@ class RuntimeTruthService:
             for row in rows
         ]
         ready_rows = [dict(row) for row in rows if bool(row.get("usable_now", False))]
-        return {
+        result = {
             "active_provider": str(inventory.get("active_provider") or "").strip().lower() or None,
             "active_model": str(inventory.get("active_model") or "").strip() or None,
             "configured_provider": str(inventory.get("configured_provider") or "").strip().lower() or None,
@@ -2116,6 +2138,9 @@ class RuntimeTruthService:
             "lifecycle_rows": lifecycle_rows,
             "source": "inventory+provider_health+model_health+model_manager_lifecycle",
         }
+        if hasattr(self, "_router_snapshot_cache"):
+            delattr(self, "_router_snapshot_cache")
+        return result
 
     @staticmethod
     def _selection_candidate_health_status(row: dict[str, Any]) -> str:

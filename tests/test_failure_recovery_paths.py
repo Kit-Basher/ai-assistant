@@ -111,7 +111,7 @@ class TestFailureRecoveryPaths(unittest.TestCase):
 
         response = self._chat(runtime, "look for information on a new model from hugging face")
         text = str((response.get("assistant") or {}).get("content") or "")
-        self.assertIn("some sources failed", text.lower())
+        self.assertTrue(text.lower().startswith("the closest matches look like"))
         self.assertIn("hf timeout", text.lower())
         self.assertIn("model_discovery_manager", response.get("meta", {}).get("used_tools", []))
         self.assertNotIn("does not exist", text.lower())

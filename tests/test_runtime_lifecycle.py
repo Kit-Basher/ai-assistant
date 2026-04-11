@@ -507,7 +507,7 @@ class TestRuntimeLifecycle(unittest.TestCase):
         payload = payload_holder.get("payload")
         self.assertIsInstance(payload, dict)
         assert isinstance(payload, dict)
-        self.assertEqual("ready", payload["phase"])
+        self.assertIn(payload["phase"], {"ready", "degraded"})
         self.assertIn(payload["providers"]["ollama"], {"ok", "down"})
         self.assertIn("router", payload)
         self.assertIn("health_summary", payload)

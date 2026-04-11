@@ -1,5 +1,5 @@
-from telegram_adapter.bot import main
+from telegram_adapter.bot import run
 
 
 if __name__ == "__main__":
-    main()
+    run()

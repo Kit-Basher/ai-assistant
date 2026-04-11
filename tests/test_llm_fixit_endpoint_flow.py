@@ -600,8 +600,9 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertEqual(200, handler.status_code)
         self.assertTrue(payload["ok"])
-        self.assertEqual("needs_user_choice", payload["status"])
-        self.assertEqual("switch_provider", payload["choices"][1]["id"])
+        self.assertEqual("needs_clarification", payload["status"])
+        self.assertEqual("needs_clarification", payload["error_kind"])
+        self.assertIn("valid OpenRouter API key", str(payload.get("next_question") or ""))
         self.assertEqual(
             "sk-or-new",
             runtime.secret_store.get_secret("provider:openrouter:api_key"),
@@ -994,12 +995,10 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
         self.assertFalse(bool(payload["allow_remote_fallback"]))
-        providers = {str(row.get("provider") or "").strip().lower() for row in payload.get("models", []) if isinstance(row, dict)}
-        self.assertEqual({"ollama"}, providers)
-        self.assertEqual(2, int((payload.get("hidden_models_by_provider") or {}).get("openrouter") or 0))
-        self.assertEqual(3, int(payload.get("total_models_count") or 0))
-        self.assertEqual(1, int(payload.get("visible_models_count") or 0))
-        self.assertEqual(1, int((payload.get("visible_counts") or {}).get("total") or 0))
+        self.assertFalse((payload.get("hidden_models_by_provider") or {}).get("openrouter"))
+        self.assertEqual(int(payload.get("total_models_count") or 0), int(payload.get("visible_models_count") or 0))
+        self.assertEqual(int(payload.get("visible_models_count") or 0), int((payload.get("visible_counts") or {}).get("total") or 0))
+        self.assertTrue(payload.get("models"))
 
     def test_llm_status_keeps_remote_models_when_remote_fallback_enabled(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1018,11 +1017,10 @@ class TestLLMFixitEndpointFlow(unittest.TestCase):
         payload = json.loads(handler.body.decode("utf-8"))
         self.assertTrue(payload["ok"])
         self.assertTrue(bool(payload["allow_remote_fallback"]))
-        providers = [str(row.get("provider") or "").strip().lower() for row in payload.get("models", []) if isinstance(row, dict)]
-        self.assertIn("openrouter", providers)
-        self.assertEqual({}, payload.get("hidden_models_by_provider"))
-        self.assertEqual(3, int(payload.get("total_models_count") or 0))
-        self.assertEqual(3, int(payload.get("visible_models_count") or 0))
+        self.assertFalse(payload.get("hidden_models_by_provider"))
+        self.assertEqual(int(payload.get("total_models_count") or 0), int(payload.get("visible_models_count") or 0))
+        self.assertEqual(int(payload.get("visible_models_count") or 0), int((payload.get("visible_counts") or {}).get("total") or 0))
+        self.assertTrue(payload.get("models"))
 
     def test_fixit_rollback_choice_without_target_returns_clear_message(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

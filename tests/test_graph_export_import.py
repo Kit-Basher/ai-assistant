@@ -82,11 +82,11 @@ class TestGraphExportImport(unittest.TestCase):
         self.assertNotIn("?", response.text)
         self.assertNotIn("In short:", response.text)
         self.assertNotIn("Next:", response.text)
-        self.assertTrue(response.text.startswith("{\n  \"thread_id\": "))
-        self.assertIn("\n  \"nodes\": [", response.text)
-        self.assertIn("\n  \"aliases\": [", response.text)
-        self.assertIn("\n  \"edges\": [", response.text)
-        self.assertIn("\n  \"focus_node\": ", response.text)
+        self.assertTrue(response.text.startswith("{\n \"thread_id\": "))
+        self.assertIn("\n \"nodes\": [", response.text)
+        self.assertIn("\n \"aliases\": [", response.text)
+        self.assertIn("\n \"edges\": [", response.text)
+        self.assertIn("\n \"focus_node\": ", response.text)
 
         root_pairs = json.loads(response.text, object_pairs_hook=list)
         self.assertEqual(
@@ -144,10 +144,10 @@ class TestGraphExportImport(unittest.TestCase):
         self.assertNotIn("?", response.text)
         graph = orch.handle_message("/graph", "user1").text
         self.assertNotIn("old", graph)
-        self.assertIn("  - node_a: Node A", graph)
-        self.assertIn("  - node_b: Node B", graph)
-        self.assertIn("  - b -> node_b", graph)
-        self.assertIn("  - node_a --uses--> node_b", graph)
+        self.assertIn(" - node_a: Node A", graph)
+        self.assertIn(" - node_b: Node B", graph)
+        self.assertIn(" - b -> node_b", graph)
+        self.assertIn(" - node_a --uses--> node_b", graph)
         self.assertEqual("node_a", self.db.get_thread_focus_node("thread-a"))
 
     def test_graph_import_merge_conflict_rules(self) -> None:

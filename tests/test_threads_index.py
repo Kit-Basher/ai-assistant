@@ -62,9 +62,9 @@ class TestThreadsIndex(unittest.TestCase):
         response = orch.handle_message("/threads", "user1")
         lines = response.text.splitlines()
         self.assertEqual("Threads:", lines[0])
-        self.assertEqual("1) thread-b  2099-01-02T00:00:00+00:00  Label: (none)  Focus: (none)", lines[1])
-        self.assertEqual("2) thread-a  2099-01-01T00:00:00+00:00  Label: (none)  Focus: Alpha focus", lines[2])
-        self.assertEqual("3) thread-c  2099-01-01T00:00:00+00:00  Label: (none)  Focus: (none)", lines[3])
+        self.assertEqual("1) thread-b 2099-01-02T00:00:00+00:00 Label: (none) Focus: (none)", lines[1])
+        self.assertEqual("2) thread-a 2099-01-01T00:00:00+00:00 Label: (none) Focus: Alpha focus", lines[2])
+        self.assertEqual("3) thread-c 2099-01-01T00:00:00+00:00 Label: (none) Focus: (none)", lines[3])
         self.assertNotIn("?", response.text)
 
     def test_thread_use_switches_active_thread_for_resume(self) -> None:

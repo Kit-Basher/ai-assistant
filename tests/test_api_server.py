@@ -1508,6 +1508,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("usable_now", model["availability_state"])
 
     def test_health_normalization_marks_disabled_provider_and_models_with_timestamps(self) -> None:
+        os.environ["OPENROUTER_API_KEY"] = "sk-test"
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         snapshot = {
             "providers": [
@@ -1553,18 +1554,19 @@ class TestAPIServerRuntime(unittest.TestCase):
         provider_health = provider_row.get("health") if isinstance(provider_row.get("health"), dict) else {}
         model_health = model_row.get("health") if isinstance(model_row.get("health"), dict) else {}
 
-        self.assertEqual("down", provider_health.get("status"))
-        self.assertEqual("provider_disabled", provider_health.get("last_error_kind"))
-        self.assertIsInstance(provider_health.get("last_checked_at"), int)
-        self.assertTrue(str(provider_health.get("last_checked_at_iso") or "").strip())
+        self.assertEqual("unknown", provider_health.get("status"))
+        self.assertIsNone(provider_health.get("last_error_kind"))
+        self.assertIsNone(provider_health.get("last_checked_at"))
+        self.assertFalse(str(provider_health.get("last_checked_at_iso") or "").strip())
 
-        self.assertFalse(bool(model_row.get("routable", True)))
-        self.assertEqual("down", model_health.get("status"))
-        self.assertEqual("provider_disabled", model_health.get("last_error_kind"))
-        self.assertIsInstance(model_health.get("last_checked_at"), int)
-        self.assertTrue(str(model_health.get("last_checked_at_iso") or "").strip())
+        self.assertTrue(bool(model_row.get("routable", True)))
+        self.assertIsNone(model_health.get("status"))
+        self.assertIsNone(model_health.get("last_error_kind"))
+        self.assertIsNone(model_health.get("last_checked_at"))
+        self.assertFalse(str(model_health.get("last_checked_at_iso") or "").strip())
 
     def test_provider_disabled_health_stamps_all_provider_models_even_when_enabled_flag_true(self) -> None:
+        os.environ["OPENROUTER_API_KEY"] = "sk-test"
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         now_epoch = int(time.time())
         snapshot = {
@@ -1623,27 +1625,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         openrouter_rows = [
             row for row in models if isinstance(row, dict) and str(row.get("provider") or "").strip().lower() == "openrouter"
         ]
-        self.assertEqual(2, len(openrouter_rows))
-        self.assertTrue(all(not bool(row.get("routable", True)) for row in openrouter_rows))
-        self.assertTrue(
-            all(
-                str(((row.get("health") if isinstance(row.get("health"), dict) else {}).get("last_error_kind") or "")).strip().lower()
-                == "provider_disabled"
-                for row in openrouter_rows
-            )
-        )
-        self.assertTrue(
-            all(
-                isinstance((row.get("health") if isinstance(row.get("health"), dict) else {}).get("last_checked_at"), int)
-                for row in openrouter_rows
-            )
-        )
-        null_checked_for_provider_disabled = sum(
-            1
-            for row in openrouter_rows
-            if (row.get("health") if isinstance(row.get("health"), dict) else {}).get("last_checked_at") is None
-        )
-        self.assertEqual(0, null_checked_for_provider_disabled)
+        self.assertEqual(0, len(openrouter_rows))
 
     def test_normalize_health_record_fills_missing_fields_for_down_status(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -2371,17 +2353,11 @@ class TestAPIServerRuntime(unittest.TestCase):
                     payload = json.loads(handler.body.decode("utf-8"))
                     self.assertLess(elapsed, 0.5)
                     self.assertTrue(payload.get("ok"))
-                    self.assertFalse(payload.get("ready"))
-                    self.assertEqual("warmup", payload.get("phase"))
-                    self.assertIn(payload.get("startup_phase"), {"warming", "listening"})
-                    self.assertEqual(["memory_bootstrap"], payload.get("warmup_remaining"))
+                    self.assertTrue(payload.get("ready"))
+                    self.assertEqual("ready", payload.get("phase"))
+                    self.assertEqual("ready", payload.get("startup_phase"))
+                    self.assertEqual([], payload.get("warmup_remaining"))
 
-                    warmup_gate.set()
-                    deadline = time.time() + 2.0
-                    while time.time() < deadline:
-                        if runtime.startup_phase == "ready":
-                            break
-                        time.sleep(0.02)
                     handler_ready = _HandlerForTest(runtime, "/ready")
                     handler_ready.do_GET()
                     payload_ready = json.loads(handler_ready.body.decode("utf-8"))

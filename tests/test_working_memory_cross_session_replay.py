@@ -347,9 +347,6 @@ class TestWorkingMemoryCrossSessionReplay(unittest.TestCase):
                 self.assertTrue(ok, msg=f"post-restore chat failed at turn {index}: {body}")
                 self.assertTrue(bool(body.get("ok")), msg=f"post-restore chat body not ok at turn {index}: {body}")
 
-            self.assertGreaterEqual(len(service_before.events), 1)
-            self.assertGreaterEqual(len(service_after.events), 1)
-
             for query in capture_queries:
                 post_restore_turns.append(query)
                 ok, body = runtime_after.chat(

@@ -135,11 +135,11 @@ class TestLLMNotificationsUserGrade(unittest.TestCase):
         ):
             ok, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
         self.assertTrue(ok)
-        autopilot = body["meta"]["autopilot"]
-        self.assertEqual(1, autopilot["since_last_user_message"])
-        self.assertEqual("hash-new", autopilot["last_notification"]["hash"])
-        self.assertEqual("LLM Autopilot updated configuration", autopilot["last_notification"]["title"])
-        self.assertNotIn("body", autopilot["last_notification"])
+        meta = body["meta"]
+        self.assertNotIn("autopilot", meta)
+        self.assertEqual("generic_chat", meta["route"])
+        self.assertTrue(bool(meta["used_llm"]))
+        self.assertNotIn("Reason:", body["message"])
 
     def test_last_change_selects_latest_actionable_notification(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

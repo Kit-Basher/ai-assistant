@@ -315,6 +315,7 @@ class TestProviderSetupFlow(unittest.TestCase):
             ("what managed adapters exist?", "governance_status"),
             ("what is my model selection policy?", "model_policy_status"),
             ("what is my cheap remote cap?", "model_policy_status"),
+            ("what execution mode does Telegram use?", "model_policy_status"),
         )
 
         with patch.object(
@@ -336,6 +337,9 @@ class TestProviderSetupFlow(unittest.TestCase):
                         },
                     )
                     self.assertEqual(expected_route, body["meta"]["route"])
+                    if utterance == "what execution mode does Telegram use?":
+                        self.assertEqual("model_controller_policy", body["setup"]["type"])
+                        self.assertIn("Mode: Controlled Mode.", body["assistant"]["content"])
 
     def test_http_chat_model_policy_explainability_routes_are_grounded(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -587,11 +591,12 @@ class TestProviderSetupFlow(unittest.TestCase):
         )
 
         self.assertEqual("setup_flow", third["meta"]["route"])
-        self.assertEqual("Now using openrouter:ai21/jamba-large-1.7 for chat.", third["assistant"]["content"])
+        self.assertIn("SAFE MODE is local-only right now", third["assistant"]["content"])
+        self.assertIn("did not switch chat to remote openrouter:ai21/jamba-large-1.7", third["assistant"]["content"])
         defaults = runtime.get_defaults()
-        self.assertEqual("openrouter", defaults["default_provider"])
-        self.assertEqual("openrouter:ai21/jamba-large-1.7", defaults["chat_model"])
-        self.assertEqual("openrouter:ai21/jamba-large-1.7", defaults["resolved_default_model"])
+        self.assertEqual("ollama", defaults["default_provider"])
+        self.assertEqual("ollama:qwen3.5:4b", defaults["chat_model"])
+        self.assertEqual("ollama:qwen3.5:4b", defaults["resolved_default_model"])
 
     def test_successful_openrouter_switch_updates_canonical_runtime_truth(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -857,13 +862,13 @@ class TestProviderSetupFlow(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIn("configured to use", body["assistant"]["content"].lower())
-        self.assertIn("best healthy target would be", body["assistant"]["content"].lower())
-        self.assertIn("ollama:qwen3.5:4b", body["assistant"]["content"])
+        self.assertIn("not responding right now", body["assistant"]["content"].lower())
+        self.assertIn("openrouter:ai21/jamba-large-1.7", body["assistant"]["content"].lower())
         truth = runtime.runtime_truth_service().chat_target_truth()
         self.assertEqual("openrouter", truth["configured_provider"])
         self.assertEqual("openrouter:ai21/jamba-large-1.7", truth["configured_model"])
-        self.assertEqual("ollama", truth["effective_provider"])
-        self.assertEqual("ollama:qwen3.5:4b", truth["effective_model"])
+        self.assertEqual("openrouter", truth["effective_provider"])
+        self.assertEqual("openrouter:ai21/jamba-large-1.7", truth["effective_model"])
 
     def test_chat_openrouter_provider_status_query_is_grounded(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -916,13 +921,14 @@ class TestProviderSetupFlow(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual("provider_status", body["setup"]["type"])
-        self.assertTrue(body["setup"]["configured"])
+        self.assertFalse(body["setup"]["configured"])
         self.assertEqual("openrouter", body["setup"]["provider"])
-        self.assertEqual("openrouter:openai/gpt-4o-mini", body["setup"]["model_id"])
+        self.assertIsNone(body["setup"]["model_id"])
         self.assertEqual("provider_status", body["meta"]["route"])
         self.assertFalse(body["meta"]["generic_fallback_used"])
         self.assertIn("OpenRouter", body["assistant"]["content"])
-        self.assertIn("openrouter:openai/gpt-4o-mini", body["assistant"]["content"])
+        self.assertIn("partly set up", body["assistant"]["content"].lower())
+        self.assertIn("chat model ready", body["assistant"]["content"].lower())
 
     def test_runtime_truth_service_exposes_structured_provider_state(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1760,7 +1766,7 @@ class TestProviderSetupFlow(unittest.TestCase):
                     self.assertNotIn("daily brief", reply.lower())
                     self.assertNotIn("db", reply.lower())
                 elif utterance == "what execution mode does Telegram use?":
-                    self.assertIn("Telegram uses managed_adapter mode", reply)
+                    self.assertIn("Mode: Controlled Mode.", reply)
                 else:
                     self.assertIn("OpenRouter", reply)
                     self.assertNotIn("I couldn't read that from the runtime state.", reply)
@@ -1785,7 +1791,7 @@ class TestProviderSetupFlow(unittest.TestCase):
                 "runtime_status",
                 "runtime_status",
                 "runtime_status",
-                "governance_status",
+                "model_policy_status",
             ],
             [str(row.get("selected_route") or "") for row in telegram_rows[-10:]],
         )

@@ -247,7 +247,11 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
         undo_ok, undo_body = runtime.llm_autopilot_undo({"actor": "webui"})
         self.assertTrue(undo_ok)
         self.assertTrue(undo_body["ok"])
-        self.assertEqual(before, runtime.registry_document.get("defaults"))
+        restored = dict(runtime.registry_document.get("defaults") or {})
+        restored.pop("chat_control_mode_override", None)
+        expected = dict(before or {})
+        expected.pop("chat_control_mode_override", None)
+        self.assertEqual(expected, restored)
         self.assertTrue(str(undo_body.get("rolled_back_to_snapshot_id") or ""))
 
     def test_churn_detection_enters_pause_and_blocks_future_apply(self) -> None:
@@ -321,7 +325,7 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
         self.assertTrue(blocked_body["applied"])
         self.assertFalse(blocked_body["safe_mode_blocked"])
 
-    def test_bootstrap_selects_local_chat_and_then_noops(self) -> None:
+    def test_bootstrap_noops_when_no_registry_candidate_is_available(self) -> None:
         runtime = AgentRuntime(
             _config(
                 self.registry_path,
@@ -346,15 +350,16 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
         with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot_for_bootstrap()):
             ok, body = runtime.llm_autopilot_bootstrap({"actor": "webui", "confirm": True}, trigger="manual")
         self.assertTrue(ok)
-        self.assertTrue(body["applied"])
-        self.assertEqual("ollama", runtime.registry_document["defaults"]["default_provider"])
-        self.assertEqual("ollama:llama3", runtime.registry_document["defaults"]["default_model"])
+        self.assertFalse(body["applied"])
+        self.assertIn("no_candidate", (body.get("plan") or {}).get("reasons") or [])
+        self.assertIsNone(runtime.registry_document["defaults"]["default_provider"])
+        self.assertIsNone(runtime.registry_document["defaults"]["default_model"])
 
         with patch.object(runtime._router, "doctor_snapshot", return_value=_doctor_snapshot_for_bootstrap()):
             noop_ok, noop_body = runtime.llm_autopilot_bootstrap({"actor": "webui", "confirm": True}, trigger="manual")
         self.assertTrue(noop_ok)
         self.assertFalse(noop_body["applied"])
-        self.assertIn("already_configured", (noop_body.get("plan") or {}).get("reasons") or [])
+        self.assertIn("no_candidate", (noop_body.get("plan") or {}).get("reasons") or [])
 
     def test_bootstrap_prefers_stronger_local_not_just_any_local(self) -> None:
         runtime = AgentRuntime(

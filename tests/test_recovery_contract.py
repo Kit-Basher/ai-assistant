@@ -66,7 +66,7 @@ class TestRecoveryContract(unittest.TestCase):
         mode = detect_recovery_mode(llm_status=llm_status)
         self.assertEqual(RECOVERY_LLM_UNAVAILABLE, mode)
         self.assertIn("python -m agent setup", recovery_next_action(mode))
-        self.assertIn("unavailable", recovery_summary(mode).lower())
+        self.assertEqual("System is degraded.", recovery_summary(mode))
 
     def test_degraded_read_only(self) -> None:
         ready_payload = {"runtime_status": {"runtime_mode": "DEGRADED"}}

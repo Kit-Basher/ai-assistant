@@ -32,7 +32,7 @@ class TestSetupChatFlow(unittest.TestCase):
             ("can you tell what CPU and GPU I have?", "operational_status", "operational_observe"),
             ("can you see the GPU?", "operational_status", "operational_observe"),
             ("can you dig deeper into my system?", "operational_status", "operational_observe"),
-            ("run a system check", "operational_status", "operational_observe"),
+            ("run a system check", "action_tool", "shell_blocked_request"),
         )
         for text, expected_route, expected_kind in cases:
             with self.subTest(text=text):
@@ -157,10 +157,17 @@ class TestSetupChatFlow(unittest.TestCase):
             "what does this mode allow?",
             "why can't you switch that here?",
             "what would you need my approval for?",
+            "what execution mode does Telegram use?",
+            "what execution mode does skill scheduled_sync use?",
+            "what execution mode does this skill use?",
         )
         for text in cases:
             with self.subTest(text=text):
                 decision = classify_runtime_chat_route(text)
+                if text == "what execution mode does this skill use?":
+                    self.assertEqual("generic_chat", decision.get("route"))
+                    self.assertEqual("generic_chat", decision.get("kind"))
+                    continue
                 self.assertEqual("model_policy_status", decision.get("route"))
                 self.assertEqual("model_controller_policy", decision.get("kind"))
                 self.assertFalse(bool(decision.get("generic_allowed")))

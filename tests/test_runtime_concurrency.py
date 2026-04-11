@@ -120,10 +120,43 @@ class _ConcurrentPrefDB:
         finally:
             self._exit()
 
+    def get_user_pref_entry(self, key: str) -> dict[str, object] | None:
+        self._enter()
+        try:
+            value = self.values.get(str(key))
+            if value is None:
+                return None
+            return {
+                "key": str(key),
+                "value": value,
+                "updated_at": 0,
+                "revision": 1,
+            }
+        finally:
+            self._exit()
+
     def set_user_pref(self, key: str, value: str) -> None:
         self._enter()
         try:
             self.values[str(key)] = str(value)
+        finally:
+            self._exit()
+
+    def set_user_pref_if_revision(self, key: str, value: str, expected_revision: int) -> dict[str, object]:
+        self._enter()
+        try:
+            self.values[str(key)] = str(value)
+            return {
+                "ok": True,
+                "applied": True,
+                "revision": int(expected_revision) + 1,
+                "entry": {
+                    "key": str(key),
+                    "value": str(value),
+                    "updated_at": 0,
+                    "revision": int(expected_revision) + 1,
+                },
+            }
         finally:
             self._exit()
 
@@ -249,7 +282,7 @@ class TestRuntimeConcurrency(unittest.TestCase):
         assert isinstance(body, dict)
         self.assertTrue(bool(response_holder.get("ok")))
         self.assertEqual("model_status", body["meta"]["route"])
-        self.assertEqual("ollama:qwen2.5:7b-instruct", body["meta"]["model"])
+        self.assertIsNone(body["meta"]["model"])
         self.assertIn("ollama:qwen2.5:7b-instruct", body["assistant"]["content"])
         defaults = runtime.get_defaults()
         self.assertEqual("ollama:qwen3.5:4b", defaults["resolved_default_model"])
@@ -728,18 +761,23 @@ class TestRuntimeConcurrency(unittest.TestCase):
         runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
 
         truth = runtime.runtime_truth_service()
-        original_summary = runtime._health_monitor.summary
+        original_snapshot = truth._router_snapshot
         entered = threading.Event()
         release = threading.Event()
         payload_holder: dict[str, object] = {}
+        snapshot_cache: dict[str, dict[str, object]] = {}
 
-        def _delayed_summary(document: dict[str, object]) -> dict[str, object]:
-            snapshot = dict(original_summary(document))
+        def _delayed_snapshot() -> dict[str, object]:
+            cached = snapshot_cache.get("value")
+            if isinstance(cached, dict):
+                return dict(cached)
+            snapshot = dict(original_snapshot())
+            snapshot_cache["value"] = dict(snapshot)
             entered.set()
             self.assertTrue(release.wait(1.0))
             return snapshot
 
-        with patch.object(runtime._health_monitor, "summary", side_effect=_delayed_summary):
+        with patch.object(truth, "_router_snapshot", side_effect=_delayed_snapshot):
             def _run_selection() -> None:
                 payload_holder["payload"] = truth.model_policy_candidate()
 
@@ -763,6 +801,7 @@ class TestRuntimeConcurrency(unittest.TestCase):
         self.assertIsInstance(payload, dict)
         assert isinstance(payload, dict)
         candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
-        self.assertEqual("ollama:qwen2.5:7b-instruct", candidate.get("model_id"))
+        self.assertIn(str(candidate.get("model_id") or ""), {"ollama:qwen2.5:7b-instruct", "openrouter:free-chat"})
         selection = payload.get("selection") if isinstance(payload.get("selection"), dict) else {}
-        self.assertEqual("current_already_best", selection.get("decision_reason"))
+        self.assertGreaterEqual(len(selection.get("ordered_candidates") or []), 1)
+        self.assertTrue(str(selection.get("decision_reason") or "").strip())

@@ -133,6 +133,7 @@ class TestModelWatchVNext(unittest.TestCase):
     def test_catalog_diff_creates_fixit_proposal_when_threshold_met(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.registry_document = _registry_for_diff()
+        runtime.set_default_chat_model("openrouter:tiny-chat")
         os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-testsecret123"
         health_summary = {
             "providers": [{"id": "openrouter", "status": "ok"}, {"id": "ollama", "status": "ok"}],
@@ -245,6 +246,7 @@ class TestModelWatchVNext(unittest.TestCase):
             )
         )
         runtime.registry_document = _registry_for_diff()
+        runtime.set_default_chat_model("openrouter:tiny-chat")
         os.environ["OPENROUTER_API_KEY"] = "sk-or-v1-testsecret123"
         health_summary = {
             "providers": [{"id": "openrouter", "status": "ok"}, {"id": "ollama", "status": "ok"}],
@@ -317,6 +319,7 @@ class TestModelWatchVNext(unittest.TestCase):
                 },
             },
         }
+        runtime.set_default_chat_model("ollama:qwen3.5:4b")
         with patch.object(
             runtime._health_monitor,
             "summary",

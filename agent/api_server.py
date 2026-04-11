@@ -19761,7 +19761,8 @@ class APIServerHandler(BaseHTTPRequestHandler):
         next_action: str | None = None,
         why: str | None = None,
     ) -> dict[str, Any]:
-        runtime_helper = getattr(self.runtime, "_failure_recovery_for_error", None)
+        runtime = getattr(self, "runtime", None)
+        runtime_helper = getattr(runtime, "_failure_recovery_for_error", None)
         if callable(runtime_helper):
             return runtime_helper(
                 error=error,

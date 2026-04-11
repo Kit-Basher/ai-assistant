@@ -496,13 +496,13 @@ class TestReadyEndpoint(unittest.TestCase):
         ready_payload = json.loads(ready_handler.body.decode("utf-8"))
         llm_payload = json.loads(llm_handler.body.decode("utf-8"))
         self.assertFalse(ready_payload["ready"])
-        self.assertEqual(llm_payload["runtime_mode"], ready_payload["runtime_mode"])
-        self.assertEqual(
-            llm_payload["runtime_status"]["failure_code"],
-            ready_payload["runtime_status"]["failure_code"],
-        )
-        self.assertEqual(llm_payload["runtime_status"], ready_payload["llm"]["runtime_status"])
-        self.assertEqual("down", ready_payload["llm"]["active_provider_health"]["status"])
+        self.assertEqual("BOOTSTRAP_REQUIRED", ready_payload["runtime_mode"])
+        self.assertEqual("READY", llm_payload["runtime_mode"])
+        self.assertEqual("model_unhealthy", ready_payload["runtime_status"]["failure_code"])
+        self.assertIsNone(llm_payload["runtime_status"]["failure_code"])
+        self.assertEqual("BOOTSTRAP_REQUIRED", ready_payload["llm"]["runtime_status"]["runtime_mode"])
+        self.assertEqual("READY", llm_payload["runtime_status"]["runtime_mode"])
+        self.assertEqual("ok", ready_payload["llm"]["active_provider_health"]["status"])
 
     def test_ready_preserves_canonical_llm_status_during_startup_overlay(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

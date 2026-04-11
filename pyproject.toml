@@ -17,7 +17,7 @@ dependencies = [
 [project.scripts]
 personal-agent = "agent.cli:main"
 personal-agent-api = "agent.api_server:main"
-personal-agent-telegram = "telegram_adapter.bot:main"
+personal-agent-telegram = "telegram_adapter.bot:run"
 
 [tool.personal_agent_build]
 source_packages = ["agent", "telegram_adapter", "memory", "skills"]

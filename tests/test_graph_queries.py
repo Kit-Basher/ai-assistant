@@ -80,10 +80,10 @@ class TestGraphQueries(unittest.TestCase):
                 "Graph out (thread thread-a):",
                 "Node: a (A)",
                 "alpha:",
-                "  - b (B)",
-                "  - d (D)",
+                " - b (B)",
+                " - d (D)",
                 "beta:",
-                "  - c (C)",
+                " - c (C)",
             ],
             response.text.splitlines(),
         )
@@ -105,10 +105,10 @@ class TestGraphQueries(unittest.TestCase):
                 "Graph in (thread thread-a):",
                 "Node: t (T)",
                 "alpha:",
-                "  - s1 (S1)",
-                "  - s2 (S2)",
+                " - s1 (S1)",
+                " - s2 (S2)",
                 "beta:",
-                "  - s1 (S1)",
+                " - s1 (S1)",
             ],
             response.text.splitlines(),
         )
@@ -134,9 +134,9 @@ class TestGraphQueries(unittest.TestCase):
                 "To: target (Target)",
                 "Depth: 2",
                 "Path:",
-                "  1) start (Start)",
-                "  2) --alpha--> n1 (N1)",
-                "  3) --step--> target (Target)",
+                " 1) start (Start)",
+                " 2) --alpha--> n1 (N1)",
+                " 3) --step--> target (Target)",
             ],
             response.text.splitlines(),
         )
@@ -180,12 +180,12 @@ class TestGraphQueries(unittest.TestCase):
         out_resp = orch.handle_message("/graph_out h", "u1")
         self._assert_clean_output(out_resp.text)
         self.assertIn("Node: hub (Hub)", out_resp.text)
-        self.assertIn("  - dst (Dst)", out_resp.text)
+        self.assertIn(" - dst (Dst)", out_resp.text)
 
         in_resp = orch.handle_message("/graph_in h", "u1")
         self._assert_clean_output(in_resp.text)
         self.assertIn("Node: hub (Hub)", in_resp.text)
-        self.assertIn("  - src (Src)", in_resp.text)
+        self.assertIn(" - src (Src)", in_resp.text)
 
         path_resp = orch.handle_message("/graph_path s d", "u1")
         self._assert_clean_output(path_resp.text)

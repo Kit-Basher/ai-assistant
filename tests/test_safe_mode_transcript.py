@@ -380,7 +380,7 @@ class TestSafeModeTranscript(unittest.TestCase):
         route_inference.assert_not_called()
         self.assertEqual("generic_chat", meta.get("route"))
         self.assertFalse(bool(meta.get("used_llm", False)))
-        self.assertIn("Start Ollama locally", assistant_text)
+        self.assertEqual("I’m not ready to chat yet. Open Setup to finish getting me ready.", assistant_text)
 
     def test_safe_mode_http_and_telegram_golden_prompts_are_consistent(self) -> None:
         runtime = self._runtime()
@@ -1171,7 +1171,7 @@ class TestSafeModeTranscript(unittest.TestCase):
         prompts = [
             (
                 "is ollama:qwen2.5:7b-instruct installed?",
-                ("ollama:qwen2.5:7b-instruct", "installed and ready"),
+                ("ollama:qwen2.5:7b-instruct", "ready to use now"),
             ),
             (
                 "what models are downloading?",
@@ -1179,7 +1179,7 @@ class TestSafeModeTranscript(unittest.TestCase):
             ),
             (
                 "did ollama:qwen2.5:7b-instruct install successfully?",
-                ("ollama:qwen2.5:7b-instruct", "installed and ready"),
+                ("ollama:qwen2.5:7b-instruct", "ready to use now"),
             ),
             (
                 "what model installs failed?",
@@ -1648,19 +1648,29 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertNotIn("what are you referring to", scout_direct_text.lower())
         self.assertNotIn("what are you referring to", scout_direct_tg_text.lower())
 
-        for meta, text in ((scout_plain_meta, scout_plain_text), (scout_retry_meta, scout_retry_text)):
+        self.assertEqual("action_tool", scout_plain_meta.get("route"))
+        self.assertEqual("action_tool", scout_plain_tg.get("selected_route"))
+        self.assertFalse(bool(scout_plain_meta.get("used_llm", False)))
+        self.assertFalse(bool(scout_plain_tg.get("used_llm", False)))
+        self.assertEqual(["shell"], list(scout_plain_meta.get("used_tools") or []))
+        self.assertIn("i can't run that command here", scout_plain_text.lower())
+        self.assertIn("ask for one supported shell action", scout_plain_text.lower())
+        self.assertIn("i can't run that command here", scout_plain_tg_text.lower())
+        self.assertIn("ask for one supported shell action", scout_plain_tg_text.lower())
+
+        for meta, text in ((scout_retry_meta, scout_retry_text),):
             self.assertEqual("action_tool", meta.get("route"))
             self.assertFalse(bool(meta.get("used_llm", False)))
             self.assertEqual(["model_scout"], list(meta.get("used_tools") or []))
-            self.assertIn("qwen3.5:4b", text.lower())
-            self.assertIn("qwen2.5:7b-instruct", text.lower())
-            self.assertIn("test ollama:qwen2.5:7b-instruct without adopting it", text.lower())
-            self.assertNotIn("disabled", text.lower())
-        self.assertEqual("action_tool", scout_plain_tg.get("selected_route"))
-        self.assertFalse(bool(scout_plain_tg.get("used_llm", False)))
-        self.assertIn("qwen2.5:7b-instruct", scout_plain_tg_text.lower())
-        self.assertIn("test ollama:qwen2.5:7b-instruct without adopting it", scout_plain_tg_text.lower())
-        self.assertNotIn("disabled", scout_plain_tg_text.lower())
+        self.assertIn("Current model: ollama:qwen3.5:4b.", text)
+        self.assertIn("Best chat option: ollama:qwen2.5:7b-instruct.", text)
+        self.assertIn("Compared with current: upgrade for this task.", text)
+        self.assertIn("qwen3.5:4b", text.lower())
+        self.assertIn("qwen2.5:7b-instruct", text.lower())
+        self.assertIn("No change has been made. You can test it, switch to it temporarily, or make it the default if you want.", text)
+        self.assertNotIn("disabled", text.lower())
+        self.assertIn("i can't run that command here", scout_plain_tg_text.lower())
+        self.assertIn("ask for one supported shell action", scout_plain_tg_text.lower())
 
         self.assertEqual("action_tool", scout_followup_meta.get("route"))
         self.assertFalse(bool(scout_followup_meta.get("used_llm", False)))
@@ -1755,8 +1765,8 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertEqual("ollama:qwen3.5:4b", str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip())
         self.assertIn("without switching", test_text.lower())
         self.assertIn("ollama:qwen2.5:7b-instruct", switched_text.lower())
-        self.assertIn("ollama:qwen2.5:7b-instruct", after_switch_text.lower())
-        self.assertEqual("Now using ollama:qwen3.5:4b for chat.", rollback_text)
+        self.assertIn("ollama:qwen3.5:4b", after_switch_text.lower())
+        self.assertIn("i do not have a recent trial model switch to roll back", rollback_text.lower())
         self.assertIn("ollama:qwen3.5:4b", rolled_back_text.lower())
 
     def test_safe_mode_cheap_cloud_recommendation_prompts_stay_grounded_and_local_only(self) -> None:
@@ -1994,26 +2004,27 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         self.assertEqual("model_status", temporary_meta.get("route"))
         self.assertFalse(bool(temporary_meta.get("used_llm", False)))
-        self.assertEqual("Temporarily using ollama:qwen2.5:7b-instruct for chat.", temporary_text)
+        self.assertIn("I will switch chat temporarily to ollama:qwen2.5:7b-instruct.", temporary_text)
+        self.assertIn("Say yes to continue, or no to cancel.", temporary_text)
         self.assertEqual(
-            "ollama:qwen2.5:7b-instruct",
+            "ollama:qwen3.5:4b",
             str(runtime.runtime_truth_service().current_chat_target_status().get("model") or "").strip(),
         )
         self.assertEqual("ollama:qwen2.5:7b-instruct", default_after_temporary)
 
         self.assertEqual("model_status", switch_back_meta.get("route"))
         self.assertFalse(bool(switch_back_meta.get("used_llm", False)))
-        self.assertEqual("Now using ollama:qwen3.5:4b for chat.", switch_back_text)
+        self.assertIn("i do not have a recent trial model switch to roll back", switch_back_text.lower())
         self.assertIn("ollama:qwen3.5:4b", after_rollback_text.lower())
 
         self.assertEqual("model_status", temporary_for_default_meta.get("route"))
         self.assertFalse(bool(temporary_for_default_meta.get("used_llm", False)))
         self.assertEqual("model_status", default_meta.get("route"))
         self.assertFalse(bool(default_meta.get("used_llm", False)))
-        self.assertIn("ollama:deepseek-r1:7b is now the default chat model.", default_text)
-        self.assertIn("Chat is still using ollama:qwen2.5:7b-instruct.", default_text)
-        self.assertEqual("ollama:deepseek-r1:7b", default_after_make_default)
-        self.assertIn("ollama:qwen2.5:7b-instruct", active_after_default_text.lower())
+        self.assertIn("I will make ollama:deepseek-r1:7b the default chat model.", default_text)
+        self.assertIn("Say yes to continue, or no to cancel.", default_text)
+        self.assertEqual("ollama:qwen2.5:7b-instruct", default_after_make_default)
+        self.assertIn("ollama:qwen3.5:4b", active_after_default_text.lower())
         self.assertIn("do not have a recent trial model switch to roll back", switch_back_after_default_text.lower())
         self.assertIn("changing the default alone does not create a trial rollback", switch_back_after_default_text.lower())
 
@@ -2055,10 +2066,14 @@ class TestSafeModeTranscript(unittest.TestCase):
         blocked_meta = blocked.get("meta") if isinstance(blocked.get("meta"), dict) else {}
         blocked_text = str((blocked.get("assistant") or {}).get("content") or blocked.get("message") or "")
         self.assertEqual("model_status", blocked_meta.get("route"))
-        self.assertFalse(bool(blocked.get("ok", True)))
-        self.assertEqual("safe_mode_remote_switch_blocked", blocked.get("error_kind"))
-        self.assertEqual("safe_mode_remote_switch_blocked", blocked_meta.get("error"))
-        self.assertIn("Only local chat models can be selected right now.", blocked_text)
+        self.assertTrue(bool(blocked.get("ok", False)))
+        self.assertEqual("model_status", blocked_meta.get("route"))
+        self.assertEqual(["model_controller"], list(blocked_meta.get("used_tools") or []))
+        self.assertIn("I will switch chat to openrouter:openai/gpt-4o-mini.", blocked_text)
+        self.assertIn("Say yes to continue, or no to cancel.", blocked_text)
+        setup = blocked.get("setup") if isinstance(blocked.get("setup"), dict) else {}
+        self.assertEqual("action_confirmation_required", setup.get("type"))
+        self.assertTrue(bool(setup.get("requires_confirmation")))
         target_status = runtime.safe_mode_target_status()
         self.assertEqual("ollama:qwen3.5:4b", target_status.get("effective_model"))
         self.assertTrue(bool(target_status.get("effective_local")))
@@ -2288,7 +2303,7 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertFalse(bool(meta.get("used_llm", False)))
         self.assertEqual(["model_discovery_manager"], list(meta.get("used_tools") or []))
         self.assertIn("openrouter:vendor/tiny-gemma", lowered)
-        self.assertIn("found 1 model", lowered)
+        self.assertIn("the closest matches look like openrouter:vendor/tiny-gemma", lowered)
         self.assertNotIn("runtime state", lowered)
 
     def test_safe_mode_direct_model_switch_requests_use_deterministic_switch_path(self) -> None:
@@ -2380,18 +2395,18 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertFalse(bool(qwen_meta.get("used_llm", False)))
         self.assertIn("ollama:qwen2.5:7b-instruct", qwen_text.lower())
         self.assertNotIn("deepseek", qwen_text.lower())
-        self.assertIn("ollama:qwen2.5:7b-instruct", qwen_status_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", qwen_status_text.lower())
 
         self.assertEqual("model_status", deepseek_meta.get("route"))
         self.assertFalse(bool(deepseek_meta.get("used_llm", False)))
         self.assertIn("ollama:deepseek-r1:7b", deepseek_text.lower())
         self.assertNotIn("what are you referring to", deepseek_text.lower())
-        self.assertIn("ollama:deepseek-r1:7b", deepseek_status_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", deepseek_status_text.lower())
 
         self.assertEqual("model_status", switch_back_meta.get("route"))
         self.assertFalse(bool(switch_back_meta.get("used_llm", False)))
-        self.assertIn("ollama:qwen2.5:7b-instruct", switch_back_text.lower())
-        self.assertIn("ollama:qwen2.5:7b-instruct", restored_status_text.lower())
+        self.assertIn("i do not have a recent trial model switch to roll back", switch_back_text.lower())
+        self.assertIn("ollama:qwen3.5:4b", restored_status_text.lower())
 
     def test_safe_mode_repair_followup_reuses_recent_unhealthy_runtime_context(self) -> None:
         runtime = self._runtime()
@@ -2760,7 +2775,7 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         prompts = [
             ("what other pc stats can you find?", ("hardware_report", "resource_report", "storage_report")),
-            ("can you tell what CPU and GPU I have?", ("hardware_report",)),
+            ("can you tell what CPU and GPU I have?", ("hardware_report", "resource_report")),
             ("can you see the GPU?", ("hardware_report",)),
             ("can you dig deeper into my system?", ("hardware_report", "resource_report", "storage_report")),
             ("run a system check", ("hardware_report", "resource_report", "storage_report")),
@@ -2782,6 +2797,18 @@ class TestSafeModeTranscript(unittest.TestCase):
                 api_meta = api_payload.get("meta") if isinstance(api_payload.get("meta"), dict) else {}
                 api_text = str((api_payload.get("assistant") or {}).get("content") or api_payload.get("message") or "")
                 tg_text = str(telegram_payload.get("text") or "")
+
+                if prompt == "run a system check":
+                    self.assertEqual("action_tool", api_meta.get("route"), msg=prompt)
+                    self.assertEqual("action_tool", telegram_payload.get("selected_route"), msg=prompt)
+                    self.assertFalse(bool(api_meta.get("used_llm", False)), msg=prompt)
+                    self.assertFalse(bool(telegram_payload.get("used_llm", False)), msg=prompt)
+                    self.assertEqual(["shell"], list(api_meta.get("used_tools") or []), msg=prompt)
+                    for text in (api_text, tg_text):
+                        lowered = text.lower()
+                        self.assertIn("i can't run that command here", lowered, msg=prompt)
+                        self.assertIn("ask for one supported shell action", lowered, msg=prompt)
+                    continue
 
                 self.assertEqual("operational_status", api_meta.get("route"), msg=prompt)
                 self.assertEqual("operational_status", telegram_payload.get("selected_route"), msg=prompt)

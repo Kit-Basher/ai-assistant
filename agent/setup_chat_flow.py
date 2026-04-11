@@ -1433,12 +1433,12 @@ def classify_setup_intent(
     execution_target = _extract_governance_execution_target(normalized)
     if execution_target:
         return {
-            "kind": "governance_execution_mode",
+            "kind": "model_controller_policy",
             "target_id": execution_target,
         }
     if "execution mode" in normalized and "skill" in normalized:
         return {
-            "kind": "governance_skill_status",
+            "kind": "model_controller_policy",
             "skill_id": _extract_governance_skill_id(normalized),
         }
     adapter_id = _extract_governance_adapter_id(normalized)
@@ -1568,8 +1568,6 @@ def classify_runtime_chat_route(
         "governance_blocks",
         "governance_pending",
         "governance_overview",
-        "governance_skill_status",
-        "governance_execution_mode",
         "governance_adapter_detail",
     }:
         return {
@@ -1577,6 +1575,13 @@ def classify_runtime_chat_route(
             "route": "governance_status",
             "generic_allowed": False,
             "fallback_reason": "governance_status",
+        }
+    if setup_kind == "model_controller_policy":
+        return {
+            **setup_intent,
+            "route": "model_policy_status",
+            "generic_allowed": False,
+            "fallback_reason": "model_policy_status",
         }
     if setup_kind in {
         "describe_current_model",

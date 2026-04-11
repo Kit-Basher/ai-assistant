@@ -108,7 +108,7 @@ class TestInferenceRouter(unittest.TestCase):
             )
         self.assertFalse(bool(result.get("ok")))
         self.assertEqual("no_suitable_model", result.get("error_kind"))
-        self.assertIn("No suitable local-first model is ready", str(result.get("text") or ""))
+        self.assertEqual("I’m not ready to chat yet. Open Setup to finish getting me ready.", result.get("text"))
         self.assertEqual(
             "Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve",
             result.get("next_action"),

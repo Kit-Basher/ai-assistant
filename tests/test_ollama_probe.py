@@ -198,7 +198,14 @@ class TestOllamaHealthRuntime(unittest.TestCase):
         ollama = status["llm_availability"]["ollama"]
         self.assertTrue(bool(ollama["native_ok"]))
         self.assertFalse(bool(ollama["openai_compat_ok"]))
-        post_mock.assert_not_called()
+        self.assertEqual(1, post_mock.call_count)
+        post_args, post_kwargs = post_mock.call_args
+        self.assertEqual("http://127.0.0.1:11434/v1/chat/completions", post_args[0])
+        self.assertEqual(15.0, float(post_kwargs.get("timeout_seconds") or 0.0))
+        payload = post_kwargs.get("payload") if isinstance(post_kwargs.get("payload"), dict) else {}
+        self.assertEqual("llama3", payload.get("model"))
+        self.assertEqual("user", (payload.get("messages") or [{}])[0].get("role"))
+        self.assertEqual("ping", (payload.get("messages") or [{}])[0].get("content"))
 
     def test_health_marks_ollama_up_with_v1_configured_base(self) -> None:
         runtime = self._runtime("http://127.0.0.1:11434/v1")
@@ -468,7 +475,7 @@ class TestOllamaHealthRuntime(unittest.TestCase):
             if isinstance(llm_status.get("health"), dict)
             else {}
         )
-        self.assertIn(str(drift_details.get("provider_health_status") or ""), {"down", "unknown"})
+        self.assertIn(str(drift_details.get("provider_health_status") or ""), {"down", "degraded", "unknown"})
 
 
 if __name__ == "__main__":

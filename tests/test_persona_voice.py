@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -17,6 +18,54 @@ class _FakeRuntime:
         self.config = SimpleNamespace(llm_registry_path="")
         self.registry_document = {}
         self.secret_store = SimpleNamespace(get_secret=lambda _name: None)
+        self.started_at = datetime.now(timezone.utc)
+        self.started_at_iso = self.started_at.isoformat()
+        self.pid = 1234
+        self.version = "0.0.0-test"
+        self.git_commit = "deadbeef"
+        self._startup_last_error = None
+
+    def _runtime_observability_context(self) -> dict[str, object]:
+        return {
+            "telegram": {"configured": False, "effective_state": "disabled"},
+            "telegram_state": "stopped",
+            "telegram_enabled": False,
+            "llm_status": {},
+            "canonical_llm_runtime_status": {},
+            "normalized_status": {"runtime_mode": "DEGRADED"},
+            "ready": False,
+            "phase": "starting",
+            "startup_phase": "starting",
+            "warmup_remaining": [],
+        }
+
+    def safe_mode_target_status(self) -> dict[str, object]:
+        return {"safe_mode": True}
+
+    def _model_watch_hf_status_snapshot(self) -> dict[str, object]:
+        return {"ok": True, "enabled": False, "status": "disabled"}
+
+    def _ready_recent_telegram_messages(self, limit: int = 5) -> list[dict[str, object]]:
+        _ = limit
+        return []
+
+    def _runtime_surface_message(
+        self,
+        *,
+        startup_phase: str,
+        normalized_status: dict[str, object],
+        onboarding_summary: str | None,
+        onboarding_next_action: str | None,
+        safe_mode_target: dict[str, object],
+        failure_recovery: dict[str, object],
+    ) -> str:
+        _ = startup_phase
+        _ = normalized_status
+        _ = onboarding_summary
+        _ = onboarding_next_action
+        _ = safe_mode_target
+        _ = failure_recovery
+        return "I can't read a clean runtime status yet."
 
     def ready_status(self) -> dict[str, object]:
         return {"ready": False, "message": "", "runtime_status": {}}

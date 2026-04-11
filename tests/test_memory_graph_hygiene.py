@@ -62,7 +62,7 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         renamed = orch.handle_message('/node_rename alpha "New Label??"', "user1")
         self.assertEqual("Node alpha renamed.", renamed.text)
         graph = orch.handle_message("/graph", "user1").text
-        self.assertIn("  - alpha: New Label", graph)
+        self.assertIn(" - alpha: New Label", graph)
         self.assertNotIn("?", graph)
 
     def test_node_rename_by_alias_resolves(self) -> None:
@@ -73,7 +73,7 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         renamed = orch.handle_message('/node_rename a1 "Aliased Rename"', "user1")
         self.assertEqual("Node alpha renamed.", renamed.text)
         graph = orch.handle_message("/graph", "user1").text
-        self.assertIn("  - alpha: Aliased Rename", graph)
+        self.assertIn(" - alpha: Aliased Rename", graph)
 
     def test_alias_add_remove_and_sorted_listing(self) -> None:
         orch = self._orchestrator()
@@ -84,19 +84,19 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         orch.handle_message("/node_alias alpha alpha_alias", "user1")
         orch.handle_message("/node_alias beta beta_alias", "user1")
         graph = orch.handle_message("/graph", "user1").text
-        alias_lines = [line for line in graph.splitlines() if line.startswith("  - ") and " -> " in line]
+        alias_lines = [line for line in graph.splitlines() if line.startswith(" - ") and " -> " in line]
         self.assertEqual(
             [
-                "  - alpha_alias -> alpha",
-                "  - beta_alias -> beta",
-                "  - zed -> beta",
+                " - alpha_alias -> alpha",
+                " - beta_alias -> beta",
+                " - zed -> beta",
             ],
             alias_lines,
         )
         removed = orch.handle_message("/node_unalias zed", "user1")
         self.assertEqual("Alias zed removed.", removed.text)
         graph_after = orch.handle_message("/graph", "user1").text
-        self.assertNotIn("  - zed -> beta", graph_after)
+        self.assertNotIn(" - zed -> beta", graph_after)
 
     def test_link_accepts_aliases(self) -> None:
         orch = self._orchestrator()
@@ -108,7 +108,7 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         linked = orch.handle_message("/link f depends s", "user1")
         self.assertEqual("Link created.", linked.text)
         graph = orch.handle_message("/graph", "user1").text
-        self.assertIn("  - first --depends--> second", graph)
+        self.assertIn(" - first --depends--> second", graph)
 
     def test_node_delete_removes_edges_and_aliases(self) -> None:
         orch = self._orchestrator()
@@ -120,10 +120,10 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         deleted = orch.handle_message("/node_delete a1", "user1")
         self.assertEqual("Node alpha deleted.", deleted.text)
         graph = orch.handle_message("/graph", "user1").text
-        self.assertNotIn("  - alpha: Alpha", graph)
-        self.assertNotIn("  - a1 -> alpha", graph)
-        self.assertNotIn("  - alpha --uses--> beta", graph)
-        self.assertIn("Edges:\n  - (none)", graph)
+        self.assertNotIn(" - alpha: Alpha", graph)
+        self.assertNotIn(" - a1 -> alpha", graph)
+        self.assertNotIn(" - alpha --uses--> beta", graph)
+        self.assertIn("Edges:\n - (none)", graph)
 
     def test_error_messages_no_question_marks(self) -> None:
         orch = self._orchestrator()
@@ -150,7 +150,7 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         self._set_active_thread(orch, "user1", "thread-a")
         orch.handle_message('/node alpha "Alpha"', "user1")
         graph = orch.handle_message("/graph", "user1").text
-        self.assertIn("Aliases:\n  (none)", graph)
+        self.assertIn("Aliases:\n (none)", graph)
         self.assertNotIn("?", graph)
 
     def test_determinism_alias_and_edges_order(self) -> None:
@@ -165,20 +165,20 @@ class TestMemoryGraphHygiene(unittest.TestCase):
         orch.handle_message("/link b rel c", "user1")
         orch.handle_message("/link a rel b", "user1")
         graph = orch.handle_message("/graph", "user1").text
-        alias_lines = [line for line in graph.splitlines() if line.startswith("  - ") and " -> " in line]
-        edge_lines = [line for line in graph.splitlines() if line.startswith("  - ") and "--" in line]
+        alias_lines = [line for line in graph.splitlines() if line.startswith(" - ") and " -> " in line]
+        edge_lines = [line for line in graph.splitlines() if line.startswith(" - ") and "--" in line]
         self.assertEqual(
             [
-                "  - aa -> a",
-                "  - m -> b",
-                "  - z -> c",
+                " - aa -> a",
+                " - m -> b",
+                " - z -> c",
             ],
             alias_lines,
         )
         self.assertEqual(
             [
-                "  - a --rel--> b",
-                "  - b --rel--> c",
+                " - a --rel--> b",
+                " - b --rel--> c",
             ],
             edge_lines,
         )

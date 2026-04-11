@@ -578,11 +578,13 @@ class TestBehavioralEvalBattery(unittest.TestCase):
                     "next_questions": ["What is using memory right now?"],
                 },
             }
-            ram_response = self._chat(ram_prompt)
+        ram_response = self._chat(ram_prompt)
 
         ram_first_line = _first_line(str(getattr(ram_response, "text", "")))
         self.assertTrue(
-            ram_first_line.startswith("You have 64 GiB of RAM and 12 GiB of VRAM available right now."),
+            ram_first_line.startswith(
+                "You have 64 GiB of RAM with 42 GiB available. VRAM is available on NVIDIA RTX 4080 with 8192 MiB free out of 12288 MiB total."
+            ),
             ram_first_line,
         )
         self.assertNotIn("System health", ram_first_line)
@@ -594,6 +596,7 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertEqual("", ram_lines[1], msg=str(getattr(ram_response, "text", "")))
         self.assertEqual("*Hardware inventory*", ram_lines[2], msg=str(getattr(ram_response, "text", "")))
         self.assertIn("Follow-ups:", str(getattr(ram_response, "text", "")))
+        self.assertIn("CPU load 1m 0.42; memory 34.4% used (confidence 0.95)", str(getattr(ram_response, "text", "")))
 
         cpu_prompt = "is anything eating my cpu?"
         self.assertEqual("operational_status", classify_runtime_chat_route(cpu_prompt).get("route"))
@@ -663,11 +666,11 @@ class TestBehavioralEvalBattery(unittest.TestCase):
                     "next_questions": ["What is using memory right now?"],
                 },
             }
-            no_vram_response = self._chat(no_vram_prompt)
+        no_vram_response = self._chat(no_vram_prompt)
 
         no_vram_first_line = _first_line(str(getattr(no_vram_response, "text", "")))
         self.assertTrue(
-            no_vram_first_line.startswith("You have 64 GiB of RAM. VRAM is unavailable right now."),
+            no_vram_first_line.startswith("You have 64 GiB of RAM with 42 GiB available. VRAM is unavailable right now."),
             no_vram_first_line,
         )
         self.assertIn("VRAM is unavailable right now", no_vram_first_line)

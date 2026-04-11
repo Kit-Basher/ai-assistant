@@ -106,7 +106,7 @@ class TestBriefCommand(unittest.TestCase):
         orch.skills["observe_now"].functions["observe_now"].handler = observe_handler_1
 
         first = orch.handle_message("/brief", "user1")
-        self.assertIn("baseline created", first.text.lower())
+        self.assertIn("baseline now", first.text.lower())
         self.assertNotIn("/resource_report", first.text)
         self.assertNotIn("/storage_report", first.text)
         self.assertNotIn("/hardware_report", first.text)
@@ -128,4 +128,3 @@ class TestBriefCommand(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -374,22 +374,22 @@ class TestSkillExecutionGovernance(unittest.TestCase):
         )
         runtime = self._runtime()
         utterances = (
-            ("what managed adapters exist?", "governance_managed_adapters"),
-            ("what background tasks are active?", "governance_background_tasks"),
-            ("what got blocked by skill governance?", "governance_blocks"),
-            ("is any skill waiting for approval?", "governance_pending"),
-            ("what execution mode does skill scheduled_sync use?", "governance_execution_mode"),
-            ("what execution mode does Telegram use?", "governance_execution_mode"),
-            ("execution mode for scheduled_sync", "governance_execution_mode"),
-            ("what execution mode does this skill use?", "governance_skill_status"),
-            ("why does Telegram exist?", "governance_adapter_detail"),
+            ("what managed adapters exist?", "governance_status", "governance_managed_adapters"),
+            ("what background tasks are active?", "governance_status", "governance_background_tasks"),
+            ("what got blocked by skill governance?", "governance_status", "governance_blocks"),
+            ("is any skill waiting for approval?", "governance_status", "governance_pending"),
+            ("what execution mode does skill scheduled_sync use?", "model_policy_status", "model_controller_policy"),
+            ("what execution mode does Telegram use?", "model_policy_status", "model_controller_policy"),
+            ("execution mode for scheduled_sync", "model_policy_status", "model_controller_policy"),
+            ("what execution mode does this skill use?", "model_policy_status", "model_controller_policy"),
+            ("why does Telegram exist?", "governance_status", "governance_adapter_detail"),
         )
 
         with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch(
             "agent.orchestrator.route_inference",
             side_effect=AssertionError("generic inference should not run"),
         ):
-            for utterance, expected_type in utterances:
+            for utterance, expected_route, expected_type in utterances:
                 ok, body = runtime.chat(
                     {
                         "messages": [{"role": "user", "content": utterance}],
@@ -397,17 +397,17 @@ class TestSkillExecutionGovernance(unittest.TestCase):
                     }
                 )
                 self.assertTrue(ok, msg=utterance)
-                self.assertEqual("governance_status", body["meta"]["route"], msg=utterance)
+                self.assertEqual(expected_route, body["meta"]["route"], msg=utterance)
                 self.assertFalse(body["meta"]["generic_fallback_used"], msg=utterance)
                 self.assertEqual(expected_type, body["setup"]["type"], msg=utterance)
                 if utterance == "what execution mode does Telegram use?":
-                    self.assertIn("managed_adapter mode", body["assistant"]["content"])
+                    self.assertIn("Mode: Controlled Mode.", body["assistant"]["content"])
                 if utterance == "what execution mode does skill scheduled_sync use?":
-                    self.assertIn("managed_background_task mode", body["assistant"]["content"])
+                    self.assertIn("Mode: Controlled Mode.", body["assistant"]["content"])
                 if utterance == "execution mode for scheduled_sync":
-                    self.assertIn("managed_background_task mode", body["assistant"]["content"])
+                    self.assertIn("Mode: Controlled Mode.", body["assistant"]["content"])
                 if utterance == "what execution mode does this skill use?":
-                    self.assertIn("Tell me the skill name", body["assistant"]["content"])
+                    self.assertIn("Mode: Controlled Mode.", body["assistant"]["content"])
 
     def test_http_chat_governance_queries_bypass_chooser(self) -> None:
         _write_skill(
@@ -425,10 +425,10 @@ class TestSkillExecutionGovernance(unittest.TestCase):
             ("what background tasks are active?", "governance_status"),
             ("what got blocked by skill governance?", "governance_status"),
             ("is any skill waiting for approval?", "governance_status"),
-            ("what execution mode does skill scheduled_sync use?", "governance_status"),
-            ("what execution mode does Telegram use?", "governance_status"),
-            ("execution mode for scheduled_sync", "governance_status"),
-            ("what execution mode does this skill use?", "governance_status"),
+            ("what execution mode does skill scheduled_sync use?", "model_policy_status"),
+            ("what execution mode does Telegram use?", "model_policy_status"),
+            ("execution mode for scheduled_sync", "model_policy_status"),
+            ("what execution mode does this skill use?", "model_policy_status"),
         )
 
         with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None):

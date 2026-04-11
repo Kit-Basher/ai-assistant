@@ -55,7 +55,7 @@ class TestThreadLabels(unittest.TestCase):
         label_resp = orch.handle_message("/thread_label My Sprint Focus", "user1")
         self.assertEqual("Label set for thread-a.", label_resp.text)
         threads = orch.handle_message("/threads", "user1")
-        self.assertIn("1) thread-a  2099-01-02T00:00:00+00:00  Label: My Sprint Focus  Focus: (none)", threads.text)
+        self.assertIn("1) thread-a 2099-01-02T00:00:00+00:00 Label: My Sprint Focus Focus: (none)", threads.text)
         self.assertNotIn("?", threads.text)
 
     def test_thread_unlabel_clears_label(self) -> None:
@@ -92,9 +92,9 @@ class TestThreadLabels(unittest.TestCase):
         threads = orch.handle_message("/threads", "user1")
         lines = threads.text.splitlines()
         self.assertEqual("Threads:", lines[0])
-        self.assertEqual("1) thread-b  2099-01-02T00:00:00+00:00  Label: Beta  Focus: (none)", lines[1])
-        self.assertEqual("2) thread-a  2099-01-01T00:00:00+00:00  Label: Alpha  Focus: (none)", lines[2])
-        self.assertEqual("3) thread-c  2099-01-01T00:00:00+00:00  Label: (none)  Focus: (none)", lines[3])
+        self.assertEqual("1) thread-b 2099-01-02T00:00:00+00:00 Label: Beta Focus: (none)", lines[1])
+        self.assertEqual("2) thread-a 2099-01-01T00:00:00+00:00 Label: Alpha Focus: (none)", lines[2])
+        self.assertEqual("3) thread-c 2099-01-01T00:00:00+00:00 Label: (none) Focus: (none)", lines[3])
         self.assertNotIn("?", threads.text)
 
     def test_thread_label_replies_not_decorated(self) -> None:

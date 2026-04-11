@@ -63,8 +63,8 @@ class TestMemoryGraph(unittest.TestCase):
         orch.handle_message('/node beta "Beta node"', "user1")
         graph = orch.handle_message("/graph", "user1").text
         self.assertIn("Nodes:", graph)
-        self.assertLess(graph.index("  - alpha: Alpha node"), graph.index("  - beta: Beta node"))
-        self.assertLess(graph.index("  - beta: Beta node"), graph.index("  - zeta: Zeta node"))
+        self.assertLess(graph.index(" - alpha: Alpha node"), graph.index(" - beta: Beta node"))
+        self.assertLess(graph.index(" - beta: Beta node"), graph.index(" - zeta: Zeta node"))
         self.assertNotIn("?", graph)
 
     def test_create_edge_and_list_deterministically(self) -> None:
@@ -77,12 +77,12 @@ class TestMemoryGraph(unittest.TestCase):
         orch.handle_message("/link a depends_on b", "user1")
         orch.handle_message("/link a blocks c", "user1")
         graph = orch.handle_message("/graph", "user1").text
-        edge_lines = [line for line in graph.splitlines() if line.startswith("  - ") and "--" in line]
+        edge_lines = [line for line in graph.splitlines() if line.startswith(" - ") and "--" in line]
         self.assertEqual(
             [
-                "  - a --blocks--> c",
-                "  - a --depends_on--> b",
-                "  - b --relates--> c",
+                " - a --blocks--> c",
+                " - a --depends_on--> b",
+                " - b --relates--> c",
             ],
             edge_lines,
         )
@@ -95,7 +95,7 @@ class TestMemoryGraph(unittest.TestCase):
         self.assertEqual("Cannot create link.", response.text)
         graph = orch.handle_message("/graph", "user1").text
         self.assertIn("Edges:", graph)
-        self.assertIn("  - (none)", graph.split("Edges:\n", 1)[1])
+        self.assertIn(" - (none)", graph.split("Edges:\n", 1)[1])
         self.assertNotIn("?", graph)
 
     def test_normalization_rules_applied(self) -> None:
@@ -106,8 +106,8 @@ class TestMemoryGraph(unittest.TestCase):
         orch.handle_message('/node node_two "Node Two"', "user1")
         orch.handle_message('/link NoDe-1!? ReL??AtioN-Type!? node_two', "user1")
         graph = orch.handle_message("/graph", "user1").text
-        self.assertIn("  - node1: Label with spaces", graph)
-        self.assertIn("  - node1 --relationtype--> node_two", graph)
+        self.assertIn(" - node1: Label with spaces", graph)
+        self.assertIn(" - node1 --relationtype--> node_two", graph)
         self.assertNotIn("?", graph)
 
     def test_graph_clear_removes_all(self) -> None:
@@ -119,8 +119,8 @@ class TestMemoryGraph(unittest.TestCase):
         cleared = orch.handle_message("/graph_clear", "user1")
         self.assertEqual("Graph cleared for this thread.", cleared.text)
         graph = orch.handle_message("/graph", "user1").text
-        self.assertIn("Nodes:\n  - (none)", graph)
-        self.assertIn("Edges:\n  - (none)", graph)
+        self.assertIn("Nodes:\n - (none)", graph)
+        self.assertIn("Edges:\n - (none)", graph)
         self.assertNotIn("?", graph)
 
     def test_graph_data_isolated_per_thread(self) -> None:
@@ -129,12 +129,12 @@ class TestMemoryGraph(unittest.TestCase):
         orch.handle_message('/node alpha "Alpha"', "user1")
         graph_a = orch.handle_message("/graph", "user1").text
         self.assertIn("Graph (thread thread-a):", graph_a)
-        self.assertIn("  - alpha: Alpha", graph_a)
+        self.assertIn(" - alpha: Alpha", graph_a)
 
         self._set_active_thread(orch, "user1", "thread-b")
         graph_b = orch.handle_message("/graph", "user1").text
         self.assertIn("Graph (thread thread-b):", graph_b)
-        self.assertIn("Nodes:\n  - (none)", graph_b)
+        self.assertIn("Nodes:\n - (none)", graph_b)
 
     def test_graph_command_outputs_not_decorated(self) -> None:
         orch = self._orchestrator()

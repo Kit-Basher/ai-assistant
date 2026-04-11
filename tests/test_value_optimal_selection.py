@@ -226,13 +226,25 @@ class TestValueOptimalSelection(unittest.TestCase):
         self.assertTrue(ok)
         route_mock.assert_not_called()
         assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
-        self.assertIn("over the cost cap", str(assistant.get("content") or ""))
+        assistant_text = str(assistant.get("content") or "")
+        self.assertTrue(assistant_text.startswith("Current model: openrouter:jamba-large."))
+        self.assertIn("Premium research recommendation: none currently qualifies.", assistant_text)
+        self.assertIn(
+            "Reason: no remote model currently meets the required premium quality and context thresholds.",
+            assistant_text,
+        )
+        self.assertIn(
+            "Mode: Controlled Mode. I can recommend local and cloud options. I only act after you approve.",
+            assistant_text,
+        )
+        self.assertIn("No change has been made.", assistant_text)
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-        self.assertEqual("generic_chat", meta.get("route"))
+        self.assertEqual("action_tool", meta.get("route"))
         self.assertNotIn("selection_policy", meta)
         wizard_state = runtime._llm_fixit_store.state  # type: ignore[attr-defined]
-        self.assertTrue(bool(wizard_state.get("active")))
-        self.assertEqual("premium_over_cap", wizard_state.get("issue_code"))
+        self.assertFalse(bool(wizard_state.get("active")))
+        self.assertEqual("idle", str(wizard_state.get("step") or ""))
+        self.assertIsNone(wizard_state.get("issue_code"))
 
     def test_api_chat_leaves_default_model_selection_to_canonical_inference(self) -> None:
         runtime = AgentRuntime(

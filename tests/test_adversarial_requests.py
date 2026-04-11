@@ -247,7 +247,7 @@ class TestAdversarialRequests(unittest.TestCase):
         )
         normalized = normalize_installed_pack_truth(row)
         self.assertEqual("installed_blocked", normalized.get("state_key"))
-        self.assertEqual("normalized files are missing", normalized.get("blocker"))
+        self.assertEqual("pack source is missing", normalized.get("blocker"))
         self.assertEqual(False, normalized.get("task_usable"))
         self.assertEqual(False, normalized.get("machine_usable"))
 
@@ -261,9 +261,9 @@ class TestAdversarialRequests(unittest.TestCase):
                 },
             }
         )
-        self.assertEqual("installed_unknown", normalized.get("state_key"))
-        self.assertEqual("normalized path not recorded", normalized.get("blocker"))
-        self.assertEqual("Installed · Unknown", normalized.get("state_label"))
+        self.assertEqual("installed_blocked", normalized.get("state_key"))
+        self.assertEqual("pack identity is missing", normalized.get("blocker"))
+        self.assertEqual("Installed · Blocked", normalized.get("state_label"))
 
     def test_corrupted_permissions_json_degrades_safely(self) -> None:
         store = PackStore(self.db_path)

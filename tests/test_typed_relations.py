@@ -78,8 +78,8 @@ class TestTypedRelations(unittest.TestCase):
                 "Relations (thread thread-a):",
                 "Mode: open",
                 "Types:",
-                "  - alpha",
-                "  - beta",
+                " - alpha",
+                " - beta",
             ],
             listed.text.splitlines(),
         )
@@ -87,8 +87,8 @@ class TestTypedRelations(unittest.TestCase):
         removed = orch.handle_message("/relation_remove alpha", "u1")
         self.assertEqual("Relation type removed: alpha.", removed.text)
         listed_after = orch.handle_message("/relations", "u1")
-        self.assertIn("  - beta", listed_after.text)
-        self.assertNotIn("  - alpha", listed_after.text)
+        self.assertIn(" - beta", listed_after.text)
+        self.assertNotIn(" - alpha", listed_after.text)
 
     def test_strict_mode_default_open(self) -> None:
         orch = self._orchestrator()
@@ -107,7 +107,7 @@ class TestTypedRelations(unittest.TestCase):
         link = orch.handle_message("/link a uses b", "u1")
         self.assertEqual("Cannot create link.", link.text)
         graph = orch.handle_message("/graph", "u1")
-        self.assertIn("Edges:\n  - (none)", graph.text)
+        self.assertIn("Edges:\n - (none)", graph.text)
 
     def test_strict_mode_on_allows_declared_relation(self) -> None:
         orch = self._orchestrator()
@@ -119,7 +119,7 @@ class TestTypedRelations(unittest.TestCase):
         link = orch.handle_message("/link a uses b", "u1")
         self.assertEqual("Link created.", link.text)
         graph = orch.handle_message("/graph", "u1")
-        self.assertIn("  - a --uses--> b", graph.text)
+        self.assertIn(" - a --uses--> b", graph.text)
         self.assertIn("Mode: strict", graph.text)
         self.assertIn("Declared relations: 1", graph.text)
 
@@ -133,7 +133,7 @@ class TestTypedRelations(unittest.TestCase):
         link = orch.handle_message("/link a free_form_relation b", "u1")
         self.assertEqual("Link created.", link.text)
         graph = orch.handle_message("/graph", "u1")
-        self.assertIn("  - a --free_form_relation--> b", graph.text)
+        self.assertIn(" - a --free_form_relation--> b", graph.text)
         self.assertIn("Mode: open", graph.text)
 
     def test_relations_output_none_when_empty(self) -> None:
@@ -145,7 +145,7 @@ class TestTypedRelations(unittest.TestCase):
                 "Relations (thread thread-a):",
                 "Mode: open",
                 "Types:",
-                "  (none)",
+                " (none)",
             ],
             listed.text.splitlines(),
         )
@@ -170,8 +170,8 @@ class TestTypedRelations(unittest.TestCase):
         self.assertEqual("Relation type already exists.", dup.text)
 
         all_text = orch.handle_message("/relations", "u1").text
-        self.assertIn("  - rel_type", all_text)
-        self.assertIn(f"  - {expected}", all_text)
+        self.assertIn(" - rel_type", all_text)
+        self.assertIn(f" - {expected}", all_text)
         self._assert_clean_output(all_text)
 
 

@@ -3454,9 +3454,9 @@ def run_polling_with_backoff(
             sleep_fn(backoff_seconds)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run the Personal Agent Telegram adapter.")
-    parser.parse_args()
+    parser.parse_args([] if argv is None else argv)
     configure_logging_if_needed()
     loaded = load_config(require_telegram_token=False)
     runtime_state = get_telegram_runtime_state()
@@ -3548,5 +3548,9 @@ def main() -> None:
         release_telegram_poll_lock(poll_lock)
 
 
+def run() -> None:
+    main(sys.argv[1:])
+
+
 if __name__ == "__main__":
-    main()
+    run()

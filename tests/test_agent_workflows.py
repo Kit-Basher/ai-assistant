@@ -119,7 +119,11 @@ class TestAgentWorkflows(unittest.TestCase):
 
         discovery = self._chat(runtime, "there is a brand new tiny Gemma 4 model, can you look into it?")
         discovery_text = str((discovery.get("assistant") or {}).get("content") or "")
-        self.assertIn("Found 2 model(s) across 3 source(s), but some sources failed.", discovery_text)
+        self.assertTrue(discovery_text.startswith("For Gemma, the closest family matches look like openrouter:vendor/tiny-gemma"))
+        self.assertIn("Likely family match: openrouter:vendor/tiny-gemma.", discovery_text)
+        self.assertIn("Practical local fit: ollama:qwen2.5:7b-instruct.", discovery_text)
+        self.assertIn("Sources checked: external_snapshots, huggingface, ollama, openrouter (4 queried).", discovery_text)
+        self.assertIn("Source errors: huggingface: hf timeout.", discovery_text)
         self.assertIn("model_discovery_manager", discovery.get("meta", {}).get("used_tools", []))
 
         install_preview = self._chat(runtime, "install ollama:qwen2.5:7b-instruct")

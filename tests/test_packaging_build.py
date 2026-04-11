@@ -87,7 +87,7 @@ class TestPackagingBuild(unittest.TestCase):
                 entry_points = zf.read(f"personal_agent-{version}.dist-info/entry_points.txt").decode("utf-8")
                 self.assertIn("personal-agent = agent.cli:main", entry_points)
                 self.assertIn("personal-agent-api = agent.api_server:main", entry_points)
-                self.assertIn("personal-agent-telegram = telegram_adapter.bot:main", entry_points)
+                self.assertIn("personal-agent-telegram = telegram_adapter.bot:run", entry_points)
                 self.assertNotIn("memory/agent.db", names)
                 self.assertNotIn("memory/llm_usage_stats.json", names)
                 self.assertNotIn("packaging/personal-agent@.service", names)

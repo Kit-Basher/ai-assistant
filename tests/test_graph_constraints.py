@@ -127,8 +127,8 @@ class TestGraphConstraints(unittest.TestCase):
         self.assertEqual("Link created.", first.text)
         self.assertEqual("Cannot create link.", second.text)
         graph = orch.handle_message("/graph", "u1").text
-        self.assertIn("  - a --depends--> b", graph)
-        self.assertNotIn("  - b --depends--> a", graph)
+        self.assertIn(" - a --depends--> b", graph)
+        self.assertNotIn(" - b --depends--> a", graph)
 
     def test_link_allows_non_cycle_for_constrained_relation(self) -> None:
         orch = self._orchestrator()
@@ -152,8 +152,8 @@ class TestGraphConstraints(unittest.TestCase):
         back = orch.handle_message("/link b relates a", "u1")
         self.assertEqual("Link created.", back.text)
         graph = orch.handle_message("/graph", "u1").text
-        self.assertIn("  - a --depends--> b", graph)
-        self.assertIn("  - b --relates--> a", graph)
+        self.assertIn(" - a --depends--> b", graph)
+        self.assertIn(" - b --relates--> a", graph)
 
     def test_import_replace_rejects_constrained_cycle_and_unchanged(self) -> None:
         orch = self._orchestrator()

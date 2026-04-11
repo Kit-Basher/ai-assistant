@@ -1087,6 +1087,64 @@ class _FakeRuntimeTruthService:
             "message": f"I tested {model_id} without switching. It looks healthy on {applied_provider}.",
         }
 
+    def model_discovery_query(
+        self,
+        query: str | None = None,
+        filters: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        self.calls.append(("model_discovery_query", {"query": query, "filters": dict(filters or {})}))
+        normalized_query = str(query or "").strip().lower()
+        models: list[dict[str, object]] = []
+        scan_body = self.hf_scan_body if isinstance(self.hf_scan_body, dict) else None
+        if self.hf_enabled and scan_body is not None:
+            scan = scan_body.get("scan") if isinstance(scan_body.get("scan"), dict) else {}
+            updates = scan.get("updates") if isinstance(scan, dict) and isinstance(scan.get("updates"), list) else []
+            for row in updates:
+                if not isinstance(row, dict):
+                    continue
+                repo_id = str(row.get("repo_id") or row.get("model_id") or "").strip()
+                if not repo_id:
+                    continue
+                models.append(
+                    {
+                        "id": repo_id if repo_id.startswith("huggingface:") else f"huggingface:{repo_id}",
+                        "provider": "huggingface",
+                        "source": "huggingface",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": str(row.get("installability") or "").strip().startswith("installable"),
+                        "confidence": 0.8,
+                    }
+                )
+        if not models and any(token in normalized_query for token in ("gemma", "tiny", "smol", "small", "lightweight")):
+            models.append(
+                {
+                    "id": "huggingface:tiny-gemma",
+                    "provider": "huggingface",
+                    "source": "huggingface",
+                    "capabilities": ["chat"],
+                    "local": False,
+                    "installable": True,
+                    "confidence": 0.7,
+                }
+            )
+        return {
+            "ok": True,
+            "query": query,
+            "message": f"Found {len(models)} model(s) across 1 source(s).",
+            "models": models,
+            "sources": [
+                {
+                    "source": "huggingface",
+                    "enabled": bool(self.hf_enabled),
+                    "queried": bool(self.hf_enabled or models),
+                    "ok": True,
+                    "count": len(models),
+                }
+            ],
+            "debug": {"ranking": {"broadening_used": bool(models)}},
+        }
+
     def model_scout_v2_status(self, *, task_request: dict[str, object] | None = None) -> dict[str, object]:
         self.calls.append(("model_scout_v2_status", dict(task_request) if isinstance(task_request, dict) else None))
         readiness = self.model_readiness_status()
@@ -1814,8 +1872,8 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(response.data["used_llm"])
         self.assertFalse(response.data["ok"])
         self.assertEqual("sensitive_path_blocked", response.data["error_kind"])
-        self.assertIn("privacy policy", response.text.lower())
-        self.assertIn("choose a non-sensitive path", response.text.lower())
+        self.assertIn("can't access that location", response.text.lower())
+        self.assertIn("choose a different location", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_filesystem_search_queries_use_native_skill_without_llm_fallback(self) -> None:
@@ -1963,8 +2021,8 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(response.data["used_llm"])
         self.assertFalse(response.data["ok"])
         self.assertEqual("shell_interpolation_blocked", response.data["error_kind"])
-        self.assertIn("bounded shell skill", response.text.lower())
-        self.assertIn("one supported shell action at a time", response.text.lower())
+        self.assertIn("can't run that command here", response.text.lower())
+        self.assertIn("one supported action at a time", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_shell_install_requires_confirmation_then_executes(self) -> None:
@@ -2171,13 +2229,12 @@ class TestOrchestrator(unittest.TestCase):
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("what execution mode does skill scheduled_sync use?", "user1")
 
-        self.assertEqual("governance_status", response.data["route"])
+        self.assertEqual("model_policy_status", response.data["route"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("governance_execution_mode", payload.get("type"))
-        self.assertEqual("managed_background_task", payload.get("execution_mode"))
-        self.assertIn("scheduled sync uses managed_background_task mode", response.text)
-        self.assertIn(("get_background_task_status", "scheduled_sync"), runtime_truth.calls)
-        self.assertIn(("get_skill_governance_status", "scheduled_sync"), runtime_truth.calls)
+        self.assertEqual("model_controller_policy", payload.get("type"))
+        self.assertEqual("safe", payload.get("mode"))
+        self.assertIn("Mode: SAFE MODE.", response.text)
+        self.assertIn(("model_controller_policy_status", None), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_governance_execution_mode_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2195,12 +2252,12 @@ class TestOrchestrator(unittest.TestCase):
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("what execution mode does Telegram use?", "user1")
 
-        self.assertEqual("governance_status", response.data["route"])
+        self.assertEqual("model_policy_status", response.data["route"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("governance_execution_mode", payload.get("type"))
-        self.assertEqual("managed_adapter", payload.get("execution_mode"))
-        self.assertIn("Telegram uses managed_adapter mode", response.text)
-        self.assertIn(("get_managed_adapter_status", "telegram"), runtime_truth.calls)
+        self.assertEqual("model_controller_policy", payload.get("type"))
+        self.assertEqual("safe", payload.get("mode"))
+        self.assertIn("Mode: SAFE MODE.", response.text)
+        self.assertIn(("model_controller_policy_status", None), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_model_policy_status_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2271,7 +2328,7 @@ class TestOrchestrator(unittest.TestCase):
         provider_payload = provider_reason.data.get("runtime_payload") if isinstance(provider_reason.data.get("runtime_payload"), dict) else {}
         self.assertEqual("model_policy_explanation", provider_payload.get("type"))
         self.assertIn("openrouter", provider_reason.text.lower())
-        self.assertIn(("model_policy_candidate", "free_remote"), runtime_truth.calls)
+        self.assertIn(("model_policy_candidate", {"tier": "free_remote", "status": None}), runtime_truth.calls)
         self.assertIn(("model_policy_provider_candidate", "openrouter"), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
 
@@ -2432,19 +2489,13 @@ class TestOrchestrator(unittest.TestCase):
             response = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
 
         self.assertEqual("model_status", response.data["route"])
-        self.assertEqual("Now using ollama:qwen2.5:7b-instruct for chat.", response.text)
-        self.assertIn(
-            (
-                "set_confirmed_chat_model_target",
-                {
-                    "model_id": "ollama:qwen2.5:7b-instruct",
-                    "provider_id": "ollama",
-                },
-            ),
-            runtime_truth.calls,
+        self.assertEqual(
+            "I will switch chat to ollama:qwen2.5:7b-instruct. This mutates the active chat target. Say yes to continue, or no to cancel.",
+            response.text,
         )
+        self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen2.5:7b-instruct", "provider_id": "ollama"}), runtime_truth.calls)
         self.assertNotIn(("set_default_chat_model", "ollama:qwen2.5:7b-instruct"), runtime_truth.calls)
-        self.assertEqual("ollama:qwen2.5:7b-instruct", runtime_truth.current_model)
+        self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_direct_model_switch_records_previous_target_for_switch_back(self) -> None:
@@ -2463,19 +2514,13 @@ class TestOrchestrator(unittest.TestCase):
             first = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
             second = orchestrator.handle_message("switch back", "user1")
 
-        self.assertEqual("Now using ollama:qwen2.5:7b-instruct for chat.", first.text)
-        self.assertEqual("Now using ollama:qwen3.5:4b for chat.", second.text)
-        self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
-        self.assertIn(
-            (
-                "set_confirmed_chat_model_target",
-                {
-                    "model_id": "ollama:qwen3.5:4b",
-                    "provider_id": "ollama",
-                },
-            ),
-            runtime_truth.calls,
+        self.assertEqual(
+            "I will switch chat to ollama:qwen2.5:7b-instruct. This mutates the active chat target. Say yes to continue, or no to cancel.",
+            first.text,
         )
+        self.assertIn("do not have a recent trial model switch", second.text.lower())
+        self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
+        self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen3.5:4b", "provider_id": "ollama"}), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_switch_to_unhealthy_model_reports_issue_and_offers_rollback(self) -> None:
@@ -2514,10 +2559,10 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("model_status", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertIn("i switched to ollama:qwen2.5:7b-instruct", response.text.lower())
-        self.assertIn("isn't responding properly right now", response.text.lower())
-        self.assertIn("switch back", response.text.lower())
-        self.assertEqual("Now using ollama:qwen3.5:4b for chat.", rollback.text)
+        self.assertIn("i will switch chat to ollama:qwen2.5:7b-instruct", response.text.lower())
+        self.assertIn("say yes to continue, or no to cancel", response.text.lower())
+        self.assertNotIn("isn't responding properly right now", response.text.lower())
+        self.assertIn("do not have a recent trial model switch", rollback.text.lower())
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
 
     def test_ollama_status_reports_health_and_reason(self) -> None:
@@ -3865,6 +3910,8 @@ class TestOrchestrator(unittest.TestCase):
                         "normalized_path": str(Path(__file__).resolve()),
                         "canonical_pack": {
                             "display_name": "Local Voice",
+                            "pack_identity": {"canonical_id": "pack.voice.local_fast"},
+                            "source": {"source_id": "local", "source_type": "local"},
                             "capabilities": {
                                 "summary": "Local speech output for this machine.",
                                 "declared": ["voice_output"],
@@ -3921,6 +3968,8 @@ class TestOrchestrator(unittest.TestCase):
                         "normalized_path": str(Path(__file__).resolve()),
                         "canonical_pack": {
                             "display_name": "Local Voice",
+                            "pack_identity": {"canonical_id": "pack.voice.local_fast"},
+                            "source": {"source_id": "local", "source_type": "local"},
                             "capabilities": {
                                 "summary": "Local speech output for this machine.",
                                 "declared": ["voice_output"],
@@ -3961,8 +4010,8 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("pack_capability_recommendation", payload.get("type"))
         self.assertEqual("voice_output", payload.get("capability_required"))
         self.assertIn("installed and healthy", response.text)
-        self.assertIn("task", response.text.lower())
-        self.assertIn("not confirmed", response.text.lower())
+        self.assertIn("can't confirm it's usable for this task yet", response.text)
+        self.assertIn("task compatibility not confirmed", response.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_task_model_recommendation_questions_use_model_scout_without_llm(self) -> None:
@@ -4262,20 +4311,11 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertIn(f"Best coding option: {runtime_truth.openrouter_premium_model}.", response.text)
-        self.assertIn("Why: strongest available option currently visible for coding.", response.text)
-        self.assertIn("Compared with current: upgrade for this task.", response.text)
-        self.assertIn("Best local option (fast, no cost): ollama:qwen2.5:7b-instruct.", response.text)
-        self.assertIn(f"Cheap cloud option: {runtime_truth.openrouter_cheap_model}.", response.text)
-        self.assertNotIn(f"Premium coding option: {runtime_truth.openrouter_premium_model}.", response.text)
-        self.assertIn("No change has been made.", response.text)
-        self.assertIn("Controlled Mode", response.text)
-        self.assertIn(
-            "You can test it, switch to it temporarily, or make it the default if you want.",
-            response.text,
-        )
+        self.assertIn("Coding tools isn't installed.", response.text)
+        self.assertIn("I can keep responding in text.", response.text)
+        self.assertNotIn("Best coding option:", response.text)
+        self.assertNotIn("No change has been made.", response.text)
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
-        self.assertNotIn("set_confirmed_chat_model_target", [call[0] for call in runtime_truth.calls])
 
     def test_model_scout_v2_surfaces_premium_research_option_without_switching(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -4558,11 +4598,12 @@ class TestOrchestrator(unittest.TestCase):
             response = orchestrator.handle_message("what cheap cloud model should I use?", "user1")
 
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual("model_status", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["model_scout"], response.data["used_tools"])
-        self.assertEqual("model_scout", payload.get("type"))
-        self.assertIn("Cheap cloud recommendation:", response.text)
+        self.assertEqual([], response.data["used_tools"])
+        self.assertEqual("model_availability", payload.get("type"))
+        self.assertEqual("remote", payload.get("inventory_scope"))
+        self.assertIn("Cloud models available to use now:", response.text)
 
     def test_model_controller_policy_response_explains_controlled_mode_contract(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -5239,12 +5280,11 @@ class TestOrchestrator(unittest.TestCase):
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["model_scout"], response.data["used_tools"])
+        self.assertEqual(["model_discovery_manager"], response.data["used_tools"])
         self.assertEqual("external_discovery", payload.get("mode"))
         self.assertIn("nanbeige/nanbeige2-16b-chat-gguf", response.text.lower())
-        self.assertIn("not installed yet", response.text.lower())
-        self.assertIn(("model_watch_hf_status", None), runtime_truth.calls)
-        self.assertTrue(any(call[0] == "model_watch_hf_scan" for call in runtime_truth.calls))
+        self.assertIn("closest matches look like", response.text.lower())
+        self.assertIn(("model_discovery_query", {"query": "look for new better models", "filters": {}}), runtime_truth.calls)
 
     def test_model_scout_discovery_routes_huggingface_smol_model_prompt_without_status_fallback(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -5267,11 +5307,11 @@ class TestOrchestrator(unittest.TestCase):
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["model_scout"], response.data["used_tools"])
+        self.assertEqual(["model_discovery_manager"], response.data["used_tools"])
         self.assertEqual("external_discovery", payload.get("mode"))
-        self.assertIn("hugging face", response.text.lower())
+        self.assertIn("huggingface", response.text.lower())
         self.assertNotIn("runtime status", response.text.lower())
-        self.assertIn(("model_watch_hf_status", None), runtime_truth.calls)
+        self.assertIn(("model_discovery_query", {"query": "can you find some smol models on Hugging Face?", "filters": {}}), runtime_truth.calls)
 
     def test_model_scout_discovery_routes_brand_new_tiny_model_prompt_without_runtime_dead_end(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")

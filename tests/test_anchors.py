@@ -66,7 +66,7 @@ class TestAnchors(unittest.TestCase):
         self.assertIn("Anchors (thread thread-a):", anchors_a.text)
         self.assertIn("Current focus: Sprint check", anchors_a.text)
         self.assertIn("#1 ", anchors_a.text)
-        self.assertIn("  - Ship docs", anchors_a.text)
+        self.assertIn(" - Ship docs", anchors_a.text)
 
         self._set_active_thread(orch, "user1", "thread-b")
         anchors_b = orch.handle_message("/anchors", "user1")
@@ -83,9 +83,9 @@ class TestAnchors(unittest.TestCase):
         self.assertEqual("Current focus: Second", lines[1])
         self.assertEqual("---", lines[2])
         self.assertRegex(lines[3], r"^#2 .+ — Second$")
-        self.assertEqual("  - two", lines[4])
+        self.assertEqual(" - two", lines[4])
         self.assertRegex(lines[5], r"^#1 .+ — First$")
-        self.assertEqual("  - one", lines[6])
+        self.assertEqual(" - one", lines[6])
         self.assertTrue(all("?" not in line for line in lines))
 
     def test_continuity_header_includes_next_when_open_line_present(self) -> None:

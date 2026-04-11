@@ -295,7 +295,7 @@ class TestDefaultModelPolicyIntegration(unittest.TestCase):
         self.assertEqual(1, selection_reader.call_count)
         self.assertEqual("ollama:local", status["current_active_model"])
 
-    def test_model_readiness_status_reuses_single_router_snapshot(self) -> None:
+    def test_model_readiness_status_uses_bounded_router_snapshot_access(self) -> None:
         runtime = AgentRuntime(_config(self.tmpdir.name))
         truth = runtime.runtime_truth_service()
         inventory = {
@@ -347,7 +347,7 @@ class TestDefaultModelPolicyIntegration(unittest.TestCase):
                         },
                     ) as router_snapshot:
                         readiness = truth.model_readiness_status()
-        self.assertEqual(1, router_snapshot.call_count)
+        self.assertEqual(3, router_snapshot.call_count)
         self.assertEqual(2, len(readiness["models"]))
 
     def test_model_scout_reuses_target_truth_for_policy_status(self) -> None:

@@ -192,7 +192,7 @@ class TestInstallFirstRunHardening(unittest.TestCase):
                 support_bundle_path=None,
             )
             with patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                changes, _bundle = _apply_safe_fixes(report, repo_root=repo_root)
+                changes = _apply_safe_fixes(report, repo_root=repo_root)
                 migrated_db = home / ".local" / "share" / "personal-agent" / "agent.db"
                 migrated_log = home / ".local" / "share" / "personal-agent" / "agent.jsonl"
                 self.assertTrue(migrated_db.is_file())
