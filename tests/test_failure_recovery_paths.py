@@ -154,7 +154,7 @@ class TestFailureRecoveryPaths(unittest.TestCase):
         ):
             preview = self._chat(runtime, "install ollama:qwen2.5:7b-instruct")
             preview_text = str((preview.get("assistant") or {}).get("content") or "")
-            self.assertIn("Reply yes to proceed or no to cancel.", preview_text)
+            self.assertIn("Say yes to continue, or no to cancel.", preview_text)
             failure = self._chat(runtime, "yes", expect_transport_ok=None, expect_body_ok=False)
         failure_text = str((failure.get("assistant") or {}).get("content") or "")
         self.assertIn("restart it and try again", failure_text.lower())
@@ -241,7 +241,7 @@ class TestFailureRecoveryPaths(unittest.TestCase):
         orch._call_skill = lambda *args, **kwargs: _observe_now({}, user_id="user1")  # type: ignore[assignment]
 
         response = orch.handle_message("/brief", "user1")
-        self.assertIn("baseline created", response.text.lower())
+        self.assertIn("i have a baseline now", response.text.lower())
         self.assertNotIn("/resource_report", response.text)
         self.assertNotIn("debug", response.text.lower())
 

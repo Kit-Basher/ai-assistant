@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from agent.public_chat import build_public_sentence_text
+
 
 def build_safe_mode_paused_message(
     *,
@@ -8,12 +10,8 @@ def build_safe_mode_paused_message(
     unpause_endpoint: str = "/llm/autopilot/unpause",
     unpause_command: str = 'POST /llm/autopilot/unpause {"confirm": true}',
 ) -> str:
-    reason_text = str(reason or "").strip() or "churn_detected"
-    detail_text = str(blocked_detail or "").strip()
-    detail_clause = f" Blocked change: {detail_text}." if detail_text else ""
-    return (
-        "Safe mode is a guardrail that pauses automatic apply changes after unstable configuration churn. "
-        f"It is currently paused. Reason: {reason_text}.{detail_clause} "
-        f"To unpause, call {unpause_command} (endpoint: {unpause_endpoint}). "
-        "While paused, chat and read-only endpoints still work, but autopilot apply actions remain blocked."
+    return build_public_sentence_text(
+        "Automatic changes are paused for safety",
+        "I can't apply that change right now.",
+        f"To unpause, call {unpause_command} (endpoint: {unpause_endpoint})",
     )

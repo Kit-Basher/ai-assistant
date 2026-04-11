@@ -1,0 +1,10 @@
+#!/usr/bin/make -f
+
+%:
+	@:
+
+binary:
+	./scripts/build_deb.sh --clean
+
+clean:
+	rm -rf dist/personal-agent_* dist/*.deb dist/*.sha256

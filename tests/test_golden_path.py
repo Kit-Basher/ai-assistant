@@ -9,6 +9,7 @@ from agent.golden_path import (
     next_step_for_failure,
     user_safe_summary,
 )
+from agent.public_chat import build_no_llm_public_message
 
 
 class TestGoldenPath(unittest.TestCase):
@@ -30,16 +31,18 @@ class TestGoldenPath(unittest.TestCase):
 
     def test_user_safe_summary(self) -> None:
         ready = user_safe_summary(ready=True, provider="ollama", model="qwen2.5:3b-instruct")
-        self.assertIn("Agent is ready.", ready)
+        self.assertIn("Ready.", ready)
         degraded = user_safe_summary(ready=False, failure_code="llm_unavailable")
-        self.assertIn("Setup needed.", degraded)
+        self.assertIn("System is degraded.", degraded)
+        self.assertIn("Open /state or /ready to see what is degraded.", degraded)
         setup = user_safe_summary(ready=False, bootstrap=True, failure_code="no_chat_model")
-        self.assertIn("Setup needed.", setup)
+        self.assertIn("System is still initializing.", setup)
+        self.assertIn("Wait for startup to finish, then try again.", setup)
 
     def test_bootstrap_guidance_is_stable(self) -> None:
         text = bootstrap_guidance()
-        self.assertIn("No chat model available", text)
-        self.assertIn("Start Ollama", text)
+        self.assertEqual(build_no_llm_public_message(), text)
+        self.assertNotIn("No chat model available", text)
 
 
 if __name__ == "__main__":

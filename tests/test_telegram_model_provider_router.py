@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from agent.audit_log import AuditLog
+from agent.public_chat import build_no_llm_public_message
 from agent.ux.llm_fixit_wizard import LLMFixitWizardStore
 from telegram_adapter.bot import (
     _handle_message,
@@ -127,7 +128,7 @@ class _FakeRuntime:
         ready = bool(model and str(provider_health.get("status") or "").strip().lower() == "ok")
         runtime_mode = "READY" if ready else "BOOTSTRAP_REQUIRED"
         summary = (
-            f"Agent is ready. Using {provider} / {model}."
+            f"Ready. Using {provider} / {model}."
             if ready
             else "Setup needed. No chat model is ready yet."
         )
@@ -144,7 +145,7 @@ class _FakeRuntime:
             "telegram": {"state": "running", "configured": True},
             "onboarding": {
                 "state": "READY" if ready else "LLM_MISSING",
-                "summary": "Setup complete. The agent is ready." if ready else "No chat model available right now.",
+                "summary": "Setup complete. The agent is ready." if ready else build_no_llm_public_message(),
                 "next_action": "No action needed." if ready else "Run: python -m agent setup",
             },
         }
@@ -475,8 +476,9 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             asyncio.run(_handle_message(update, context))
 
             reply = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("No chat model available right now.", reply)
-            self.assertIn("Next:", reply)
+            self.assertIn(build_no_llm_public_message(), reply)
+            self.assertNotIn("No chat model available right now.", reply)
+            self.assertNotIn("Reason:", reply)
             self.assertNotIn("Reply 1, 2, or 3.", reply)
             self.assertNotIn("LLM unavailable right now.", reply)
             self.assertEqual([], orchestrator.calls)
@@ -559,7 +561,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
                     "runtime_mode": "READY",
                     "runtime_status": {
                         "runtime_mode": "READY",
-                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
                         "next_action": None,
                     },
                     "onboarding": {
@@ -602,7 +604,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
                     "runtime_mode": "READY",
                     "runtime_status": {
                         "runtime_mode": "READY",
-                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
                         "next_action": None,
                     },
                     "telegram": {

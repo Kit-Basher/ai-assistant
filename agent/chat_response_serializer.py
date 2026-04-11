@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agent.orchestrator import OrchestratorResponse
+from agent.public_chat import build_public_chat_meta, normalize_public_assistant_text
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ def serialize_orchestrator_chat_response(
     user_id: str,
     thread_id: str,
     autopilot_meta: dict[str, Any],
+    include_debug: bool = False,
 ) -> SerializedChatResponse:
     response_data = _response_data(response)
     route = str(response_data.get("route") or "generic_chat").strip().lower() or "generic_chat"
@@ -68,43 +70,17 @@ def serialize_orchestrator_chat_response(
     generic_fallback_used = route == "generic_chat"
     generic_fallback_allowed = route == "generic_chat"
     generic_fallback_reason = str(response_data.get("generic_fallback_reason") or "").strip() or None
-    assistant_text = str(response.text or "").strip() or "Done."
+    assistant_text = normalize_public_assistant_text(response.text, fallback="Done.")
     ok = bool(response_data.get("ok", True))
 
-    meta: dict[str, Any] = {
-        "provider": provider,
-        "model": model,
-        "route": route,
-        "route_reason": route_reason,
-        "source_surface": source_surface,
-        "fallback_used": bool(response_data.get("fallback_used", False)),
-        "generic_fallback_used": generic_fallback_used,
-        "generic_fallback_allowed": generic_fallback_allowed,
-        "generic_fallback_reason": generic_fallback_reason,
-        "attempts": response_data.get("attempts") or [],
-        "duration_ms": int(response_data.get("duration_ms") or 0),
-        "error": str(response_data.get("error_kind") or "").strip() or None,
-        "autopilot": dict(autopilot_meta) if isinstance(autopilot_meta, dict) else {},
-        "used_runtime_state": bool(response_data.get("used_runtime_state", False)),
-        "used_llm": bool(response_data.get("used_llm", False)),
-        "used_memory": bool(response_data.get("used_memory", False)),
-        "used_tools": [
-            str(item).strip()
-            for item in (
-                response_data.get("used_tools")
-                if isinstance(response_data.get("used_tools"), list)
-                else []
-            )
-            if str(item).strip()
-        ],
-        "thread_id": thread_id,
-        "user_id": user_id,
-    }
-    if isinstance(runtime_payload, dict):
-        meta["setup_type"] = str(runtime_payload.get("type") or "").strip() or None
-        meta["runtime_state_failure_reason"] = str(runtime_payload.get("reason") or "").strip() or None
-    if isinstance(response_data.get("selection_policy"), dict):
-        meta["selection_policy"] = dict(response_data.get("selection_policy"))
+    meta = build_public_chat_meta(
+        response_data,
+        include_debug=include_debug,
+        source_surface=source_surface,
+        user_id=user_id,
+        thread_id=thread_id,
+        autopilot_meta=autopilot_meta,
+    )
 
     body: dict[str, Any] = {
         "ok": ok,

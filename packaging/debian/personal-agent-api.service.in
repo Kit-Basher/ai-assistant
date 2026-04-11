@@ -1,0 +1,24 @@
+[Unit]
+Description=Personal Agent API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__PERSONAL_AGENT_RUNTIME_ROOT__
+Environment=PYTHONPATH=__PERSONAL_AGENT_RUNTIME_ROOT__
+Environment=LLM_REGISTRY_PATH=%h/.local/share/personal-agent/llm_registry.json
+Environment=AGENT_SECRET_STORE_PATH=%h/.local/share/personal-agent/secrets.enc.json
+Environment=LLM_USAGE_STATS_PATH=%h/.local/share/personal-agent/llm_usage_stats.json
+Environment=AGENT_DB_PATH=%h/.local/share/personal-agent/agent.db
+Environment=AGENT_LOG_PATH=%h/.local/share/personal-agent/agent.jsonl
+Environment=AGENT_PERMISSIONS_PATH=%h/.local/share/personal-agent/permissions.json
+Environment=AGENT_AUDIT_LOG_PATH=%h/.local/share/personal-agent/audit.jsonl
+Environment=AGENT_WEBUI_DIST_PATH=__PERSONAL_AGENT_RUNTIME_ROOT__/agent/webui/dist
+ExecStart=/usr/bin/python3 -m agent.api_server --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

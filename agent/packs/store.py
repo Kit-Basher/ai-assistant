@@ -11,9 +11,16 @@ from typing import Any
 
 from agent.packs.diffing import build_pack_diff, build_pack_version_ref
 from agent.packs.manifest import PackManifest, compute_permissions_hash, normalize_permissions
+from agent.state_transitions import (
+    external_pack_record_is_noop,
+    install_pack_write_is_noop,
+    pack_approval_hash_write_is_noop,
+    pack_enabled_write_is_noop,
+)
 
 
 _EXTERNAL_PACK_REMOVAL_CACHE: dict[str, set[str]] = {}
+_EXTERNAL_PACK_REMOVAL_CACHE_LOCK = threading.RLock()
 
 
 class PackStore:
@@ -151,22 +158,60 @@ class PackStore:
         except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError):
             pass
 
+    @staticmethod
+    def _is_retryable_db_error(exc: sqlite3.OperationalError) -> bool:
+        message = str(exc).lower()
+        return "locked" in message or "busy" in message
+
+    def _read_with_retry(self, fn):
+        delay_seconds = 0.05
+        for attempt in range(3):
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if not self._is_retryable_db_error(exc):
+                    raise
+                if attempt >= 2:
+                    raise
+                time.sleep(delay_seconds * (attempt + 1))
+
+    def _write_with_retry(self, fn):
+        delay_seconds = 0.05
+        for attempt in range(3):
+            try:
+                return fn()
+            except sqlite3.OperationalError as exc:
+                if not self._is_retryable_db_error(exc):
+                    raise
+                if attempt >= 2:
+                    raise
+                with self._lock:
+                    try:
+                        self._conn.rollback()
+                    except (sqlite3.OperationalError, sqlite3.ProgrammingError, sqlite3.DatabaseError):
+                        pass
+                time.sleep(delay_seconds * (attempt + 1))
+
     def _external_pack_removal_cache(self) -> set[str]:
-        return _EXTERNAL_PACK_REMOVAL_CACHE.setdefault(self.db_path, set())
+        with _EXTERNAL_PACK_REMOVAL_CACHE_LOCK:
+            return _EXTERNAL_PACK_REMOVAL_CACHE.setdefault(self.db_path, set())
 
     def _mark_external_pack_removed(self, pack_id: str) -> None:
         normalized = str(pack_id or "").strip()
         if normalized:
-            self._external_pack_removal_cache().add(normalized)
+            with _EXTERNAL_PACK_REMOVAL_CACHE_LOCK:
+                self._external_pack_removal_cache().add(normalized)
 
     def _forget_external_pack_removed(self, pack_id: str) -> None:
         normalized = str(pack_id or "").strip()
         if normalized:
-            self._external_pack_removal_cache().discard(normalized)
+            with _EXTERNAL_PACK_REMOVAL_CACHE_LOCK:
+                self._external_pack_removal_cache().discard(normalized)
 
     def _is_external_pack_removed(self, pack_id: str) -> bool:
         normalized = str(pack_id or "").strip()
-        return bool(normalized and normalized in self._external_pack_removal_cache())
+        with _EXTERNAL_PACK_REMOVAL_CACHE_LOCK:
+            return bool(normalized and normalized in self._external_pack_removal_cache())
 
     @staticmethod
     def _external_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -205,7 +250,7 @@ class PackStore:
             ),
             "review_required": bool(review.get("review_required", True)),
             "non_executable": True,
-            "enabled": False,
+            "enabled": None,
             "permissions": canonical.get("permissions") if isinstance(canonical.get("permissions"), dict) else {},
             "capabilities": canonical.get("capabilities") if isinstance(canonical.get("capabilities"), dict) else {},
             "components": list(PackStore._sequence(canonical.get("components"))),
@@ -266,18 +311,21 @@ class PackStore:
         return out
 
     def list_external_packs(self) -> list[dict[str, Any]]:
-        with self._lock:
-            self._refresh_read_snapshot()
-            cur = self._conn.execute(
-                """
-                SELECT pack_id, pack_name, version, pack_type, classification, status,
-                       canonical_json, risk_json, review_json, quarantine_path, normalized_path,
-                       installed_at, updated_at
-                FROM external_packs
-                ORDER BY pack_id ASC
-                """
-            )
-            rows = cur.fetchall()
+        def _query() -> list[sqlite3.Row]:
+            with self._lock:
+                self._refresh_read_snapshot()
+                cur = self._conn.execute(
+                    """
+                    SELECT pack_id, pack_name, version, pack_type, classification, status,
+                           canonical_json, risk_json, review_json, quarantine_path, normalized_path,
+                           installed_at, updated_at
+                    FROM external_packs
+                    ORDER BY pack_id ASC
+                    """
+                )
+                return cur.fetchall()
+
+        rows = self._read_with_retry(_query)
         out: list[dict[str, Any]] = []
         for row in rows:
             parsed = self._external_row_to_dict(row)
@@ -286,36 +334,42 @@ class PackStore:
         return out
 
     def get_external_pack(self, pack_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            self._refresh_read_snapshot()
-            if self._is_external_pack_removed(pack_id):
-                return None
-            cur = self._conn.execute(
-                """
-                SELECT pack_id, pack_name, version, pack_type, classification, status,
-                       canonical_json, risk_json, review_json, quarantine_path, normalized_path,
-                       installed_at, updated_at
-                FROM external_packs
-                WHERE pack_id = ?
-                """,
-                (pack_id,),
-            )
-            row = cur.fetchone()
+        def _query() -> sqlite3.Row | None:
+            with self._lock:
+                self._refresh_read_snapshot()
+                if self._is_external_pack_removed(pack_id):
+                    return None
+                cur = self._conn.execute(
+                    """
+                    SELECT pack_id, pack_name, version, pack_type, classification, status,
+                           canonical_json, risk_json, review_json, quarantine_path, normalized_path,
+                           installed_at, updated_at
+                    FROM external_packs
+                    WHERE pack_id = ?
+                    """,
+                    (pack_id,),
+                )
+                return cur.fetchone()
+
+        row = self._read_with_retry(_query)
         return self._external_row_to_dict(row)
 
     def get_external_pack_removal(self, pack_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            self._refresh_read_snapshot()
-            cur = self._conn.execute(
-                """
-                SELECT pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path,
-                       quarantine_path, removed_by, reason, removed_at, updated_at
-                FROM external_pack_removals
-                WHERE pack_id = ?
-                """,
-                (pack_id,),
-            )
-            row = cur.fetchone()
+        def _query() -> sqlite3.Row | None:
+            with self._lock:
+                self._refresh_read_snapshot()
+                cur = self._conn.execute(
+                    """
+                    SELECT pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path,
+                           quarantine_path, removed_by, reason, removed_at, updated_at
+                    FROM external_pack_removals
+                    WHERE pack_id = ?
+                    """,
+                    (pack_id,),
+                )
+                return cur.fetchone()
+
+        row = self._read_with_retry(_query)
         if row is None:
             return None
         try:
@@ -390,17 +444,20 @@ class PackStore:
         }
 
     def get_registry_source_cache(self, source_id: str) -> dict[str, Any] | None:
-        with self._lock:
-            self._refresh_read_snapshot()
-            cur = self._conn.execute(
-                """
-                SELECT source_id, source_json, listings_json, fetched_at, expires_at, updated_at
-                FROM external_pack_registry_cache
-                WHERE source_id = ?
-                """,
-                (source_id,),
-            )
-            row = cur.fetchone()
+        def _query() -> sqlite3.Row | None:
+            with self._lock:
+                self._refresh_read_snapshot()
+                cur = self._conn.execute(
+                    """
+                    SELECT source_id, source_json, listings_json, fetched_at, expires_at, updated_at
+                    FROM external_pack_registry_cache
+                    WHERE source_id = ?
+                    """,
+                    (source_id,),
+                )
+                return cur.fetchone()
+
+        row = self._read_with_retry(_query)
         if row is None:
             return None
         try:
@@ -456,29 +513,32 @@ class PackStore:
         now_ts = self._now_ts()
         ttl = max(int(ttl_seconds or 0), 0)
         expires_at = now_ts + ttl if ttl > 0 else now_ts - 1
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO external_pack_registry_cache (
-                    source_id, source_json, listings_json, fetched_at, expires_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_id) DO UPDATE SET
-                    source_json = excluded.source_json,
-                    listings_json = excluded.listings_json,
-                    fetched_at = excluded.fetched_at,
-                    expires_at = excluded.expires_at,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    source_id,
-                    json.dumps(source_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    json.dumps(listings_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    now_ts,
-                    expires_at,
-                    now_ts,
-                ),
-            )
-            self._conn.commit()
+        def _write() -> None:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    INSERT INTO external_pack_registry_cache (
+                        source_id, source_json, listings_json, fetched_at, expires_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source_id) DO UPDATE SET
+                        source_json = excluded.source_json,
+                        listings_json = excluded.listings_json,
+                        fetched_at = excluded.fetched_at,
+                        expires_at = excluded.expires_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        source_id,
+                        json.dumps(source_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(listings_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        now_ts,
+                        expires_at,
+                        now_ts,
+                    ),
+                )
+                self._conn.commit()
+
+        self._write_with_retry(_write)
         cached = self.get_registry_source_cache(source_id)
         assert cached is not None
         return cached
@@ -491,8 +551,22 @@ class PackStore:
         reason: str | None = None,
     ) -> dict[str, Any] | None:
         current = self.get_external_pack(pack_id)
+        existing_removal = self.get_external_pack_removal(pack_id)
         if current is None:
-            return None
+            if existing_removal is None:
+                return None
+            normalized_root = Path(self.external_storage_root())
+            normalized_path = self._path_within_root(existing_removal.get("normalized_path"), normalized_root)
+            quarantine_path = self._path_within_root(existing_removal.get("quarantine_path"), normalized_root)
+            self._remove_tree(normalized_path)
+            self._remove_tree(quarantine_path)
+            self._mark_external_pack_removed(pack_id)
+            return {
+                "removed": False,
+                "already_removed": True,
+                "removal": existing_removal,
+                "pack": None,
+            }
         now_ts = self._now_ts()
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         risk_report = current.get("risk_report") if isinstance(current.get("risk_report"), dict) else {}
@@ -506,6 +580,8 @@ class PackStore:
                 skill_text = (normalized_path / "SKILL.md").read_text(encoding="utf-8")
             except OSError:
                 skill_text = ""
+        if existing_removal is not None:
+            self._mark_external_pack_removed(pack_id)
         removal_payload = {
             "pack_id": str(current.get("pack_id") or pack_id),
             "canonical_json": canonical_pack,
@@ -519,42 +595,45 @@ class PackStore:
             "removed_at": now_ts,
             "updated_at": now_ts,
         }
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO external_pack_removals (
-                    pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path, quarantine_path,
-                    removed_by, reason, removed_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pack_id) DO UPDATE SET
-                    canonical_json = excluded.canonical_json,
-                    risk_json = excluded.risk_json,
-                    review_json = excluded.review_json,
-                    skill_text = excluded.skill_text,
-                    normalized_path = excluded.normalized_path,
-                    quarantine_path = excluded.quarantine_path,
-                    removed_by = excluded.removed_by,
-                    reason = excluded.reason,
-                    removed_at = excluded.removed_at,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    removal_payload["pack_id"],
-                    json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    json.dumps(risk_report, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    json.dumps(review_envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    skill_text or None,
-                    removal_payload["normalized_path"],
-                    removal_payload["quarantine_path"],
-                    removal_payload["removed_by"],
-                    removal_payload["reason"],
-                    removal_payload["removed_at"],
-                    removal_payload["updated_at"],
-                ),
-            )
-            self._conn.execute("DELETE FROM external_pack_diffs WHERE from_pack_id = ? OR to_pack_id = ?", (pack_id, pack_id))
-            self._conn.execute("DELETE FROM external_packs WHERE pack_id = ?", (pack_id,))
-            self._conn.commit()
+        def _write() -> None:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    INSERT INTO external_pack_removals (
+                        pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path, quarantine_path,
+                        removed_by, reason, removed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pack_id) DO UPDATE SET
+                        canonical_json = excluded.canonical_json,
+                        risk_json = excluded.risk_json,
+                        review_json = excluded.review_json,
+                        skill_text = excluded.skill_text,
+                        normalized_path = excluded.normalized_path,
+                        quarantine_path = excluded.quarantine_path,
+                        removed_by = excluded.removed_by,
+                        reason = excluded.reason,
+                        removed_at = excluded.removed_at,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        removal_payload["pack_id"],
+                        json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(risk_report, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(review_envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        skill_text or None,
+                        removal_payload["normalized_path"],
+                        removal_payload["quarantine_path"],
+                        removal_payload["removed_by"],
+                        removal_payload["reason"],
+                        removal_payload["removed_at"],
+                        removal_payload["updated_at"],
+                    ),
+                )
+                self._conn.execute("DELETE FROM external_pack_diffs WHERE from_pack_id = ? OR to_pack_id = ?", (pack_id, pack_id))
+                self._conn.execute("DELETE FROM external_packs WHERE pack_id = ?", (pack_id,))
+                self._conn.commit()
+
+        self._write_with_retry(_write)
         self._mark_external_pack_removed(pack_id)
         self._remove_tree(normalized_path)
         self._remove_tree(quarantine_path)
@@ -568,25 +647,28 @@ class PackStore:
         existing = self._get_external_pack_diff_row(from_pack_id, to_pack_id)
         now_ts = self._now_ts()
         created_at = int(existing.get("created_at") or now_ts) if existing else now_ts
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO external_pack_diffs (
-                    from_pack_id, to_pack_id, diff_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(from_pack_id, to_pack_id) DO UPDATE SET
-                    diff_json = excluded.diff_json,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    from_pack_id,
-                    to_pack_id,
-                    json.dumps(diff_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    created_at,
-                    now_ts,
-                ),
-            )
-            self._conn.commit()
+        def _write() -> None:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    INSERT INTO external_pack_diffs (
+                        from_pack_id, to_pack_id, diff_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(from_pack_id, to_pack_id) DO UPDATE SET
+                        diff_json = excluded.diff_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        from_pack_id,
+                        to_pack_id,
+                        json.dumps(diff_payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        created_at,
+                        now_ts,
+                    ),
+                )
+                self._conn.commit()
+
+        self._write_with_retry(_write)
         cached = self._get_external_pack_diff_row(from_pack_id, to_pack_id)
         assert cached is not None
         return cached
@@ -743,57 +825,74 @@ class PackStore:
         permissions = normalize_permissions(manifest.permissions)
         permissions_json = json.dumps(permissions, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         permissions_hash = compute_permissions_hash(permissions)
+        manifest_path_value = (manifest_path or "").strip() or None
 
-        with self._lock:
-            existing = self.get_pack(pack_id)
-            approved_permissions_hash: str | None
-            if manifest.trust == "native":
-                approved_permissions_hash = permissions_hash
-            elif existing is not None:
-                approved_permissions_hash = str(existing.get("approved_permissions_hash") or "").strip() or None
-            else:
-                approved_permissions_hash = None
+        def _write() -> dict[str, Any]:
+            with self._lock:
+                existing = self.get_pack(pack_id)
+                approved_permissions_hash: str | None
+                if manifest.trust == "native":
+                    approved_permissions_hash = permissions_hash
+                elif existing is not None:
+                    approved_permissions_hash = str(existing.get("approved_permissions_hash") or "").strip() or None
+                else:
+                    approved_permissions_hash = None
 
-            enabled_value = bool(enable)
-            if manifest.trust == "native":
-                enabled_value = True
-            elif existing is not None:
-                enabled_value = bool(enable) if enable else bool(existing.get("enabled", False))
+                enabled_value = bool(enable)
+                if manifest.trust == "native":
+                    enabled_value = True
+                elif existing is not None:
+                    enabled_value = bool(enable) if enable else bool(existing.get("enabled", False))
 
-            installed_at = int(existing.get("installed_at") or now_ts) if existing else now_ts
-            self._conn.execute(
-                """
-                INSERT INTO skill_packs (
-                    pack_id, version, trust, manifest_path, permissions_json, permissions_hash,
-                    approved_permissions_hash, enabled, installed_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pack_id) DO UPDATE SET
-                    version = excluded.version,
-                    trust = excluded.trust,
-                    manifest_path = excluded.manifest_path,
-                    permissions_json = excluded.permissions_json,
-                    permissions_hash = excluded.permissions_hash,
-                    approved_permissions_hash = excluded.approved_permissions_hash,
-                    enabled = excluded.enabled,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    pack_id,
-                    manifest.version,
-                    manifest.trust,
-                    (manifest_path or "").strip() or None,
-                    permissions_json,
-                    permissions_hash,
-                    approved_permissions_hash,
-                    1 if enabled_value else 0,
-                    installed_at,
-                    now_ts,
-                ),
-            )
-            self._conn.commit()
-            updated = self.get_pack(pack_id)
-            assert updated is not None
-            return updated
+                if install_pack_write_is_noop(
+                    existing,
+                    version=manifest.version,
+                    trust=manifest.trust,
+                    manifest_path=manifest_path_value,
+                    permissions_json=permissions_json,
+                    permissions_hash=permissions_hash,
+                    approved_permissions_hash=approved_permissions_hash,
+                    enabled_value=enabled_value,
+                ):
+                    assert existing is not None
+                    return existing
+
+                installed_at = int(existing.get("installed_at") or now_ts) if existing else now_ts
+                self._conn.execute(
+                    """
+                    INSERT INTO skill_packs (
+                        pack_id, version, trust, manifest_path, permissions_json, permissions_hash,
+                        approved_permissions_hash, enabled, installed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pack_id) DO UPDATE SET
+                        version = excluded.version,
+                        trust = excluded.trust,
+                        manifest_path = excluded.manifest_path,
+                        permissions_json = excluded.permissions_json,
+                        permissions_hash = excluded.permissions_hash,
+                        approved_permissions_hash = excluded.approved_permissions_hash,
+                        enabled = excluded.enabled,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        pack_id,
+                        manifest.version,
+                        manifest.trust,
+                        manifest_path_value,
+                        permissions_json,
+                        permissions_hash,
+                        approved_permissions_hash,
+                        1 if enabled_value else 0,
+                        installed_at,
+                        now_ts,
+                    ),
+                )
+                self._conn.commit()
+                updated = self.get_pack(pack_id)
+                assert updated is not None
+                return updated
+
+        return self._write_with_retry(_write)
 
     def ensure_native_pack(
         self,
@@ -816,23 +915,39 @@ class PackStore:
 
     def set_enabled(self, pack_id: str, enabled: bool) -> dict[str, Any] | None:
         now_ts = self._now_ts()
-        with self._lock:
-            self._conn.execute(
-                "UPDATE skill_packs SET enabled = ?, updated_at = ? WHERE pack_id = ?",
-                (1 if enabled else 0, now_ts, pack_id),
-            )
-            self._conn.commit()
-            return self.get_pack(pack_id)
+        def _write() -> dict[str, Any] | None:
+            with self._lock:
+                existing = self.get_pack(pack_id)
+                if existing is None:
+                    return None
+                if pack_enabled_write_is_noop(existing, enabled=enabled):
+                    return existing
+                self._conn.execute(
+                    "UPDATE skill_packs SET enabled = ?, updated_at = ? WHERE pack_id = ?",
+                    (1 if enabled else 0, now_ts, pack_id),
+                )
+                self._conn.commit()
+                return self.get_pack(pack_id)
+
+        return self._write_with_retry(_write)
 
     def set_approval_hash(self, pack_id: str, approval_hash: str | None) -> dict[str, Any] | None:
         now_ts = self._now_ts()
-        with self._lock:
-            self._conn.execute(
-                "UPDATE skill_packs SET approved_permissions_hash = ?, updated_at = ? WHERE pack_id = ?",
-                ((approval_hash or "").strip() or None, now_ts, pack_id),
-            )
-            self._conn.commit()
-            return self.get_pack(pack_id)
+        def _write() -> dict[str, Any] | None:
+            with self._lock:
+                existing = self.get_pack(pack_id)
+                if existing is None:
+                    return None
+                if pack_approval_hash_write_is_noop(existing, approval_hash=approval_hash):
+                    return existing
+                self._conn.execute(
+                    "UPDATE skill_packs SET approved_permissions_hash = ?, updated_at = ? WHERE pack_id = ?",
+                    ((approval_hash or "").strip() or None, now_ts, pack_id),
+                )
+                self._conn.commit()
+                return self.get_pack(pack_id)
+
+        return self._write_with_retry(_write)
 
     def record_external_pack(
         self,
@@ -954,44 +1069,59 @@ class PackStore:
                     }
                 ],
             )
-        with self._lock:
-            self._conn.execute(
-                """
-                INSERT INTO external_packs (
-                    pack_id, pack_name, version, pack_type, classification, status,
-                    canonical_json, risk_json, review_json, quarantine_path, normalized_path,
-                    installed_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(pack_id) DO UPDATE SET
-                    pack_name = excluded.pack_name,
-                    version = excluded.version,
-                    pack_type = excluded.pack_type,
-                    classification = excluded.classification,
-                    status = excluded.status,
-                    canonical_json = excluded.canonical_json,
-                    risk_json = excluded.risk_json,
-                    review_json = excluded.review_json,
-                    quarantine_path = excluded.quarantine_path,
-                    normalized_path = excluded.normalized_path,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    pack_id,
-                    str(canonical_pack.get("name") or pack_id),
-                    str(canonical_pack.get("version") or "0.1.0"),
-                    str(canonical_pack.get("type") or "skill"),
-                    str(classification or "").strip() or "unknown_pack",
-                    str(status or "").strip() or "blocked",
-                    json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    json.dumps(risk_report, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    json.dumps(review_envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    (quarantine_path or "").strip() or None,
-                    (normalized_path or "").strip() or None,
-                    installed_at,
-                    now_ts,
-                ),
-            )
-            self._conn.commit()
+        if existing is not None and external_pack_record_is_noop(
+            existing,
+            canonical_pack=canonical_pack,
+            classification=str(classification or "").strip() or "unknown_pack",
+            status=str(status or "").strip() or "blocked",
+            risk_report=risk_report,
+            review_envelope=review_envelope,
+            quarantine_path=quarantine_path,
+            normalized_path=normalized_path,
+        ):
+            self._forget_external_pack_removed(pack_id)
+            return existing
+        def _write() -> None:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    INSERT INTO external_packs (
+                        pack_id, pack_name, version, pack_type, classification, status,
+                        canonical_json, risk_json, review_json, quarantine_path, normalized_path,
+                        installed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pack_id) DO UPDATE SET
+                        pack_name = excluded.pack_name,
+                        version = excluded.version,
+                        pack_type = excluded.pack_type,
+                        classification = excluded.classification,
+                        status = excluded.status,
+                        canonical_json = excluded.canonical_json,
+                        risk_json = excluded.risk_json,
+                        review_json = excluded.review_json,
+                        quarantine_path = excluded.quarantine_path,
+                        normalized_path = excluded.normalized_path,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        pack_id,
+                        str(canonical_pack.get("name") or pack_id),
+                        str(canonical_pack.get("version") or "0.1.0"),
+                        str(canonical_pack.get("type") or "skill"),
+                        str(classification or "").strip() or "unknown_pack",
+                        str(status or "").strip() or "blocked",
+                        json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(risk_report, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(review_envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        (quarantine_path or "").strip() or None,
+                        (normalized_path or "").strip() or None,
+                        installed_at,
+                        now_ts,
+                    ),
+                )
+                self._conn.commit()
+
+        self._write_with_retry(_write)
         self._forget_external_pack_removed(pack_id)
         updated = self.get_external_pack(pack_id)
         assert updated is not None
@@ -1027,20 +1157,23 @@ class PackStore:
             "local_review_status": str(local_review_status or "reviewed").strip() or "reviewed",
             "user_approved_hashes": approved_hashes,
         }
-        with self._lock:
-            self._conn.execute(
-                """
-                UPDATE external_packs
-                SET canonical_json = ?, updated_at = ?
-                WHERE pack_id = ?
-                """,
-                (
-                    json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                    self._now_ts(),
-                    canonical_id,
-                ),
-            )
-            self._conn.commit()
+        def _write() -> None:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    UPDATE external_packs
+                    SET canonical_json = ?, updated_at = ?
+                    WHERE pack_id = ?
+                    """,
+                    (
+                        json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        self._now_ts(),
+                        canonical_id,
+                    ),
+                )
+                self._conn.commit()
+
+        self._write_with_retry(_write)
         return self.get_external_pack(canonical_id)
 
     def external_storage_root(self) -> str:

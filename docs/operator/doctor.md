@@ -9,8 +9,11 @@ Canonical local diagnostics entrypoint:
 
 Canonical release gate:
 
-- `python scripts/release_smoke.py`
+- `python scripts/release_gate.py`
+- fast pre-check: `python scripts/release_smoke.py`
 - heavier follow-up validation: `python scripts/release_validation_extended.py`
+
+For day-to-day incident response, use `docs/operator/OPERATIONS.md`.
 
 ## Guarantees
 
@@ -34,10 +37,15 @@ The bundle includes:
 - the doctor report and a plain-text summary
 - startup/self-check snapshots for API and Telegram
 - redacted local API snapshots (`/health`, `/ready`, `/runtime`, `/llm/status`, `/memory`) when available
+- version/build metadata when available
 - canonical paths, backup targets, and restore guidance
 
 If the local API is down, diagnostics collection still succeeds and records that
 the fetch failed instead of pretending the runtime is healthy.
+
+For normal bug reports, this bundle plus the current outputs of `/ready`,
+`/state`, and `/packs/state` is usually enough to diagnose the issue without
+digging through logs first.
 
 ## Safe Fix Scope (`--fix`)
 
@@ -67,6 +75,9 @@ Restore/import:
 - run `python -m agent doctor --fix`
 - restart the user services
 - verify `python -m agent status` and `/ready`
+
+If restore does not produce a clean `/ready`, `/state`, and `/packs/state`
+triple, stop and treat the state as still dirty.
 
 ## Failed Upgrade / Corrupt State Recovery
 

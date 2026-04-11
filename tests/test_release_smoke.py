@@ -30,10 +30,17 @@ class TestReleaseSmokeScripts(unittest.TestCase):
         rendered = stdout.getvalue()
         self.assertIn("tests/test_publishability_smoke.py", rendered)
         self.assertIn("tests/test_golden_path_smoke.py", rendered)
+        self.assertIn("tests/test_install_local_flow.py", rendered)
+        self.assertIn("tests/test_debian_package.py", rendered)
+        self.assertIn("tests/test_release_bundle.py", rendered)
+        self.assertIn("tests/test_desktop_launcher.py", rendered)
+        self.assertIn("tests/test_first_run_release_smoke.py", rendered)
+        self.assertIn("tests/test_webui_conversation_smoke.py", rendered)
         self.assertIn(
             "tests/test_memory_hardening.py::TestMemoryHardening::test_memory_status_reports_disabled_components_and_fresh_state",
             rendered,
         )
+        self.assertIn("tests/test_assistant_behavior_release_gate.py", rendered)
         self.assertIn(
             "tests/test_api_server.py::TestAPIServerRuntime::test_health_is_explicit_before_and_after_process_restart_with_deferred_warmup",
             rendered,
@@ -49,14 +56,17 @@ class TestReleaseSmokeScripts(unittest.TestCase):
 
     def test_release_smoke_invokes_pytest_with_fixed_args(self) -> None:
         module = _load_module(REPO_ROOT / "scripts" / "release_smoke.py", "release_smoke_script_run")
-        with patch.object(module.pytest, "main", return_value=0) as pytest_main:
+        with patch.object(module.subprocess, "run", return_value=type("Proc", (), {"returncode": 0})()) as run_mock:
             exit_code = module.main([])
         self.assertEqual(0, exit_code)
-        pytest_main.assert_called_once()
-        args = list(pytest_main.call_args.args[0])
-        self.assertEqual("-q", args[0])
-        self.assertEqual("--maxfail=1", args[1])
-        self.assertEqual(list(module.MAIN_TEST_NODES), args[2:])
+        run_mock.assert_called()
+        args = list(run_mock.call_args.args[0])
+        self.assertEqual(module.sys.executable, args[0])
+        self.assertEqual("-m", args[1])
+        self.assertEqual("pytest", args[2])
+        self.assertEqual("-q", args[3])
+        self.assertEqual("--maxfail=1", args[4])
+        self.assertEqual(list(module.MAIN_TEST_NODES), args[5:])
 
     def test_extended_release_validation_wraps_main_plus_heavier_nodes(self) -> None:
         module = _load_module(REPO_ROOT / "scripts" / "release_smoke.py", "release_smoke_script_extended")
@@ -73,3 +83,6 @@ class TestReleaseSmokeScripts(unittest.TestCase):
             "tests/test_runtime_concurrency.py::TestRuntimeConcurrency::test_first_chat_and_ready_probe_do_not_race_after_deferred_startup",
             module.EXTENDED_TEST_NODES,
         )
+        self.assertIn("tests/test_clean_context_validation.py", module.EXTENDED_TEST_NODES)
+        self.assertIn("tests/test_extended_soak.py", module.EXTENDED_TEST_NODES)
+        self.assertIn("tests/test_concurrency_stress.py", module.EXTENDED_TEST_NODES)

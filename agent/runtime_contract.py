@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Mapping
 
+from agent.failure_ux import build_failure_recovery
+from agent.persona import normalize_persona_text
+
 
 RUNTIME_MODE_READY = "READY"
 RUNTIME_MODE_BOOTSTRAP_REQUIRED = "BOOTSTRAP_REQUIRED"
@@ -109,6 +112,57 @@ def _next_action_from_failure_code(failure_code: str | None) -> str:
     return "Run: python -m agent doctor"
 
 
+def _runtime_failure_recovery(
+    *,
+    runtime_mode: str,
+    bootstrap_required: bool | None = None,
+    failure_code: str | None = None,
+    phase: str | None = None,
+) -> dict[str, Any] | None:
+    mode = str(runtime_mode or "").strip().upper()
+    if mode == RUNTIME_MODE_READY:
+        return None
+    failure = _norm_text(failure_code)
+    phase_key = _norm_text(phase)
+    if bool(bootstrap_required) or phase_key in {"starting", "listening", "warming"}:
+        return build_failure_recovery(
+            "runtime_initializing",
+            current_state=phase_key or mode.lower(),
+            details=failure or None,
+        )
+    if failure in {"lock_unavailable", "lock_path_unavailable"}:
+        return build_failure_recovery("db_busy", current_state=mode.lower(), details=failure or None)
+    if failure in {"telegram_token_missing", "missing_token", "telegram_token_invalid", "token_invalid"}:
+        return build_failure_recovery(
+            "confirm_token_expired",
+            current_state=mode.lower(),
+            details=failure or None,
+        )
+    if failure in {"llm_unavailable", "no_chat_model", "provider_unhealthy", "model_unhealthy", "safe_mode_paused", "router_unavailable"}:
+        return build_failure_recovery(
+            "runtime_degraded",
+            current_state=mode.lower(),
+            details=failure or None,
+        )
+    if mode == RUNTIME_MODE_FAILED:
+        return build_failure_recovery(
+            "runtime_blocked",
+            current_state=mode.lower(),
+            details=failure or None,
+        )
+    if mode == RUNTIME_MODE_DEGRADED:
+        return build_failure_recovery(
+            "runtime_degraded",
+            current_state=mode.lower(),
+            details=failure or None,
+        )
+    return build_failure_recovery(
+        "runtime_not_ready",
+        current_state=mode.lower(),
+        details=failure or None,
+    )
+
+
 def get_effective_next_action(
     *,
     runtime_mode: str,
@@ -146,19 +200,29 @@ def normalize_user_facing_status(
         runtime_mode=runtime_mode,
         failure_code=failure_code,
     )
+    recovery = _runtime_failure_recovery(
+        runtime_mode=runtime_mode,
+        bootstrap_required=bootstrap_required,
+        failure_code=failure_code,
+        phase=phase,
+    )
     if runtime_mode == RUNTIME_MODE_READY:
         if bool(identity.get("known")):
-            summary = f"Agent is ready. Using {identity.get('provider')} / {identity.get('model')}."
+            summary = f"Ready. Using {identity.get('provider')} / {identity.get('model')}."
         else:
-            summary = "Agent is ready."
-    elif runtime_mode == RUNTIME_MODE_BOOTSTRAP_REQUIRED:
-        summary = "Setup needed. No chat model is ready yet."
-    elif runtime_mode == RUNTIME_MODE_FAILED:
-        summary = "Agent failed."
+            summary = "Ready."
+        state_label = "Ready"
+    elif recovery is not None:
+        summary = str(recovery.get("message") or "").strip() or "Agent is not ready yet."
+        state_label = str(recovery.get("state_label") or "").strip() or "Not ready"
     else:
         summary = "Agent is starting or degraded."
-    if runtime_mode != RUNTIME_MODE_READY and next_action:
+        state_label = "Not ready"
+    if runtime_mode != RUNTIME_MODE_READY and not summary:
+        summary = "Agent is starting or degraded."
+    if runtime_mode != RUNTIME_MODE_READY and not recovery and next_action:
         summary = f"{summary}\nNext: {next_action}"
+    summary = normalize_persona_text(summary)
     return {
         "runtime_mode": runtime_mode,
         "ready": runtime_mode == RUNTIME_MODE_READY,
@@ -172,6 +236,11 @@ def normalize_user_facing_status(
         "identity_known": bool(identity.get("known", False)),
         "identity_reason": str(identity.get("reason") or "").strip().lower() or "unknown",
         "next_action": next_action,
+        "state_label": state_label,
+        "reason": str(recovery.get("reason") or "").strip() if isinstance(recovery, dict) else None,
+        "next_step": str(recovery.get("next_step") or "").strip() if isinstance(recovery, dict) else next_action,
+        "blocker": str(recovery.get("blocker") or "").strip() if isinstance(recovery, dict) else None,
+        "recovery": recovery,
         "summary": summary,
     }
 
@@ -186,4 +255,3 @@ __all__ = [
     "get_runtime_mode",
     "normalize_user_facing_status",
 ]
-

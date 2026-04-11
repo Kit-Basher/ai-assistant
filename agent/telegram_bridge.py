@@ -19,6 +19,8 @@ from agent.doctor import run_doctor_report
 from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import bootstrap_needed
 from agent.onboarding_contract import ONBOARDING_READY
+from agent.persona import normalize_persona_text
+from agent.public_chat import build_no_llm_public_message, build_public_sentence_text, is_no_llm_error_kind
 from agent.runtime_contract import normalize_user_facing_status
 from agent.setup_wizard import (
     SetupWizardResult,
@@ -376,7 +378,9 @@ def build_telegram_status(
             model=model,
             local_providers={"ollama"},
         )
-    summary = str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
+    summary = normalize_persona_text(
+        str(runtime_status.get("summary") or "").strip() or "Agent is starting or degraded."
+    )
     runtime_mode = str(runtime_status.get("runtime_mode") or "DEGRADED").strip().upper() or "DEGRADED"
     telegram_state = (
         str(((ready_payload.get("telegram") or {}).get("state")) if isinstance(ready_payload.get("telegram"), dict) else "")
@@ -575,13 +579,14 @@ def _canonical_chat_result(
 def _structured_error_text(payload: dict[str, Any]) -> str | None:
     if payload.get("ok") is not False:
         return None
-    reason = (
-        str(payload.get("error_kind") or "").strip()
-        or str(payload.get("message") or "").strip()
-        or str(payload.get("failure_code") or "").strip()
-        or "unknown_error"
+    if is_no_llm_error_kind(payload.get("error_kind")):
+        return build_no_llm_public_message()
+    detail = str(payload.get("message") or "").strip() or None
+    return build_public_sentence_text(
+        "I couldn't finish that request",
+        detail,
+        "Please try again.",
     )
-    return f"Agent could not complete the request.\nReason: {reason}"
 
 
 def build_telegram_chat_api_payload(
@@ -620,15 +625,18 @@ def build_telegram_chat_payload_result(
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
     setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
     proxy_meta = payload.get("_proxy_meta") if isinstance(payload.get("_proxy_meta"), dict) else {}
-    message = str(
-        (assistant or {}).get("content")
-        or payload.get("message")
-        or setup.get("summary")
-        or meta.get("summary")
-        or ""
-    ).strip()
-    if not message:
-        message = str(_structured_error_text(payload) or "").strip()
+    if is_no_llm_error_kind(payload.get("error_kind")):
+        message = build_no_llm_public_message()
+    else:
+        message = str(
+            (assistant or {}).get("content")
+            or payload.get("message")
+            or setup.get("summary")
+            or meta.get("summary")
+            or ""
+        ).strip()
+        if not message:
+            message = str(_structured_error_text(payload) or "").strip()
     route = str(meta.get("route") or "generic_chat").strip().lower() or "generic_chat"
     used_tools = [
         str(item).strip()
@@ -961,8 +969,10 @@ def handle_telegram_text(
         result.setdefault("legacy_compatibility", False)
         result.setdefault("generic_fallback_used", False)
         result.setdefault("generic_fallback_reason", None)
+        if isinstance(result.get("text"), str):
+            result["text"] = normalize_persona_text(str(result.get("text") or ""))
         return result
-    return _canonical_chat_result(
+    result = _canonical_chat_result(
         text=text,
         chat_id=chat_id,
         trace_id=trace_id,
@@ -970,6 +980,9 @@ def handle_telegram_text(
         orchestrator=orchestrator,
         fetch_local_api_chat_json=fetch_local_api_chat_json,
     )
+    if isinstance(result.get("text"), str):
+        result["text"] = normalize_persona_text(str(result.get("text") or ""))
+    return result
 
 
 def build_telegram_memory_response(

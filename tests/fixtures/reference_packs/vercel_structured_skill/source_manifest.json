@@ -1,0 +1,16 @@
+{
+  "fixture_id": "vercel_structured_skill",
+  "source_kind": "multi-file structured skill",
+  "upstream_repo": "vercel-labs/agent-skills",
+  "pinned_ref": "73140fc5b3a214ad3222bcf557b397b3c02d11c1",
+  "source_url": "https://github.com/vercel-labs/agent-skills/tree/73140fc5b3a214ad3222bcf557b397b3c02d11c1/skills/react-view-transitions",
+  "source_files": [
+    "SKILL.md",
+    "references/implementation.md",
+    "references/patterns.md",
+    "references/nextjs.md",
+    "references/css-recipes.md"
+  ],
+  "why_this_exists": "Demonstrates that a strong existing skill file is preserved while reference files are retained as safe supporting material.",
+  "expected_outcome": "normalized_safe_text"
+}

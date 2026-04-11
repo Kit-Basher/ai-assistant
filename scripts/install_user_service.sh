@@ -8,7 +8,7 @@ UNIT_TARGET_DIR="${HOME}/.config/systemd/user"
 UNIT_TARGET="${UNIT_TARGET_DIR}/personal-agent-api.service"
 
 mkdir -p "${UNIT_TARGET_DIR}"
-cp "${UNIT_SOURCE}" "${UNIT_TARGET}"
+ln -sf "${UNIT_SOURCE}" "${UNIT_TARGET}"
 systemctl --user daemon-reload
 systemctl --user enable --now personal-agent-api.service
 

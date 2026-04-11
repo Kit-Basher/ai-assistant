@@ -1,0 +1,12 @@
+{
+  "fixture_id": "anthropic_clean_skill",
+  "source_kind": "anthropic-style clean SKILL.md",
+  "upstream_repo": "anthropics/claude-plugins-official",
+  "pinned_ref": "62f2063abcd3bf325577e7777346ecb270233c80",
+  "source_url": "https://github.com/anthropics/claude-plugins-official/tree/62f2063abcd3bf325577e7777346ecb270233c80/plugins/example-plugin/skills/example-skill",
+  "source_files": [
+    "SKILL.md"
+  ],
+  "why_this_exists": "Demonstrates that a strong existing skill markdown file is preserved and normalized cleanly.",
+  "expected_outcome": "normalized_safe_text"
+}

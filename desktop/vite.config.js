@@ -14,6 +14,8 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     proxy: {
+      "/state": apiTarget,
+      "/packs": apiTarget,
       "/health": apiTarget,
       "/models": apiTarget,
       "/chat": apiTarget,

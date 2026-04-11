@@ -2,18 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from agent.public_chat import build_no_llm_public_message
 from agent.runtime_contract import (
     RUNTIME_MODE_DEGRADED,
     get_effective_next_action,
     normalize_user_facing_status,
-)
-
-
-_DEFAULT_BOOTSTRAP_GUIDANCE = (
-    "No chat model available right now.\n"
-    "1) Start Ollama locally at http://127.0.0.1:11434.\n"
-    "2) Install a local chat model (for example qwen2.5:3b-instruct).\n"
-    "3) Run /model to confirm chat setup."
 )
 
 
@@ -91,7 +84,7 @@ def next_step_for_failure(failure_code: str | None) -> str:
 
 
 def bootstrap_guidance() -> str:
-    return _DEFAULT_BOOTSTRAP_GUIDANCE
+    return build_no_llm_public_message()
 
 
 def user_safe_summary(

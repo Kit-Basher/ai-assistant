@@ -1,0 +1,23 @@
+{
+  "classification": "portable_text_skill",
+  "status": "partial_safe_import",
+  "outcome_category": "partial_safe_import",
+  "summary_contains": [
+    "included some safe content I could keep",
+    "stripped executable or unsafe files"
+  ],
+  "must_have_paths": [
+    "PACK.md",
+    "manifest.json",
+    "SKILL.md",
+    "prompts/main.md",
+    "prompts/examples.md",
+    "metadata/source.json",
+    "metadata/normalization.json",
+    "metadata/review.json"
+  ],
+  "must_not_have_paths": [
+    "Tools/RebuildPAI.ts",
+    "Tools/IntegrityMaintenance.ts"
+  ]
+}

@@ -51,7 +51,8 @@ product-facing overview; use this file for current-state and handover truth.
       - `VERSION` is the version source
       - repo installs/updates use `pip install -e .`
       - release artifacts build through `python scripts/build_dist.py --outdir dist --clean`
-      - Debian/system packaging remains explicitly unsupported for this release
+      - the release bundle and Debian package are supported optional install
+        paths; legacy root/system packaging remains unsupported
     - one canonical install/service story:
       - repo checkout at `~/personal-agent`
       - user service `personal-agent-api.service`
@@ -63,6 +64,14 @@ product-facing overview; use this file for current-state and handover truth.
       diagnostics bundle path
     - `python scripts/hardware_observe_smoke.py` as a non-blocking live
       answer-shape smoke for RAM/VRAM observation
+    - `tests/test_webui_conversation_smoke.py` as the deterministic shipped-path
+      two-turn assistant proof
+    - `tests/test_assistant_behavior_release_gate.py` as the explicit
+      assistant-behavior release gate for greeting, vague, nonsense, mixed,
+      and no-LLM chat cases
+    - `tests/test_clean_context_validation.py` as the isolated temp-home
+      release-bundle clean-context proof for install, launcher, chat, relaunch,
+      and uninstall/remove-state
     - legacy root/system-service scripts retired and fail closed
 
 ## 2. Mode Contract
@@ -416,7 +425,8 @@ product-facing overview; use this file for current-state and handover truth.
 - public legacy `/model_scout/*` operator HTTP endpoints are gone
 
 ## 9. Release Smoke Suite
-- `python scripts/release_smoke.py` is the canonical fast release gate
+- `python scripts/release_gate.py` is the canonical release gate
+- `python scripts/release_smoke.py` is the fast pre-check inside that gate
 - `python scripts/release_validation_extended.py` is the clearly named heavier
   follow-up path
 - The main suite covers:
@@ -444,8 +454,9 @@ product-facing overview; use this file for current-state and handover truth.
 - discovery remains read-only and non-canonical
 - explicit `/packs/install` still supports portable text skills only
 - native/plugin packs remain blocked from execution
-- the canonical release gate is the compact smoke suite, not live network smoke
-  or reboot automation
+- the canonical release gate is `python scripts/release_gate.py`; it stays
+  compact and does not attempt live network/provider smoke coverage or real
+  reboot automation
 
 ## 11. Do Not Regress
 - do not add duplicate selector paths

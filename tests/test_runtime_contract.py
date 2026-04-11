@@ -70,7 +70,7 @@ class TestRuntimeContract(unittest.TestCase):
             local_providers={"ollama"},
         )
         self.assertEqual(RUNTIME_MODE_READY, ready.get("runtime_mode"))
-        self.assertIn("Agent is ready.", str(ready.get("summary")))
+        self.assertTrue(str(ready.get("summary")).startswith("Ready."))
 
         bootstrap = normalize_user_facing_status(
             ready=False,
@@ -81,8 +81,12 @@ class TestRuntimeContract(unittest.TestCase):
             local_providers={"ollama"},
         )
         self.assertEqual(RUNTIME_MODE_BOOTSTRAP_REQUIRED, bootstrap.get("runtime_mode"))
-        self.assertIn("Setup needed.", str(bootstrap.get("summary")))
-        self.assertIn("Next:", str(bootstrap.get("summary")))
+        self.assertEqual("Initializing", bootstrap.get("state_label"))
+        self.assertIn("System is still initializing.", str(bootstrap.get("summary")))
+        self.assertIn("Startup is still in progress.", str(bootstrap.get("summary")))
+        self.assertIn("Wait for startup", str(bootstrap.get("summary")))
+        self.assertIn("startup", str(bootstrap.get("reason")).lower())
+        self.assertIn("wait", str(bootstrap.get("next_step")).lower())
 
         failed = normalize_user_facing_status(
             ready=False,
@@ -93,9 +97,11 @@ class TestRuntimeContract(unittest.TestCase):
             local_providers={"ollama"},
         )
         self.assertEqual(RUNTIME_MODE_FAILED, failed.get("runtime_mode"))
-        self.assertIn("Agent failed.", str(failed.get("summary")))
+        self.assertEqual("Blocked", failed.get("state_label"))
+        self.assertIn("System is blocked.", str(failed.get("summary")))
+        self.assertIn("required dependency or configuration is missing", str(failed.get("summary")).lower())
+        self.assertIn("Fix the blocker", str(failed.get("summary")))
 
 
 if __name__ == "__main__":
     unittest.main()
-

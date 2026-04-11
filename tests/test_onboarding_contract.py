@@ -14,6 +14,7 @@ from agent.onboarding_contract import (
     onboarding_steps,
     onboarding_summary,
 )
+from agent.public_chat import build_no_llm_public_message
 
 
 class TestOnboardingContract(unittest.TestCase):
@@ -41,7 +42,7 @@ class TestOnboardingContract(unittest.TestCase):
             "active_model_health": {"status": "down"},
         }
         self.assertEqual(ONBOARDING_LLM_MISSING, detect_onboarding_state(llm_status=status))
-        self.assertIn("No chat model available", onboarding_summary(ONBOARDING_LLM_MISSING))
+        self.assertEqual(build_no_llm_public_message(), onboarding_summary(ONBOARDING_LLM_MISSING))
 
     def test_detect_services_down(self) -> None:
         ready_payload = {

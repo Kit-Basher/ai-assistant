@@ -3,12 +3,14 @@ import subprocess
 import tempfile
 import unittest
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from agent.filesystem_skill import FileSystemSkill
 from agent.knowledge_cache import facts_hash
 from agent.orchestrator import Orchestrator, OrchestratorResponse
 from agent.shell_skill import ShellSkill
+from agent.public_chat import build_no_llm_public_message
 from agent.tool_contract import normalize_tool_request
 from agent.working_memory import WorkingMemoryState, append_turn
 from memory.db import MemoryDB
@@ -649,7 +651,7 @@ class _FakeRuntimeTruthService:
             "failure_code": None,
             "provider": self.current_provider,
             "model": self.current_model,
-            "summary": "Agent is ready.",
+                "summary": "Ready.",
         }
 
     def list_managed_adapters(self) -> dict[str, object]:
@@ -1615,7 +1617,7 @@ class TestOrchestrator(unittest.TestCase):
         orchestrator = self._orchestrator()
         response = orchestrator.handle_message("hello there", "user1")
         self.assertIsInstance(response, OrchestratorResponse)
-        self.assertIn("No chat model available", response.text)
+        self.assertIn("I’m not ready to chat yet", response.text)
 
     def test_llm_available_routes_free_text_to_llm_chat(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="hi from llm")
@@ -1626,7 +1628,7 @@ class TestOrchestrator(unittest.TestCase):
             timezone="UTC",
             llm_client=llm,
         )
-        response = orchestrator.handle_message("hello", "user1")
+        response = orchestrator.handle_message("what can you help with?", "user1")
         self.assertEqual("hi from llm", response.text)
         self.assertEqual(1, len(llm.chat_calls))
         call = llm.chat_calls[0]
@@ -1685,6 +1687,26 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("runtime_status", runtime_response.data["route"])
         self.assertFalse(runtime_response.data["used_llm"])
         self.assertIn(("runtime_status", "runtime_status"), runtime_truth.calls)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_assistant_capabilities_mentions_pack_suggestions(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("what can you help me with?", "user1")
+        self.assertEqual("assistant_capabilities", response.data["route"])
+        self.assertIn("Pack suggestions", response.text)
+        self.assertIn("missing capability", response.text.lower())
+        self.assertFalse(response.data["used_llm"])
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_filesystem_queries_use_native_skill_without_llm_fallback(self) -> None:
@@ -3342,12 +3364,22 @@ class TestOrchestrator(unittest.TestCase):
             chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
         )
 
-        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={
+                "ok": True,
+                "text": "I can help with that.",
+                "provider": None,
+                "model": None,
+                "duration_ms": 1,
+                "attempts": [],
+            },
+        ):
             response = orchestrator.handle_message("do the thing", "user1")
 
-        self.assertEqual("assistant_clarification", response.data["route"])
-        self.assertFalse(response.data["used_llm"])
-        self.assertIn("runtime status, model status, setup help, or a direct task", response.text.lower())
+        self.assertEqual("generic_chat", response.data["route"])
+        self.assertTrue(response.data["used_llm"])
+        self.assertIn("i can help with that", response.text.lower())
         self.assertNotIn("gpt", response.text.lower())
 
     def test_repair_followup_prefers_split_inventory_and_readiness_surfaces(self) -> None:
@@ -3558,6 +3590,37 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("ollama is reachable", response.text.lower())
         self.assertIn("ollama:qwen2.5:3b-instruct", response.text.lower())
 
+    def test_setup_explanation_without_chat_model_uses_canonical_no_llm_copy(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        with patch.object(
+            runtime_truth,
+            "setup_status",
+            return_value={
+                "setup_state": "unavailable",
+                "active_provider": None,
+                "active_model": None,
+                "provider_health_status": "unknown",
+                "provider_health_reason": None,
+            },
+        ):
+            response = orchestrator._setup_explanation_response(used_memory=False)
+
+        self.assertEqual("setup_flow", response.data["route"])
+        self.assertEqual(build_no_llm_public_message(), response.text)
+        self.assertNotIn("No chat model is available right now", response.text)
+        self.assertNotIn("provider", response.text.lower())
+
     def test_direct_model_switch_asks_specific_clarification_when_bare_name_is_ambiguous(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
@@ -3657,6 +3720,249 @@ class TestOrchestrator(unittest.TestCase):
             runtime_truth.calls,
         )
         self.assertNotIn("choose_best_local_chat_model", [call[0] for call in runtime_truth.calls])
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_pack_capability_recommendation_offers_preview_without_auto_install(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                if query != "voice":
+                    return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+                return {
+                    "source": {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "local-voice",
+                                "name": "Local Voice",
+                                "summary": "Local speech output for this machine.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "/tmp/local-voice",
+                            }
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Talk to me out loud", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("voice_output", payload.get("capability_required"))
+        self.assertEqual("install_preview", payload.get("fallback"))
+        self.assertIn("Voice output isn't installed.", response.text)
+        self.assertIn("best fit for this machine", response.text)
+        self.assertIn("Say yes and I'll show the install preview.", response.text)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_pack_capability_recommendation_compares_two_good_options_without_auto_install(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                if query != "voice":
+                    return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+                return {
+                    "source": {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "local-voice",
+                                "name": "Local Voice",
+                                "summary": "Lightweight local speech output for this machine.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "/tmp/local-voice",
+                                "tags": ["voice_output", "lightweight"],
+                            },
+                            {
+                                "remote_id": "studio-voice",
+                                "name": "Studio Voice",
+                                "summary": "Full speech output with broader phrasing support.",
+                                "artifact_type_hint": "experience_pack",
+                                "installable_by_current_policy": True,
+                                "source_url": "/tmp/studio-voice",
+                                "tags": ["voice_output", "studio", "complete"],
+                            },
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Talk to me out loud", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("recommended_plus_alternate", payload.get("comparison_mode"))
+        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertIn("I found 2 packs that fit this machine.", response.text)
+        self.assertIn("Local Voice looks lighter.", response.text)
+        self.assertIn("Studio Voice may need more resources.", response.text)
+        self.assertIn("I'd start with Local Voice.", response.text)
+        self.assertIn("install preview for Local Voice", response.text)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_installed_but_disabled_pack_is_explained_without_auto_install(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return [
+                    {
+                        "pack_id": "pack.voice.local_fast",
+                        "name": "Local Voice",
+                        "status": "normalized",
+                        "enabled": False,
+                        "normalized_path": str(Path(__file__).resolve()),
+                        "canonical_pack": {
+                            "display_name": "Local Voice",
+                            "capabilities": {
+                                "summary": "Local speech output for this machine.",
+                                "declared": ["voice_output"],
+                            },
+                        },
+                        "review_envelope": {"pack_name": "Local Voice"},
+                    }
+                ]
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Talk to me out loud", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("voice_output", payload.get("capability_required"))
+        self.assertIn("installed, but it is disabled", response.text)
+        self.assertIn("not enabled as a live capability", response.text)
+        self.assertIn("text", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_installed_and_healthy_pack_is_task_unconfirmed_without_auto_install(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return [
+                    {
+                        "pack_id": "pack.voice.local_fast",
+                        "name": "Local Voice",
+                        "status": "normalized",
+                        "enabled": True,
+                        "normalized_path": str(Path(__file__).resolve()),
+                        "canonical_pack": {
+                            "display_name": "Local Voice",
+                            "capabilities": {
+                                "summary": "Local speech output for this machine.",
+                                "declared": ["voice_output"],
+                            },
+                        },
+                        "review_envelope": {"pack_name": "Local Voice"},
+                    }
+                ]
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Talk to me out loud", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("voice_output", payload.get("capability_required"))
+        self.assertIn("installed and healthy", response.text)
+        self.assertIn("task", response.text.lower())
+        self.assertIn("not confirmed", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_task_model_recommendation_questions_use_model_scout_without_llm(self) -> None:
@@ -5306,7 +5612,7 @@ class TestOrchestrator(unittest.TestCase):
         )
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("is openrouter configured?", "user1")
-        self.assertEqual("I couldn't read that from the runtime state.", response.text)
+        self.assertEqual("I can't read a clean runtime status yet.", response.text)
         self.assertEqual("provider_status", response.data["route"])
         self.assertTrue(response.data["used_runtime_state"])
         self.assertFalse(response.data["used_llm"])
@@ -5376,8 +5682,8 @@ class TestOrchestrator(unittest.TestCase):
             llm_client=llm,
         )
         response = orchestrator.handle_message("hello", "user1")
-        self.assertIn("No chat model available", response.text)
-        self.assertIn("Start Ollama", response.text)
+        self.assertIn("I’m not ready to chat yet", response.text)
+        self.assertIn("Open Setup", response.text)
         self.assertEqual([], llm.chat_calls)
 
     def test_llm_chat_run_directive_executes_internal_brief(self) -> None:
@@ -5614,7 +5920,7 @@ class TestOrchestrator(unittest.TestCase):
             "agent.orchestrator.route_inference",
             return_value={
                 "ok": False,
-                "text": "No suitable local-first model is ready for this request.\nNext: Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve",
+                "text": build_no_llm_public_message(),
                 "provider": None,
                 "model": None,
                 "task_type": "chat",
@@ -5645,8 +5951,9 @@ class TestOrchestrator(unittest.TestCase):
             },
         ):
             response = orchestrator._llm_chat("user1", "tell me a joke")
-        self.assertIn("No suitable local-first model is ready", response.text)
-        self.assertIn("Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve", response.text)
+        self.assertEqual(build_no_llm_public_message(), response.text)
+        self.assertNotIn("No suitable local-first model is ready", response.text)
+        self.assertNotIn("Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve", response.text)
         self.assertEqual([], llm.chat_calls)
 
     def test_llm_chat_keeps_junk_command_suffix_unchanged_when_no_trigger(self) -> None:
@@ -5872,8 +6179,8 @@ class TestOrchestrator(unittest.TestCase):
         )
         with patch.object(orchestrator, "_handle_message_impl") as run_mock:
             response = orchestrator._llm_chat("user1", "tell me a joke")
-        self.assertIn("Chat LLM is unavailable.", response.text)
-        self.assertIn("Next:", response.text)
+        self.assertIn("I’m not ready to chat yet", response.text)
+        self.assertNotIn("Chat LLM is unavailable.", response.text)
         self.assertNotIn("Try /brief", response.text)
         run_mock.assert_not_called()
         self.assertEqual(1, llm.chat_calls)
@@ -5889,7 +6196,8 @@ class TestOrchestrator(unittest.TestCase):
             chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
         )
         response = orchestrator.handle_message("tell me a joke", "user1")
-        self.assertIn("Something went wrong while answering that", response.text)
+        self.assertIn("I’m not ready to chat yet", response.text)
+        self.assertNotIn("Something went wrong while answering that", response.text)
         self.assertNotIn("Chat LLM is unavailable.", response.text)
         self.assertNotIn("python -m agent setup", response.text)
         self.assertEqual(1, llm.chat_calls)
@@ -6143,10 +6451,10 @@ class TestOrchestrator(unittest.TestCase):
         orch.skills["observe_now"].functions["observe_now"].handler = observe_handler
 
         first = orch.handle_message("hello", "user1")
-        self.assertIn("no chat model available", first.text.lower())
+        self.assertIn("i’m not ready to chat yet", first.text.lower())
 
         second = orch.handle_message("yes please", "user1")
-        self.assertIn("no chat model available", second.text.lower())
+        self.assertIn("i’m not ready to chat yet", second.text.lower())
 
     def test_done_invalid_id(self) -> None:
         orch = self._orchestrator()

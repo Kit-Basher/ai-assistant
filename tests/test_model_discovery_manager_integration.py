@@ -215,6 +215,224 @@ class TestModelDiscoveryManagerIntegration(unittest.TestCase):
         self.assertEqual("fetch_failed", result["debug"]["source_errors"]["huggingface"]["error_kind"])
         self.assertEqual("hf timeout", result["debug"]["source_errors"]["huggingface"]["error"])
 
+    def test_partial_fuzzy_gemma_prompt_broadens_and_ranks_family_match_first(self) -> None:
+        manager = self._manager()
+        hf_queries: list[str | None] = []
+
+        def _hf_side_effect(query: str | None):
+            hf_queries.append(query)
+            lowered = str(query or "").strip().lower()
+            if "gemma" in lowered:
+                return (
+                    [
+                        {
+                            "id": "huggingface:google/gemma-2-2b-it",
+                            "provider": "huggingface",
+                            "source": "huggingface",
+                            "model_name": "google/gemma-2-2b-it",
+                            "capabilities": ["chat"],
+                            "local": False,
+                            "installable": False,
+                            "confidence": 0.78,
+                        }
+                    ],
+                    {
+                        "source": "huggingface",
+                        "enabled": True,
+                        "queried": True,
+                        "ok": True,
+                        "count": 1,
+                        "error_kind": None,
+                        "error": None,
+                    },
+                )
+            return (
+                [],
+                {
+                    "source": "huggingface",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            )
+
+        with patch.object(manager, "_query_huggingface", side_effect=_hf_side_effect), patch.object(
+            manager,
+            "_query_openrouter",
+            return_value=(
+                [
+                    {
+                        "id": "openrouter:google/gemma-2-9b",
+                        "provider": "openrouter",
+                        "source": "openrouter",
+                        "model_name": "google/gemma-2-9b",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.95,
+                    }
+                ],
+                {
+                    "source": "openrouter",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 1,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_ollama",
+            return_value=(
+                [
+                    {
+                        "id": "ollama:qwen2.5:7b-instruct",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "model_name": "qwen2.5:7b-instruct",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.9,
+                    }
+                ],
+                {
+                    "source": "ollama",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 1,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_external_snapshots",
+            return_value=(
+                [],
+                {
+                    "source": "external_snapshots",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ):
+            result = manager.query("tiny Gemma 4", {})
+
+        self.assertTrue(result["ok"])
+        self.assertGreater(len(hf_queries), 1)
+        self.assertEqual("tiny Gemma 4", hf_queries[0])
+        self.assertTrue(any("gemma" in str(query or "").lower() for query in hf_queries[1:]))
+        self.assertEqual("huggingface:google/gemma-2-2b-it", result["models"][0]["id"])
+        self.assertGreaterEqual(len(result["models"]), 2)
+        self.assertGreater(float(result["models"][0]["match_score"]), float(result["models"][1]["match_score"]))
+        self.assertIn("broadened the search", result["message"].lower())
+        self.assertIn("likely model(s)", result["message"].lower())
+
+    def test_small_local_coding_prompt_prefers_local_candidate_before_generic_alternative(self) -> None:
+        manager = self._manager()
+
+        with patch.object(
+            manager,
+            "_query_huggingface",
+            return_value=(
+                [],
+                {
+                    "source": "huggingface",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_openrouter",
+            return_value=(
+                [
+                    {
+                        "id": "openrouter:vendor/assistant-lite",
+                        "provider": "openrouter",
+                        "source": "openrouter",
+                        "model_name": "vendor/assistant-lite",
+                        "capabilities": ["chat"],
+                        "local": False,
+                        "installable": False,
+                        "confidence": 0.96,
+                    }
+                ],
+                {
+                    "source": "openrouter",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 1,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_ollama",
+            return_value=(
+                [
+                    {
+                        "id": "ollama:qwen2.5-coder:7b",
+                        "provider": "ollama",
+                        "source": "ollama",
+                        "model_name": "qwen2.5-coder:7b",
+                        "capabilities": ["chat"],
+                        "local": True,
+                        "installable": True,
+                        "confidence": 0.88,
+                    }
+                ],
+                {
+                    "source": "ollama",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 1,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_external_snapshots",
+            return_value=(
+                [],
+                {
+                    "source": "external_snapshots",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ):
+            result = manager.query("small local coding model", {})
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(len(result["models"]), 1)
+        self.assertEqual("ollama:qwen2.5-coder:7b", result["models"][0]["id"])
+        self.assertTrue(bool(result["models"][0]["local"]))
+        self.assertIn("likely model(s)", result["message"].lower())
+
     def test_empty_results_include_explanation_and_actionable_next_steps(self) -> None:
         manager = self._manager()
 
@@ -246,8 +464,122 @@ class TestModelDiscoveryManagerIntegration(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual([], result["models"])
         self.assertEqual(0, result["debug"]["matched_count"])
-        self.assertIn("No models matched 'alpha beta'.", result["message"])
-        self.assertIn("Try broader terms or check whether the queried sources are enabled.", result["message"])
+        self.assertIn("I searched for 'alpha beta'.", result["message"])
+        self.assertIn("I couldn't find a close fit.", result["message"])
+        self.assertIn("Try a model family, a size hint, or check whether the queried sources are enabled.", result["message"])
+
+    def test_broadened_search_after_no_exact_match_uses_variant_queries(self) -> None:
+        manager = self._manager()
+        hf_queries: list[str | None] = []
+
+        def _hf_side_effect(query: str | None):
+            hf_queries.append(query)
+            lowered = str(query or "").strip().lower()
+            if lowered == "new qwen coder":
+                return (
+                    [],
+                    {
+                        "source": "huggingface",
+                        "enabled": True,
+                        "queried": True,
+                        "ok": True,
+                        "count": 0,
+                        "error_kind": None,
+                        "error": None,
+                    },
+                )
+            if "qwen coder" in lowered:
+                return (
+                    [
+                        {
+                            "id": "huggingface:qwen2.5-coder-7b",
+                            "provider": "huggingface",
+                            "source": "huggingface",
+                            "model_name": "qwen2.5-coder-7b",
+                            "capabilities": ["chat"],
+                            "local": False,
+                            "installable": False,
+                            "confidence": 0.72,
+                        }
+                    ],
+                    {
+                        "source": "huggingface",
+                        "enabled": True,
+                        "queried": True,
+                        "ok": True,
+                        "count": 1,
+                        "error_kind": None,
+                        "error": None,
+                    },
+                )
+            return (
+                [],
+                {
+                    "source": "huggingface",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            )
+
+        with patch.object(manager, "_query_huggingface", side_effect=_hf_side_effect), patch.object(
+            manager,
+            "_query_openrouter",
+            return_value=(
+                [],
+                {
+                    "source": "openrouter",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_ollama",
+            return_value=(
+                [],
+                {
+                    "source": "ollama",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ), patch.object(
+            manager,
+            "_query_external_snapshots",
+            return_value=(
+                [],
+                {
+                    "source": "external_snapshots",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ):
+            result = manager.query("new qwen coder", {})
+
+        self.assertTrue(result["ok"])
+        self.assertGreater(len(hf_queries), 1)
+        self.assertEqual("new qwen coder", hf_queries[0])
+        self.assertIn("qwen coder", " ".join(str(query or "") for query in hf_queries[1:]).lower())
+        self.assertEqual("huggingface:qwen2.5-coder-7b", result["models"][0]["id"])
+        self.assertIn("broadened to", result["message"].lower())
+        self.assertIn("qwen coder", result["message"].lower())
 
     def test_normalized_rows_expose_required_fields_and_preserve_richer_metadata(self) -> None:
         row = _normalize_result_row(

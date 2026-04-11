@@ -38,7 +38,7 @@ class _ReadyRuntime:
             "ready": True,
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
                 "next_action": None,
             },
             "telegram": {"state": "running"},
@@ -67,8 +67,8 @@ class _NotStartedRuntime:
             "ready": False,
             "runtime_status": {
                 "runtime_mode": "BOOTSTRAP_REQUIRED",
-                "summary": "Setup needed. No chat model is ready yet.",
-                "next_action": "Run: python -m agent setup",
+                "summary": "System is still initializing. Startup is still in progress. Next: Wait for startup to finish, then try again.",
+                "next_action": "Wait for startup to finish, then try again.",
             },
             "telegram": {"state": "running"},
             "onboarding": {
@@ -249,6 +249,43 @@ class TestTelegramBridge(unittest.TestCase):
         self.assertEqual("tg-e1", result.get("trace_id"))
         self.assertEqual("run `agent doctor`", result.get("next_action"))
         self.assertIn("trace_id: tg-e1", str(result.get("text") or ""))
+
+    def test_chat_proxy_success_preserves_route_and_first_line(self) -> None:
+        def _proxy(_payload: dict[str, object]) -> dict[str, object]:
+            return {
+                "ok": True,
+                "assistant": {"content": "Ready.\nUsing ollama / ollama:qwen2.5:3b-instruct."},
+                "meta": {"route": "runtime_status", "used_tools": ["runtime_status"]},
+            }
+
+        result = handle_telegram_text(
+            text="what is the runtime status?",
+            chat_id="42",
+            trace_id="tg-proxy-ok",
+            runtime=None,
+            orchestrator=None,
+            fetch_local_api_chat_json=_proxy,
+        )
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("runtime_status", result.get("route"))
+        self.assertEqual("Ready.", str(result.get("text") or "").splitlines()[0])
+        self.assertEqual(["runtime_status"], result.get("used_tools"))
+
+    def test_chat_proxy_unavailable_returns_truthful_backend_message(self) -> None:
+        def _proxy(_payload: dict[str, object]) -> dict[str, object]:
+            return {"_proxy_error": {"kind": "unreachable", "backend_reachable": False, "backend_ready": False}}
+
+        result = handle_telegram_text(
+            text="what is the runtime status?",
+            chat_id="42",
+            trace_id="tg-proxy-down",
+            runtime=None,
+            orchestrator=None,
+            fetch_local_api_chat_json=_proxy,
+        )
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("chat_proxy_error", result.get("route"))
+        self.assertIn("couldn't reach the agent backend", str(result.get("text") or "").lower())
 
 
 if __name__ == "__main__":

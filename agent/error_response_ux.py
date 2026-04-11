@@ -4,6 +4,9 @@ from datetime import datetime, timezone
 import time
 from typing import Any
 
+from agent.failure_ux import failure_recovery_message
+from agent.persona import normalize_persona_text
+
 
 _EXAMPLE_PAYLOAD = '{\n  "messages": [\n    {"role": "user", "content": "hello"}\n  ]\n}'
 
@@ -29,10 +32,12 @@ def compose_actionable_message(
     if why:
         parts.append(_sentence(why))
     message = " ".join(part for part in parts if part).strip()
+    if message.startswith("I can't do that yet. It needs a valid local path."):
+        message = "That won't work yet - it needs a valid local path."
     next_text = " ".join(str(next_action or "").strip().split())
     if next_text:
         message = f"{message} Next: {next_text.rstrip('.')}."
-    return message.strip()
+    return normalize_persona_text(message)
 
 
 def _cooldown_from_state(
@@ -85,13 +90,15 @@ def upstream_down_message(
     else:
         base = "A model provider is temporarily unavailable."
     if not isinstance(cooldown_until, int) or cooldown_until <= 0:
-        return f"{base} Try again after a short delay or switch provider."
+        return normalize_persona_text(f"{base} Try again after a short delay or switch provider.")
     now_value = int(time.time()) if now_epoch is None else int(now_epoch)
     remaining = max(0, int(cooldown_until - now_value))
     cooldown_iso = _iso_utc(cooldown_until)
-    return (
-        f"{base} Cooldown until {cooldown_iso} ({remaining}s remaining). "
-        f"Try again after {cooldown_iso} or switch provider."
+    return normalize_persona_text(
+        (
+            f"{base} Cooldown until {cooldown_iso} ({remaining}s remaining). "
+            f"Try again after {cooldown_iso} or switch provider."
+        )
     )
 
 
@@ -103,14 +110,14 @@ def bad_request_next_question(
     lowered = str(error_message or "").strip().lower()
     json_issue = str(json_error or "").strip().lower()
     if "messages must be a non-empty list" in lowered:
-        return f"Could you resend using this JSON shape?\n{_EXAMPLE_PAYLOAD}"
+        return f"Send it again using this JSON shape:\n{_EXAMPLE_PAYLOAD}"
     if json_issue == "content_type_not_json":
         return (
-            "Could you resend with header Content-Type: application/json and this body?\n"
+            "Send it again with header Content-Type: application/json and this body:\n"
             f"{_EXAMPLE_PAYLOAD}"
         )
     if json_issue == "invalid_json_body":
-        return f"Could you resend valid JSON like this?\n{_EXAMPLE_PAYLOAD}"
+        return f"Send valid JSON like this:\n{_EXAMPLE_PAYLOAD}"
     return None
 
 
@@ -127,7 +134,7 @@ def friendly_error_message(
             "Provider credits or limits blocked this request. Add credits, lower max tokens, or choose a cheaper model."
         )
     if kind != "upstream_down":
-        return str(current_message or "").strip()
+        return normalize_persona_text(str(current_message or "").strip())
     data = context if isinstance(context, dict) else {}
     return upstream_down_message(
         health_state=data.get("health_state") if isinstance(data.get("health_state"), dict) else None,
@@ -154,7 +161,11 @@ def deterministic_error_message(
     if code:
         lines.append(f"failure_code: {code}")
     lines.append(f"next_action: {str(next_action or 'run agent doctor').strip() or 'run agent doctor'}")
-    return "\n".join(lines)
+    return normalize_persona_text("\n".join(lines))
+
+
+def failure_recovery_text(kind: str, **context: Any) -> str:
+    return failure_recovery_message(kind, **context)
 
 
 __all__ = [
@@ -162,5 +173,6 @@ __all__ = [
     "compose_actionable_message",
     "deterministic_error_message",
     "friendly_error_message",
+    "failure_recovery_text",
     "upstream_down_message",
 ]

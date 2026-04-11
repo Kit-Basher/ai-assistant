@@ -88,6 +88,8 @@ from agent.runtime_events import RuntimeEventRecorder
 from agent.runtime_contract import (
     normalize_user_facing_status,
 )
+from agent.persona import normalize_persona_text
+from agent.public_chat import build_no_llm_public_message, is_no_llm_error_kind
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
@@ -213,9 +215,11 @@ from agent.semantic_memory import build_semantic_memory_service
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.manifest import compute_permissions_hash, normalize_permissions
 from agent.packs.policy import is_iface_allowed
+from agent.packs.state_truth import build_pack_state_snapshot, normalize_available_pack_truth, normalize_installed_pack_truth
 from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
 from agent.packs.remote_fetch import RemotePackFetcher
 from agent.packs.store import PackStore
+from agent.failure_ux import build_failure_recovery
 from agent.recovery_contract import (
     detect_recovery_mode,
     recovery_next_action,
@@ -225,6 +229,7 @@ from agent.orchestrator import Orchestrator, classify_authoritative_domain, has_
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
 from agent.secret_store import SecretStore
+from agent.state_transitions import confirmation_transition_state, startup_phase_transition_allowed
 from agent.skills_loader import SkillLoader
 from memory.db import MemoryDB
 
@@ -1116,8 +1121,8 @@ class AgentRuntime:
             },
         )
 
-    @staticmethod
     def _pack_error(
+        self,
         *,
         error: str,
         message: str,
@@ -1127,12 +1132,20 @@ class AgentRuntime:
         next_action: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
+        recovery = self._failure_recovery_for_error(
+            error=error,
+            error_kind=error_kind,
+            message=message,
+            next_action=next_action,
+            why=why,
+        )
         body: dict[str, Any] = {
             "ok": False,
             "error": error,
             "error_kind": error_kind,
             "message": message,
             "errors": [error],
+            "recovery": recovery,
         }
         if why:
             body["why"] = str(why).strip()
@@ -1169,6 +1182,12 @@ class AgentRuntime:
         why: str,
         next_action: str,
     ) -> dict[str, Any]:
+        recovery = build_failure_recovery(
+            "confirm_plan_missing",
+            reason=why,
+            next_step=next_action,
+            subject=what_happened,
+        )
         return {
             "ok": False,
             "error": "confirm_required",
@@ -1180,7 +1199,97 @@ class AgentRuntime:
             ),
             "why": why,
             "next_action": next_action,
+            "recovery": recovery,
         }
+
+    @staticmethod
+    def _failure_recovery_for_error(
+        *,
+        error: str,
+        error_kind: str,
+        message: str,
+        next_action: str | None = None,
+        why: str | None = None,
+    ) -> dict[str, Any]:
+        error_key = str(error or "").strip().lower()
+        kind_key = str(error_kind or "").strip().lower()
+        if error_key in {"pack_not_found", "not_installed"} or kind_key in {"not_found"}:
+            return build_failure_recovery(
+                "pack_not_installed",
+                reason=why or message,
+                next_step=next_action or "Open the preview, then install it if you want to use it.",
+            )
+        if error_key in {"invalid_manifest", "invalid_metadata"} or kind_key in {"bad_request"}:
+            return build_failure_recovery(
+                "pack_invalid_metadata",
+                reason=why or message,
+                next_step=next_action or "Fix the metadata or use a valid pack source.",
+            )
+        if error_key in {"confirm_token_stale", "stale"} or kind_key in {"plan_changed"}:
+            return build_failure_recovery(
+                "confirm_token_stale",
+                reason=why or message,
+                next_step=next_action or "Request a new preview.",
+            )
+        if error_key in {"confirm_token_consumed", "already_consumed"}:
+            return build_failure_recovery(
+                "confirm_token_consumed",
+                reason=why or message,
+                next_step=next_action or "No action needed unless you want a new preview.",
+            )
+        if error_key in {"confirm_token_expired", "expired"}:
+            return build_failure_recovery(
+                "confirm_token_expired",
+                reason=why or message,
+                next_step=next_action or "Request a new preview.",
+            )
+        if error_key in {"confirm_token_mismatch"} or kind_key in {"token_mismatch"}:
+            return build_failure_recovery(
+                "confirm_token_mismatch",
+                reason=why or message,
+                next_step=next_action or "Confirm the latest pending plan.",
+            )
+        if error_key in {"confirm_downstream_failed"}:
+            return build_failure_recovery(
+                "confirm_downstream_failed",
+                reason=why or message,
+                next_step=next_action or "Fix the downstream blocker, then retry the plan.",
+            )
+        if error_key in {"confirm_plan_missing", "missing_pending_plan"} or kind_key in {"needs_clarification"}:
+            return build_failure_recovery(
+                "confirm_plan_missing",
+                reason=why or message,
+                next_step=next_action or "Request a new preview.",
+            )
+        if error_key in {"already_removed"}:
+            return build_failure_recovery(
+                "pack_remove_missing",
+                reason=why or message,
+                next_step=next_action or "No action needed.",
+            )
+        if error_key in {"pack_disabled"}:
+            return build_failure_recovery(
+                "pack_disabled",
+                reason=why or message,
+                next_step=next_action or "Enable it before using it.",
+            )
+        if error_key in {"db_busy", "lock_conflict"} or kind_key in {"lock_conflict", "busy"}:
+            return build_failure_recovery(
+                "db_busy",
+                reason=why or message,
+                next_step=next_action or "Retry once the current write finishes.",
+            )
+        if kind_key in {"needs_clarification", "confirm_required"}:
+            return build_failure_recovery(
+                "confirm_plan_missing",
+                reason=why or message,
+                next_step=next_action or "Request a new preview.",
+            )
+        return build_failure_recovery(
+            "unknown",
+            reason=why or message,
+            next_step=next_action or "Run the request again or inspect the relevant state surface.",
+        )
 
     @staticmethod
     def _pack_clarification(*, intent: str, message: str, trace_id: str = "packs") -> tuple[bool, dict[str, Any]]:
@@ -1218,17 +1327,37 @@ class AgentRuntime:
             "packs": self.pack_store.list_packs(),
         }
 
+    def packs_state(self) -> dict[str, Any]:
+        discovery = self._pack_registry_discovery()
+        return build_pack_state_snapshot(pack_store=self.pack_store, discovery=discovery)
+
     def _pack_registry_discovery(self) -> PackRegistryDiscoveryService:
         return PackRegistryDiscoveryService(
             pack_store=self.pack_store,
             storage_root=self.pack_store.external_storage_root(),
+            lock=self._registry_lock,
         )
 
     def list_pack_sources(self) -> dict[str, Any]:
-        return {
+        warnings: list[dict[str, Any]] = []
+        try:
+            sources = self._pack_registry_discovery().list_sources()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            warnings.append(
+                {
+                    "kind": "pack_sources_unavailable",
+                    "message": "Pack sources are temporarily unavailable.",
+                    "detail": str(exc),
+                }
+            )
+            sources = []
+        payload: dict[str, Any] = {
             "ok": True,
-            "sources": self._pack_registry_discovery().list_sources(),
+            "sources": sources,
         }
+        if warnings:
+            payload["warnings"] = warnings
+        return payload
 
     def get_pack_sources_policy(self) -> tuple[bool, dict[str, Any]]:
         payload = self._pack_registry_discovery().get_policy()
@@ -1712,9 +1841,11 @@ class AgentRuntime:
                 message=f"external pack not found: {canonical_id}",
                 next_question="Use a canonical external pack id returned by /packs or /packs/install.",
             )
+        normalized_state = normalize_installed_pack_truth(pack)
         return True, {
             "ok": True,
             "pack": pack,
+            "normalized_state": normalized_state,
         }
 
     def get_pack_history(self, canonical_id: str) -> tuple[bool, dict[str, Any]]:
@@ -1746,9 +1877,10 @@ class AgentRuntime:
                 error_kind="bad_request",
                 message=f"external pack not found: {canonical_id}",
                 next_question="Use a canonical external pack id returned by /packs or /packs/install.",
-        )
+            )
         pack = removed.get("pack") if isinstance(removed.get("pack"), dict) else {}
         removal = removed.get("removal") if isinstance(removed.get("removal"), dict) else {}
+        already_removed = bool(removed.get("already_removed", False))
         try:
             orchestrator = self.orchestrator()
             forget_activation = getattr(orchestrator, "forget_external_pack_activation", None)
@@ -1759,17 +1891,25 @@ class AgentRuntime:
                 )
         except Exception:
             pass
-        message = compose_actionable_message(
-            what_happened=f"I removed external pack {str(pack.get('name') or canonical_id).strip() or canonical_id}",
-            why="I removed the canonical pack record and cleaned up the installed artifacts.",
-            next_action="Use /packs to confirm it is gone, or reinstall it later if needed.",
-        )
+        if already_removed:
+            message = compose_actionable_message(
+                what_happened=f"Removal already completed for external pack {str(removal.get('pack_id') or canonical_id).strip() or canonical_id}",
+                why="The canonical pack record was already gone, and the cleanup record is still intact.",
+                next_action="Use /packs to confirm it stays gone, or reinstall it later if needed.",
+            )
+        else:
+            message = compose_actionable_message(
+                what_happened=f"I removed external pack {str(pack.get('name') or canonical_id).strip() or canonical_id}",
+                why="I removed the canonical pack record and cleaned up the installed artifacts.",
+                next_action="Use /packs to confirm it is gone, or reinstall it later if needed.",
+            )
         return True, {
             "ok": True,
             "message": message,
             "pack": pack,
             "removal": removal,
             "next_action": "Use /packs to confirm it is gone, or reinstall it later if needed.",
+            "already_removed": already_removed,
         }
 
     def compare_packs(self, from_pack_id: str, to_pack_id: str) -> tuple[bool, dict[str, Any]]:
@@ -1978,7 +2118,15 @@ class AgentRuntime:
                 message="enabled flag is required",
                 next_question='Include {"enabled": true} or {"enabled": false}.',
             )
-        updated = self.pack_store.set_enabled(pack_id, bool(payload.get("enabled")))
+        enabled_value = payload.get("enabled")
+        if enabled_value is not True and enabled_value is not False:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="enabled must be a boolean",
+                next_question='Include {"enabled": true} or {"enabled": false}.',
+            )
+        updated = self.pack_store.set_enabled(pack_id, bool(enabled_value))
         if updated is None:
             return self._pack_error(
                 error="pack_not_found",
@@ -2057,6 +2205,11 @@ class AgentRuntime:
         normalized = str(phase or "").strip().lower() or "starting"
         if normalized not in {"starting", "listening", "warming", "ready", "degraded"}:
             normalized = "starting"
+        current = str(self.startup_phase or "").strip().lower()
+        if current == normalized:
+            return
+        if current and not startup_phase_transition_allowed(current, normalized):
+            return
         self.startup_phase = normalized
         _startup_stdout_event("runtime.startup_phase", phase=normalized)
 
@@ -4919,8 +5072,14 @@ class AgentRuntime:
         onboarding_summary: str | None = None,
         onboarding_next_action: str | None = None,
         safe_mode_target: Mapping[str, Any] | None = None,
+        failure_recovery: Mapping[str, Any] | None = None,
     ) -> str:
-        if startup_phase == "degraded":
+        recovery_row = failure_recovery if isinstance(failure_recovery, Mapping) else {}
+        runtime_mode = str(normalized_status.get("runtime_mode") or "").strip().lower()
+        recovery_message = str(recovery_row.get("message") or "").strip()
+        if recovery_message and runtime_mode != "ready":
+            message = recovery_message
+        elif startup_phase == "degraded":
             message = "Startup warmup degraded. Check logs and retry."
         elif startup_phase in {"starting", "listening", "warming"}:
             message = "Starting up... retrying. Try /ready again in a moment."
@@ -4932,7 +5091,7 @@ class AgentRuntime:
                 else str(onboarding_summary).strip()
             )
         else:
-            message = str(normalized_status.get("summary") or "").strip() or "Agent is ready."
+            message = str(normalized_status.get("summary") or "").strip() or "Ready."
         target_payload = safe_mode_target if isinstance(safe_mode_target, Mapping) else {}
         if (
             bool(target_payload.get("enabled", False))
@@ -4961,11 +5120,30 @@ class AgentRuntime:
             safe_mode=safe_mode,
             safe_mode_target=safe_mode_target if isinstance(safe_mode_target, Mapping) else {},
         )
+        failure_recovery = None
+        try:
+            runtime_truth = self.runtime_truth_service()
+            runtime_failure_builder = getattr(runtime_truth, "_runtime_failure_recovery", None)
+            if callable(runtime_failure_builder):
+                failure_recovery = runtime_failure_builder(
+                    ready=observability,
+                    llm_status=observability.get("llm_status") if isinstance(observability.get("llm_status"), dict) else {},
+                    normalized_status=normalized_status,
+                    runtime_mode=str(normalized_status.get("runtime_mode") or "DEGRADED"),
+                    startup_phase=startup_phase,
+                )
+        except Exception:
+            failure_recovery = None
         message = self._runtime_surface_message(
             startup_phase=startup_phase,
             normalized_status=normalized_status,
             safe_mode_target=safe_mode_target if isinstance(safe_mode_target, Mapping) else {},
+            failure_recovery=failure_recovery,
         )
+        runtime_state_label = str(failure_recovery.get("state_label") or "").strip() if isinstance(failure_recovery, dict) else ""
+        runtime_reason = str(failure_recovery.get("reason") or "").strip() if isinstance(failure_recovery, dict) else ""
+        runtime_blocker = str(failure_recovery.get("blocker") or "").strip() if isinstance(failure_recovery, dict) else ""
+        runtime_next_step = str(failure_recovery.get("next_step") or "").strip() if isinstance(failure_recovery, dict) else ""
         return {
             "ready": bool(observability.get("ready", False)),
             "phase": phase,
@@ -4975,10 +5153,15 @@ class AgentRuntime:
             "runtime_status": dict(normalized_status),
             "failure_code": str(normalized_status.get("failure_code") or "").strip() or None,
             "next_action": normalized_status.get("next_action"),
+            "state_label": runtime_state_label or ("Ready" if bool(observability.get("ready", False)) else "Not ready"),
+            "reason": runtime_reason or None,
+            "blocker": runtime_blocker or None,
+            "next_step": runtime_next_step or None,
             "last_error": str(self._startup_last_error or "").strip() or None,
             "message": message,
             "safe_mode": safe_mode,
             "safe_mode_target": safe_mode_target,
+            "failure_recovery": failure_recovery,
             "control_mode": {
                 "mode": str(control_mode.get("mode") or "safe"),
                 "mode_label": str(control_mode.get("mode_label") or "SAFE MODE"),
@@ -4999,126 +5182,200 @@ class AgentRuntime:
         }
 
     def ready_status(self) -> dict[str, Any]:
-        observability = self._runtime_observability_context()
-        safe_mode_target = self.safe_mode_target_status()
-        telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
-        telegram_state = str(observability.get("telegram_state") or "stopped")
-        telegram_enabled = bool(observability.get("telegram_enabled", False))
-        llm_status = observability["llm_status"] if isinstance(observability.get("llm_status"), dict) else {}
-        canonical_llm_runtime_status = (
-            observability["canonical_llm_runtime_status"]
-            if isinstance(observability.get("canonical_llm_runtime_status"), dict)
-            else {}
-        )
-        hf_status = self._model_watch_hf_status_snapshot()
-        startup_phase = str(observability.get("startup_phase") or "starting").strip().lower() or "starting"
-        phase = str(observability.get("phase") or RuntimeLifecyclePhase.READY.value).strip().lower() or RuntimeLifecyclePhase.READY.value
-        warmup_remaining = list(observability.get("warmup_remaining") or [])
-        normalized_status = (
-            observability["normalized_status"] if isinstance(observability.get("normalized_status"), dict) else {}
-        )
-        ready = bool(observability.get("ready", False))
-        setup_context_ready_payload: dict[str, Any] = {
-            "ok": True,
-            "ready": bool(ready),
-            "phase": phase,
-            "startup_phase": startup_phase,
-            "failure_code": str(normalized_status.get("failure_code") or "").strip() or None,
-            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
-            "runtime_status": normalized_status,
-            "telegram": {
-                "enabled": telegram_enabled,
-                "configured": bool(telegram.get("configured", False)),
-                "state": telegram_state,
-                "effective_state": str(telegram.get("effective_state") or "unknown"),
-            },
-        }
-        setup_context_llm_status = llm_status
-        onboarding_state = detect_onboarding_state(
-            ready_payload=setup_context_ready_payload,
-            llm_status=setup_context_llm_status,
-        )
-        recovery_mode = detect_recovery_mode(
-            ready_payload=setup_context_ready_payload,
-            llm_status=setup_context_llm_status,
-            failure_code=str(normalized_status.get("failure_code") or "").strip() or None,
-            api_reachable=True,
-        )
-        onboarding_next = onboarding_next_action(
-            onboarding_state,
-            ready_payload=setup_context_ready_payload,
-        )
-        if str(onboarding_state).strip().upper() == "DEGRADED":
-            onboarding_next = recovery_next_action(recovery_mode)
-        onboarding_payload = {
-            "state": onboarding_state,
-            "summary": onboarding_summary(
-                onboarding_state,
-                ready_payload=setup_context_ready_payload,
-                llm_status=setup_context_llm_status,
-            ),
-            "next_action": onboarding_next,
-            "steps": onboarding_steps(onboarding_state),
-        }
-        recovery_payload = {
-            "mode": recovery_mode,
-            "summary": recovery_summary(recovery_mode),
-            "next_action": recovery_next_action(recovery_mode),
-        }
-        uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.started_at).total_seconds()))
-        recent_messages = self._ready_recent_telegram_messages(limit=5)
-        message = self._runtime_surface_message(
-            startup_phase=startup_phase,
-            normalized_status=normalized_status,
-            onboarding_summary=None if str(onboarding_state).strip().upper() == "READY" else str(onboarding_payload.get("summary") or ""),
-            onboarding_next_action=None if str(onboarding_state).strip().upper() == "READY" else str(onboarding_payload.get("next_action") or ""),
-            safe_mode_target=safe_mode_target,
-        )
-        return {
-            "ok": True,
-            "ready": bool(ready),
-            "phase": phase,
-            "startup_phase": startup_phase,
-            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
-            "next_action": normalized_status.get("next_action"),
-            "runtime_status": normalized_status,
-            "onboarding": onboarding_payload,
-            "recovery": recovery_payload,
-            "warmup_remaining": list(warmup_remaining),
-            "last_error": str(self._startup_last_error or "") or None,
-            "api": {
-                "version": self.version,
-                "git_commit": self.git_commit,
-                "pid": self.pid,
-                "started_at": self.started_at_iso,
-                "uptime_seconds": uptime_seconds,
-            },
-            "telegram": {
-                **telegram,
-                "status": telegram_state,
-                "recent_messages": recent_messages,
-            },
-            "model_watch": {
-                "hf": hf_status,
-            },
-            "safe_mode_target": safe_mode_target,
-            "llm": {
-                "provider": canonical_llm_runtime_status.get("provider"),
-                "model": canonical_llm_runtime_status.get("model"),
-                "local_remote": canonical_llm_runtime_status.get("local_remote"),
-                "known": bool(canonical_llm_runtime_status.get("identity_known", False)),
-                "reason": canonical_llm_runtime_status.get("identity_reason"),
-                "runtime_status": canonical_llm_runtime_status,
-                "active_provider_health": llm_status.get("active_provider_health") if isinstance(llm_status.get("active_provider_health"), dict) else {},
-                "active_model_health": llm_status.get("active_model_health") if isinstance(llm_status.get("active_model_health"), dict) else {},
-                "default_provider": llm_status.get("default_provider"),
-                "resolved_default_model": llm_status.get("resolved_default_model"),
-                "default_model": llm_status.get("default_model"),
-                "allow_remote_fallback": bool(llm_status.get("allow_remote_fallback", True)),
-                "policy": llm_status.get("policy") if isinstance(llm_status.get("policy"), dict) else {},
-            },
-            "message": message,
-        }
+        truth = self.runtime_truth_service()
+        ready_builder = getattr(truth, "ready_status", None)
+        try:
+            if callable(ready_builder):
+                payload = ready_builder()
+            else:  # pragma: no cover - compatibility fallback for legacy test doubles
+                payload = self._runtime_core_status_payload()
+        except Exception:  # pragma: no cover - compatibility fallback
+            payload = self._runtime_core_status_payload()
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def ui_state(self) -> dict[str, Any]:
+        ready_payload = self.ready_status()
+        truth = self.runtime_truth_service()
+        ui_state_builder = getattr(truth, "ui_state", None)
+        try:
+            if callable(ui_state_builder):
+                payload = ui_state_builder(ready_payload=ready_payload)
+            else:  # pragma: no cover - compatibility fallback for legacy test doubles
+                payload = self._legacy_ui_state_payload(ready_payload=ready_payload)
+        except Exception:  # pragma: no cover - compatibility fallback
+            payload = self._legacy_ui_state_payload(ready_payload=ready_payload)
+        return dict(payload) if isinstance(payload, dict) else {}
+
+    def _legacy_ui_state_payload(self, *, ready_payload: dict[str, Any]) -> dict[str, Any]:
+        def _norm_text(value: Any) -> str:
+            return str(value or "").strip()
+
+        def _health_label(provider_status: str, model_status: str) -> str:
+            provider_state = str(provider_status or "").strip().lower() or "unknown"
+            model_state = str(model_status or "").strip().lower() or "unknown"
+            if provider_state == "ok" and model_state == "ok":
+                return "up"
+            if provider_state in {"down", "degraded"}:
+                return provider_state
+            if model_state in {"down", "degraded"}:
+                return model_state
+            return "unknown"
+
+        try:
+            runtime_status = (
+                ready_payload.get("runtime_status")
+                if isinstance(ready_payload.get("runtime_status"), dict)
+                else {}
+            )
+            truth = self.runtime_truth_service()
+            current_target = (
+                truth.current_chat_target_status()
+                if callable(getattr(truth, "current_chat_target_status", None))
+                else {}
+            )
+            defaults = self.get_defaults()
+            model_provider = (
+                str(current_target.get("effective_provider") or current_target.get("provider") or "").strip().lower()
+                or str(defaults.get("default_provider") or "").strip().lower()
+                or None
+            )
+            model_id = (
+                str(current_target.get("effective_model") or current_target.get("model") or "").strip()
+                or str(defaults.get("resolved_default_model") or defaults.get("default_model") or "").strip()
+                or None
+            )
+            provider_health = str(
+                current_target.get("effective_provider_health_status")
+                or current_target.get("provider_health_status")
+                or ""
+            ).strip().lower()
+            model_health = str(
+                current_target.get("effective_model_health_status")
+                or current_target.get("health_status")
+                or ""
+            ).strip().lower()
+            health = _health_label(provider_health, model_health)
+            runtime_mode = (
+                str(runtime_status.get("runtime_mode") or ready_payload.get("runtime_mode") or "DEGRADED")
+                .strip()
+                .lower()
+                or "degraded"
+            )
+            summary = normalize_persona_text(
+                str(ready_payload.get("message") or runtime_status.get("summary") or "Ready.").strip()
+            )
+            blocked_reason = None
+            if runtime_mode != "ready":
+                blocked_reason = _norm_text(runtime_status.get("failure_code")) or None
+            safe_mode_target = ready_payload.get("safe_mode_target") if isinstance(ready_payload.get("safe_mode_target"), dict) else {}
+            if not blocked_reason and isinstance(safe_mode_target, dict) and bool(safe_mode_target.get("enabled", False)):
+                if safe_mode_target.get("configured_valid") is False:
+                    blocked_reason = (
+                        _norm_text(safe_mode_target.get("reason"))
+                        or _norm_text(safe_mode_target.get("message"))
+                        or None
+                    )
+            if not blocked_reason:
+                blocked_payload = ready_payload.get("blocked") if isinstance(ready_payload.get("blocked"), dict) else {}
+                if isinstance(blocked_payload, dict) and bool(blocked_payload.get("blocked", False)):
+                    blocked_reason = (
+                        _norm_text(blocked_payload.get("reason"))
+                        or _norm_text(blocked_payload.get("kind"))
+                        or None
+                    )
+            next_step = normalize_persona_text(
+                str(
+                    runtime_status.get("next_action")
+                    or (
+                        ready_payload.get("onboarding", {}).get("next_action")
+                        if isinstance(ready_payload.get("onboarding"), dict)
+                        else ""
+                    )
+                    or (
+                        ready_payload.get("recovery", {}).get("next_action")
+                        if isinstance(ready_payload.get("recovery"), dict)
+                        else ""
+                    )
+                    or ""
+                ).strip()
+            ) or None
+            memory_db = None
+            try:
+                memory_db = self._ensure_memory_db()
+            except Exception:
+                memory_db = None
+            show_conf_pref = "on"
+            response_style = "concise"
+            if memory_db is not None:
+                show_conf_pref = (memory_db.get_preference("show_confidence") or "on").strip().lower()
+                response_style = _norm_text(memory_db.get_preference("response_style")) or "concise"
+            return {
+                "ok": True,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "runtime": {
+                    "status": runtime_mode,
+                    "summary": summary,
+                    "next_action": next_step,
+                },
+                "model": {
+                    "provider": model_provider,
+                    "model": model_id,
+                    "path": f"{model_provider} / {model_id}" if model_provider and model_id else None,
+                    "routing_mode": str(defaults.get("routing_mode") or self.config.llm_routing_mode or "auto")
+                    .strip()
+                    .lower()
+                    or "auto",
+                    "health": health,
+                },
+                "conversation": {
+                    "topic": None,
+                    "recent_request": None,
+                    "open_loop": None,
+                },
+                "action": {
+                    "pending_approval": False,
+                    "blocked_reason": blocked_reason,
+                    "last_action": None,
+                },
+                "signals": {
+                    "response_style": response_style,
+                    "confidence_visible": show_conf_pref not in {"off", "false", "0", "no"},
+                },
+                "source": "ready+runtime_truth+defaults+preferences",
+            }
+        except Exception as exc:  # pragma: no cover - defensive UI state fallback
+            return {
+                "ok": False,
+                "error": exc.__class__.__name__,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "runtime": {
+                    "status": "unknown",
+                    "summary": "I couldn’t read the live state snapshot right now.",
+                    "next_action": None,
+                },
+                "model": {
+                    "provider": None,
+                    "model": None,
+                    "path": None,
+                    "routing_mode": "auto",
+                    "health": "unknown",
+                },
+                "conversation": {
+                    "topic": None,
+                    "recent_request": None,
+                    "open_loop": None,
+                },
+                "action": {
+                    "pending_approval": False,
+                    "blocked_reason": "state_snapshot_unavailable",
+                    "last_action": None,
+                },
+                "signals": {
+                    "response_style": None,
+                    "confidence_visible": None,
+                },
+                "source": "fallback",
+            }
 
     def runtime_snapshot(self) -> dict[str, Any]:
         observability = self._runtime_observability_context()
@@ -10446,6 +10703,9 @@ class AgentRuntime:
             "pending_expires_ts": None,
             "pending_issue_code": None,
             "last_prompt_ts": now_epoch,
+            "last_confirm_token": None,
+            "last_confirmed_ts": None,
+            "last_confirmed_issue_code": None,
             "openrouter_last_test": openrouter_last_test,
         }
         try:
@@ -13400,7 +13660,13 @@ class AgentRuntime:
                 return current_issue_hash
             return str(_current_decision()[2] or "")
 
-        def _save_idle_state(*, last_test: dict[str, Any] | None) -> None:
+        def _save_idle_state(
+            *,
+            last_test: dict[str, Any] | None,
+            last_confirm_token: str | None = None,
+            last_confirmed_ts: int | None = None,
+            last_confirmed_issue_code: str | None = None,
+        ) -> None:
             recovery_store.save(
                 {
                     "active": False,
@@ -13415,6 +13681,9 @@ class AgentRuntime:
                     "pending_expires_ts": None,
                     "pending_issue_code": None,
                     "last_prompt_ts": now_epoch,
+                    "last_confirm_token": str(last_confirm_token or "").strip() or None,
+                    "last_confirmed_ts": int(last_confirmed_ts or 0) or None,
+                    "last_confirmed_issue_code": str(last_confirmed_issue_code or "").strip() or None,
                     "openrouter_last_test": last_test,
                 }
             )
@@ -13444,6 +13713,9 @@ class AgentRuntime:
                     "pending_expires_ts": None,
                     "pending_issue_code": None,
                     "last_prompt_ts": now_epoch,
+                    "last_confirm_token": None,
+                    "last_confirmed_ts": None,
+                    "last_confirmed_issue_code": None,
                     "openrouter_last_test": last_test,
                 }
             )
@@ -13553,219 +13825,304 @@ class AgentRuntime:
             }
 
         if confirm:
-            pending_plan = wizard_state.get("pending_plan") if isinstance(wizard_state.get("pending_plan"), list) else []
-            expected_token = (
-                str(wizard_state.get("pending_confirm_token") or "").strip()
-                or str(wizard_state.get("confirm_token") or "").strip()
-            )
-            if not pending_plan or not expected_token:
-                return True, {
-                    "ok": True,
-                    "intent": "llm_fixit",
-                    "confidence": 0.0,
-                    "did_work": False,
-                    "error_kind": "needs_clarification",
-                    "message": "No pending plan to confirm.",
-                    "next_question": "Ask me to run fix-it again.",
-                    "actions": [],
-                    "errors": ["needs_clarification"],
-                    "issue_code": _issue_code_fallback(),
-                    "choices": [],
-                    "trace_id": f"fixit-{now_epoch}",
-                }
-
-            pending_expires_ts = int(wizard_state.get("pending_expires_ts") or 0)
-            if pending_expires_ts > 0 and now_epoch > pending_expires_ts:
-                recovery_store.clear()
-                return True, {
-                    "ok": True,
-                    "intent": "llm_fixit",
-                    "confidence": 0.0,
-                    "did_work": False,
-                    "error_kind": "needs_clarification",
-                    "message": "That confirmation expired. Ask me to fix it again.",
-                    "next_question": "Run fix-it again now?",
-                    "actions": [],
-                    "errors": ["needs_clarification"],
-                    "issue_code": _issue_code_fallback(),
-                    "choices": [],
-                    "trace_id": f"fixit-{now_epoch}",
-                }
-
-            recomputed_token = wizard_confirm_token_for_plan_rows(
-                [row for row in pending_plan if isinstance(row, dict)]
-            )
-            if recomputed_token != expected_token:
-                recovery_store.clear()
-                return True, {
-                    "ok": True,
-                    "intent": "llm_fixit",
-                    "confidence": 0.0,
-                    "did_work": False,
-                    "error_kind": "needs_clarification",
-                    "message": "Pending plan changed. Ask me to fix it again.",
-                    "next_question": "Run fix-it again now?",
-                    "actions": [],
-                    "errors": ["needs_clarification"],
-                    "issue_code": _issue_code_fallback(),
-                    "choices": [],
-                    "trace_id": f"fixit-{now_epoch}",
-                }
-
-            provided_token = str(payload.get("confirm_token") or "").strip()
-            if provided_token and provided_token != expected_token:
-                return True, {
-                    "ok": True,
-                    "intent": "llm_fixit",
-                    "confidence": 0.0,
-                    "did_work": False,
-                    "error_kind": "needs_clarification",
-                    "message": "Confirmation token did not match the pending plan.",
-                    "next_question": "Confirm the latest pending plan?",
-                    "actions": [],
-                    "errors": ["needs_clarification"],
-                    "issue_code": _issue_code_fallback(),
-                    "choices": [],
-                    "trace_id": f"fixit-{now_epoch}",
-                }
-
-            ok_exec, exec_payload = self._execute_llm_fixit_plan(
-                plan_rows=[row for row in pending_plan if isinstance(row, dict)],
-                actor=actor,
-            )
-            install_target_model: str | None = None
-            rollback_target_model: str | None = None
-            for row in [item for item in pending_plan if isinstance(item, dict)]:
-                action_name = str(row.get("action") or "").strip()
-                if action_name == "ollama.pull_model":
-                    model_value = self._normalize_ollama_pull_model(str((row.get("params") or {}).get("model") or ""))
-                    if model_value:
-                        install_target_model = model_value
-                if action_name == "defaults.rollback":
-                    rollback_value = str((row.get("params") or {}).get("target_chat_model") or "").strip()
-                    if rollback_value:
-                        rollback_target_model = rollback_value
-            provider_tests = exec_payload.get("provider_tests") if isinstance(exec_payload.get("provider_tests"), dict) else {}
-            openrouter_test = (
-                provider_tests.get("openrouter")
-                if isinstance(provider_tests.get("openrouter"), dict)
-                else openrouter_last_test
-            )
-            if isinstance(openrouter_test, dict):
-                status_after = self._llm_fixit_status_payload()
-                decision_after = evaluate_wizard_decision(
-                    status_after,
-                    context={
-                        "openrouter_secret_present": self._openrouter_secret_present(),
-                        "openrouter_last_test": openrouter_test,
-                    },
+            with self._orchestrator_lock:
+                wizard_state = recovery_store.state if isinstance(recovery_store.state, dict) else recovery_store.empty_state()
+                pending_plan = wizard_state.get("pending_plan") if isinstance(wizard_state.get("pending_plan"), list) else []
+                expected_token = (
+                    str(wizard_state.get("pending_confirm_token") or "").strip()
+                    or str(wizard_state.get("confirm_token") or "").strip()
                 )
-                if decision_after.status != "ok":
-                    prompt_after, choices_after = _save_choice_state(
-                        decision_obj=decision_after,
-                        status_obj=status_after,
-                        last_test=openrouter_test,
+                provided_token = str(payload.get("confirm_token") or "").strip()
+                validation = confirmation_transition_state(
+                    wizard_state,
+                    provided_token=provided_token,
+                    recomputed_token=wizard_confirm_token_for_plan_rows(
+                        [row for row in pending_plan if isinstance(row, dict)]
+                    ),
+                    now_epoch=now_epoch,
+                )
+                validation_state = str(validation.get("state") or "").strip().lower()
+                if not bool(validation.get("allowed", False)):
+                    if validation_state in {"expired", "plan_changed"}:
+                        recovery_store.clear()
+                    elif validation_state == "already_consumed":
+                        recovery = build_failure_recovery(
+                            "confirm_token_consumed",
+                            reason=str(validation.get("message") or "That confirmation was already used."),
+                            next_step=str(validation.get("next_question") or "Ask me to fix it again."),
+                        )
+                        return True, {
+                            "ok": True,
+                            "intent": "llm_fixit",
+                            "confidence": 1.0,
+                            "did_work": False,
+                            "error_kind": None,
+                            "message": str(recovery.get("message") or validation.get("message") or "That confirmation was already used."),
+                            "next_question": str(validation.get("next_question") or "Ask me to fix it again."),
+                            "actions": [],
+                            "errors": [],
+                            "status": "already_consumed",
+                            "issue_code": _issue_code_fallback(),
+                            "recovery": recovery,
+                            "trace_id": f"fixit-{now_epoch}",
+                        }
+                    else:
+                        recovery = build_failure_recovery(
+                            str(validation_state or "confirm_plan_missing"),
+                            reason=str(validation.get("message") or "No pending plan to confirm."),
+                            next_step=str(validation.get("next_question") or "Ask me to run fix-it again."),
+                        )
+                        return True, {
+                            "ok": True,
+                            "intent": "llm_fixit",
+                            "confidence": 0.0,
+                            "did_work": False,
+                            "error_kind": str(validation.get("error_kind") or "needs_clarification"),
+                            "message": str(recovery.get("message") or validation.get("message") or "No pending plan to confirm."),
+                            "next_question": str(validation.get("next_question") or "Ask me to run fix-it again."),
+                            "actions": [],
+                            "errors": ["needs_clarification"],
+                            "issue_code": _issue_code_fallback(),
+                            "choices": [],
+                            "recovery": recovery,
+                            "trace_id": f"fixit-{now_epoch}",
+                        }
+                if validation_state == "already_consumed":
+                    recovery = build_failure_recovery(
+                        "confirm_token_consumed",
+                        reason=str(validation.get("message") or "That confirmation was already used."),
+                        next_step=str(validation.get("next_question") or "Ask me to fix it again."),
+                    )
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 1.0,
+                        "did_work": False,
+                        "error_kind": None,
+                        "message": str(recovery.get("message") or validation.get("message") or "That confirmation was already used."),
+                        "next_question": str(validation.get("next_question") or "Ask me to fix it again."),
+                        "actions": [],
+                        "errors": [],
+                        "status": "already_consumed",
+                        "issue_code": _issue_code_fallback(),
+                        "recovery": recovery,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+                pending_expires_ts = int(wizard_state.get("pending_expires_ts") or 0)
+                if pending_expires_ts > 0 and now_epoch > pending_expires_ts:
+                    recovery_store.clear()
+                    recovery = build_failure_recovery(
+                        "confirm_token_expired",
+                        reason="The pending plan timed out before confirmation.",
+                        next_step="Run fix-it again now?",
                     )
                     return True, {
                         "ok": True,
                         "intent": "llm_fixit",
                         "confidence": 0.0,
-                        "did_work": bool(exec_payload.get("executed_steps")),
+                        "did_work": False,
                         "error_kind": "needs_clarification",
-                        "message": prompt_after,
-                        "next_question": str(decision_after.question or ""),
+                        "message": str(recovery.get("message") or "That confirmation expired. Ask me to fix it again."),
+                        "next_question": "Run fix-it again now?",
                         "actions": [],
                         "errors": ["needs_clarification"],
-                        "status": "needs_user_choice",
-                        "issue_code": decision_after.issue_code,
-                        "choices": choices_after,
-                        "result": exec_payload,
-                        "openrouter_last_test": openrouter_test,
+                        "issue_code": _issue_code_fallback(),
+                        "choices": [],
+                        "recovery": recovery,
                         "trace_id": f"fixit-{now_epoch}",
                     }
-            _save_idle_state(last_test=openrouter_test if isinstance(openrouter_test, dict) else None)
-            failed_steps = exec_payload.get("failed_steps") if isinstance(exec_payload.get("failed_steps"), list) else []
-            ollama_pull_failure = next(
-                (
-                    row for row in failed_steps
-                    if isinstance(row, dict) and str(row.get("action") or "").strip() == "ollama.pull_model"
-                ),
-                None,
-            )
-            rollback_step = next(
-                (
-                    row for row in (
-                        exec_payload.get("executed_steps")
-                        if isinstance(exec_payload.get("executed_steps"), list)
-                        else []
-                    )
-                    if isinstance(row, dict) and str(row.get("action") or "").strip() == "defaults.rollback"
-                ),
-                None,
-            )
-            defaults_after = self.get_defaults() if install_target_model and ok_exec else {}
-            if ok_exec and install_target_model:
-                chosen_model = str(defaults_after.get("chat_model") or f"ollama:{install_target_model}")
-                message = f"Installed and configured {chosen_model} for chat."
-                next_question = None
-                error_kind = None
-                errors_payload: list[str] = []
-            elif ok_exec and isinstance(rollback_step, dict):
-                rolled_back_to = str(
-                    rollback_step.get("rolled_back_to")
-                    or rollback_target_model
-                    or self.get_defaults().get("chat_model")
-                    or ""
-                ).strip()
-                rolled_back_from = str(rollback_step.get("rolled_back_from") or "").strip() or None
-                message = (
-                    f"✅ Rolled back chat model to {rolled_back_to} (was {rolled_back_from})"
-                    if rolled_back_from
-                    else f"✅ Rolled back chat model to {rolled_back_to}"
+
+                recomputed_token = wizard_confirm_token_for_plan_rows(
+                    [row for row in pending_plan if isinstance(row, dict)]
                 )
-                next_question = None
-                error_kind = None
-                errors_payload = []
-            elif isinstance(ollama_pull_failure, dict):
-                failure_kind = str(
-                    ollama_pull_failure.get("error_kind") or ollama_pull_failure.get("error") or ""
-                ).strip().lower()
-                if failure_kind in {"ollama_unavailable", "timeout"}:
-                    message = "Ollama is unreachable right now. Start Ollama, then run fix-it again."
-                    next_question = "After Ollama is running, should I retry local model install?"
-                    error_kind = "upstream_down"
-                    errors_payload = [failure_kind or "ollama_unavailable"]
+                if recomputed_token != expected_token:
+                    recovery_store.clear()
+                    recovery = build_failure_recovery(
+                        "confirm_token_stale",
+                        reason="Pending plan changed before confirmation.",
+                        next_step="Run fix-it again now?",
+                    )
+                    return True, {
+                        "ok": True,
+                        "intent": "llm_fixit",
+                        "confidence": 0.0,
+                        "did_work": False,
+                        "error_kind": "needs_clarification",
+                        "message": str(recovery.get("message") or "Pending plan changed. Ask me to fix it again."),
+                        "next_question": "Run fix-it again now?",
+                        "actions": [],
+                        "errors": ["needs_clarification"],
+                        "issue_code": _issue_code_fallback(),
+                        "choices": [],
+                        "recovery": recovery,
+                        "trace_id": f"fixit-{now_epoch}",
+                    }
+
+                ok_exec, exec_payload = self._execute_llm_fixit_plan(
+                    plan_rows=[row for row in pending_plan if isinstance(row, dict)],
+                    actor=actor,
+                )
+                install_target_model: str | None = None
+                rollback_target_model: str | None = None
+                for row in [item for item in pending_plan if isinstance(item, dict)]:
+                    action_name = str(row.get("action") or "").strip()
+                    if action_name == "ollama.pull_model":
+                        model_value = self._normalize_ollama_pull_model(str((row.get("params") or {}).get("model") or ""))
+                        if model_value:
+                            install_target_model = model_value
+                    if action_name == "defaults.rollback":
+                        rollback_value = str((row.get("params") or {}).get("target_chat_model") or "").strip()
+                        if rollback_value:
+                            rollback_target_model = rollback_value
+                provider_tests = exec_payload.get("provider_tests") if isinstance(exec_payload.get("provider_tests"), dict) else {}
+                openrouter_test = (
+                    provider_tests.get("openrouter")
+                    if isinstance(provider_tests.get("openrouter"), dict)
+                    else openrouter_last_test
+                )
+                if isinstance(openrouter_test, dict):
+                    status_after = self._llm_fixit_status_payload()
+                    decision_after = evaluate_wizard_decision(
+                        status_after,
+                        context={
+                            "openrouter_secret_present": self._openrouter_secret_present(),
+                            "openrouter_last_test": openrouter_test,
+                        },
+                    )
+                    if decision_after.status != "ok":
+                        prompt_after, choices_after = _save_choice_state(
+                            decision_obj=decision_after,
+                            status_obj=status_after,
+                            last_test=openrouter_test,
+                        )
+                        recovery = build_failure_recovery(
+                            "confirm_downstream_failed",
+                            reason="The confirm was accepted, but a downstream step still needs attention.",
+                            next_step=str(decision_after.question or "Do you want the detailed failed steps?"),
+                        )
+                        return True, {
+                            "ok": True,
+                            "intent": "llm_fixit",
+                            "confidence": 0.0,
+                            "did_work": bool(exec_payload.get("executed_steps")),
+                            "error_kind": "needs_clarification",
+                            "message": prompt_after,
+                            "next_question": str(decision_after.question or ""),
+                            "actions": [],
+                            "errors": ["needs_clarification"],
+                            "status": "needs_user_choice",
+                            "issue_code": decision_after.issue_code,
+                            "choices": choices_after,
+                            "result": exec_payload,
+                            "openrouter_last_test": openrouter_test,
+                            "recovery": recovery,
+                            "trace_id": f"fixit-{now_epoch}",
+                        }
+                _save_idle_state(
+                    last_test=openrouter_test if isinstance(openrouter_test, dict) else None,
+                    last_confirm_token=expected_token,
+                    last_confirmed_ts=now_epoch,
+                    last_confirmed_issue_code=_issue_code_fallback(),
+                )
+                failed_steps = exec_payload.get("failed_steps") if isinstance(exec_payload.get("failed_steps"), list) else []
+                ollama_pull_failure = next(
+                    (
+                        row for row in failed_steps
+                        if isinstance(row, dict) and str(row.get("action") or "").strip() == "ollama.pull_model"
+                    ),
+                    None,
+                )
+                rollback_step = next(
+                    (
+                        row for row in (
+                            exec_payload.get("executed_steps")
+                            if isinstance(exec_payload.get("executed_steps"), list)
+                            else []
+                        )
+                        if isinstance(row, dict) and str(row.get("action") or "").strip() == "defaults.rollback"
+                    ),
+                    None,
+                )
+                defaults_after = self.get_defaults() if install_target_model and ok_exec else {}
+                if ok_exec and install_target_model:
+                    chosen_model = str(defaults_after.get("chat_model") or f"ollama:{install_target_model}")
+                    message = f"Installed and configured {chosen_model} for chat."
+                    next_question = None
+                    error_kind = None
+                    errors_payload: list[str] = []
+                elif ok_exec and isinstance(rollback_step, dict):
+                    rolled_back_to = str(
+                        rollback_step.get("rolled_back_to")
+                        or rollback_target_model
+                        or self.get_defaults().get("chat_model")
+                        or ""
+                    ).strip()
+                    rolled_back_from = str(rollback_step.get("rolled_back_from") or "").strip() or None
+                    message = (
+                        f"✅ Rolled back chat model to {rolled_back_to} (was {rolled_back_from})"
+                        if rolled_back_from
+                        else f"✅ Rolled back chat model to {rolled_back_to}"
+                    )
+                    next_question = None
+                    error_kind = None
+                    errors_payload = []
+                elif isinstance(ollama_pull_failure, dict):
+                    failure_kind = str(
+                        ollama_pull_failure.get("error_kind") or ollama_pull_failure.get("error") or ""
+                    ).strip().lower()
+                    if failure_kind in {"ollama_unavailable", "timeout"}:
+                        recovery = build_failure_recovery(
+                            "dependency_unavailable",
+                            subject="Ollama",
+                            reason="Ollama is unreachable right now.",
+                            next_step="Start Ollama, then run fix-it again.",
+                        )
+                        message = str(recovery.get("message") or "Ollama is unreachable right now. Start Ollama, then run fix-it again.")
+                        next_question = "After Ollama is running, should I retry local model install?"
+                        error_kind = "upstream_down"
+                        errors_payload = [failure_kind or "ollama_unavailable"]
+                    else:
+                        recovery = build_failure_recovery(
+                            "confirm_downstream_failed",
+                            reason="Applied part of the plan, but one or more steps still need attention.",
+                            next_step="Do you want the detailed failed steps?",
+                        )
+                        message = str(recovery.get("message") or "Applied partial fixes; some steps still need attention.")
+                        next_question = "Do you want the detailed failed steps?"
+                        error_kind = "upstream_down"
+                        errors_payload = ["execution_partial_failure"]
                 else:
-                    message = "Applied partial fixes; some steps still need attention."
-                    next_question = "Do you want the detailed failed steps?"
-                    error_kind = "upstream_down"
-                    errors_payload = ["execution_partial_failure"]
-            else:
-                message = "Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."
-                next_question = None if ok_exec else "Do you want the detailed failed steps?"
-                error_kind = None if ok_exec else "upstream_down"
-                errors_payload = [] if ok_exec else ["execution_partial_failure"]
-            response_payload = {
-                "ok": ok_exec,
-                "intent": "llm_fixit",
-                "confidence": 1.0 if ok_exec else 0.0,
-                "did_work": bool(exec_payload.get("executed_steps")),
-                "error_kind": error_kind,
-                "message": message,
-                "next_question": next_question,
-                "actions": [],
-                "errors": errors_payload,
-                "issue_code": _issue_code_fallback(),
-                "result": exec_payload,
-                "trace_id": f"fixit-{now_epoch}",
-            }
-            if ok_exec and install_target_model:
-                response_payload["chat_model"] = defaults_after.get("chat_model")
-                response_payload["resolved_default_model"] = defaults_after.get("resolved_default_model")
-            if ok_exec and isinstance(rollback_step, dict):
-                response_payload["chat_model"] = rollback_step.get("rolled_back_to") or self.get_defaults().get("chat_model")
-                response_payload["last_chat_model"] = rollback_step.get("rolled_back_from") or self.get_defaults().get("last_chat_model")
-            return ok_exec, response_payload
+                    recovery = build_failure_recovery(
+                        "confirm_downstream_failed" if not ok_exec else "unknown",
+                        reason="Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention.",
+                        next_step=None if ok_exec else "Do you want the detailed failed steps?",
+                    )
+                    message = str(recovery.get("message") or ("Applied safe LLM fixes." if ok_exec else "Applied partial fixes; some steps still need attention."))
+                    next_question = None if ok_exec else "Do you want the detailed failed steps?"
+                    error_kind = None if ok_exec else "upstream_down"
+                    errors_payload = [] if ok_exec else ["execution_partial_failure"]
+                response_payload = {
+                    "ok": ok_exec,
+                    "intent": "llm_fixit",
+                    "confidence": 1.0 if ok_exec else 0.0,
+                    "did_work": bool(exec_payload.get("executed_steps")),
+                    "error_kind": error_kind,
+                    "message": message,
+                    "next_question": next_question,
+                    "actions": [],
+                    "errors": errors_payload,
+                    "issue_code": _issue_code_fallback(),
+                    "result": exec_payload,
+                    "trace_id": f"fixit-{now_epoch}",
+                }
+                if ok_exec and install_target_model:
+                    response_payload["chat_model"] = defaults_after.get("chat_model")
+                    response_payload["resolved_default_model"] = defaults_after.get("resolved_default_model")
+                if ok_exec and isinstance(rollback_step, dict):
+                    response_payload["chat_model"] = rollback_step.get("rolled_back_to") or self.get_defaults().get("chat_model")
+                    response_payload["last_chat_model"] = rollback_step.get("rolled_back_from") or self.get_defaults().get("last_chat_model")
+                response_payload["recovery"] = recovery if "recovery" in locals() else None
+                return ok_exec, response_payload
 
         answer = str(payload.get("answer") or "").strip()
         if answer:
@@ -13900,16 +14257,19 @@ class AgentRuntime:
                             ),
                             "choices": choices_json,
                             "pending_plan": pending_plan_rows,
-                            "pending_confirm_token": confirm_token,
-                            "pending_created_ts": now_epoch,
-                            "pending_expires_ts": now_epoch + 300,
-                            "pending_issue_code": issue_code_for_choice,
-                            "last_prompt_ts": now_epoch,
-                            "openrouter_last_test": openrouter_last_test,
-                            "proposal_type": state_proposal_type or ("local_download" if inferred_local_download else "switch_default"),
-                            "proposal_details": str(wizard_state.get("proposal_details") or "").strip() or None,
-                        }
-                    )
+                    "pending_confirm_token": confirm_token,
+                    "pending_created_ts": now_epoch,
+                    "pending_expires_ts": now_epoch + 300,
+                    "pending_issue_code": issue_code_for_choice,
+                    "last_prompt_ts": now_epoch,
+                    "last_confirm_token": None,
+                    "last_confirmed_ts": None,
+                    "last_confirmed_issue_code": None,
+                    "openrouter_last_test": openrouter_last_test,
+                    "proposal_type": state_proposal_type or ("local_download" if inferred_local_download else "switch_default"),
+                    "proposal_details": str(wizard_state.get("proposal_details") or "").strip() or None,
+                }
+            )
                     return True, {
                         "ok": True,
                         "intent": "llm_fixit",
@@ -14006,6 +14366,9 @@ class AgentRuntime:
                         "pending_expires_ts": None,
                         "pending_issue_code": None,
                         "last_prompt_ts": now_epoch,
+                        "last_confirm_token": None,
+                        "last_confirmed_ts": None,
+                        "last_confirmed_issue_code": None,
                         "openrouter_last_test": openrouter_last_test,
                     }
                 )
@@ -14133,6 +14496,9 @@ class AgentRuntime:
                 "pending_expires_ts": now_epoch + 300,
                 "pending_issue_code": issue_code_for_choice,
                 "last_prompt_ts": now_epoch,
+                "last_confirm_token": None,
+                "last_confirmed_ts": None,
+                "last_confirmed_issue_code": None,
                 "openrouter_last_test": openrouter_last_test,
                 "proposal_type": str(wizard_state.get("proposal_type") or "").strip().lower() or None,
                 "proposal_details": str(wizard_state.get("proposal_details") or "").strip() or None,
@@ -19229,6 +19595,9 @@ class AgentRuntime:
         return candidate, cache_control
 
 
+MAX_JSON_REQUEST_BYTES = 1_048_576
+
+
 class APIServerHandler(BaseHTTPRequestHandler):
     runtime: AgentRuntime
 
@@ -19296,7 +19665,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
 
     def _read_json(self) -> dict[str, Any]:
         self._last_json_error = None
-        length = int(self.headers.get("Content-Length") or 0)
+        raw_length = str(self.headers.get("Content-Length") or "").strip()
+        try:
+            length = int(raw_length or 0)
+        except (TypeError, ValueError):
+            self._last_json_error = "invalid_content_length"
+            return {}
+        if length < 0:
+            self._last_json_error = "invalid_content_length"
+            return {}
+        if length > MAX_JSON_REQUEST_BYTES:
+            self._last_json_error = "request_too_large"
+            return {}
         if length <= 0:
             return {}
         content_type = str(self.headers.get("Content-Type") or "").strip().lower()
@@ -19316,6 +19696,53 @@ class APIServerHandler(BaseHTTPRequestHandler):
         self._last_json_error = "invalid_json_body"
         return {}
 
+    def _json_request_error_response(self, *, path: str, payload: dict[str, Any], json_error: str) -> tuple[int, dict[str, Any]]:
+        trace_id = self._request_trace_id(payload)
+        intent = path.lstrip("/") or "request"
+        if json_error == "content_type_not_json":
+            message = "Request body must use Content-Type: application/json."
+            next_question = bad_request_next_question(error_message=message, json_error=json_error)
+        elif json_error == "invalid_json_body":
+            message = "Request body is not valid JSON."
+            next_question = bad_request_next_question(error_message=message, json_error=json_error)
+        elif json_error == "request_too_large":
+            limit_mb = max(1, int(MAX_JSON_REQUEST_BYTES // (1024 * 1024)))
+            message = f"Request body is too large. Keep it under {limit_mb} MiB."
+            next_question = "Send a smaller JSON body?"
+        elif json_error == "invalid_content_length":
+            message = "Request Content-Length header is invalid."
+            next_question = "Send the request again with a valid Content-Length header?"
+        else:
+            message = "Request body is not valid JSON."
+            next_question = None
+        if next_question and "?" not in next_question:
+            next_question = f"{next_question.rstrip('.')}?"
+        envelope = failure(
+            message,
+            intent=intent,
+            error_kind="bad_request",
+            trace_id=trace_id,
+            errors=["bad_request"],
+            next_question=next_question,
+        )
+        recovery = self._failure_recovery_for_error(
+            error="bad_request",
+            error_kind="bad_request",
+            message=message,
+            next_action=next_question,
+        )
+        status = 413 if json_error == "request_too_large" else 400
+        return status, {
+            "ok": False,
+            "error": "bad_request",
+            "error_kind": envelope["error_kind"],
+            "message": envelope["message"],
+            "next_question": envelope["next_question"],
+            "recovery": recovery,
+            "trace_id": envelope["trace_id"],
+            "envelope": envelope,
+        }
+
     def _request_trace_id(self, payload: dict[str, Any] | None = None) -> str:
         body = payload if isinstance(payload, dict) else {}
         for key in ("request_id", "trace_id"):
@@ -19324,6 +19751,30 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return value
         seed = f"{time.time_ns()}|{os.getpid()}|{getattr(self, 'path', '')}"
         return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+    def _failure_recovery_for_error(
+        self,
+        *,
+        error: str,
+        error_kind: str,
+        message: str,
+        next_action: str | None = None,
+        why: str | None = None,
+    ) -> dict[str, Any]:
+        runtime_helper = getattr(self.runtime, "_failure_recovery_for_error", None)
+        if callable(runtime_helper):
+            return runtime_helper(
+                error=error,
+                error_kind=error_kind,
+                message=message,
+                next_action=next_action,
+                why=why,
+            )
+        return build_failure_recovery(
+            "unknown",
+            reason=why or message,
+            next_step=next_action,
+        )
 
     @staticmethod
     def _message_content_text(content: Any) -> str:
@@ -19758,6 +20209,11 @@ class APIServerHandler(BaseHTTPRequestHandler):
             "error": error_code,
             "error_kind": envelope["error_kind"],
             "message": envelope["message"],
+            "recovery": self._failure_recovery_for_error(
+                error=error_code,
+                error_kind=str(envelope["error_kind"] or error_kind),
+                message=message,
+            ),
             "trace_id": envelope["trace_id"],
             "envelope": envelope,
         }
@@ -19874,6 +20330,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
                 return
+            if path == "/state":
+                self._send_json(200, self.runtime.ui_state())
+                return
             if path == "/runtime":
                 self._send_json(200, self.runtime.runtime_snapshot())
                 return
@@ -19918,6 +20377,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/packs":
                 self._send_json(200, self.runtime.list_packs())
+                return
+            if path == "/packs/state":
+                self._send_json(200, self.runtime.packs_state())
                 return
             if path == "/pack_sources":
                 self._send_json(200, self.runtime.list_pack_sources())
@@ -19967,7 +20429,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.preview_pack_source_listing(parts[1], parts[3])
                 self._send_json(200 if ok else 400, body)
                 return
-            if len(parts) == 2 and parts[0] == "packs":
+            if len(parts) == 2 and parts[0] == "packs" and parts[1] != "state":
                 ok, body = self.runtime.get_pack_details(parts[1])
                 self._send_json(200 if ok else 400, body)
                 return
@@ -20173,33 +20635,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             memory_debug_payload: dict[str, Any] | None = None
             authoritative_runtime_route = False
             json_error = str(getattr(self, "_last_json_error", "") or "").strip().lower() or None
-            if path in {"/chat", "/ask", "/done"} and json_error in {"content_type_not_json", "invalid_json_body"}:
-                trace_id = self._request_trace_id(payload)
-                if json_error == "content_type_not_json":
-                    message = "Request body must use Content-Type: application/json."
-                else:
-                    message = "Request body is not valid JSON."
-                next_question = bad_request_next_question(error_message=message, json_error=json_error)
-                envelope = failure(
-                    message,
-                    intent=path.lstrip("/"),
-                    error_kind="bad_request",
-                    trace_id=trace_id,
-                    errors=["bad_request"],
-                    next_question=next_question,
-                )
-                self._send_json(
-                    400,
-                    {
-                        "ok": False,
-                        "error": "bad_request",
-                        "error_kind": envelope["error_kind"],
-                        "message": envelope["message"],
-                        "next_question": envelope["next_question"],
-                        "trace_id": envelope["trace_id"],
-                        "envelope": envelope,
-                    },
-                )
+            if json_error is not None:
+                status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
+                self._send_json(status_code, response)
                 return
             if path in {"/chat", "/ask"}:
                 trace_id = self._request_trace_id(payload)
@@ -20684,7 +21122,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             "health_state": self.runtime._health_monitor.state,  # noqa: SLF001
                         },
                     )
-                    base_message = assistant_text or "I couldn't complete that request."
+                    if is_no_llm_error_kind(error_kind):
+                        base_message = build_no_llm_public_message()
+                    else:
+                        base_message = assistant_text or "I couldn't complete that request."
                     friendly_message = friendly_error_message(
                         error_kind=error_kind,
                         current_message=base_message,
@@ -21262,6 +21703,11 @@ class APIServerHandler(BaseHTTPRequestHandler):
         try:
             path, parts = self._path_parts()
             payload = self._read_json()
+            json_error = str(getattr(self, "_last_json_error", "") or "").strip().lower() or None
+            if json_error is not None:
+                status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
+                self._send_json(status_code, response)
+                return
 
             if path == "/pack_sources/policy":
                 if self._reject_non_loopback_operator_surface(path=path):

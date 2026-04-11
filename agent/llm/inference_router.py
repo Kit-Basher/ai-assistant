@@ -8,6 +8,7 @@ from agent.llm.install_planner import build_install_plan
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_selector import select_model_for_task
 from agent.llm.task_classifier import classify_task_request
+from agent.public_chat import build_no_llm_public_message
 
 
 def _default_task_requirements(task_type: str) -> list[str]:
@@ -171,7 +172,7 @@ class InferenceRouter:
         if not _is_llm_client_available(self.llm_client):
             return _normalized_error_result(
                 error_kind="llm_unavailable",
-                text="LLM inference is unavailable right now.\nNext: Run: python -m agent doctor",
+                text=build_no_llm_public_message(),
                 task_type=task_type or "chat",
                 selection_reason="llm_unavailable",
                 trace_id=normalized_trace_id,
@@ -217,12 +218,9 @@ class InferenceRouter:
                         route_data["plan"] = plan
                     next_action = _normalize_text((plan or {}).get("next_action")) or "Run: python -m agent doctor"
                     error_kind = _normalize_text((selection or {}).get("reason")) or "no_suitable_model"
-                    text = "No suitable local-first model is ready for this request.\nNext: {next_action}".format(
-                        next_action=next_action
-                    )
                     return _normalized_error_result(
                         error_kind=error_kind,
-                        text=text,
+                        text=build_no_llm_public_message(),
                         task_type=str(normalized_task.get("task_type") or "chat"),
                         selection_reason=selection_reason,
                         trace_id=normalized_trace_id,

@@ -59,7 +59,7 @@ class TestRuntimeContractConsistency(unittest.TestCase):
         }
         telegram_text = _runtime_status_text({"runtime": _FakeRuntime(status_payload)})
         self.assertIn("✅ Agent is running", telegram_text)
-        self.assertIn("Agent is ready. Using ollama / qwen2.5:3b-instruct.", telegram_text)
+        self.assertIn("Ready. Using ollama / qwen2.5:3b-instruct.", telegram_text)
 
     def test_bootstrap_state_semantics_across_surfaces(self) -> None:
         normalized = normalize_user_facing_status(
@@ -71,7 +71,10 @@ class TestRuntimeContractConsistency(unittest.TestCase):
             local_providers={"ollama"},
         )
         self.assertEqual("BOOTSTRAP_REQUIRED", normalized["runtime_mode"])
-        self.assertIn("Setup needed.", str(normalized["summary"]))
+        self.assertEqual("Initializing", normalized["state_label"])
+        self.assertEqual("runtime_initializing", normalized["recovery"]["kind"])
+        self.assertIn("System is still initializing.", str(normalized["summary"]))
+        self.assertIn("Wait for startup", str(normalized["summary"]))
 
 
 if __name__ == "__main__":

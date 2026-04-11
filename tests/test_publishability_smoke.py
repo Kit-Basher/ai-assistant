@@ -460,7 +460,13 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual("action_tool", blocked_meta.get("route"))
         self.assertEqual(["filesystem"], blocked_meta.get("used_tools"))
         self.assertFalse(bool(blocked_meta.get("used_llm")))
-        self.assertEqual("sensitive_path_blocked", blocked_meta.get("error"))
+        self.assertNotIn("error", blocked_meta)
+        self.assertEqual("sensitive_path_blocked", blocked_read.get("error_kind"))
+        blocked_read_message = str(blocked_read.get("message") or "")
+        self.assertIn("can't access that location", blocked_read_message.lower())
+        self.assertIn("choose a different location", blocked_read_message.lower())
+        self.assertNotIn("reason:", blocked_read_message.lower())
+        self.assertNotIn("next:", blocked_read_message.lower())
 
         blocked_search, _ = self._chat(
             runtime,
@@ -473,7 +479,13 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual("action_tool", blocked_search_meta.get("route"))
         self.assertEqual(["filesystem"], blocked_search_meta.get("used_tools"))
         self.assertFalse(bool(blocked_search_meta.get("used_llm")))
-        self.assertEqual("sensitive_path_blocked", blocked_search_meta.get("error"))
+        self.assertNotIn("error", blocked_search_meta)
+        self.assertEqual("sensitive_path_blocked", blocked_search.get("error_kind"))
+        blocked_search_message = str(blocked_search.get("message") or "")
+        self.assertIn("can't access that location", blocked_search_message.lower())
+        self.assertIn("choose a different location", blocked_search_message.lower())
+        self.assertNotIn("reason:", blocked_search_message.lower())
+        self.assertNotIn("next:", blocked_search_message.lower())
 
         python_version, _ = self._chat(
             runtime,
@@ -498,7 +510,13 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual("action_tool", blocked_shell_meta.get("route"))
         self.assertEqual(["shell"], blocked_shell_meta.get("used_tools"))
         self.assertFalse(bool(blocked_shell_meta.get("used_llm")))
-        self.assertEqual("shell_interpolation_blocked", blocked_shell_meta.get("error"))
+        self.assertNotIn("error", blocked_shell_meta)
+        self.assertEqual("shell_interpolation_blocked", blocked_shell.get("error_kind"))
+        blocked_shell_message = str(blocked_shell.get("message") or "")
+        self.assertIn("can't run that command here", blocked_shell_message.lower())
+        self.assertIn("try one supported action at a time", blocked_shell_message.lower())
+        self.assertNotIn("reason:", blocked_shell_message.lower())
+        self.assertNotIn("next:", blocked_shell_message.lower())
 
     def test_publishability_mutating_preview_confirm_flows(self) -> None:
         runtime = self._make_runtime(safe_mode_enabled=True)

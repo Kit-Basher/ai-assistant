@@ -11,6 +11,7 @@ from unittest.mock import patch
 from agent import cli
 from agent.doctor import DoctorCheck, DoctorReport
 from agent.orchestrator import Orchestrator
+from agent.public_chat import build_no_llm_public_message
 from memory.db import MemoryDB
 from telegram_adapter.bot import _handle_message, _send_reply
 
@@ -87,7 +88,7 @@ class TestGoldenPathSmoke(unittest.TestCase):
                     "runtime_mode": "READY",
                     "runtime_status": {
                         "runtime_mode": "READY",
-                        "summary": "Agent is ready.",
+                        "summary": "Ready.",
                     },
                     "telegram": {"state": "running"},
                 },
@@ -118,7 +119,7 @@ class TestGoldenPathSmoke(unittest.TestCase):
                     "runtime_mode": "READY",
                     "runtime_status": {
                         "runtime_mode": "READY",
-                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
                     },
                     "telegram": {"state": "running"},
                 }
@@ -171,7 +172,7 @@ class TestGoldenPathSmoke(unittest.TestCase):
                 if "show me the status" in text:
                     return {
                         "ok": True,
-                        "text": "Agent is ready.\nruntime_mode: READY\ntelegram: running",
+                        "text": "Ready.\nruntime_mode: READY\ntelegram: running",
                         "route": "status",
                         "selected_route": "status",
                         "handler_name": "test_bridge",
@@ -290,7 +291,8 @@ class TestGoldenPathSmoke(unittest.TestCase):
             skills = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
             orch = Orchestrator(db=db, skills_path=skills, log_path=os.path.join(tmpdir, "agent.log"), timezone="UTC", llm_client=None)
             response = orch.handle_message("hello", "u1")
-            self.assertIn("No chat model available", response.text)
+            self.assertEqual(build_no_llm_public_message(), response.text)
+            self.assertNotIn("No chat model available", response.text)
             self.assertNotIn("Anthropic", response.text)
             db.close()
 

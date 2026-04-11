@@ -135,6 +135,22 @@ def _make_local_fixture(root: Path) -> dict[str, str]:
     }
 
 
+def _make_native_fixture(root: Path) -> str:
+    pack_dir = root / "pack-smoke-native"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    (pack_dir / "package.json").write_text(
+        json.dumps({"name": "pack-smoke-native", "version": "1.0.0"}, ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
+    (pack_dir / "handler.js").write_text(
+        "export function run() {\n"
+        "  return true;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    return str(pack_dir)
+
+
 def _is_dead_end(text: str) -> bool:
     lowered = str(text or "").lower()
     return any(
@@ -154,8 +170,16 @@ def _is_dead_end(text: str) -> bool:
     )
 
 
-def _step_result(route: str, text: str, *, warnings: list[str] | None = None) -> None:
+def _status_text(result: dict[str, Any]) -> str:
+    status = result.get("status")
+    if isinstance(status, int) and status:
+        return str(status)
+    return "ok" if bool(result.get("ok")) else "error"
+
+
+def _step_result(route: str, result: dict[str, Any], text: str, *, warnings: list[str] | None = None) -> None:
     print(f"route: {route}")
+    print(f"status: {_status_text(result)}")
     print(f"first_line: {_first_line(text)}")
     print(f"dead_end_warnings: {', '.join(warnings or []) if warnings else 'none'}")
 
@@ -176,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         created_source_id = source_id
         catalog_path = fixture["catalog_path"]
         pack_dir = fixture["pack_dir"]
+        native_pack_dir = _make_native_fixture(Path(tmpdir))
         remote_id = fixture["remote_id"]
 
         create_payload = {
@@ -207,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
         elif str(source_payload.get("id") or "").strip() != source_id:
             create_warnings.append("source id mismatch")
             exit_code = 1
-        _step_result(f"POST /pack_sources/catalog ({source_id})", create_text, warnings=create_warnings)
+        _step_result(f"POST /pack_sources/catalog ({source_id})", create_result, create_text, warnings=create_warnings)
 
         list_result = _request_json(str(args.base_url), "GET", "/pack_sources", timeout=8.0)
         list_body = list_result.get("payload") if isinstance(list_result.get("payload"), dict) else {}
@@ -227,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         elif source_row is None:
             list_warnings.append("temporary source not visible in /pack_sources")
             exit_code = 1
-        _step_result("GET /pack_sources", list_text, warnings=list_warnings)
+        _step_result("GET /pack_sources", list_result, list_text, warnings=list_warnings)
 
         packs_result = _request_json(
             str(args.base_url),
@@ -253,7 +278,7 @@ def main(argv: list[str] | None = None) -> int:
         elif pack_row is None:
             packs_warnings.append("expected pack not present in list")
             exit_code = 1
-        _step_result(f"GET /pack_sources/{source_id}/packs", pack_text, warnings=packs_warnings)
+        _step_result(f"GET /pack_sources/{source_id}/packs", packs_result, pack_text, warnings=packs_warnings)
 
         search_result = _request_json(
             str(args.base_url),
@@ -280,7 +305,7 @@ def main(argv: list[str] | None = None) -> int:
         elif search_row is None:
             search_warnings.append("expected pack not present in search results")
             exit_code = 1
-        _step_result(f"GET /pack_sources/{source_id}/search?q=smoke", search_text, warnings=search_warnings)
+        _step_result(f"GET /pack_sources/{source_id}/search?q=smoke", search_result, search_text, warnings=search_warnings)
 
         preview_result = _request_json(
             str(args.base_url),
@@ -310,7 +335,12 @@ def main(argv: list[str] | None = None) -> int:
         if _is_dead_end(preview_text):
             preview_warnings.append("preview dead-end wording")
             exit_code = 1
-        _step_result(f"GET /pack_sources/{source_id}/packs/{remote_id}/preview", preview_text, warnings=preview_warnings)
+        _step_result(
+            f"GET /pack_sources/{source_id}/packs/{remote_id}/preview",
+            preview_result,
+            preview_text,
+            warnings=preview_warnings,
+        )
 
         install_target = str((preview.get("install_handoff") or {}).get("source") or pack_dir).strip()
         install_payload = {"path": install_target}
@@ -344,7 +374,99 @@ def main(argv: list[str] | None = None) -> int:
         if _is_dead_end(install_text):
             install_warnings.append("install dead-end wording")
             exit_code = 1
-        _step_result("/packs/install", install_text, warnings=install_warnings)
+        _step_result("/packs/install", install_result, install_text, warnings=install_warnings)
+
+        native_install_result = _request_json(
+            str(args.base_url),
+            "POST",
+            "/packs/install",
+            {"source": native_pack_dir},
+            timeout=20.0,
+        )
+        native_install_body = native_install_result.get("payload") if isinstance(native_install_result.get("payload"), dict) else {}
+        native_install_text = str(
+            native_install_body.get("message")
+            or native_install_body.get("why")
+            or (native_install_body.get("review") or {}).get("summary")
+            or native_install_result.get("error")
+            or ""
+        )
+        native_install_status = str((native_install_body.get("normalization_result") or {}).get("status") or "").strip().lower()
+        native_install_warnings: list[str] = []
+        lowered_native_install = native_install_text.lower()
+        if not native_install_result.get("ok"):
+            native_install_warnings.append("blocked native install failed")
+            exit_code = 1
+        if native_install_status != "blocked":
+            native_install_warnings.append(f"unexpected blocked-native status: {native_install_status or 'missing'}")
+            exit_code = 1
+        if "blocked" not in lowered_native_install:
+            native_install_warnings.append("blocked install wording missing")
+            exit_code = 1
+        if _is_dead_end(native_install_text):
+            native_install_warnings.append("blocked install dead-end wording")
+            exit_code = 1
+        _step_result(
+            "/packs/install (blocked native)",
+            native_install_result,
+            native_install_text,
+            warnings=native_install_warnings,
+        )
+
+        remote_source_url = str(os.environ.get("PACK_ROUTE_SMOKE_REMOTE_URL") or "").strip()
+        if remote_source_url:
+            remote_source_kind = str(os.environ.get("PACK_ROUTE_SMOKE_REMOTE_SOURCE_KIND") or "github_archive").strip() or "github_archive"
+            remote_ref = str(os.environ.get("PACK_ROUTE_SMOKE_REMOTE_REF") or "main").strip() or "main"
+            remote_install_result = _request_json(
+                str(args.base_url),
+                "POST",
+                "/packs/install",
+                {
+                    "source": remote_source_url,
+                    "source_kind": remote_source_kind,
+                    "ref": remote_ref,
+                },
+                timeout=30.0,
+            )
+            remote_install_body = (
+                remote_install_result.get("payload") if isinstance(remote_install_result.get("payload"), dict) else {}
+            )
+            remote_install_text = str(
+                remote_install_body.get("message")
+                or remote_install_body.get("why")
+                or (remote_install_body.get("review") or {}).get("summary")
+                or remote_install_result.get("error")
+                or ""
+            )
+            remote_install_status = str((remote_install_body.get("normalization_result") or {}).get("status") or "").strip().lower()
+            remote_install_warnings: list[str] = []
+            lowered_remote_install = remote_install_text.lower()
+            if not remote_install_result.get("ok"):
+                remote_install_warnings.append("remote install failed")
+                exit_code = 1
+            if remote_install_status not in {"normalized", "partial_safe_import", "blocked"}:
+                remote_install_warnings.append(f"unexpected remote status: {remote_install_status or 'missing'}")
+                exit_code = 1
+            if remote_install_status == "normalized" and "normalized" not in lowered_remote_install:
+                remote_install_warnings.append("normalized install wording missing")
+                exit_code = 1
+            if remote_install_status == "partial_safe_import" and not any(
+                token in lowered_remote_install for token in ("safe parts", "quarantined")
+            ):
+                remote_install_warnings.append("partial import wording missing")
+                exit_code = 1
+            if remote_install_status == "blocked" and "blocked" not in lowered_remote_install:
+                remote_install_warnings.append("blocked install wording missing")
+                exit_code = 1
+            if _is_dead_end(remote_install_text):
+                remote_install_warnings.append("remote install dead-end wording")
+                exit_code = 1
+            _step_result(
+                "/packs/install (remote)",
+                remote_install_result,
+                remote_install_text,
+                warnings=remote_install_warnings,
+            )
 
         if not args.keep_source:
             cleanup_result = _request_json(

@@ -124,7 +124,7 @@ class TestAgentWorkflows(unittest.TestCase):
 
         install_preview = self._chat(runtime, "install ollama:qwen2.5:7b-instruct")
         install_preview_text = str((install_preview.get("assistant") or {}).get("content") or "")
-        self.assertIn("Reply yes to proceed or no to cancel.", install_preview_text)
+        self.assertIn("Say yes to continue, or no to cancel.", install_preview_text)
         self.assertIn("canonical model manager", install_preview_text)
 
         install_confirm = self._chat(runtime, "yes")
@@ -140,7 +140,7 @@ class TestAgentWorkflows(unittest.TestCase):
 
         switch_preview = self._chat(runtime, "switch to ollama:qwen2.5:7b-instruct")
         switch_preview_text = str((switch_preview.get("assistant") or {}).get("content") or "")
-        self.assertIn("Reply yes to proceed or no to cancel.", switch_preview_text)
+        self.assertIn("Say yes to continue, or no to cancel.", switch_preview_text)
 
         switch_confirm = self._chat(runtime, "yes")
         switch_confirm_text = str((switch_confirm.get("assistant") or {}).get("content") or "")
@@ -229,7 +229,7 @@ class TestAgentWorkflows(unittest.TestCase):
         )
         blocked_text = str((blocked.get("assistant") or {}).get("content") or "")
         self.assertIn("openrouter", blocked_text.lower())
-        self.assertIn("reply yes to proceed or no to cancel.", blocked_text.lower())
+        self.assertIn("say yes to continue, or no to cancel.", blocked_text.lower())
 
         ok_mode, mode_body = runtime.llm_control_mode_set({"mode": "controlled", "confirm": True, "actor": "test"})
         self.assertTrue(ok_mode)
@@ -237,7 +237,7 @@ class TestAgentWorkflows(unittest.TestCase):
 
         preview = self._chat(runtime, "switch to openrouter:openai/gpt-4o-mini")
         preview_text = str((preview.get("assistant") or {}).get("content") or "")
-        self.assertIn("Reply yes to proceed or no to cancel.", preview_text)
+        self.assertIn("Say yes to continue, or no to cancel.", preview_text)
 
         success = self._chat(runtime, "yes")
         success_text = str((success.get("assistant") or {}).get("content") or "")

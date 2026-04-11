@@ -258,8 +258,222 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertEqual("main", install_payload["pack"]["source"]["ref"])
         self.assertTrue(install_payload["pack"]["source"]["archive_sha256"])
         self.assertTrue(install_payload["pack"]["quarantine_path"])
-        self.assertTrue(install_payload["pack"]["normalized_path"])
-        self.assertIn("I fetched a snapshot", install_payload["review"]["summary"])
+
+    def test_pack_state_endpoint_reports_installed_available_and_blocked_packs(self) -> None:
+        def _seed_pack(*, pack_id: str, name: str, status: str, content_hash: str, source_key: str, capabilities: list[str], enabled: bool = False) -> None:
+            normalized_path = Path(self.tmpdir.name) / f"{pack_id}.normalized"
+            if status != "blocked":
+                normalized_path.mkdir(parents=True, exist_ok=True)
+            self.runtime.pack_store.record_external_pack(
+                canonical_pack={
+                    "id": pack_id,
+                    "name": name,
+                    "version": "1.0.0",
+                    "type": "skill",
+                    "source": {
+                        "origin": "local_registry",
+                        "display_name": "Local Registry",
+                        "kind": "local_catalog",
+                        "url": "file:///tmp/local-registry",
+                    },
+                    "pack_identity": {
+                        "canonical_id": pack_id,
+                        "content_hash": content_hash,
+                        "source_key": source_key,
+                    },
+                    "capabilities": {
+                        "summary": ", ".join(capabilities),
+                        "declared": capabilities,
+                        "inferred": [],
+                    },
+                    "trust": {"level": "review_required", "flags": []},
+                },
+                classification="portable_text_skill" if status != "blocked" else "unknown_pack",
+                status=status,
+                risk_report={"level": "low", "score": 0.1, "flags": [], "blocked_reason": "missing GPU acceleration" if status == "blocked" else None},
+                review_envelope={
+                    "pack_name": name,
+                    "review_required": status != "normalized",
+                    "safe_options": ["Review it", "Ignore it"],
+                    "summary": f"{name} review summary",
+                },
+                quarantine_path=None,
+                normalized_path=str(normalized_path) if status != "blocked" else None,
+            )
+            if enabled:
+                self.runtime.pack_store.set_enabled(pack_id, True)
+
+        _seed_pack(
+            pack_id="pack.voice.local_fast",
+            name="Local Voice",
+            status="normalized",
+            content_hash="hash-voice",
+            source_key="voice",
+            capabilities=["voice_output"],
+            enabled=True,
+        )
+        _seed_pack(
+            pack_id="pack.avatar.basic",
+            name="Basic Avatar",
+            status="partial_safe_import",
+            content_hash="hash-avatar",
+            source_key="avatar",
+            capabilities=["avatar_visual"],
+        )
+        _seed_pack(
+            pack_id="pack.camera.robot",
+            name="Robot Camera",
+            status="blocked",
+            content_hash="hash-camera",
+            source_key="camera",
+            capabilities=["camera_feed"],
+        )
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Registry", "kind": "local_catalog", "enabled": True, "allowed_by_policy": True}
+                ]
+
+            def list_packs(self, source_id: str) -> dict[str, object]:
+                assert source_id == "local"
+                return {
+                    "source": {"id": "local", "name": "Local Registry", "kind": "local_catalog", "enabled": True},
+                    "policy": {"enabled": True, "allowlisted": True},
+                    "packs": [
+                        {
+                            "remote_id": "robot-camera",
+                            "name": "Robot Camera",
+                            "summary": "Robot camera feed integration.",
+                            "artifact_type_hint": "native_code_pack",
+                            "installable_by_current_policy": False,
+                            "install_block_reason_if_known": "missing GPU acceleration",
+                            "source_kind_hint": "github_archive",
+                            "latest_ref_hint": "main",
+                            "source_url": "https://example.invalid/robot-camera",
+                            "tags": ["camera_feed"],
+                            "badges": ["blocked"],
+                        },
+                        {
+                            "remote_id": "text-speech",
+                            "name": "Local Voice",
+                            "summary": "Local speech output for this machine.",
+                            "artifact_type_hint": "portable_text_skill",
+                            "installable_by_current_policy": True,
+                            "source_kind_hint": "github_archive",
+                            "latest_ref_hint": "main",
+                            "source_url": "https://example.invalid/local-voice",
+                            "tags": ["voice_output"],
+                            "badges": ["ready"],
+                        },
+                    ],
+                    "from_cache": True,
+                    "stale": False,
+                    "fetched_at": "2026-04-09T00:00:00Z",
+                }
+
+        self.runtime._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        handler = _HandlerForTest(self.runtime, "/packs/state")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(
+            {
+                "total": 5,
+                "installed": 3,
+                "enabled": 0,
+                "healthy": 1,
+                "machine_usable": 1,
+                "task_unconfirmed": 1,
+                "usable": 0,
+                "blocked": 2,
+                "available": 1,
+            },
+            payload["summary"],
+        )
+        self.assertEqual("Ready", payload["state_label"])
+        self.assertIsNone(payload["recovery"])
+        self.assertEqual(3, len(payload["packs"]))
+        self.assertEqual(2, len(payload["available_packs"]))
+        installed_states = {row["state"]: row for row in payload["packs"]}
+        self.assertEqual("Installed · Healthy", installed_states["installed_healthy"]["state_label"])
+        self.assertEqual("Installed and healthy, but task usability is not confirmed.", installed_states["installed_healthy"]["status_note"])
+        self.assertIsNone(installed_states["installed_healthy"]["enabled"])
+        self.assertEqual("unknown", installed_states["installed_healthy"]["normalized_state"]["activation_state"])
+        self.assertTrue(installed_states["installed_healthy"]["healthy"])
+        self.assertTrue(installed_states["installed_healthy"]["machine_usable"])
+        self.assertFalse(installed_states["installed_healthy"]["usable"])
+        self.assertEqual("Installed · Limited", installed_states["installed_limited"]["state_label"])
+        self.assertIn("compatibility is not fully confirmed", installed_states["installed_limited"]["status_note"])
+        self.assertIsNone(installed_states["installed_limited"]["enabled"])
+        self.assertFalse(installed_states["installed_limited"]["healthy"])
+        self.assertFalse(installed_states["installed_limited"]["machine_usable"])
+        self.assertFalse(installed_states["installed_limited"]["usable"])
+        self.assertEqual("Installed · Blocked", installed_states["installed_blocked"]["state_label"])
+        self.assertIn("blocked during import", installed_states["installed_blocked"]["status_note"])
+        self.assertIsNone(installed_states["installed_blocked"]["enabled"])
+        self.assertFalse(installed_states["installed_blocked"]["healthy"])
+        self.assertFalse(installed_states["installed_blocked"]["machine_usable"])
+        self.assertFalse(installed_states["installed_blocked"]["usable"])
+
+        available_states = {row["state"]: row for row in payload["available_packs"]}
+        self.assertIn("Available", available_states["available"]["state_label"])
+        self.assertIn("Available to preview", available_states["available"]["status_note"])
+        self.assertFalse(available_states["available"]["installed"])
+        self.assertFalse(available_states["available"]["enabled"])
+        self.assertEqual("previewable", available_states["available"]["normalized_state"]["discovery_state"])
+        self.assertEqual("installable", available_states["available"]["normalized_state"]["install_state"])
+        self.assertEqual("unknown", available_states["available"]["normalized_state"]["health_state"])
+        self.assertEqual("unconfirmed", available_states["available"]["normalized_state"]["compatibility_state"])
+        self.assertEqual("unknown", available_states["available"]["normalized_state"]["usability_state"])
+        self.assertFalse(available_states["available"]["normalized_state"]["machine_usable"])
+        self.assertEqual("Blocked", available_states["blocked"]["state_label"])
+        self.assertIn("missing GPU acceleration", available_states["blocked"]["blocker"])
+        self.assertFalse(available_states["blocked"]["usable"])
+        self.assertEqual("blocked", available_states["blocked"]["normalized_state"]["compatibility_state"])
+        self.assertEqual("failing", available_states["blocked"]["normalized_state"]["health_state"])
+        self.assertEqual("unusable", available_states["blocked"]["normalized_state"]["usability_state"])
+
+    def test_pack_state_endpoint_handles_empty_state_without_guessing(self) -> None:
+        class _EmptyPackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def list_packs(self, source_id: str) -> dict[str, object]:
+                raise AssertionError(f"unexpected source lookup: {source_id}")
+
+        self.runtime._pack_registry_discovery = lambda: _EmptyPackDiscovery()  # type: ignore[assignment]
+
+        handler = _HandlerForTest(self.runtime, "/packs/state")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["read_only"])
+        self.assertEqual(
+            {
+                "total": 0,
+                "installed": 0,
+                "enabled": 0,
+                "healthy": 0,
+                "machine_usable": 0,
+                "task_unconfirmed": 0,
+                "usable": 0,
+                "blocked": 0,
+                "available": 0,
+            },
+            payload["summary"],
+        )
+        self.assertEqual("Ready", payload["state_label"])
+        self.assertIsNone(payload["recovery"])
+        self.assertEqual([], payload["packs"])
+        self.assertEqual([], payload["available_packs"])
+        self.assertEqual([], payload["source_warnings"])
 
     def test_external_pack_is_usable_through_chat_and_removed_cleanly(self) -> None:
         fixture_root = Path(__file__).parent / "fixtures" / "reference_packs" / "anthropic_clean_skill" / "source"
@@ -287,8 +501,12 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         orchestrator.llm_client = fake_llm
         with mock.patch.object(orchestrator, "_llm_chat_available", return_value=True):
             response = orchestrator.handle_message("What is Repo Helper for?", "user-a")
-        self.assertIn("safe imported text pack", response.text.lower())
+        self.assertIn("available as an imported pack", response.text.lower())
         self.assertIn("repo helper", response.text.lower())
+        self.assertNotIn("safe imported text pack", response.text.lower())
+        self.assertNotIn("example prompts:", response.text.lower())
+        self.assertNotIn("inputs:", response.text.lower())
+        self.assertNotIn("behavior:", response.text.lower())
 
         orchestrator._pack_store._conn.execute("BEGIN")
         orchestrator._pack_store.list_external_packs()
@@ -314,6 +532,8 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertIn("reinstall", after_removal.text.lower())
         self.assertNotIn("safe imported text pack", after_removal.text.lower())
         self.assertNotIn("example prompts:", after_removal.text.lower())
+        self.assertNotIn("inputs:", after_removal.text.lower())
+        self.assertNotIn("behavior:", after_removal.text.lower())
         self.assertIn("quarantined and normalized", install_payload["message"].lower())
         self.assertIn("metadata/normalization.json", install_payload["why"])
 

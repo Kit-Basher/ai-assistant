@@ -6,7 +6,11 @@
 - Product/runtime contract: `PRODUCT_RUNTIME_SPEC.md`
 - Current branch reality: `PROJECT_STATUS.md`
 - Install/recovery path: `docs/operator/SETUP.md`
+- Release bundle path: `bash scripts/build_release_bundle.sh --clean`
+- Debian package path: `bash scripts/build_deb.sh --clean`
 - Doctor/diagnostics path: `docs/operator/doctor.md`
+- Post-release operations and incident handling: `docs/operator/OPERATIONS.md`
+- Release-note template: `docs/operator/RELEASE_NOTES_TEMPLATE.md`
 
 ## Runtime Modes
 
@@ -28,6 +32,20 @@ User service:
 - `systemctl --user restart personal-agent-api.service`
 - `systemctl --user enable --now personal-agent-api.service`
 - reboot resilience: `loginctl enable-linger "$USER"`
+
+Desktop launcher:
+- recommended install for a new user:
+  - `bash scripts/install_local.sh --desktop-launcher`
+- distributed install:
+  - `bash install.sh`
+- Debian install:
+  - `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
+- launcher-only install/update:
+  - `bash scripts/install_desktop_launcher.sh`
+- it installs a menu entry named `Personal Agent`
+- it registers the user service if needed, then opens the existing local web UI
+  in the default browser after a bounded `/ready` check
+- use it as a front door only; it does not create a second runtime mode
 
 Canonical local paths:
 - code: `~/personal-agent`
@@ -63,12 +81,33 @@ Canonical support/debug path:
   - safe local fixes: `.venv/bin/python -m agent doctor --fix`
   - strict mode (legacy timer checks): `AGENT_DOCTOR_REQUIRE_SYSTEMD_UNITS=1 .venv/bin/python scripts/doctor.py`
 - Test sweep:
-  - canonical release gate: `python scripts/release_smoke.py`
+  - canonical release gate: `python scripts/release_gate.py`
+  - fast pre-check: `python scripts/release_smoke.py`
   - heavier follow-up validation: `python scripts/release_validation_extended.py`
   - live hardware answer-shape smoke: `python scripts/hardware_observe_smoke.py`
   - live product-path smoke family: `python scripts/live_product_smoke.py`
+  - live Telegram parity smoke: `python scripts/telegram_smoke.py`
+  - live hardware/discovery smoke: `python scripts/hardware_discovery_smoke.py`
+  - live discovery-quality smoke: `python scripts/discovery_quality_smoke.py`
   - live pack-route smoke: `python scripts/pack_route_smoke.py`
+  - live reference pack workflow smoke: `python scripts/reference_pack_workflow_smoke.py`
   - live web UI smoke: `python scripts/webui_smoke.py`
+  - brief transcript check: `python scripts/brief_smoke.py`
+- optional live hardware/discovery follow-up after release smoke: `python scripts/release_validation_extended.py --with-live-smokes`
+
+Release and support handoff:
+- `docs/operator/RELEASE.md`
+- `docs/operator/OPERATIONS.md`
+- `docs/operator/BACKUP_RESTORE.md`
+- `docs/operator/KNOWN_LIMITS.md`
+- `GET /version` for support and release verification
+
+Advanced drawer state panel:
+- read-only `State` section backed by `GET /state`
+- read-only `Packs` section backed by `GET /packs/state`
+
+Pack smoke remote-download mode:
+- Set `PACK_ROUTE_SMOKE_REMOTE_URL` before running `python scripts/pack_route_smoke.py`.
 
 Runtime mode contract (all surfaces):
 - `READY`: normal operation.

@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 import time
+import sqlite3
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -255,6 +257,7 @@ class PackRegistryDiscoveryService:
         sources_path: str | None = None,
         policy_path: str | None = None,
         opener: Any | None = None,
+        lock: threading.RLock | None = None,
     ) -> None:
         self.pack_store = pack_store
         self.storage_root = Path(storage_root).expanduser().resolve()
@@ -269,6 +272,7 @@ class PackRegistryDiscoveryService:
             else (self.storage_root / "registry_source_policy.json").resolve()
         )
         self._opener = opener or urllib.request.build_opener(_HttpsOnlyRedirectHandler())
+        self._lock = lock or threading.RLock()
 
     def get_catalog(self) -> dict[str, Any]:
         document, persisted_exists = self._read_sources_document()
@@ -302,23 +306,24 @@ class PackRegistryDiscoveryService:
         *,
         changed_by: str | None = None,
     ) -> dict[str, Any]:
-        normalized_row = self._normalize_source_write(payload, create=True)
-        existing_ids = {source.id for source in self._load_sources()}
-        if str(normalized_row.get("id") or "").strip() in existing_ids:
-            raise ValueError("duplicate_source_id")
-        document, _ = self._read_sources_document()
-        next_sources = self._raw_sources(document)
-        next_sources.append(normalized_row)
-        next_document = self._with_catalog_audit_update(
-            current_document=document,
-            next_sources=next_sources,
-            changed_by=changed_by,
-            changed_fields=sorted(str(key) for key in payload.keys()),
-            source_id=str(normalized_row.get("id") or ""),
-            operation="create",
-        )
-        self._write_sources_document(next_document)
-        return self.get_catalog_source(str(normalized_row.get("id") or ""))
+        with self._lock:
+            normalized_row = self._normalize_source_write(payload, create=True)
+            existing_ids = {source.id for source in self._load_sources()}
+            if str(normalized_row.get("id") or "").strip() in existing_ids:
+                raise ValueError("duplicate_source_id")
+            document, _ = self._read_sources_document()
+            next_sources = self._raw_sources(document)
+            next_sources.append(normalized_row)
+            next_document = self._with_catalog_audit_update(
+                current_document=document,
+                next_sources=next_sources,
+                changed_by=changed_by,
+                changed_fields=sorted(str(key) for key in payload.keys()),
+                source_id=str(normalized_row.get("id") or ""),
+                operation="create",
+            )
+            self._write_sources_document(next_document)
+            return self.get_catalog_source(str(normalized_row.get("id") or ""))
 
     def update_catalog_source(
         self,
@@ -327,53 +332,55 @@ class PackRegistryDiscoveryService:
         *,
         changed_by: str | None = None,
     ) -> dict[str, Any]:
-        source = self._source_by_id(source_id)
-        normalized = str(source_id or "").strip()
-        document, _ = self._read_sources_document()
-        current_row = self._raw_source_for_id(document, normalized) or self._source_to_persisted_row(source)
-        next_row = self._normalize_source_write(
-            payload,
-            create=False,
-            current_row=current_row,
-            source_id=normalized,
-        )
-        next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
-        next_sources.append(next_row)
-        next_document = self._with_catalog_audit_update(
-            current_document=document,
-            next_sources=next_sources,
-            changed_by=changed_by,
-            changed_fields=sorted(str(key) for key in payload.keys()),
-            source_id=normalized,
-            operation="update",
-        )
-        self._write_sources_document(next_document)
-        return self.get_catalog_source(normalized)
+        with self._lock:
+            source = self._source_by_id(source_id)
+            normalized = str(source_id or "").strip()
+            document, _ = self._read_sources_document()
+            current_row = self._raw_source_for_id(document, normalized) or self._source_to_persisted_row(source)
+            next_row = self._normalize_source_write(
+                payload,
+                create=False,
+                current_row=current_row,
+                source_id=normalized,
+            )
+            next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
+            next_sources.append(next_row)
+            next_document = self._with_catalog_audit_update(
+                current_document=document,
+                next_sources=next_sources,
+                changed_by=changed_by,
+                changed_fields=sorted(str(key) for key in payload.keys()),
+                source_id=normalized,
+                operation="update",
+            )
+            self._write_sources_document(next_document)
+            return self.get_catalog_source(normalized)
 
     def delete_catalog_source(self, source_id: str, *, changed_by: str | None = None) -> dict[str, Any]:
-        source = self._source_by_id(source_id)
-        normalized = str(source_id or "").strip()
-        document, _ = self._read_sources_document()
-        current_row = self._raw_source_for_id(document, normalized) or self._source_to_persisted_row(source)
-        next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
-        next_document = self._with_catalog_audit_update(
-            current_document=document,
-            next_sources=next_sources,
-            changed_by=changed_by,
-            changed_fields=sorted({"source_id", *[str(key) for key in current_row.keys()]}),
-            source_id=normalized,
-            operation="delete",
-        )
-        self._write_sources_document(next_document)
-        policy_cleanup = self._remove_policy_override_for_deleted_source(normalized, changed_by=changed_by)
-        return {
-            "path": str(self.sources_path),
-            "deleted_source_id": normalized,
-            "deleted_source": source.to_dict(),
-            "persisted_catalog": next_document,
-            "policy_override_removed": bool(policy_cleanup.get("removed", False)),
-            "policy_cleanup": policy_cleanup,
-        }
+        with self._lock:
+            source = self._source_by_id(source_id)
+            normalized = str(source_id or "").strip()
+            document, _ = self._read_sources_document()
+            current_row = self._raw_source_for_id(document, normalized) or self._source_to_persisted_row(source)
+            next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
+            next_document = self._with_catalog_audit_update(
+                current_document=document,
+                next_sources=next_sources,
+                changed_by=changed_by,
+                changed_fields=sorted({"source_id", *[str(key) for key in current_row.keys()]}),
+                source_id=normalized,
+                operation="delete",
+            )
+            self._write_sources_document(next_document)
+            policy_cleanup = self._remove_policy_override_for_deleted_source(normalized, changed_by=changed_by)
+            return {
+                "path": str(self.sources_path),
+                "deleted_source_id": normalized,
+                "deleted_source": source.to_dict(),
+                "persisted_catalog": next_document,
+                "policy_override_removed": bool(policy_cleanup.get("removed", False)),
+                "policy_cleanup": policy_cleanup,
+            }
 
     def get_policy(self) -> dict[str, Any]:
         policy = self._load_policy()
@@ -409,21 +416,22 @@ class PackRegistryDiscoveryService:
         }
 
     def update_global_policy(self, payload: dict[str, Any], *, changed_by: str | None = None) -> dict[str, Any]:
-        changed_fields = self._validate_policy_patch(payload)
-        document, _ = self._read_policy_document()
-        next_defaults = dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {}
-        for field in changed_fields:
-            next_defaults[field] = payload.get(field)
-        next_document = self._with_audit_update(
-            current_document=document,
-            next_defaults=next_defaults,
-            next_overrides=self._raw_overrides(document),
-            changed_by=changed_by,
-            changed_fields=changed_fields,
-            scope="defaults",
-        )
-        self._write_policy_document(next_document)
-        return self.get_policy()
+        with self._lock:
+            changed_fields = self._validate_policy_patch(payload)
+            document, _ = self._read_policy_document()
+            next_defaults = dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {}
+            for field in changed_fields:
+                next_defaults[field] = payload.get(field)
+            next_document = self._with_audit_update(
+                current_document=document,
+                next_defaults=next_defaults,
+                next_overrides=self._raw_overrides(document),
+                changed_by=changed_by,
+                changed_fields=changed_fields,
+                scope="defaults",
+            )
+            self._write_policy_document(next_document)
+            return self.get_policy()
 
     def update_source_policy(
         self,
@@ -432,27 +440,28 @@ class PackRegistryDiscoveryService:
         *,
         changed_by: str | None = None,
     ) -> dict[str, Any]:
-        source = self._source_by_id(source_id)
-        changed_fields = self._validate_policy_patch(payload)
-        document, _ = self._read_policy_document()
-        overrides = self._raw_overrides(document)
-        existing = self._raw_override_for_source(document, source.id) or {"source_id": source.id}
-        next_override = dict(existing)
-        next_override["source_id"] = source.id
-        for field in changed_fields:
-            next_override[field] = payload.get(field)
-        next_overrides = [row for row in overrides if str(row.get("source_id") or "").strip() != source.id]
-        next_overrides.append(next_override)
-        next_document = self._with_audit_update(
-            current_document=document,
-            next_defaults=dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {},
-            next_overrides=next_overrides,
-            changed_by=changed_by,
-            changed_fields=changed_fields,
-            scope=f"source:{source.id}",
-        )
-        self._write_policy_document(next_document)
-        return self.get_source_policy(source.id)
+        with self._lock:
+            source = self._source_by_id(source_id)
+            changed_fields = self._validate_policy_patch(payload)
+            document, _ = self._read_policy_document()
+            overrides = self._raw_overrides(document)
+            existing = self._raw_override_for_source(document, source.id) or {"source_id": source.id}
+            next_override = dict(existing)
+            next_override["source_id"] = source.id
+            for field in changed_fields:
+                next_override[field] = payload.get(field)
+            next_overrides = [row for row in overrides if str(row.get("source_id") or "").strip() != source.id]
+            next_overrides.append(next_override)
+            next_document = self._with_audit_update(
+                current_document=document,
+                next_defaults=dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {},
+                next_overrides=next_overrides,
+                changed_by=changed_by,
+                changed_fields=changed_fields,
+                scope=f"source:{source.id}",
+            )
+            self._write_policy_document(next_document)
+            return self.get_source_policy(source.id)
 
     def list_sources(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
@@ -564,20 +573,21 @@ class PackRegistryDiscoveryService:
         return []
 
     def _read_sources_document(self) -> tuple[dict[str, Any], bool]:
-        if not self.sources_path.exists():
-            return {"sources": [], "meta": {}}, False
-        try:
-            raw = json.loads(self.sources_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            raw = {}
-        if isinstance(raw, list):
-            return {"sources": [dict(row) for row in raw if isinstance(row, dict)], "meta": {}}, True
-        if not isinstance(raw, dict):
-            raw = {}
-        return {
-            "sources": self._raw_sources(raw),
-            "meta": dict(raw.get("meta")) if isinstance(raw.get("meta"), dict) else {},
-        }, True
+        with self._lock:
+            if not self.sources_path.exists():
+                return {"sources": [], "meta": {}}, False
+            try:
+                raw = json.loads(self.sources_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+            if isinstance(raw, list):
+                return {"sources": [dict(row) for row in raw if isinstance(row, dict)], "meta": {}}, True
+            if not isinstance(raw, dict):
+                raw = {}
+            return {
+                "sources": self._raw_sources(raw),
+                "meta": dict(raw.get("meta")) if isinstance(raw.get("meta"), dict) else {},
+            }, True
 
     @staticmethod
     def _raw_sources(document: dict[str, Any]) -> list[dict[str, Any]]:
@@ -704,14 +714,15 @@ class PackRegistryDiscoveryService:
         return next_document
 
     def _write_sources_document(self, document: dict[str, Any]) -> None:
-        payload = {
-            "sources": self._normalize_sources_document(document),
-            "meta": dict(document.get("meta")) if isinstance(document.get("meta"), dict) else {},
-        }
-        self.sources_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.sources_path.with_name(f"{self.sources_path.name}.tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp_path.replace(self.sources_path)
+        with self._lock:
+            payload = {
+                "sources": self._normalize_sources_document(document),
+                "meta": dict(document.get("meta")) if isinstance(document.get("meta"), dict) else {},
+            }
+            self.sources_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.sources_path.with_name(f"{self.sources_path.name}.tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            tmp_path.replace(self.sources_path)
 
     def _normalize_sources_document(self, document: dict[str, Any]) -> list[dict[str, Any]]:
         return [
@@ -839,19 +850,20 @@ class PackRegistryDiscoveryService:
         }
 
     def _read_policy_document(self) -> tuple[dict[str, Any], bool]:
-        if not self.policy_path.exists():
-            return {"defaults": {}, "overrides": [], "meta": {}}, False
-        try:
-            raw = json.loads(self.policy_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            raw = {}
-        if not isinstance(raw, dict):
-            raw = {}
-        return {
-            "defaults": dict(raw.get("defaults")) if isinstance(raw.get("defaults"), dict) else {},
-            "overrides": self._raw_overrides(raw),
-            "meta": dict(raw.get("meta")) if isinstance(raw.get("meta"), dict) else {},
-        }, True
+        with self._lock:
+            if not self.policy_path.exists():
+                return {"defaults": {}, "overrides": [], "meta": {}}, False
+            try:
+                raw = json.loads(self.policy_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+            if not isinstance(raw, dict):
+                raw = {}
+            return {
+                "defaults": dict(raw.get("defaults")) if isinstance(raw.get("defaults"), dict) else {},
+                "overrides": self._raw_overrides(raw),
+                "meta": dict(raw.get("meta")) if isinstance(raw.get("meta"), dict) else {},
+            }, True
 
     @staticmethod
     def _raw_overrides(document: dict[str, Any]) -> list[dict[str, Any]]:
@@ -943,16 +955,17 @@ class PackRegistryDiscoveryService:
         return next_document
 
     def _write_policy_document(self, document: dict[str, Any]) -> None:
-        payload = {
-            "defaults": dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {},
-            "overrides": self._raw_overrides(document),
-            "meta": dict(document.get("meta")) if isinstance(document.get("meta"), dict) else {},
-        }
-        self._load_policy_from_document(payload)
-        self.policy_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.policy_path.with_name(f"{self.policy_path.name}.tmp")
-        tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        tmp_path.replace(self.policy_path)
+        with self._lock:
+            payload = {
+                "defaults": dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {},
+                "overrides": self._raw_overrides(document),
+                "meta": dict(document.get("meta")) if isinstance(document.get("meta"), dict) else {},
+            }
+            self._load_policy_from_document(payload)
+            self.policy_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.policy_path.with_name(f"{self.policy_path.name}.tmp")
+            tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            tmp_path.replace(self.policy_path)
 
     def _validate_policy_patch(self, payload: dict[str, Any]) -> list[str]:
         if not isinstance(payload, dict):
@@ -1131,7 +1144,7 @@ class PackRegistryDiscoveryService:
         persist_cache: bool = True,
     ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         now_ts = int(time.time())
-        cached = self.pack_store.get_registry_source_cache(source.id)
+        cached = self._get_registry_source_cache_with_retry(source.id)
         if isinstance(cached, dict) and int(cached.get("expires_at") or 0) >= now_ts:
             return list(cached.get("listings") if isinstance(cached.get("listings"), list) else []), {
                 "from_cache": True,
@@ -1167,6 +1180,20 @@ class PackRegistryDiscoveryService:
                     "fetched_at": self._ts_to_iso(int(cached.get("fetched_at") or 0)),
                 }
             raise
+
+    def _get_registry_source_cache_with_retry(self, source_id: str) -> dict[str, Any] | None:
+        delay_seconds = 0.05
+        for attempt in range(3):
+            try:
+                return self.pack_store.get_registry_source_cache(source_id)
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" not in message and "busy" not in message:
+                    raise
+                if attempt >= 2:
+                    return None
+                time.sleep(delay_seconds * (attempt + 1))
+        return None
 
     def _fetch_catalog(self, source: RegistrySource) -> Any:
         if source.kind == REGISTRY_KIND_LOCAL_CATALOG:

@@ -11,11 +11,13 @@ import time
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.chat_response_serializer import SerializedChatResponse
 from agent.config import Config
+from agent.intent.assessment import IntentAssessment, IntentCandidate
 from agent.llm.chat_preflight import PreparedChatRequest
 from agent.llm.model_manager import (
     CanonicalModelManager,
@@ -24,8 +26,10 @@ from agent.llm.model_manager import (
 )
 from agent.llm.types import LLMError, Response, Usage
 from agent.model_watch_catalog import write_snapshot_atomic
+from agent.public_chat import build_no_llm_public_message
 from agent.modelops.discovery import ModelInfo
 from agent.orchestrator import OrchestratorResponse
+from agent.safe_mode_ux import build_safe_mode_paused_message
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -1239,11 +1243,12 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("openrouter", meta.get("provider"))
         self.assertEqual("openrouter:base-chat", meta.get("model"))
         self.assertEqual("generic_chat", meta.get("route"))
-        self.assertEqual([], meta.get("attempts"))
-        self.assertEqual(0, meta.get("duration_ms"))
         self.assertFalse(bool(meta.get("used_llm")))
-        policy = meta.get("selection_policy") if isinstance(meta.get("selection_policy"), dict) else {}
-        self.assertEqual("premium_over_cap", policy.get("mode"))
+        self.assertNotIn("attempts", meta)
+        self.assertNotIn("duration_ms", meta)
+        self.assertNotIn("selection_policy", meta)
+        self.assertNotIn("source_surface", meta)
+        self.assertNotIn("route_reason", meta)
 
     def test_chat_ordinary_message_still_works_through_orchestrator(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -3665,22 +3670,27 @@ class TestAPIServerRuntime(unittest.TestCase):
 
         payload = {"messages": [{"role": "user", "content": "fix it"}]}
         handler = _HandlerForTest(runtime, payload)
-        with patch.object(
+        with patch("agent.api_server.classify_ambiguity", return_value=type("Verdict", (), {"ambiguous": False})()), patch.object(
             runtime,
-            "llm_availability_state",
-            return_value={"available": True, "reason": "ok"},
-        ), patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+            "chat",
+            return_value=(
+                True,
+                {
+                    "ok": True,
+                    "assistant": {"content": "generic reply"},
+                    "message": "generic reply",
+                    "meta": {"route": "generic_chat"},
+                },
+            ),
+        ) as chat_mock:
             handler.do_POST()
 
         response = handler.response_payload
         self.assertEqual(200, handler.status_code)
         self.assertEqual(True, response.get("ok"))
-        self.assertEqual("needs_clarification", response.get("error_kind"))
-        message = str(response.get("message") or "")
-        self.assertIn("Do you mean:", message)
-        self.assertIn("A)", message)
-        self.assertIn("B)", message)
-        self.assertNotIn("1)", message)
+        self.assertEqual("generic_chat", (response.get("meta") or {}).get("route"))
+        self.assertEqual("generic reply", response.get("message"))
+        chat_mock.assert_called_once()
 
     def test_chat_runtime_status_queries_bypass_intent_chooser(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4691,30 +4701,142 @@ class TestAPIServerRuntime(unittest.TestCase):
                 self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
 
         first = _HandlerForTest(runtime, {"messages": [{"role": "user", "content": "fix it"}]})
-        with patch.object(
+        with patch("agent.api_server.classify_ambiguity", return_value=type("Verdict", (), {"ambiguous": False})()), patch.object(
             runtime,
-            "llm_availability_state",
-            return_value={"available": False, "reason": "provider_unhealthy"},
-        ), patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+            "chat",
+            return_value=(
+                True,
+                {
+                    "ok": True,
+                    "assistant": {"content": "I’m not ready to chat yet. Open Setup to finish getting me ready."},
+                    "message": "I’m not ready to chat yet. Open Setup to finish getting me ready.",
+                    "meta": {"route": "generic_chat"},
+                },
+            ),
+        ):
             first.do_POST()
 
         response_first = first.response_payload
         self.assertEqual(200, first.status_code)
         self.assertEqual(True, response_first.get("ok"))
         first_message = str(response_first.get("message") or "")
-        self.assertIn("1)", first_message)
-        self.assertIn("2)", first_message)
-        self.assertIn("3)", first_message)
-        self.assertIn("Reply 1, 2, or 3.", first_message)
+        self.assertIn("I’m not ready to chat yet", first_message)
+        self.assertIn("Open Setup", first_message)
+        self.assertNotIn("1)", first_message)
+        self.assertNotIn("2)", first_message)
+        self.assertNotIn("3)", first_message)
 
         second = _HandlerForTest(runtime, {"messages": [{"role": "user", "content": "1"}]})
-        with patch.object(runtime, "chat", side_effect=AssertionError("chat should not be called")):
+        with patch("agent.api_server.classify_ambiguity", return_value=type("Verdict", (), {"ambiguous": False})()), patch.object(
+            runtime,
+            "chat",
+            return_value=(
+                True,
+                {
+                    "ok": True,
+                    "assistant": {"content": "I’m not ready to chat yet. Open Setup to finish getting me ready."},
+                    "message": "I’m not ready to chat yet. Open Setup to finish getting me ready.",
+                    "meta": {"route": "generic_chat"},
+                },
+            ),
+        ):
             second.do_POST()
         response_second = second.response_payload
         self.assertEqual(200, second.status_code)
         self.assertEqual(True, response_second.get("ok"))
-        self.assertTrue(bool(response_second.get("did_work")))
-        self.assertIn("Current provider/model:", str(response_second.get("message") or ""))
+        self.assertIn("I’m not ready to chat yet", str(response_second.get("message") or ""))
+
+    def test_chat_no_llm_returns_canonical_public_guidance_without_internal_details(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": False,
+            "phase": "degraded",
+            "startup_phase": "starting",
+            "runtime_mode": "BOOTSTRAP_REQUIRED",
+            "summary": "Setup needed. No chat model is ready yet.",
+            "runtime_status": {
+                "runtime_mode": "BOOTSTRAP_REQUIRED",
+                "summary": "Setup needed. No chat model is ready yet.",
+                "next_action": "Run: python -m agent setup",
+            },
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "Hello"}],
+            "source_surface": "api",
+            "user_id": "api:no-llm",
+            "thread_id": "api:no-llm:thread",
+        }
+        handler = _HandlerForTest(runtime, payload)
+
+        with (
+            patch.object(runtime, "ready_status", return_value=ready_payload),
+            patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            patch.object(orchestrator, "_llm_chat_available", return_value=False),
+            patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            patch("agent.api_server.detect_low_confidence", return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "hello"})),
+            patch("agent.api_server.classify_ambiguity", return_value=SimpleNamespace(ambiguous=False, reason="none")),
+            patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+        ):
+            handler.do_POST()
+
+        response = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(bool(response.get("ok")))
+        text = str((response.get("assistant") or {}).get("content") or response.get("message") or "")
+        self.assertEqual(build_no_llm_public_message(), text)
+        self.assertEqual(text, str(response.get("message") or ""))
+        self.assertNotIn("trace_id:", text.lower())
+        self.assertNotIn("Reason:", text)
+        meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
+        self.assertEqual("generic_chat", meta.get("route"))
+        self.assertFalse(bool(meta.get("used_llm")))
+        self.assertNotIn("runtime_payload", json.dumps(response, ensure_ascii=True).lower())
+
+    def test_safe_mode_pause_message_stays_plain_and_assistant_facing(self) -> None:
+        message = build_safe_mode_paused_message(
+            reason="churn_detected",
+            blocked_detail="mutating automation",
+        )
+        self.assertIn("Automatic changes are paused for safety.", message)
+        self.assertIn("I can't apply that change right now.", message)
+        self.assertNotIn("Reason:", message)
+        self.assertNotIn("churn_detected", message)
+        self.assertNotIn("mutating automation", message)
+        self.assertNotIn("guardrail", message.lower())
+        self.assertNotIn("operator", message.lower())
 
     def test_chat_thread_integrity_drift_is_handled_as_normal_request(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

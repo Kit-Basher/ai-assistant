@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
+import sys
 from pathlib import Path
-
-import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -12,6 +12,13 @@ ROOT = Path(__file__).resolve().parents[1]
 MAIN_TEST_NODES: tuple[str, ...] = (
     "tests/test_publishability_smoke.py",
     "tests/test_golden_path_smoke.py",
+    "tests/test_install_local_flow.py",
+    "tests/test_debian_package.py",
+    "tests/test_release_bundle.py",
+    "tests/test_desktop_launcher.py",
+    "tests/test_first_run_release_smoke.py",
+    "tests/test_webui_conversation_smoke.py",
+    "tests/test_assistant_behavior_release_gate.py",
     "tests/test_install_first_run_hardening.py::TestInstallFirstRunHardening::test_resolved_default_paths_use_canonical_location_for_fresh_install",
     "tests/test_install_first_run_hardening.py::TestInstallFirstRunHardening::test_doctor_required_dirs_warn_when_install_dirs_missing",
     "tests/test_install_first_run_hardening.py::TestInstallFirstRunHardening::test_startup_checks_fail_when_registry_json_is_invalid",
@@ -30,6 +37,16 @@ EXTENDED_TEST_NODES: tuple[str, ...] = MAIN_TEST_NODES + (
     "tests/test_doctor_cli.py",
     "tests/test_runtime_concurrency.py::TestRuntimeConcurrency::test_first_chat_after_deferred_startup_ready_succeeds",
     "tests/test_runtime_concurrency.py::TestRuntimeConcurrency::test_first_chat_and_ready_probe_do_not_race_after_deferred_startup",
+    "tests/test_clean_context_validation.py",
+    "tests/test_state_truth_unification.py",
+    "tests/test_pack_state_truth.py",
+    "tests/test_pack_capability_recommendation.py",
+    "tests/test_failure_recovery_ux.py",
+    "tests/test_observability_self_explanation.py",
+    "tests/test_state_machine_hardening.py",
+    "tests/test_concurrency_stress.py",
+    "tests/test_regression_soak.py",
+    "tests/test_extended_soak.py",
 )
 
 
@@ -53,7 +70,9 @@ def _run_suite(name: str, test_nodes: tuple[str, ...], *, list_only: bool = Fals
         _print_nodes(name, test_nodes)
         return 0
     print(f"Running {name} from {ROOT}", flush=True)
-    return int(pytest.main(_build_pytest_args(test_nodes, quiet=quiet)))
+    command = (sys.executable, "-m", "pytest", *_build_pytest_args(test_nodes, quiet=quiet))
+    proc = subprocess.run(command, cwd=ROOT, check=False)
+    return int(proc.returncode)
 
 
 def run_main_suite(*, list_only: bool = False, quiet: bool = True) -> int:

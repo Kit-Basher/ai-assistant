@@ -10,6 +10,7 @@ from unittest.mock import patch
 from agent.api_server import APIServerHandler, AgentRuntime, compute_autopilot_bootstrap_apply_policy, compute_notification_send_policy, compute_self_heal_apply_policy
 from agent.config import Config
 from agent.llm.model_manager import model_manager_state_path_for_runtime, save_model_manager_state
+from agent.public_chat import build_no_llm_public_message
 from agent.orchestrator import OrchestratorResponse
 from agent.telegram_bridge import handle_telegram_text
 
@@ -515,7 +516,7 @@ class TestSafeModeTranscript(unittest.TestCase):
                 }
             return {
                 "ok": False,
-                "text": "Chat LLM is unavailable.\nNext: Run: python -m agent setup",
+                "text": build_no_llm_public_message(),
                 "provider": kwargs.get("provider_override"),
                 "model": kwargs.get("model_override"),
                 "duration_ms": 1,
@@ -549,13 +550,16 @@ class TestSafeModeTranscript(unittest.TestCase):
         identity_tg_text = str(identity_tg.get("text") or "")
         error_api_text = str((error_api.get("assistant") or {}).get("content") or error_api.get("message") or "")
         error_tg_text = str(error_tg.get("text") or "")
+        no_llm_message = build_no_llm_public_message()
 
         self.assertIn("Personal Agent", identity_api_text)
         self.assertIn("Personal Agent", identity_tg_text)
         self.assertNotIn("I am DeepSeek", identity_api_text)
         self.assertNotIn("I am DeepSeek", identity_tg_text)
-        self.assertIn("Something went wrong while answering that", error_api_text)
-        self.assertIn("Something went wrong while answering that", error_tg_text)
+        self.assertEqual(no_llm_message, error_api_text)
+        self.assertEqual(no_llm_message, error_tg_text)
+        self.assertNotIn("Something went wrong while answering that", error_api_text)
+        self.assertNotIn("Something went wrong while answering that", error_tg_text)
         self.assertNotIn("Chat LLM is unavailable.", error_api_text)
         self.assertNotIn("Chat LLM is unavailable.", error_tg_text)
         self.assertNotIn("python -m agent setup", error_api_text)
@@ -568,16 +572,26 @@ class TestSafeModeTranscript(unittest.TestCase):
             "system status": "runtime_status",
             "give me a system report": "runtime_status",
             "agent health report": "runtime_status",
-            "help?": "assistant_clarification",
+            "help?": "generic_chat",
             "fix it": "setup_flow",
             "what is happening": "runtime_status",
-            "do the thing": "assistant_clarification",
-            "????": "assistant_fallback",
-            "asdfasdf": "assistant_clarification",
-            "uhh": "assistant_clarification",
+            "do the thing": "generic_chat",
+            "????": "generic_chat",
+            "asdfasdf": "generic_chat",
+            "uhh": "generic_chat",
         }
 
-        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+        def _fake_route_inference(**kwargs):  # type: ignore[no-untyped-def]
+            return {
+                "ok": True,
+                "text": "I can help with that.",
+                "provider": kwargs.get("provider_override"),
+                "model": kwargs.get("model_override"),
+                "duration_ms": 1,
+                "attempts": [],
+            }
+
+        with patch("agent.orchestrator.route_inference", side_effect=_fake_route_inference):
             for prompt, expected_route in prompts.items():
                 with self.subTest(prompt=prompt):
                     api_payload = self._invoke_chat_http(
@@ -597,10 +611,12 @@ class TestSafeModeTranscript(unittest.TestCase):
 
                     self.assertEqual(expected_route, api_meta.get("route"), msg=prompt)
                     self.assertEqual(expected_route, telegram_payload.get("selected_route"), msg=prompt)
-                    self.assertFalse(bool(api_meta.get("used_llm", False)), msg=prompt)
-                    self.assertFalse(bool(telegram_payload.get("used_llm", False)), msg=prompt)
-                    self.assertNotEqual("generic_chat", api_meta.get("route"), msg=prompt)
-                    self.assertNotEqual("generic_chat", telegram_payload.get("selected_route"), msg=prompt)
+                    if expected_route == "generic_chat":
+                        self.assertTrue(bool(api_meta.get("used_llm", False)), msg=prompt)
+                        self.assertTrue(bool(telegram_payload.get("used_llm", False)), msg=prompt)
+                    else:
+                        self.assertFalse(bool(api_meta.get("used_llm", False)), msg=prompt)
+                        self.assertFalse(bool(telegram_payload.get("used_llm", False)), msg=prompt)
                     self.assertNotIn("i am deepseek", api_text.lower(), msg=prompt)
                     self.assertNotIn("i am gpt", api_text.lower(), msg=prompt)
                     self.assertNotIn("created by openai", api_text.lower(), msg=prompt)
@@ -614,12 +630,9 @@ class TestSafeModeTranscript(unittest.TestCase):
 
                     if expected_route == "runtime_status":
                         self.assertIn("healthy and ready", api_text.lower(), msg=prompt)
-                    if expected_route == "setup_flow":
-                        self.assertIn("setup looks okay right now", api_text.lower(), msg=prompt)
-                    if expected_route == "assistant_clarification":
-                        self.assertIn("runtime status, model status, setup help, or a direct task", api_text.lower(), msg=prompt)
-                    if expected_route == "assistant_fallback":
-                        self.assertIn("i’m not sure what you want yet", api_text.lower(), msg=prompt)
+                    if expected_route == "generic_chat":
+                        self.assertIn("i can help with that", api_text.lower(), msg=prompt)
+                        self.assertIn("i can help with that", tg_text.lower(), msg=prompt)
 
     def test_safe_mode_interpretation_followups_use_previous_memory_report_and_stronger_model(self) -> None:
         runtime = self._runtime()
@@ -785,7 +798,7 @@ class TestSafeModeTranscript(unittest.TestCase):
             "agent.orchestrator.route_inference",
             return_value={
                 "ok": False,
-                "text": "Chat LLM is unavailable.\nNext: Run: python -m agent setup",
+                "text": build_no_llm_public_message(),
                 "provider": "ollama",
                 "model": "ollama:qwen2.5:7b-instruct",
                 "duration_ms": 1,
@@ -1315,8 +1328,8 @@ class TestSafeModeTranscript(unittest.TestCase):
         self.assertEqual("model_status", telegram_payload.get("selected_route"))
         self.assertFalse(bool(api_meta.get("used_llm", False)))
         self.assertFalse(bool(telegram_payload.get("used_llm", False)))
-        self.assertIn("blocking install/download/import actions", api_text)
-        self.assertIn("blocking install/download/import actions", tg_text)
+        self.assertIn("does not let me download or install it here", api_text)
+        self.assertIn("does not let me download or install it here", tg_text)
         self.assertNotIn("alibaba cloud", api_text)
         self.assertNotIn("alibaba cloud", tg_text)
         self.assertNotIn("large language model", api_text)
@@ -2219,35 +2232,43 @@ class TestSafeModeTranscript(unittest.TestCase):
 
     def test_safe_mode_model_scout_hf_discovery_is_truthful_about_download_candidates(self) -> None:
         runtime = self._runtime(model_watch_hf_enabled=True)
-        fake_hf_scan_body = {
+        fake_discovery = {
             "ok": True,
-            "trigger": "manual",
-            "scan": {
-                "ok": True,
-                "enabled": True,
-                "updates": [
-                    {
-                        "repo_id": "nanbeige/Nanbeige2-16B-Chat-GGUF",
-                        "installability": "installable_ollama",
-                    }
-                ],
-                "discovered_count": 1,
-            },
-            "proposal_created": True,
-            "proposal": {
-                "repo_id": "nanbeige/Nanbeige2-16B-Chat-GGUF",
-                "installability": "installable_ollama",
-            },
+            "query": "better model",
+            "message": "Found 1 model(s) across 3 source(s).",
+            "models": [
+                {
+                    "id": "openrouter:vendor/tiny-gemma",
+                    "provider": "openrouter",
+                    "source": "openrouter",
+                    "capabilities": ["chat"],
+                    "local": False,
+                    "installable": False,
+                    "confidence": 0.8,
+                }
+            ],
+            "sources": [
+                {
+                    "source": "openrouter",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 1,
+                    "error_kind": None,
+                    "error": None,
+                }
+            ],
+            "debug": {"source_errors": {}, "source_counts": {"openrouter": 1}},
         }
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")), patch.object(
+            runtime.runtime_truth_service(),
+            "model_discovery_query",
+            return_value=fake_discovery,
+        ), patch.object(
             runtime,
             "model_watch_hf_status",
             return_value={"ok": True, "enabled": True, "tracked_repos": 1, "discovered_count": 0},
-        ), patch.object(
-            runtime,
-            "model_watch_hf_scan",
-            return_value=(True, fake_hf_scan_body),
         ):
             payload = self._invoke_chat_http(
                 runtime,
@@ -2265,10 +2286,10 @@ class TestSafeModeTranscript(unittest.TestCase):
 
         self.assertEqual("action_tool", meta.get("route"))
         self.assertFalse(bool(meta.get("used_llm", False)))
-        self.assertEqual(["model_scout"], list(meta.get("used_tools") or []))
-        self.assertIn("nanbeige/nanbeige2-16b-chat-gguf", lowered)
-        self.assertIn("not installed yet", lowered)
-        self.assertNotIn("already installed", lowered)
+        self.assertEqual(["model_discovery_manager"], list(meta.get("used_tools") or []))
+        self.assertIn("openrouter:vendor/tiny-gemma", lowered)
+        self.assertIn("found 1 model", lowered)
+        self.assertNotIn("runtime state", lowered)
 
     def test_safe_mode_direct_model_switch_requests_use_deterministic_switch_path(self) -> None:
         runtime = self._runtime()

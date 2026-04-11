@@ -1,0 +1,15 @@
+{
+  "fixture_id": "fragmented_prompt_repo",
+  "source_kind": "fragmented prompt-style repo",
+  "upstream_repo": "openclaw/skills",
+  "pinned_ref": "29c8c207fcdf20812d45d38c033dad3968bcefa9",
+  "source_url": "https://github.com/openclaw/skills/tree/29c8c207fcdf20812d45d38c033dad3968bcefa9/skills/titanwings/colleague-skill",
+  "source_files": [
+    "README.md",
+    "prompts/main.md",
+    "prompts/examples.md",
+    "instructions/workflow.md"
+  ],
+  "why_this_exists": "Demonstrates canonical SKILL.md synthesis from fragmented safe text without a central upstream skill file.",
+  "expected_outcome": "normalized_safe_text"
+}

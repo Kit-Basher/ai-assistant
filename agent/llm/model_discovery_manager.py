@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -67,6 +68,104 @@ _QUERY_STOPWORDS = {
     "with",
 }
 
+_QUERY_MODEL_FAMILY_MARKERS = {
+    "codex",
+    "deepseek",
+    "gemma",
+    "gpt",
+    "llama",
+    "llava",
+    "mistral",
+    "mixtral",
+    "minicpm",
+    "moondream",
+    "phi",
+    "qwen",
+    "starcoder",
+    "yi",
+}
+_QUERY_SIZE_HINTS = {
+    "tiny",
+    "small",
+    "mini",
+    "lite",
+    "light",
+    "lightweight",
+}
+_QUERY_LOCALITY_HINTS = {
+    "local",
+    "ollama",
+    "offline",
+    "on-device",
+    "on device",
+    "on my machine",
+    "on-machine",
+    "on machine",
+    "private",
+}
+_QUERY_TASK_HINTS = {
+    "chat",
+    "coding",
+    "code",
+    "coder",
+    "embed",
+    "embedding",
+    "image",
+    "vision",
+    "reasoning",
+    "reason",
+}
+_QUERY_RECENCY_HINTS = {
+    "latest",
+    "new",
+    "newest",
+    "recent",
+    "recently",
+    "current",
+    "fresh",
+}
+_QUERY_SUITABILITY_HINTS = {
+    "fast",
+    "efficient",
+    "hardware",
+    "lightweight",
+    "local",
+    "small",
+    "tiny",
+}
+_QUERY_SIZE_RE = re.compile(r"(?<!\w)(\d+(?:\.\d+)?)\s*[bB](?!\w)")
+_QUERY_TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9\.\-:]*")
+_QUERY_INCLUDE_THRESHOLD = 0.2
+_QUERY_STRONG_THRESHOLD = 0.62
+
+
+@dataclass(frozen=True)
+class ModelDiscoveryQueryProfile:
+    original_query: str | None
+    normalized_query: str
+    tokens: tuple[str, ...]
+    family_terms: tuple[str, ...]
+    size_terms: tuple[str, ...]
+    locality_terms: tuple[str, ...]
+    task_terms: tuple[str, ...]
+    recency_terms: tuple[str, ...]
+    suitability_terms: tuple[str, ...]
+    query_variants: tuple[str, ...]
+
+    def as_debug_dict(self) -> dict[str, Any]:
+        return {
+            "original_query": self.original_query,
+            "normalized_query": self.normalized_query,
+            "tokens": list(self.tokens),
+            "family_terms": list(self.family_terms),
+            "size_terms": list(self.size_terms),
+            "locality_terms": list(self.locality_terms),
+            "task_terms": list(self.task_terms),
+            "recency_terms": list(self.recency_terms),
+            "suitability_terms": list(self.suitability_terms),
+            "query_variants": list(self.query_variants),
+        }
+
 
 def _as_string_list(values: Any) -> list[str]:
     if isinstance(values, str):
@@ -108,6 +207,258 @@ def _safe_float(value: Any) -> float | None:
 def _query_tokens(query: str | None) -> list[str]:
     tokens = [token for token in (str(query or "").strip().lower().split()) if token]
     return [token for token in tokens if token not in _QUERY_STOPWORDS]
+
+
+def _tokenize_query(query: str | None) -> list[str]:
+    return [token for token in _QUERY_TOKEN_RE.findall(str(query or "").strip().lower()) if token]
+
+
+def _query_profile(query: str | None) -> ModelDiscoveryQueryProfile:
+    normalized_query = str(query or "").strip().lower()
+    tokens = _tokenize_query(normalized_query)
+    size_terms: list[str] = []
+    locality_terms: list[str] = []
+    task_terms: list[str] = []
+    recency_terms: list[str] = []
+    suitability_terms: list[str] = []
+
+    for token in tokens:
+        if token in _QUERY_SIZE_HINTS or _QUERY_SIZE_RE.fullmatch(token):
+            size_terms.append(token)
+        if token in _QUERY_TASK_HINTS:
+            task_terms.append(token)
+        if token in _QUERY_RECENCY_HINTS:
+            recency_terms.append(token)
+        if token in _QUERY_SUITABILITY_HINTS:
+            suitability_terms.append(token)
+    if any(phrase in normalized_query for phrase in _QUERY_LOCALITY_HINTS):
+        locality_terms.extend(sorted({phrase for phrase in _QUERY_LOCALITY_HINTS if phrase in normalized_query}))
+
+    special_terms = {
+        *size_terms,
+        *locality_terms,
+        *task_terms,
+        *recency_terms,
+        *suitability_terms,
+        "model",
+        "models",
+    }
+    family_terms = [
+        token
+        for token in tokens
+        if token not in special_terms and token not in _QUERY_STOPWORDS
+    ]
+    if not family_terms and normalized_query:
+        family_terms = [token for token in tokens if token not in _QUERY_STOPWORDS]
+
+    variants: list[str] = []
+
+    def _append_variant(parts: Sequence[str]) -> None:
+        value = " ".join(str(part).strip() for part in parts if str(part).strip()).strip()
+        if not value or value in variants:
+            return
+        variants.append(value)
+
+    _append_variant([normalized_query])
+    _append_variant(family_terms)
+    _append_variant([*family_terms, *task_terms[:2]])
+    _append_variant(task_terms[:2])
+    _append_variant([*locality_terms[:2], *task_terms[:2]])
+    _append_variant([*size_terms[:2], *family_terms[:2]])
+    _append_variant([*size_terms[:2], *task_terms[:2]])
+    _append_variant([*locality_terms[:2], *size_terms[:2]])
+    _append_variant([*family_terms[:2], *locality_terms[:2], *task_terms[:2]])
+
+    return ModelDiscoveryQueryProfile(
+        original_query=query,
+        normalized_query=normalized_query,
+        tokens=tuple(tokens),
+        family_terms=tuple(family_terms),
+        size_terms=tuple(size_terms),
+        locality_terms=tuple(locality_terms),
+        task_terms=tuple(task_terms),
+        recency_terms=tuple(recency_terms),
+        suitability_terms=tuple(suitability_terms),
+        query_variants=tuple(variants),
+    )
+
+
+def _row_model_size_b(row: Mapping[str, Any]) -> float | None:
+    raw = row.get("params_b")
+    if isinstance(raw, (int, float)):
+        return float(raw) if float(raw) > 0 else None
+    text = " ".join(
+        value
+        for value in (
+            str(row.get("model_name") or "").strip().lower(),
+            str(row.get("model") or "").strip().lower(),
+            str(row.get("id") or "").strip().lower(),
+        )
+        if value
+    )
+    match = _QUERY_SIZE_RE.search(text)
+    if match:
+        try:
+            return float(match.group(1))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _row_source_text(row: Mapping[str, Any]) -> str:
+    return _row_text(row).lower()
+
+
+def _row_has_any_marker(row: Mapping[str, Any], markers: Sequence[str]) -> bool:
+    text = _row_source_text(row)
+    return any(str(marker).strip().lower() in text for marker in markers if str(marker).strip())
+
+
+def _match_score_for_row(profile: ModelDiscoveryQueryProfile, row: Mapping[str, Any]) -> tuple[float, list[str]]:
+    if not profile.normalized_query:
+        confidence = _confidence_for_row(str(row.get("source") or ""), row)
+        return (round(min(0.2, 0.12 + confidence * 0.08), 3), ["default"])
+
+    text = _row_source_text(row)
+    score = 0.0
+    reasons: list[str] = []
+    row_confidence = _confidence_for_row(str(row.get("source") or ""), row)
+
+    exact_phrase = profile.normalized_query
+    if exact_phrase and exact_phrase in text:
+        score += 0.7
+        reasons.append("exact_phrase")
+
+    query_token_hits = [token for token in profile.tokens if token in text]
+    if query_token_hits:
+        score += min(0.3, 0.08 * len(query_token_hits))
+        reasons.append(f"tokens:{','.join(query_token_hits[:3])}")
+
+    family_hits = [token for token in profile.family_terms if token in text]
+    if family_hits:
+        score += min(0.4, 0.15 * len(family_hits))
+        reasons.append(f"family:{','.join(family_hits[:3])}")
+
+    task_hits = [token for token in profile.task_terms if token in text or token in _as_string_list(row.get("capabilities"))]
+    if task_hits:
+        score += min(0.28, 0.12 * len(task_hits))
+        reasons.append(f"task:{','.join(task_hits[:3])}")
+
+    if profile.locality_terms:
+        if bool(row.get("local", False)):
+            score += 0.26
+            reasons.append("local")
+        elif str(row.get("source") or "").strip().lower() in {"ollama", "external_snapshots"}:
+            score += 0.12
+            reasons.append("local-ish")
+        else:
+            score -= 0.06
+            reasons.append("remote")
+
+    if profile.size_terms or profile.suitability_terms:
+        size_b = _row_model_size_b(row)
+        if size_b is not None:
+            if any(term in {"tiny", "small", "mini", "lite", "light", "lightweight"} for term in profile.size_terms + profile.suitability_terms):
+                if size_b <= 4.0:
+                    score += 0.26
+                    reasons.append("small-4b")
+                elif size_b <= 8.0:
+                    score += 0.18
+                    reasons.append("small-8b")
+                elif size_b <= 14.0:
+                    score += 0.08
+                    reasons.append("mid-size")
+                else:
+                    score -= 0.08
+            size_query_terms = [term for term in profile.size_terms if _QUERY_SIZE_RE.fullmatch(term)]
+            if size_query_terms:
+                try:
+                    requested = float(size_query_terms[0].lower().rstrip("b"))
+                except (TypeError, ValueError):
+                    requested = None
+                if requested is not None:
+                    distance = abs(size_b - requested)
+                    if distance <= 1.0:
+                        score += 0.32
+                        reasons.append(f"size~{requested:g}b")
+                    elif distance <= 3.0:
+                        score += 0.2
+                        reasons.append(f"size~{requested:g}b")
+                    else:
+                        score -= 0.05
+        if _row_has_any_marker(row, ("code", "coder", "deepseek", "starcoder")) and any(
+            token in {"code", "coding", "coder"} for token in profile.task_terms
+        ):
+            score += 0.22
+            reasons.append("coding")
+        if _row_has_any_marker(row, ("vision", "image", "llava", "moondream", "minicpm-v", "bakllava")) and any(
+            token in {"vision", "image"} for token in profile.task_terms
+        ):
+            score += 0.22
+            reasons.append("vision")
+
+    if profile.recency_terms:
+        if str(row.get("source") or "").strip().lower() in {"huggingface", "openrouter", "external_snapshots"}:
+            score += 0.08
+            reasons.append("recent-source")
+        quality = _safe_float(row.get("quality_percentile"))
+        if quality is not None:
+            score += min(0.08, max(0.0, quality / 100.0))
+        else:
+            score += min(0.05, row_confidence * 0.05)
+
+    score += min(0.08, row_confidence * 0.08)
+
+    if profile.task_terms and not task_hits and not family_hits:
+        score -= 0.04
+
+    return (round(max(score, 0.0), 3), reasons or ["related"])
+
+
+def _should_include_row(score: float, profile: ModelDiscoveryQueryProfile) -> bool:
+    if not profile.normalized_query:
+        return True
+    return score >= _QUERY_INCLUDE_THRESHOLD
+
+
+def _is_strong_match(score: float, profile: ModelDiscoveryQueryProfile) -> bool:
+    if not profile.normalized_query:
+        return True
+    return score >= _QUERY_STRONG_THRESHOLD
+
+
+def _broadenable_query_variants(profile: ModelDiscoveryQueryProfile) -> list[str]:
+    if not profile.normalized_query:
+        return []
+    return [variant for variant in profile.query_variants if variant and variant != profile.normalized_query]
+
+
+def _rank_discovery_rows(
+    rows: Sequence[Mapping[str, Any]],
+    profile: ModelDiscoveryQueryProfile,
+) -> list[dict[str, Any]]:
+    ranked: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        payload = dict(row)
+        score, reasons = _match_score_for_row(profile, payload)
+        payload["match_score"] = score
+        payload["match_reasons"] = reasons
+        payload["match_band"] = "likely" if score >= _QUERY_STRONG_THRESHOLD else "related" if score >= _QUERY_INCLUDE_THRESHOLD else "nearby"
+        payload["query_profile"] = profile.as_debug_dict()
+        payload["query_match"] = bool(profile.normalized_query and score >= _QUERY_INCLUDE_THRESHOLD)
+        ranked.append(payload)
+    ranked.sort(
+        key=lambda item: (
+            -float(item.get("match_score") or 0.0),
+            0 if bool(item.get("local", False)) else 1,
+            str(item.get("source") or ""),
+            str(item.get("provider") or ""),
+            str(item.get("id") or ""),
+        )
+    )
+    return ranked
 
 
 def _row_text(row: Mapping[str, Any]) -> str:
@@ -358,6 +709,63 @@ def _query_huggingface(
         "error_kind": None,
         "error": None,
     }
+
+
+def _query_huggingface_with_broadening(
+    query: str | None,
+    *,
+    profile: ModelDiscoveryQueryProfile,
+    fetch_json: Callable[[str], Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    exact_rows, exact_status = _query_huggingface(query, fetch_json=fetch_json)
+    attempts = [
+        {
+            "query": query,
+            "status": dict(exact_status),
+            "count": len(exact_rows),
+        }
+    ]
+    if not bool(exact_status.get("ok", False)):
+        status = dict(exact_status)
+        status["queries"] = attempts
+        status["query_mode"] = "exact"
+        return exact_rows, status
+
+    ranked_exact = _rank_discovery_rows(exact_rows, profile)
+    strong_exact = [row for row in ranked_exact if _is_strong_match(float(row.get("match_score") or 0.0), profile)]
+    if strong_exact:
+        status = dict(exact_status)
+        status["queries"] = attempts
+        status["query_mode"] = "exact"
+        return ranked_exact, status
+
+    broadened_rows: list[dict[str, Any]] = list(ranked_exact)
+    seen_ids = {str(row.get("id") or "").strip() for row in broadened_rows if str(row.get("id") or "").strip()}
+    broadened_queries = _broadenable_query_variants(profile)
+    for variant in broadened_queries:
+        variant_rows, variant_status = _query_huggingface(variant, fetch_json=fetch_json)
+        attempts.append(
+            {
+                "query": variant,
+                "status": dict(variant_status),
+                "count": len(variant_rows),
+            }
+        )
+        if not bool(variant_status.get("ok", False)):
+            continue
+        for row in _rank_discovery_rows(variant_rows, profile):
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or model_id in seen_ids:
+                continue
+            seen_ids.add(model_id)
+            broadened_rows.append(row)
+
+    status = dict(exact_status)
+    status["queries"] = attempts
+    status["query_mode"] = "broadened" if len(attempts) > 1 else "exact"
+    status["count"] = len(broadened_rows)
+    status["broadening_used"] = len(attempts) > 1
+    return _rank_discovery_rows(broadened_rows, profile), status
 
 
 def _fetch_json(url: str, *, headers: Mapping[str, str] | None = None, timeout_seconds: float = 20.0) -> Any:
@@ -625,26 +1033,55 @@ def _source_summary_text(statuses: Sequence[Mapping[str, Any]]) -> str:
 def _actionable_message(
     *,
     query: str | None,
+    profile: ModelDiscoveryQueryProfile | None,
     statuses: Sequence[Mapping[str, Any]],
     matched_count: int,
     enabled_sources: Sequence[str],
     filtered_out_count: int,
+    broadening_used: bool,
+    broadening_variants: Sequence[str],
+    nearby_candidates: Sequence[Mapping[str, Any]],
 ) -> str:
     queried = [row for row in statuses if bool(row.get("queried", False))]
     failed = [row for row in statuses if not bool(row.get("ok", False))]
+    profile = profile or _query_profile(query)
+    broaden_text = ""
+    if broadening_used and broadening_variants:
+        broaden_text = " Broadened to: " + ", ".join(broadening_variants[:4]) + "."
+    nearby_preview = ", ".join(
+        str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+        for row in nearby_candidates[:3]
+        if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+    )
     if not queried:
         return (
-            "No discovery sources are enabled. "
-            "Enable Hugging Face/OpenRouter/Ollama in the registry or point AGENT_MODEL_WATCH_CATALOG_PATH at a snapshot."
+            "I don't have any discovery sources enabled yet. "
+            "Enable Hugging Face, OpenRouter, or Ollama in the registry, or point AGENT_MODEL_WATCH_CATALOG_PATH at a snapshot."
         )
     if queried and all(not bool(row.get("ok", False)) for row in queried):
         return (
-            "No discovery source returned usable data. "
+            "I checked the enabled discovery sources, but none returned usable data. "
             f"Check the source configuration and network/auth setup. "
             f"Source errors: {_source_summary_text(statuses)}."
         )
     if matched_count > 0:
         source_count = len({str(row.get("source") or "") for row in statuses if bool(row.get("ok", False))})
+        fit_preview = ", ".join(
+            str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+            for row in nearby_candidates[:3]
+            if str(row.get("id") or row.get("model_name") or row.get("model") or "").strip()
+        )
+        if profile.normalized_query and fit_preview:
+            if broadening_used:
+                prefix = f"I broadened the search for '{query or ''}' using family/task/locality hints."
+            else:
+                prefix = f"I searched for '{query or ''}'."
+            return (
+                f"{prefix} Found {matched_count} likely model(s) across {source_count} source(s). "
+                f"Likely fits: {fit_preview}."
+                + (f" Broadened to: {', '.join(broadening_variants[:4])}." if broadening_used and broadening_variants else "")
+                + (f" Source errors: {_source_summary_text(statuses)}." if failed else "")
+            )
         if failed:
             return (
                 f"Found {matched_count} model(s) across {source_count} source(s), but some sources failed. "
@@ -652,18 +1089,36 @@ def _actionable_message(
             )
         return f"Found {matched_count} model(s) across {source_count} source(s)."
     if filtered_out_count > 0:
+        search_clause = f"I searched for '{query or ''}'."
+        if broadening_used and broaden_text:
+            search_clause += broaden_text
+        elif profile.family_terms or profile.task_terms or profile.locality_terms or profile.size_terms:
+            hint_bits = [
+                *list(profile.family_terms[:2]),
+                *list(profile.task_terms[:2]),
+                *list(profile.locality_terms[:2]),
+                *list(profile.size_terms[:2]),
+            ]
+            hint_bits = [bit for bit in hint_bits if bit]
+            if hint_bits:
+                search_clause += " I also considered " + ", ".join(hint_bits[:4]) + "."
         return (
-            f"No models matched '{query or ''}'. "
-            "Try broader terms or remove filters."
+            f"{search_clause} No models matched closely enough. "
+            + (f"Nearby candidates: {nearby_preview}. " if nearby_preview else "")
+            + "Try broader terms, a model family, or remove filters."
         )
     if failed:
         return (
             f"No models were returned for '{query or ''}'. "
-            f"Source errors: {_source_summary_text(statuses)}."
+            + (f"Broadened to: {', '.join(broadening_variants[:4])}. " if broadening_used and broadening_variants else "")
+            + (f"Nearby candidates: {nearby_preview}. " if nearby_preview else "")
+            + f"Source errors: {_source_summary_text(statuses)}."
         )
     return (
-        f"No models matched '{query or ''}'. "
-        "Try broader terms or check whether the queried sources are enabled."
+        f"I searched for '{query or ''}'. "
+        + (f"Broadened to: {', '.join(broadening_variants[:4])}. " if broadening_used and broadening_variants else "")
+        + (f"Nearby candidates: {nearby_preview}. " if nearby_preview else "")
+        + "I couldn't find a close fit. Try a model family, a size hint, or check whether the queried sources are enabled."
     )
 
 
@@ -709,6 +1164,62 @@ class ModelDiscoveryManager:
     def _query_huggingface(self, query: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return _query_huggingface(query, fetch_json=self._fetch_json)
 
+    def _query_huggingface_with_broadening(
+        self,
+        query: str | None,
+        *,
+        profile: ModelDiscoveryQueryProfile,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        exact_rows, exact_status = self._query_huggingface(query)
+        attempts = [
+            {
+                "query": query,
+                "status": dict(exact_status),
+                "count": len(exact_rows),
+            }
+        ]
+        if not bool(exact_status.get("ok", False)):
+            status = dict(exact_status)
+            status["queries"] = attempts
+            status["query_mode"] = "exact"
+            return exact_rows, status
+
+        ranked_exact = _rank_discovery_rows(exact_rows, profile)
+        strong_exact = [row for row in ranked_exact if _is_strong_match(float(row.get("match_score") or 0.0), profile)]
+        if strong_exact:
+            status = dict(exact_status)
+            status["queries"] = attempts
+            status["query_mode"] = "exact"
+            return ranked_exact, status
+
+        broadened_rows: list[dict[str, Any]] = list(ranked_exact)
+        seen_ids = {str(row.get("id") or "").strip() for row in broadened_rows if str(row.get("id") or "").strip()}
+        broadened_queries = _broadenable_query_variants(profile)
+        for variant in broadened_queries:
+            variant_rows, variant_status = self._query_huggingface(variant)
+            attempts.append(
+                {
+                    "query": variant,
+                    "status": dict(variant_status),
+                    "count": len(variant_rows),
+                }
+            )
+            if not bool(variant_status.get("ok", False)):
+                continue
+            for row in _rank_discovery_rows(variant_rows, profile):
+                model_id = str(row.get("id") or "").strip()
+                if not model_id or model_id in seen_ids:
+                    continue
+                seen_ids.add(model_id)
+                broadened_rows.append(row)
+
+        status = dict(exact_status)
+        status["queries"] = attempts
+        status["query_mode"] = "broadened" if len(attempts) > 1 else "exact"
+        status["count"] = len(broadened_rows)
+        status["broadening_used"] = len(attempts) > 1
+        return _rank_discovery_rows(broadened_rows, profile), status
+
     def _query_openrouter(
         self,
         query: str | None,
@@ -740,6 +1251,7 @@ class ModelDiscoveryManager:
 
     def query(self, query: str | None, filters: Mapping[str, Any] | None = None) -> dict[str, Any]:
         normalized_filters = dict(filters) if isinstance(filters, Mapping) else {}
+        profile = _query_profile(query)
         selected_sources = _as_string_list(normalized_filters.get("sources") or normalized_filters.get("source"))
         selected_sources = [
             _SOURCE_ALIASES.get(source.lower(), source.lower())
@@ -752,6 +1264,8 @@ class ModelDiscoveryManager:
         registry_document = self._registry_document()
         source_rows: list[dict[str, Any]] = []
         source_statuses: list[dict[str, Any]] = []
+        source_attempts: dict[str, list[dict[str, Any]]] = {}
+        hf_source_index: int | None = None
 
         for source_id in _SOURCE_IDS:
             if source_id not in selected_sources:
@@ -769,6 +1283,7 @@ class ModelDiscoveryManager:
                 continue
 
             if source_id == "huggingface":
+                hf_source_index = len(source_statuses)
                 rows, status = self._query_huggingface(query)
             elif source_id == "openrouter":
                 rows, status = self._query_openrouter(query, registry_document=registry_document)
@@ -778,38 +1293,75 @@ class ModelDiscoveryManager:
                 rows, status = self._query_external_snapshots(query, filters=normalized_filters)
 
             source_rows.extend(rows)
-            source_statuses.append(dict(status))
+            status_row = dict(status)
+            source_statuses.append(status_row)
+            source_attempts[source_id] = status_row.get("queries") if isinstance(status_row.get("queries"), list) else [
+                {"query": query, "status": dict(status_row), "count": len(rows)}
+            ]
+
+        ranked_rows = _rank_discovery_rows(source_rows, profile)
+        if (
+            profile.normalized_query
+            and hf_source_index is not None
+            and not any(_is_strong_match(float(row.get("match_score") or 0.0), profile) for row in ranked_rows)
+        ):
+            hf_rows, hf_status = self._query_huggingface_with_broadening(query, profile=profile)
+            source_rows = [row for row in source_rows if str(row.get("source") or "").strip().lower() != "huggingface"]
+            source_rows.extend(hf_rows)
+            if hf_source_index < len(source_statuses):
+                source_statuses[hf_source_index] = dict(hf_status)
+                source_attempts["huggingface"] = hf_status.get("queries") if isinstance(hf_status.get("queries"), list) else source_attempts.get("huggingface", [])
+            ranked_rows = _rank_discovery_rows(source_rows, profile)
 
         seen_ids: set[str] = set()
         merged_rows: list[dict[str, Any]] = []
-        for row in source_rows:
+        nearby_candidates: list[dict[str, Any]] = []
+        for row in ranked_rows:
             if not isinstance(row, dict):
                 continue
             model_id = str(row.get("id") or "").strip()
             if not model_id or model_id in seen_ids:
                 continue
-            if not _row_matches_query(row, query):
-                continue
             if not _row_matches_filters(row, normalized_filters):
                 continue
             seen_ids.add(model_id)
-            merged_rows.append(dict(row))
+            score = float(row.get("match_score") or 0.0)
+            if _should_include_row(score, profile):
+                merged_rows.append(dict(row))
+            elif score > 0.0:
+                nearby_candidates.append(dict(row))
 
-        merged_rows.sort(key=lambda row: (str(row.get("source") or ""), str(row.get("provider") or ""), str(row.get("id") or "")))
+        merged_rows.sort(
+            key=lambda row: (
+                -float(row.get("match_score") or 0.0),
+                0 if bool(row.get("local", False)) else 1,
+                str(row.get("source") or ""),
+                str(row.get("provider") or ""),
+                str(row.get("id") or ""),
+            )
+        )
 
         limit = _safe_int(normalized_filters.get("limit"))
         if limit is not None:
             merged_rows = merged_rows[:limit]
+        nearby_candidates = nearby_candidates[:5]
 
         enabled_sources = [row.get("source") for row in source_statuses if bool(row.get("queried", False)) and bool(row.get("ok", False))]
-        filtered_out_count = max(0, len(source_rows) - len(merged_rows))
+        filtered_out_count = max(0, len(ranked_rows) - len(merged_rows))
         matched_count = len(merged_rows)
+        broadening_used = bool(source_attempts.get("huggingface")) and len(source_attempts.get("huggingface") or []) > 1
+        broadening_variants = _broadenable_query_variants(profile)
+        candidate_preview_rows = merged_rows[:3] if merged_rows else nearby_candidates[:3]
         message = _actionable_message(
             query=query,
+            profile=profile,
             statuses=source_statuses,
             matched_count=matched_count,
             enabled_sources=[str(item) for item in enabled_sources if str(item).strip()],
             filtered_out_count=filtered_out_count,
+            broadening_used=broadening_used,
+            broadening_variants=broadening_variants,
+            nearby_candidates=candidate_preview_rows,
         )
         any_source_ok = any(bool(row.get("ok", False)) for row in source_statuses if bool(row.get("queried", False)))
         if not any_source_ok and not merged_rows:
@@ -833,6 +1385,24 @@ class ModelDiscoveryManager:
                 str(row.get("source") or f"source_{idx}"): int(row.get("count") or 0)
                 for idx, row in enumerate(source_statuses)
                 if bool(row.get("queried", False))
+            },
+            "query_profile": profile.as_debug_dict(),
+            "query_variants": list(profile.query_variants),
+            "ranking": {
+                "include_threshold": _QUERY_INCLUDE_THRESHOLD,
+                "strong_threshold": _QUERY_STRONG_THRESHOLD,
+                "broadening_used": broadening_used,
+                "broadening_variants": broadening_variants,
+                "nearby_candidates": [
+                    {
+                        "id": row.get("id"),
+                        "provider": row.get("provider"),
+                        "source": row.get("source"),
+                        "match_score": row.get("match_score"),
+                        "match_band": row.get("match_band"),
+                    }
+                    for row in nearby_candidates
+                ],
             },
             "source_registry": list(_SOURCE_IDS),
             "matched_count": len(merged_rows),

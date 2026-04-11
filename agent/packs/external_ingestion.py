@@ -7,6 +7,7 @@ import re
 import shutil
 import time
 import urllib.parse
+from functools import lru_cache
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -52,6 +53,7 @@ STATIC_ASSET_EXTENSIONS = {
     ".ico",
     ".css",
 }
+GOLD_STANDARD_PATH = Path(__file__).with_name("GOLD_STANDARD.md")
 EXECUTABLE_FILE_NAMES = {
     "package.json",
     "package-lock.json",
@@ -359,6 +361,48 @@ def _looks_like_strong_skill_markdown(text: str) -> bool:
 
 def _default_skill_section(title: str, body: str) -> str:
     return f"## {title}\n\n{_squash_blank_lines(body).strip()}\n"
+
+
+@lru_cache(maxsize=1)
+def _gold_standard_skill_section_titles() -> tuple[str, ...]:
+    try:
+        text = GOLD_STANDARD_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return (
+            "Purpose",
+            "When to Use",
+            "Inputs",
+            "Behavior",
+            "Constraints",
+            "Response Style",
+            "Example Prompts",
+        )
+    titles: list[str] = []
+    capture = False
+    for line in text.splitlines():
+        lowered = line.strip().lower()
+        if lowered == "## skill.md required sections":
+            capture = True
+            continue
+        if capture:
+            if line.startswith("## "):
+                break
+            match = re.match(r"^\s*-\s+(.*\S)\s*$", line)
+            if match:
+                title = match.group(1).strip()
+                if title:
+                    titles.append(title)
+    if not titles:
+        return (
+            "Purpose",
+            "When to Use",
+            "Inputs",
+            "Behavior",
+            "Constraints",
+            "Response Style",
+            "Example Prompts",
+        )
+    return tuple(titles)
 
 
 def _path_is_metadata(rel_path: str) -> bool:
@@ -795,35 +839,23 @@ class ExternalPackIngestor:
             )
             if str(item).strip()
         )
+        gold_standard_titles = _gold_standard_skill_section_titles()
+        section_bodies = {
+            "Purpose": summary or f"{display_name} is a safe normalized pack.",
+            "When to Use": (
+                "Use this pack when the user asks for the task or guidance this pack describes, and stay within the safe text and asset content that was imported."
+            ),
+            "Inputs": "User prompts, the safe instructions in this pack, and any preserved reference materials or assets.",
+            "Behavior": main_text or "Use the preserved source instructions and the safe reference materials in this pack.",
+            "Constraints": "Do not execute imported code or shell instructions. Use only safe text and assets. Ignore anything that was dropped during normalization.",
+            "Response Style": "Be concise, grounded, and explicit about uncertainty.",
+            "Example Prompts": example_text or "No explicit examples were found in the imported source.",
+        }
         sections = [
             f"# {display_name}",
-            _default_skill_section("Purpose", summary or f"{display_name} is a safe normalized pack."),
-            _default_skill_section(
-                "When to use",
-                "Use this pack when the user asks for the task or guidance this pack describes, and stay within the safe text and asset content that was imported.",
-            ),
-            _default_skill_section(
-                "Inputs",
-                "User prompts, the safe instructions in this pack, and any preserved reference materials or assets.",
-            ),
-            _default_skill_section(
-                "Behavior",
-                main_text
-                or "Use the preserved source instructions and the safe reference materials in this pack.",
-            ),
-            _default_skill_section(
-                "Constraints",
-                "Do not execute imported code or shell instructions. Use only safe text and assets. Ignore anything that was dropped during normalization.",
-            ),
-            _default_skill_section(
-                "Response style",
-                "Be concise, grounded, and explicit about uncertainty.",
-            ),
-            _default_skill_section(
-                "Example prompts",
-                example_text or "No explicit examples were found in the imported source.",
-            ),
         ]
+        for title in gold_standard_titles:
+            sections.append(_default_skill_section(title, section_bodies.get(title, section_bodies.get(title.title(), ""))))
         if declared_capabilities or inferred_capabilities:
             sections.append(
                 _default_skill_section(

@@ -131,7 +131,10 @@ class TestAuthoritativeDomainGate(unittest.TestCase):
         llm_messages = last_call["messages"]
         assert isinstance(llm_messages, list)
         self.assertIn("LOCAL_OBSERVATIONS", str(llm_messages[1]["content"]))
-        self.assertIn("LOCAL_OBSERVATIONS", response.text)
+        self.assertNotIn("LOCAL_OBSERVATIONS", response.text)
+        self.assertIn("Likely CPU-limited workload", response.text)
+        self.assertIn("local_observations", response.data)
+        self.assertIsInstance(response.data["local_observations"], dict)
 
     def test_ask_authoritative_tool_failure_returns_not_sure_with_one_question(self) -> None:
         orchestrator = Orchestrator(

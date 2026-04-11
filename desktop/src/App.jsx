@@ -3,10 +3,12 @@ import AdminPanel from "./components/AdminPanel";
 import ChatExperience from "./components/ChatExperience";
 import DebugTab from "./components/DebugTab";
 import ModelScoutTab from "./components/ModelScoutTab";
+import PacksTab from "./components/PacksTab";
 import OperationsTab from "./components/OperationsTab";
 import PermissionsTab from "./components/PermissionsTab";
 import ProvidersTab from "./components/ProvidersTab";
 import SetupTab from "./components/SetupTab";
+import StateTab from "./components/StateTab";
 import TelegramTab from "./components/TelegramTab";
 import {
   buildAssistantMessage,
@@ -225,6 +227,7 @@ export default function App() {
   const [adminLoaded, setAdminLoaded] = useState(false);
   const [adminBusy, setAdminBusy] = useState(false);
   const [readyState, setReadyState] = useState(null);
+  const [uiState, setUiState] = useState(null);
 
   const [providers, setProviders] = useState([]);
   const [models, setModels] = useState([]);
@@ -267,6 +270,7 @@ export default function App() {
   const [llmHealth, setLlmHealth] = useState(null);
   const [llmHealthMessage, setLlmHealthMessage] = useState("");
   const [llmHealthRunning, setLlmHealthRunning] = useState(false);
+  const [packsState, setPacksState] = useState(null);
   const [autoconfigPlan, setAutoconfigPlan] = useState(null);
   const [autoconfigStatus, setAutoconfigStatus] = useState("");
   const [autoconfigBusy, setAutoconfigBusy] = useState(false);
@@ -371,6 +375,8 @@ export default function App() {
         providersPayload,
         modelsPayload,
         defaultsPayload,
+        statePayload,
+        packsStatePayload,
         telegramPayload,
         modelCheckPayload,
         modelLifecyclePayload,
@@ -388,6 +394,8 @@ export default function App() {
         request("GET", "/providers"),
         request("GET", "/models"),
         request("GET", "/defaults"),
+        request("GET", "/state").catch(() => null),
+        request("GET", "/packs/state").catch(() => null),
         request("GET", "/telegram/status").catch(() => null),
         request("POST", "/llm/models/check", { purposes: MODEL_SCOUT_PURPOSES }).catch(() => null),
         request("GET", "/llm/models/lifecycle").catch(() => null),
@@ -412,6 +420,12 @@ export default function App() {
       setDefaultProvider(defaultsPayload.default_provider || "");
       setDefaultModel(defaultsPayload.default_model || "");
       setAllowRemoteFallback(defaultsPayload.allow_remote_fallback !== false);
+      if (statePayload) {
+        setUiState(statePayload);
+      }
+      if (packsStatePayload && packsStatePayload.ok) {
+        setPacksState(packsStatePayload);
+      }
       if (telegramPayload && telegramPayload.ok) {
         setTelegramConfigured(telegramPayload.configured === true);
       }
@@ -527,11 +541,21 @@ export default function App() {
     let stopped = false;
     const poll = async () => {
       try {
-        const [notificationsPayload, statusPayload] = await Promise.all([
+        const [statePayload, packsStatePayload, notificationsPayload, statusPayload] = await Promise.all([
+          request("GET", "/state").catch(() => null),
+          request("GET", "/packs/state").catch(() => null),
           request("GET", "/llm/notifications?limit=20").catch(() => null),
           request("GET", "/llm/notifications/status").catch(() => null)
         ]);
         if (stopped) return;
+
+        if (statePayload) {
+          setUiState(statePayload);
+        }
+
+        if (packsStatePayload && packsStatePayload.ok) {
+          setPacksState(packsStatePayload);
+        }
 
         if (notificationsPayload && notificationsPayload.ok) {
           const incoming = Array.isArray(notificationsPayload.notifications) ? notificationsPayload.notifications : [];
@@ -954,6 +978,7 @@ export default function App() {
         messages: nextMessages.map((item) => ({ role: item.role, content: item.content })),
         session_id: chatSessionId,
         thread_id: chatThreadId,
+        source_surface: "webui",
         purpose: "chat",
         task_type: "chat"
       }, { allowError: true });
@@ -1625,6 +1650,16 @@ export default function App() {
           setupStatus={setupStatus}
         />
       )
+    },
+    {
+      id: "state",
+      label: "State",
+      content: <StateTab stateSnapshot={uiState} />
+    },
+    {
+      id: "packs",
+      label: "Packs",
+      content: <PacksTab packsSnapshot={packsState} />
     },
     {
       id: "operations",

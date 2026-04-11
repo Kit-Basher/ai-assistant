@@ -43,7 +43,8 @@ wins.
 - Canonical packaging truth:
   - `pyproject.toml` is the packaging metadata source
   - `VERSION` is the version source
-  - Debian/system packaging is explicitly out of scope for this release
+  - the release bundle and Debian package are supported optional install
+    paths; legacy root/system packaging is out of scope
 - Legacy root/system-service wrapper scripts are retired and fail closed.
 
 ## 4. Mode Model
@@ -208,13 +209,16 @@ wins.
 - Automatic proposal adoption.
 - Automatic external-pack trust, approval, or background sync.
 - Background full-disk indexing or unrestricted scanning.
-- Debian/system packaging as the supported runtime deployment story.
+- Legacy root/system packaging.
 - Duplicate recommendation or controller paths.
 
 ## 11. Release Confidence
-- The canonical fast release gate is `python scripts/release_smoke.py`.
+- The canonical release gate is `python scripts/release_gate.py`.
+- The fast pre-check inside that gate is `python scripts/release_smoke.py`.
 - Run it before calling a build releasable and after risky install/upgrade work.
 - It is intended to prove the coherent product path plus the main
   safety/recovery gates, not to exhaustively test every internal subsystem.
 - A heavier follow-up validation path exists at
   `python scripts/release_validation_extended.py`.
+- Release, rollback, backup, defaults, and support boundaries are documented
+  in `docs/operator/RELEASE.md`.

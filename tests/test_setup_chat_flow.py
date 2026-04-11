@@ -165,6 +165,21 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertEqual("model_controller_policy", decision.get("kind"))
                 self.assertFalse(bool(decision.get("generic_allowed")))
 
+    def test_pack_capability_prompts_route_to_pack_recommendation(self) -> None:
+        cases = (
+            ("Talk to me out loud", "voice_output"),
+            ("Use the avatar", "avatar_visual"),
+            ("Open the robot camera feed", "camera_feed"),
+            ("What pack do I need for voice output?", "voice_output"),
+        )
+        for text, capability in cases:
+            with self.subTest(text=text):
+                decision = classify_runtime_chat_route(text)
+                self.assertEqual("action_tool", decision.get("route"))
+                self.assertEqual("pack_capability_recommendation", decision.get("kind"))
+                self.assertEqual(capability, decision.get("capability"))
+                self.assertFalse(bool(decision.get("generic_allowed")))
+
     def test_cheap_cloud_recommendation_phrases_route_to_action_tool(self) -> None:
         cases = (
             "what cheap cloud model should I use?",

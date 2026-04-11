@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any
 import re
 
 from agent.error_response_ux import compose_actionable_message
+from agent.failure_ux import build_failure_recovery
 from agent.filesystem_skill import FileSystemSkill
+from agent.persona import normalize_persona_text
+from agent.onboarding_contract import (
+    detect_onboarding_state,
+    onboarding_next_action,
+    onboarding_steps,
+    onboarding_summary,
+)
 from agent.llm.approved_local_models import approved_local_profile_for_ref
 from agent.llm.control_contract import normalize_task_request
 from agent.llm.default_model_policy import choose_best_default_chat_candidate
@@ -25,6 +34,8 @@ from agent.llm.model_manager import (
     model_manager_state_path_for_runtime,
 )
 from agent.llm.registry import _default_registry_document, parse_registry_document
+from agent.recovery_contract import detect_recovery_mode, recovery_next_action, recovery_summary
+from agent.runtime_lifecycle import RuntimeLifecyclePhase
 from agent.shell_skill import ShellSkill
 
 
@@ -289,6 +300,430 @@ class RuntimeTruthService:
                 "can_clear_override": False,
             },
         }
+
+    @staticmethod
+    def _health_label(provider_status: str, model_status: str) -> str:
+        provider_state = str(provider_status or "").strip().lower() or "unknown"
+        model_state = str(model_status or "").strip().lower() or "unknown"
+        if provider_state == "ok" and model_state == "ok":
+            return "up"
+        if provider_state in {"down", "degraded"}:
+            return provider_state
+        if model_state in {"down", "degraded"}:
+            return model_state
+        return "unknown"
+
+    @staticmethod
+    def _runtime_failure_recovery(
+        *,
+        ready: dict[str, Any],
+        llm_status: dict[str, Any],
+        normalized_status: dict[str, Any],
+        runtime_mode: str,
+        startup_phase: str,
+    ) -> dict[str, Any] | None:
+        if str(runtime_mode or "").strip().lower() == "ready":
+            return None
+        failure_code = (
+            str(normalized_status.get("failure_code") or "").strip().lower()
+            or str(ready.get("failure_code") or "").strip().lower()
+            or str(ready.get("llm_reason") or "").strip().lower()
+        )
+        provider_health = llm_status.get("active_provider_health") if isinstance(llm_status.get("active_provider_health"), dict) else {}
+        model_health = llm_status.get("active_model_health") if isinstance(llm_status.get("active_model_health"), dict) else {}
+        if str(startup_phase or "").strip().lower() in {"starting", "listening", "warming"}:
+            return build_failure_recovery(
+                "runtime_initializing",
+                current_state=startup_phase,
+                details=failure_code or None,
+            )
+        if failure_code in {"lock_unavailable", "lock_path_unavailable", "telegram_conflict", "lock_conflict"}:
+            return build_failure_recovery("db_busy", current_state=runtime_mode, details=failure_code or None)
+        if failure_code in {"telegram_token_missing", "missing_token", "telegram_token_invalid", "token_invalid"}:
+            return build_failure_recovery("confirm_token_expired", current_state=runtime_mode, details=failure_code or None)
+        if failure_code in {"llm_unavailable", "provider_unhealthy", "model_unhealthy", "no_chat_model", "router_unavailable"}:
+            return build_failure_recovery(
+                "runtime_degraded",
+                current_state=runtime_mode,
+                details=failure_code or None,
+                blocker=str(ready.get("next_action") or "").strip() or None,
+            )
+        provider_status = str(provider_health.get("status") or "").strip().lower()
+        model_status = str(model_health.get("status") or "").strip().lower()
+        if provider_status in {"down", "degraded"} or model_status in {"down", "degraded"}:
+            return build_failure_recovery(
+                "dependency_unavailable",
+                subject="active provider" if provider_status in {"down", "degraded"} else "active model",
+                reason="The active runtime dependency is not healthy.",
+                current_state=runtime_mode,
+                details=failure_code or None,
+            )
+        if str(runtime_mode or "").strip().lower() == "degraded":
+            return build_failure_recovery("runtime_degraded", current_state=runtime_mode, details=failure_code or None)
+        if str(runtime_mode or "").strip().lower() == "blocked":
+            return build_failure_recovery("runtime_blocked", current_state=runtime_mode, details=failure_code or None)
+        return build_failure_recovery("runtime_not_ready", current_state=runtime_mode, details=failure_code or None)
+
+    def ready_status(self) -> dict[str, Any]:
+        observability = self.runtime._runtime_observability_context()
+        safe_mode_target = self.runtime.safe_mode_target_status()
+        telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
+        telegram_state = str(observability.get("telegram_state") or "stopped")
+        telegram_enabled = bool(observability.get("telegram_enabled", False))
+        llm_status = observability["llm_status"] if isinstance(observability.get("llm_status"), dict) else {}
+        canonical_llm_runtime_status = (
+            observability["canonical_llm_runtime_status"]
+            if isinstance(observability.get("canonical_llm_runtime_status"), dict)
+            else {}
+        )
+        hf_status = self.runtime._model_watch_hf_status_snapshot()
+        startup_phase = str(observability.get("startup_phase") or "starting").strip().lower() or "starting"
+        phase = (
+            str(observability.get("phase") or RuntimeLifecyclePhase.READY.value).strip().lower()
+            or RuntimeLifecyclePhase.READY.value
+        )
+        warmup_remaining = list(observability.get("warmup_remaining") or [])
+        normalized_status = (
+            observability["normalized_status"] if isinstance(observability.get("normalized_status"), dict) else {}
+        )
+        ready = bool(observability.get("ready", False))
+        setup_context_ready_payload: dict[str, Any] = {
+            "ok": True,
+            "ready": bool(ready),
+            "phase": phase,
+            "startup_phase": startup_phase,
+            "failure_code": str(normalized_status.get("failure_code") or "").strip() or None,
+            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
+            "runtime_status": normalized_status,
+            "telegram": {
+                "enabled": telegram_enabled,
+                "configured": bool(telegram.get("configured", False)),
+                "state": telegram_state,
+                "effective_state": str(telegram.get("effective_state") or "unknown"),
+            },
+        }
+        onboarding_state = detect_onboarding_state(
+            ready_payload=setup_context_ready_payload,
+            llm_status=llm_status,
+        )
+        recovery_mode = detect_recovery_mode(
+            ready_payload=setup_context_ready_payload,
+            llm_status=llm_status,
+            failure_code=str(normalized_status.get("failure_code") or "").strip() or None,
+            api_reachable=True,
+        )
+        onboarding_next = onboarding_next_action(
+            onboarding_state,
+            ready_payload=setup_context_ready_payload,
+        )
+        if str(onboarding_state).strip().upper() == "DEGRADED":
+            onboarding_next = recovery_next_action(recovery_mode)
+        onboarding_payload = {
+            "state": onboarding_state,
+            "summary": onboarding_summary(
+                onboarding_state,
+                ready_payload=setup_context_ready_payload,
+                llm_status=llm_status,
+            ),
+            "next_action": onboarding_next,
+            "steps": onboarding_steps(onboarding_state),
+        }
+        recovery_payload = {
+            "mode": recovery_mode,
+            "summary": recovery_summary(recovery_mode),
+            "next_action": recovery_next_action(recovery_mode),
+        }
+        failure_recovery = self._runtime_failure_recovery(
+            ready=setup_context_ready_payload,
+            llm_status=llm_status if isinstance(llm_status, dict) else {},
+            normalized_status=normalized_status if isinstance(normalized_status, dict) else {},
+            runtime_mode=str(normalized_status.get("runtime_mode") or "DEGRADED"),
+            startup_phase=startup_phase,
+        )
+        uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.runtime.started_at).total_seconds()))
+        recent_messages = self.runtime._ready_recent_telegram_messages(limit=5)
+        runtime_state_label = str(failure_recovery.get("state_label") or "").strip() if isinstance(failure_recovery, dict) else ""
+        runtime_reason = str(failure_recovery.get("reason") or "").strip() if isinstance(failure_recovery, dict) else ""
+        runtime_blocker = str(failure_recovery.get("blocker") or "").strip() if isinstance(failure_recovery, dict) else ""
+        runtime_next_step = str(failure_recovery.get("next_step") or "").strip() if isinstance(failure_recovery, dict) else ""
+        message = self.runtime._runtime_surface_message(
+            startup_phase=startup_phase,
+            normalized_status=normalized_status,
+            onboarding_summary=None if str(onboarding_state).strip().upper() == "READY" else str(onboarding_payload.get("summary") or ""),
+            onboarding_next_action=None if str(onboarding_state).strip().upper() == "READY" else str(onboarding_payload.get("next_action") or ""),
+            safe_mode_target=safe_mode_target,
+            failure_recovery=failure_recovery,
+        )
+        return {
+            "ok": True,
+            "ready": bool(ready),
+            "phase": phase,
+            "startup_phase": startup_phase,
+            "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
+            "next_action": normalized_status.get("next_action"),
+            "state_label": runtime_state_label or ("Ready" if ready else "Not ready"),
+            "reason": runtime_reason or None,
+            "blocker": runtime_blocker or None,
+            "next_step": runtime_next_step or None,
+            "runtime_status": normalized_status,
+            "onboarding": onboarding_payload,
+            "recovery": recovery_payload,
+            "failure_recovery": failure_recovery,
+            "warmup_remaining": list(warmup_remaining),
+            "last_error": str(self.runtime._startup_last_error or "") or None,
+            "api": {
+                "version": self.runtime.version,
+                "git_commit": self.runtime.git_commit,
+                "pid": self.runtime.pid,
+                "started_at": self.runtime.started_at_iso,
+                "uptime_seconds": uptime_seconds,
+            },
+            "telegram": {
+                **telegram,
+                "status": telegram_state,
+                "recent_messages": recent_messages,
+            },
+            "model_watch": {
+                "hf": hf_status,
+            },
+            "safe_mode_target": safe_mode_target,
+            "llm": {
+                "provider": canonical_llm_runtime_status.get("provider"),
+                "model": canonical_llm_runtime_status.get("model"),
+                "local_remote": canonical_llm_runtime_status.get("local_remote"),
+                "known": bool(canonical_llm_runtime_status.get("identity_known", False)),
+                "reason": canonical_llm_runtime_status.get("identity_reason"),
+                "runtime_status": canonical_llm_runtime_status,
+                "active_provider_health": llm_status.get("active_provider_health") if isinstance(llm_status.get("active_provider_health"), dict) else {},
+                "active_model_health": llm_status.get("active_model_health") if isinstance(llm_status.get("active_model_health"), dict) else {},
+                "default_provider": llm_status.get("default_provider"),
+                "resolved_default_model": llm_status.get("resolved_default_model"),
+                "default_model": llm_status.get("default_model"),
+                "allow_remote_fallback": bool(llm_status.get("allow_remote_fallback", True)),
+                "policy": llm_status.get("policy") if isinstance(llm_status.get("policy"), dict) else {},
+            },
+            "message": message,
+        }
+
+    def ui_state(self, *, ready_payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        ready = dict(ready_payload) if isinstance(ready_payload, dict) else self.ready_status()
+
+        try:
+            def _norm_text(value: Any) -> str:
+                return str(value or "").strip()
+
+            ready_runtime_status = (
+                ready.get("runtime_status") if isinstance(ready.get("runtime_status"), dict) else {}
+            )
+            truth = self.runtime.runtime_truth_service()
+            current_target = (
+                truth.current_chat_target_status()
+                if callable(getattr(truth, "current_chat_target_status", None))
+                else {}
+            )
+            defaults = self.runtime.get_defaults()
+            control_mode = self.runtime.llm_control_mode_status()
+            model_provider = (
+                str(current_target.get("effective_provider") or current_target.get("provider") or "").strip().lower()
+                or str(defaults.get("default_provider") or "").strip().lower()
+                or None
+            )
+            model_id = (
+                str(current_target.get("effective_model") or current_target.get("model") or "").strip()
+                or str(defaults.get("resolved_default_model") or defaults.get("default_model") or "").strip()
+                or None
+            )
+            provider_health = str(
+                current_target.get("effective_provider_health_status")
+                or current_target.get("provider_health_status")
+                or ""
+            ).strip().lower()
+            model_health = str(
+                current_target.get("effective_model_health_status")
+                or current_target.get("health_status")
+                or ""
+            ).strip().lower()
+            health = self._health_label(provider_health, model_health)
+            runtime_mode = (
+                str(ready_runtime_status.get("runtime_mode") or ready.get("runtime_mode") or "DEGRADED")
+                .strip()
+                .lower()
+                or "degraded"
+            )
+            recovery_row = ready.get("failure_recovery") if isinstance(ready.get("failure_recovery"), dict) else {}
+            summary = normalize_persona_text(
+                str(ready.get("message") or ready_runtime_status.get("summary") or "Ready.").strip()
+            )
+            if runtime_mode != "ready" and isinstance(recovery_row, dict) and str(recovery_row.get("message") or "").strip():
+                summary = normalize_persona_text(str(recovery_row.get("message") or "").strip())
+            state_label = (
+                str(ready.get("state_label") or ready_runtime_status.get("state_label") or "").strip()
+                or str(recovery_row.get("state_label") or "").strip()
+                or ("Ready" if runtime_mode == "ready" else "Not ready")
+            )
+            reason = (
+                str(ready.get("reason") or ready_runtime_status.get("reason") or "").strip()
+                or str(recovery_row.get("reason") or "").strip()
+                or None
+            )
+            next_step = (
+                str(ready.get("next_step") or ready_runtime_status.get("next_step") or "").strip()
+                or str(recovery_row.get("next_step") or "").strip()
+                or None
+            )
+            blocked_reason = None
+            if runtime_mode != "ready":
+                blocked_reason = (
+                    _norm_text(recovery_row.get("blocker"))
+                    or _norm_text(ready_runtime_status.get("failure_code"))
+                    or None
+                )
+            safe_mode_target = ready.get("safe_mode_target") if isinstance(ready.get("safe_mode_target"), dict) else {}
+            if not blocked_reason and isinstance(safe_mode_target, dict) and bool(safe_mode_target.get("enabled", False)):
+                if safe_mode_target.get("configured_valid") is False:
+                    blocked_reason = (
+                        _norm_text(safe_mode_target.get("reason"))
+                        or _norm_text(safe_mode_target.get("message"))
+                        or None
+                    )
+            if not blocked_reason:
+                blocked_payload = ready.get("blocked") if isinstance(ready.get("blocked"), dict) else {}
+                if isinstance(blocked_payload, dict) and bool(blocked_payload.get("blocked", False)):
+                    blocked_reason = (
+                        _norm_text(blocked_payload.get("reason"))
+                        or _norm_text(blocked_payload.get("kind"))
+                        or None
+                    )
+            failure_recovery = self._runtime_failure_recovery(
+                ready=ready,
+                llm_status=ready.get("llm") if isinstance(ready.get("llm"), dict) else {},
+                normalized_status=ready_runtime_status if isinstance(ready_runtime_status, dict) else {},
+                runtime_mode=runtime_mode,
+                startup_phase=str(ready.get("startup_phase") or ready.get("phase") or "starting"),
+            )
+            next_step = normalize_persona_text(
+                str(
+                    ready_runtime_status.get("next_action")
+                    or (
+                        ready.get("onboarding", {}).get("next_action")
+                        if isinstance(ready.get("onboarding"), dict)
+                        else ""
+                    )
+                    or (
+                        ready.get("recovery", {}).get("next_action")
+                        if isinstance(ready.get("recovery"), dict)
+                        else ""
+                    )
+                    or ""
+                ).strip()
+            ) or None
+            memory_db = None
+            try:
+                memory_db = self.runtime._ensure_memory_db()
+            except Exception:
+                memory_db = None
+            show_conf_pref = "on"
+            response_style = "concise"
+            if memory_db is not None:
+                show_conf_pref = (memory_db.get_preference("show_confidence") or "on").strip().lower()
+                response_style = _norm_text(memory_db.get_preference("response_style")) or "concise"
+            return {
+                "ok": True,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "runtime": {
+                    "status": runtime_mode,
+                    "state_label": state_label,
+                    "summary": summary,
+                    "reason": reason,
+                    "next_action": next_step,
+                    "next_step": next_step,
+                    "blocker": blocked_reason,
+                    "recovery": recovery_row if recovery_row else ready.get("failure_recovery"),
+                },
+                "model": {
+                    "provider": model_provider,
+                    "model": model_id,
+                    "path": f"{model_provider} / {model_id}" if model_provider and model_id else None,
+                    "routing_mode": str(defaults.get("routing_mode") or self.runtime.config.llm_routing_mode or "auto")
+                    .strip()
+                    .lower()
+                    or "auto",
+                    "health": health,
+                    "reason": str(
+                        current_target.get("health_reason")
+                        or current_target.get("qualification_reason")
+                        or current_target.get("degraded_reason")
+                        or ""
+                    ).strip() or None,
+                    "health_reason": str(current_target.get("health_reason") or "").strip() or None,
+                    "qualification_reason": str(current_target.get("qualification_reason") or "").strip() or None,
+                    "degraded_reason": str(current_target.get("degraded_reason") or "").strip() or None,
+                },
+                "conversation": {
+                    "topic": None,
+                    "recent_request": None,
+                    "open_loop": None,
+                },
+                "action": {
+                    "pending_approval": False,
+                    "blocked_reason": blocked_reason,
+                    "next_step": next_step,
+                    "last_action": None,
+                },
+                "failure_recovery": failure_recovery,
+                "signals": {
+                    "response_style": response_style,
+                    "confidence_visible": show_conf_pref not in {"off", "false", "0", "no"},
+                },
+                "source": "ready+runtime_truth+defaults+preferences",
+            }
+        except Exception as exc:  # pragma: no cover - defensive UI state fallback
+            return {
+                "ok": False,
+                "error": exc.__class__.__name__,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "runtime": {
+                    "status": "unknown",
+                    "summary": "I couldn’t read the live state snapshot right now.",
+                    "next_action": None,
+                },
+                "model": {
+                    "provider": None,
+                    "model": None,
+                    "path": None,
+                    "routing_mode": "auto",
+                    "health": "unknown",
+                },
+                "conversation": {
+                    "topic": None,
+                    "recent_request": None,
+                    "open_loop": None,
+                },
+                "action": {
+                    "pending_approval": False,
+                    "blocked_reason": "state_snapshot_unavailable",
+                    "last_action": None,
+                },
+                "failure_recovery": {
+                    "kind": "unknown",
+                    "status": "unknown",
+                    "state_label": "Unknown",
+                    "summary": "I couldn’t read the live state snapshot right now.",
+                    "reason": "The runtime state snapshot failed to load.",
+                    "next_step": "Try again after the runtime finishes starting.",
+                    "retryable": True,
+                    "recoverability": "retryable",
+                    "blocker": "state_snapshot_unavailable",
+                    "current_state": "unknown",
+                    "details": exc.__class__.__name__,
+                    "message": "I couldn’t read the live state snapshot right now. The runtime state snapshot failed to load. Next: Try again after the runtime finishes starting.",
+                },
+                "signals": {
+                    "response_style": None,
+                    "confidence_visible": None,
+                },
+                "source": "fallback",
+            }
 
     def _hardware_capacity_snapshot(self) -> dict[str, Any]:
         cached = getattr(self, "_hardware_capacity_cache", None)
@@ -2117,14 +2552,12 @@ class RuntimeTruthService:
                 "scope": "telegram",
                 "configured": configured,
                 "state": state,
-                "summary": (
-                    f"Telegram is {state.replace('_', ' ')}."
-                    if configured
-                    else "Telegram is not configured yet."
+                "summary": normalize_persona_text(
+                    f"Telegram is {state.replace('_', ' ')}." if configured else "Telegram is not configured yet."
                 ),
             }
 
-        ready = self.runtime.ready_status()
+        ready = self.ready_status()
         current_target = self.current_chat_target_status()
         target_truth = self.chat_target_truth()
         runtime_status = (
@@ -2134,14 +2567,14 @@ class RuntimeTruthService:
         )
         provider = str(target_truth.get("effective_provider") or current_target.get("provider") or self._default_provider_id() or "").strip().lower() or None
         model = str(target_truth.get("effective_model") or current_target.get("model") or self._resolved_default_model() or "").strip() or None
-        summary = (
+        summary = normalize_persona_text(
             str(ready.get("message") or "").strip()
             if bool(ready.get("ready", False))
             else (
                 str(target_truth.get("qualification_reason") or "").strip()
                 or str(ready.get("message") or "").strip()
                 or str(runtime_status.get("summary") or "").strip()
-                or "I couldn't read that from the runtime state."
+                or "I can't read a clean runtime status from the current state yet."
             )
         )
         return {

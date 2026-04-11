@@ -9,6 +9,7 @@ from urllib import error as urllib_error
 from unittest.mock import patch
 
 from telegram_adapter.bot import _chat_proxy_timeout_seconds, _handle_message, _post_local_api_chat_json, _post_local_api_chat_json_async
+from agent.public_chat import build_no_llm_public_message
 
 
 class _RaisingLLM:
@@ -356,8 +357,38 @@ class TestTelegramAdapter(unittest.TestCase):
                 asyncio.run(_handle_message(update, context))
 
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertIn("Agent could not complete the request.", reply_text)
-            self.assertIn("Reason: llm_unavailable", reply_text)
+            self.assertEqual(build_no_llm_public_message(), reply_text)
+            self.assertNotIn("Reason:", reply_text)
+            self.assertNotIn("llm_unavailable", reply_text.lower())
+
+    def test_error_response_from_api_proxy_uses_assistant_voice_when_no_reply_text_is_present(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            update = _FakeUpdate(42, "tell me a joke")
+            context = _FakeContext(
+                {
+                    "orchestrator": _FakeOrchestrator(_FakeResponse("unused")),
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                }
+            )
+            with patch(
+                "telegram_adapter.bot._post_local_api_chat_json_async",
+                return_value=_chat_api_response(
+                    "",
+                    data={
+                        "ok": False,
+                        "error_kind": "runtime_error",
+                        "message": "backend problem",
+                    },
+                ),
+            ):
+                asyncio.run(_handle_message(update, context))
+
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertIn("I couldn't finish that request", reply_text)
+            self.assertIn("Please try again.", reply_text)
+            self.assertNotIn("Reason:", reply_text)
+            self.assertNotIn("Agent could not complete the request", reply_text)
 
     def test_disconnect_proxy_error_is_soft_when_backend_is_healthy(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -548,7 +579,7 @@ class TestTelegramAdapter(unittest.TestCase):
                 text = str(((messages[-1] if messages else {}) or {}).get("content") or "")
                 if text == "runtime":
                     return _chat_api_response(
-                        "Agent is ready.",
+                        "Ready.",
                         data={"route": "runtime_status", "used_runtime_state": True, "used_llm": False},
                     )
                 return _chat_api_response(
@@ -560,7 +591,7 @@ class TestTelegramAdapter(unittest.TestCase):
             asyncio.run(_handle_message(runtime_update, context))
             asyncio.run(_handle_message(setup_update, context))
 
-            self.assertEqual("Agent is ready.", str(runtime_update.effective_message.replies[-1]["text"] or ""))
+            self.assertEqual("Ready.", str(runtime_update.effective_message.replies[-1]["text"] or ""))
             self.assertEqual(
                 "Ollama is ready for chat with ollama:qwen3.5:4b.",
                 str(setup_update.effective_message.replies[-1]["text"] or ""),
@@ -596,7 +627,7 @@ class TestTelegramAdapter(unittest.TestCase):
                     },
                     "setup": {
                         "type": "runtime_status",
-                        "summary": "Agent is ready. Using ollama / ollama:qwen3.5:4b.",
+                        "summary": "Ready. Using ollama / ollama:qwen3.5:4b.",
                     },
                 }
 

@@ -122,7 +122,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                     "runtime_mode": "READY",
                     "runtime_status": {
                         "runtime_mode": "READY",
-                        "summary": "Agent is ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                        "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
                         "next_action": None,
                     },
                     "telegram": {"state": "running"},

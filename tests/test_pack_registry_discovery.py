@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
@@ -228,6 +230,52 @@ class TestPackRegistryDiscovery(unittest.TestCase):
         self.assertIn("approval_tied_to_content", preview["badges"])
         self.assertIn("changed_upstream", preview["badges"])
         self.assertIn("identity is tied to content", preview["summary"])
+
+    def test_preview_retries_through_transient_registry_cache_lock(self) -> None:
+        catalog_path = self.storage_root / "registry_catalog.json"
+        catalog_path.write_text(
+            json.dumps(
+                {
+                    "packs": [
+                        {
+                            "id": "docs-skill",
+                            "name": "Docs Skill",
+                            "summary": "Summarizes docs safely.",
+                            "source_url": "https://github.com/example/docs-skill",
+                            "has_skill_md": True,
+                        }
+                    ]
+                },
+                ensure_ascii=True,
+            ),
+            encoding="utf-8",
+        )
+        self._write_sources(
+            [
+                {
+                    "id": "local-registry",
+                    "kind": "local_catalog",
+                    "name": "Local Registry",
+                    "base_url": str(catalog_path),
+                    "enabled": True,
+                }
+            ]
+        )
+        service = PackRegistryDiscoveryService(
+            pack_store=self.store,
+            storage_root=str(self.storage_root),
+            sources_path=str(self.sources_path),
+        )
+
+        with mock.patch.object(
+            self.store,
+            "get_registry_source_cache",
+            side_effect=[sqlite3.OperationalError("database is locked"), None, None],
+        ):
+            preview_payload = service.preview("local-registry", "docs-skill")
+
+        self.assertEqual("portable_text_skill", preview_payload["preview"]["artifact_type_hint"])
+        self.assertIn("read-only", preview_payload["preview"]["summary"].lower())
 
     def test_policy_controls_allowlist_denied_disabled_and_kind_restriction(self) -> None:
         catalog_path = self.storage_root / "registry_catalog.json"

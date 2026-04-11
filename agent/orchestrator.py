@@ -18,7 +18,6 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from agent.intent_router import route_message
-from agent.intent.low_confidence import detect_low_confidence
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
 from agent.doctor import run_doctor_report
@@ -31,6 +30,11 @@ from agent.logging_utils import log_event, redact_payload
 from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
 from agent.conversation_memory import record_event
 import agent.memory_ingest as memory_ingest
+from agent.packs.capability_recommendation import (
+    detect_pack_capability_need,
+    recommend_packs_for_capability,
+    render_pack_capability_response,
+)
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
@@ -52,8 +56,18 @@ from agent.identity import (
 )
 from agent.llm.chat_preflight import build_chat_selection_policy_meta
 from agent.llm.inference_router import route_inference
-from agent.onboarding_contract import onboarding_next_action, onboarding_summary
-from agent.recovery_contract import recovery_next_action, recovery_summary
+from agent.onboarding_flow import (
+    classify_onboarding_reply,
+    is_onboarding_entry_trigger,
+    mark_onboarding_completed,
+    onboarding_decline_response,
+    onboarding_entry_prompt,
+    onboarding_intent_prompt,
+    onboarding_skip_response,
+    recommend_onboarding_capability,
+    render_onboarding_recommendation,
+    should_offer_onboarding,
+)
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import compose_actionable_message, deterministic_error_message
 from agent.runtime_truth_service import RuntimeTruthService
@@ -74,6 +88,8 @@ from agent.setup_chat_flow import (
     classify_runtime_chat_route,
     normalize_setup_text,
 )
+from agent.persona import normalize_persona_text
+from agent.public_chat import build_no_llm_public_message, build_public_sentence_text, normalize_public_assistant_text
 from agent.skills.system_health_analyzer import build_system_health_report
 from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
@@ -398,8 +414,6 @@ _MODEL_SCOUT_SWITCH_BACK_PHRASES = (
     "switch back to the last model",
 )
 _RUNTIME_REPAIR_ACTION_PHRASES = (
-    "repair it",
-    "fix it",
     "repair ollama",
     "fix ollama",
     "repair openrouter",
@@ -571,6 +585,7 @@ class Orchestrator:
             except Exception:
                 pass
         self._runtime_setup_state: dict[str, dict[str, Any]] = {}
+        self._onboarding_state: dict[str, dict[str, Any]] = {}
         self._model_trial_state: dict[str, dict[str, Any]] = {}
         self._last_interpretable_result: dict[str, dict[str, Any]] = {}
         self._tool_executor = ToolExecutor(
@@ -708,13 +723,7 @@ class Orchestrator:
 
     @staticmethod
     def _bootstrap_no_chat_text() -> str:
-        state = "LLM_MISSING"
-        return (
-            f"{onboarding_summary(state)}\n"
-            "1) Start Ollama locally at http://127.0.0.1:11434.\n"
-            "2) Install a local chat model (for example qwen2.5:3b-instruct).\n"
-            f"Next: {onboarding_next_action(state)}"
-        )
+        return build_no_llm_public_message()
 
     def _bootstrap_no_chat_response(self) -> OrchestratorResponse:
         return OrchestratorResponse(self._bootstrap_no_chat_text())
@@ -733,8 +742,7 @@ class Orchestrator:
                     )
             except Exception:
                 pass
-        mode = "LLM_UNAVAILABLE"
-        return OrchestratorResponse(f"{recovery_summary(mode)}\nNext: {recovery_next_action(mode)}")
+        return OrchestratorResponse(self._bootstrap_no_chat_text())
 
     @staticmethod
     def _trace_id(prefix: str) -> str:
@@ -834,7 +842,7 @@ class Orchestrator:
         if bool(result.get("ok", False)):
             self._memory_runtime.set_last_tool(user_id, str(result.get("tool") or ""))
             return OrchestratorResponse(
-                str(result.get("user_text") or "Done.").strip() or "Done.",
+                normalize_public_assistant_text(str(result.get("user_text") or "Done."), fallback="Done."),
                 {
                     "tool_result": {
                         "tool": result.get("tool"),
@@ -1362,6 +1370,7 @@ class Orchestrator:
             and str(row.get("content") or "").strip()
         ]
         state, issue = self._memory_runtime.load_working_memory_state(user_id)
+        had_working_memory_before = bool(state.warm_summaries or state.cold_state_blocks or state.hot_turns)
         if len(transcript_messages) > 1:
             state = rebuild_state_from_messages(transcript_messages, previous_state=state)
         elif transcript_messages:
@@ -1406,7 +1415,7 @@ class Orchestrator:
             "messages": effective_messages,
             "memory_context_text": effective_memory_context_text,
             "issue": issue,
-            "used_working_memory": bool(state.warm_summaries or state.cold_state_blocks or state.hot_turns),
+            "used_working_memory": had_working_memory_before,
         }
 
     def _runtime_truth(self) -> RuntimeTruthService | None:
@@ -1497,8 +1506,11 @@ class Orchestrator:
         if next_question:
             data["next_question"] = str(next_question).strip()
         if isinstance(payload, dict):
-            data["runtime_payload"] = dict(payload)
-        return OrchestratorResponse(str(text or "").strip() or "Done.", data)
+            payload_copy = dict(payload)
+            if isinstance(payload_copy.get("summary"), str):
+                payload_copy["summary"] = normalize_persona_text(payload_copy.get("summary"))
+            data["runtime_payload"] = payload_copy
+        return OrchestratorResponse(normalize_persona_text(str(text or "").strip() or "Done."), data)
 
     def _runtime_state_unavailable_response(
         self,
@@ -1507,7 +1519,7 @@ class Orchestrator:
         used_memory: bool = False,
         reason: str | None = None,
     ) -> OrchestratorResponse:
-        message = "I can't read a clean runtime status from the current state yet."
+        message = normalize_persona_text("I can't read a clean runtime status from the current state yet.")
         return self._runtime_truth_response(
             text=message,
             route=route,
@@ -1679,6 +1691,12 @@ class Orchestrator:
                 "summary": "I can read and update your local memory, preferences, anchors, and open loops.",
                 "available": True,
             },
+            {
+                "key": "pack_suggestions",
+                "title": "Pack suggestions",
+                "summary": "I can tell you when a task needs a missing capability and point to a relevant pack preview without auto-installing it.",
+                "available": True,
+            },
         ]
         if truth is not None:
             target_truth = (
@@ -1796,7 +1814,7 @@ class Orchestrator:
             "Do not invent a name, persona, company, or origin story.",
             f"If asked who you are, answer as {assistant_label} only.",
             "If no explicit user name is configured, refer to the user as 'you'.",
-            "Keep the tone practical, direct, calm, and non-corporate.",
+            "Follow the persona contract: local-first, practical, calm, direct, answer-first, and non-corporate.",
         ]
         if user_label != "you":
             lines.append(f"You may refer to the user as {user_label} sparingly when it helps clarity.")
@@ -1863,6 +1881,7 @@ class Orchestrator:
                 provider=provider,
                 model=model,
             )
+        guarded_text = normalize_persona_text(guarded_text)
         if self._assistant_frontdoor_engaged(user_text):
             lowered_guarded_text = str(guarded_text or "").strip().lower()
             bootstrap_recovery_text = any(
@@ -1870,7 +1889,7 @@ class Orchestrator:
                 for marker in (
                     "start ollama locally",
                     "install a local chat model",
-                    "no chat model available right now",
+                    "i’m not ready to chat yet",
                 )
             )
             generic_fallback_used = bool(response_data.get("generic_fallback_used", False))
@@ -4320,7 +4339,7 @@ class Orchestrator:
         if not confirmed:
             question = (
                 f"I will ask the canonical model manager to acquire {matched_model}. "
-                "This mutates the available model inventory. Reply yes to proceed or no to cancel."
+                "This mutates the available model inventory. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id,
@@ -4514,7 +4533,7 @@ class Orchestrator:
         if not confirmed:
             question = (
                 f"I will switch chat temporarily to {matched_model}. "
-                "This mutates the active chat target. Reply yes to proceed or no to cancel."
+                "This mutates the active chat target. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id,
@@ -4921,20 +4940,20 @@ class Orchestrator:
         return bool(words & {"system", "runtime", "agent"} and words & {"status", "report", "health"})
 
     def _looks_like_short_help_prompt(self, text: str) -> bool:
-        words = self._assistant_unmatched_words(text)
-        if not words or len(words) > 3:
-            return False
-        return bool(set(words) & {"help", "fix", "repair"})
+        normalized = normalize_setup_text(text).replace("/", " ")
+        return any(
+            phrase in normalized
+            for phrase in (
+                "help me get this working",
+                "help me fix it",
+                "check setup and explain what s wrong",
+                "check setup and explain what's wrong",
+                "diagnose setup",
+            )
+        )
 
     def _looks_like_placeholder_action_prompt(self, text: str) -> bool:
-        words = set(self._assistant_unmatched_words(text))
-        if not words or len(words) > 4:
-            return False
-        placeholders = {"thing", "things", "this", "that", "it", "stuff", "something"}
-        action_verbs = {"do", "run", "make", "fix", "repair", "handle", "check"}
-        if "status" in words and words & placeholders:
-            return True
-        return bool(words & action_verbs and words & placeholders)
+        return False
 
     def _assistant_unmatched_clarification_response(
         self,
@@ -4991,6 +5010,9 @@ class Orchestrator:
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
+        pack_capability_response = self._pack_capability_recommendation_response(user_id, text)
+        if pack_capability_response is not None:
+            return pack_capability_response
         truth = self._runtime_truth()
         normalized = normalize_setup_text(text).replace("/", " ")
 
@@ -5011,24 +5033,6 @@ class Orchestrator:
                 reason="short_help_prompt",
             )
 
-        if self._looks_like_placeholder_action_prompt(text):
-            return self._assistant_unmatched_clarification_response(
-                used_memory=used_memory,
-                reason="placeholder_action_prompt",
-            )
-
-        low_confidence = detect_low_confidence(text)
-        nl_intent = str((nl_route(text) or {}).get("intent") or "").strip().upper()
-        if low_confidence.is_low_confidence and nl_intent != "CHITCHAT":
-            if str(low_confidence.reason or "").strip().lower() in {"no_semantic_tokens", "repetition_spam"}:
-                return self._assistant_unmatched_fallback_response(
-                    used_memory=used_memory,
-                    reason=str(low_confidence.reason or "unclear_input"),
-                )
-            return self._assistant_unmatched_clarification_response(
-                used_memory=used_memory,
-                reason=str(low_confidence.reason or "unclear_input"),
-            )
         return None
 
     @staticmethod
@@ -5167,14 +5171,10 @@ class Orchestrator:
         if removed_best is not None and removed_best_score >= 0.35:
             row = removed_best["row"]
             pack_name = str(removed_best.get("pack_name") or "").strip() or "That pack"
-            summary = str(removed_best.get("summary") or "").strip()
-            lines = [
-                f"{pack_name} was removed, so I can’t use it through chat anymore.",
-            ]
-            if summary:
-                lines.append(f"Removed pack summary: {summary}.")
-            lines.append("Reinstall it if you want to use it again, or ask /packs to see what is still installed.")
-            message = " ".join(lines).strip()
+            message = (
+                f"{pack_name} was removed, so I can’t use it through chat anymore. "
+                "Reinstall it if you want to use it again, or ask /packs to see what is still installed."
+            ).strip()
             return self._runtime_truth_response(
                 text=message,
                 route="action_tool",
@@ -5263,7 +5263,6 @@ class Orchestrator:
         if best is None or best_score < 0.22:
             return None
         row = best["row"]
-        sections = best["sections"] if isinstance(best.get("sections"), dict) else {}
         review_envelope = row.get("review_envelope") if isinstance(row.get("review_envelope"), dict) else {}
         pack_name = self._external_pack_display_name(
             str(
@@ -5274,33 +5273,12 @@ class Orchestrator:
             ).strip()
         )
         status = str(row.get("status") or "").strip().lower()
-        summary = str(best.get("summary") or "").strip()
-        purpose = self._external_pack_snippet(sections.get("purpose") or summary or f"{pack_name} is a safe imported text pack.")
-        when_to_use = self._external_pack_snippet(sections.get("when to use"))
-        inputs = self._external_pack_snippet(sections.get("inputs"))
-        behavior = self._external_pack_snippet(sections.get("behavior"))
-        constraints = self._external_pack_snippet(sections.get("constraints"))
-        examples = self._external_pack_snippet(sections.get("example prompts"))
-        lines: list[str] = []
         if status == "blocked":
-            lines.append(f"{pack_name} is blocked, so I cannot use it through chat.")
-            if summary:
-                lines.append(f"Reason: {summary}.")
+            message = f"{pack_name} is blocked, so I cannot use it through chat."
         else:
-            lines.append(f"{pack_name} is a safe imported text pack for {purpose}.")
-            if when_to_use:
-                lines.append(f"Use it when {when_to_use}.")
-            if inputs:
-                lines.append(f"Inputs: {inputs}.")
-            if behavior:
-                lines.append(f"Behavior: {behavior}.")
-            if constraints:
-                lines.append(f"Constraints: {constraints}.")
-            if examples:
-                lines.append(f"Example prompts: {examples}.")
+            message = f"{pack_name} is available as an imported pack. I won’t repeat the pack text here."
             if status == "partial_safe_import":
-                lines.append("Some unsafe files were stripped during import.")
-        message = " ".join(lines).strip()
+                message = f"{message} Some unsafe files were stripped during import."
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -5315,6 +5293,96 @@ class Orchestrator:
                 "status": status or None,
             },
         )
+
+    def _pack_registry_discovery(self):
+        cached = getattr(self, "_pack_registry_discovery_cache", None)
+        if cached is not None:
+            return cached
+        from agent.packs.registry_discovery import PackRegistryDiscoveryService
+
+        discovery = PackRegistryDiscoveryService(
+            pack_store=self._pack_store,
+            storage_root=self._pack_store.external_storage_root(),
+        )
+        self._pack_registry_discovery_cache = discovery
+        return discovery
+
+    def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        need = detect_pack_capability_need(text)
+        if need is None:
+            return None
+        recommendation = recommend_packs_for_capability(
+            text,
+            pack_store=self._pack_store,
+            pack_registry_discovery=self._pack_registry_discovery(),
+            capability=str(need.get("capability") or "").strip().lower() or None,
+        )
+        if recommendation is None:
+            return None
+        message = render_pack_capability_response(recommendation)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["pack_capability_recommendation"],
+            payload={
+                "type": "pack_capability_recommendation",
+                "summary": message,
+                "recommendation": recommendation,
+                "capability_required": recommendation.get("capability_required"),
+                "comparison_mode": recommendation.get("comparison_mode"),
+                "fallback": recommendation.get("fallback"),
+                "next_step": recommendation.get("next_step"),
+            },
+        )
+
+    def _onboarding_prompt_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse | None:
+        state = self._current_onboarding_state(user_id)
+        stage = str(state.get("stage") or "").strip().lower()
+        if stage in {"entry", "intent"}:
+            decision = classify_onboarding_reply(text, stage=stage)
+            kind = str(decision.get("kind") or "").strip().lower()
+            if kind == "skip":
+                self._clear_onboarding_state(user_id)
+                mark_onboarding_completed(self.db, user_id)
+                return OrchestratorResponse(
+                    onboarding_decline_response() if stage == "intent" else onboarding_skip_response()
+                )
+            if kind == "yes" and stage == "entry":
+                self._save_onboarding_state(user_id, {"stage": "intent"})
+                return OrchestratorResponse(onboarding_intent_prompt())
+            if kind == "intent":
+                intent = str(decision.get("intent") or "").strip().lower()
+                self._clear_onboarding_state(user_id)
+                mark_onboarding_completed(self.db, user_id, intent_hint=intent or None)
+                recommendation = recommend_onboarding_capability(
+                    intent,
+                    pack_store=self._pack_store,
+                    pack_registry_discovery=self._pack_registry_discovery(),
+                )
+                return OrchestratorResponse(render_onboarding_recommendation(intent, recommendation))
+
+            self._clear_onboarding_state(user_id)
+            mark_onboarding_completed(self.db, user_id)
+            return None
+
+        chat_preflight = chat_context if isinstance(chat_context, dict) else {}
+        if bool((chat_preflight.get("chat_preflight") or {}).get("direct_result")):
+            return None
+        source_surface = str(chat_preflight.get("source_surface") or "").strip().lower()
+        if source_surface not in {"webui", "ui", "browser", "desktop"}:
+            return None
+        if self._llm_chat_available() and should_offer_onboarding(self.db, self._pack_store, user_id) and is_onboarding_entry_trigger(text):
+            self._save_onboarding_state(user_id, {"stage": "entry"})
+            return OrchestratorResponse(onboarding_entry_prompt())
+        return None
 
     def forget_external_pack_activation(self, *, pack_id: str | None = None, pack_name: str | None = None) -> int:
         normalized_pack_id = str(pack_id or "").strip()
@@ -5360,6 +5428,25 @@ class Orchestrator:
 
     def _clear_runtime_setup_state(self, user_id: str) -> None:
         self._runtime_setup_state.pop(user_id, None)
+
+    def _current_onboarding_state(self, user_id: str) -> dict[str, Any]:
+        state = self._onboarding_state.get(user_id)
+        if not isinstance(state, dict):
+            return {}
+        created_ts = int(state.get("created_ts") or 0)
+        if created_ts and int(time.time()) - created_ts > 24 * 60 * 60:
+            self._onboarding_state.pop(user_id, None)
+            return {}
+        return dict(state)
+
+    def _save_onboarding_state(self, user_id: str, state: dict[str, Any]) -> None:
+        self._onboarding_state[user_id] = {
+            **dict(state),
+            "created_ts": int(time.time()),
+        }
+
+    def _clear_onboarding_state(self, user_id: str) -> None:
+        self._onboarding_state.pop(user_id, None)
 
     def _current_model_trial_state(self, user_id: str) -> dict[str, Any]:
         state = self._model_trial_state.get(user_id)
@@ -6066,7 +6153,10 @@ class Orchestrator:
                 reason="runtime_truth_service_unavailable",
             )
         status_payload = truth.runtime_status(kind)
-        message = str(status_payload.get("summary") or "").strip() or "I can't read a clean runtime status from the current state yet."
+        message = normalize_persona_text(
+            str(status_payload.get("summary") or "").strip()
+            or "I can't read a clean runtime status from the current state yet."
+        )
         return self._runtime_truth_response(
             text=message,
             route="runtime_status",
@@ -7171,46 +7261,46 @@ class Orchestrator:
         target = Orchestrator._filesystem_target_label(payload)
         error_kind = str(payload.get("error_kind") or "").strip().lower() or "filesystem_error"
         if error_kind == "outside_allowed_roots":
-            return compose_actionable_message(
-                what_happened=f"I can't access {target}",
-                why="It is outside the allowed local file roots.",
-                next_action="Choose a path under the allowed local roots.",
+            return build_public_sentence_text(
+                "I can't access that location",
+                "It's outside the allowed local files.",
+                "Choose a path inside the allowed local files.",
             )
         if error_kind == "sensitive_path_blocked":
-            return compose_actionable_message(
-                what_happened=f"I can't access {target}",
-                why="That path is blocked by the local privacy policy.",
-                next_action="Choose a non-sensitive path instead.",
+            return build_public_sentence_text(
+                "I can't access that location",
+                "It's protected.",
+                "Choose a different location.",
             )
         if error_kind == "binary_file_not_supported":
-            return compose_actionable_message(
-                what_happened=f"I can't read {target}",
-                why="It looks binary, and this skill only supports text files.",
-                next_action="Point me at a text file instead.",
+            return build_public_sentence_text(
+                f"I can't read {target}",
+                "It looks binary.",
+                "Choose a text file instead.",
             )
         if error_kind == "not_found":
-            return compose_actionable_message(
-                what_happened=f"I can't access {target}",
-                why="It does not exist.",
-                next_action="Check the path and try again.",
+            return build_public_sentence_text(
+                f"I can't access {target}",
+                "I couldn't find it.",
+                "Check the path and try again.",
             )
         if error_kind == "not_readable":
-            return compose_actionable_message(
-                what_happened=f"I can't access {target}",
-                why="It is not readable.",
-                next_action="Choose a readable path instead.",
+            return build_public_sentence_text(
+                f"I can't access {target}",
+                "It isn't readable.",
+                "Choose a readable path instead.",
             )
         if error_kind == "not_directory":
-            return compose_actionable_message(
-                what_happened=f"I can't list {target}",
-                why="It is not a directory.",
-                next_action="Choose a directory path instead.",
+            return build_public_sentence_text(
+                f"I can't list {target}",
+                "It isn't a directory.",
+                "Choose a directory path instead.",
             )
         if error_kind == "not_file":
-            return compose_actionable_message(
-                what_happened=f"I can't read {target}",
-                why="It is not a regular text file.",
-                next_action="Choose a regular text file instead.",
+            return build_public_sentence_text(
+                f"I can't read {target}",
+                "It isn't a regular text file.",
+                "Choose a regular text file instead.",
             )
         return str(payload.get("message") or "I couldn't complete that filesystem request.").strip() or "I couldn't complete that filesystem request."
 
@@ -7519,94 +7609,88 @@ class Orchestrator:
     def _shell_blocked_message(payload: dict[str, Any]) -> str:
         blocked_reason = str(payload.get("blocked_reason") or payload.get("error_kind") or "").strip().lower()
         if blocked_reason == "shell_interpolation_blocked":
-            return compose_actionable_message(
-                what_happened="I can't run shell-style chaining, pipes, or interpolation through this bounded shell skill",
-                why="This shell surface only accepts validated structured operations.",
-                next_action="Ask for one supported shell action at a time.",
+            return build_public_sentence_text(
+                "I can't run that command here",
+                "Try one supported action at a time.",
             )
         if blocked_reason == "unsupported_command":
-            return compose_actionable_message(
-                what_happened="I can't run that shell command here",
-                why="This skill only supports a small allowlisted set of native shell operations.",
-                next_action="Ask for a supported read-only shell command or a bounded install/create action.",
+            return build_public_sentence_text(
+                "I can't run that command here",
+                "Ask for one supported shell action.",
             )
         if blocked_reason == "destructive_operation_blocked":
-            return compose_actionable_message(
-                what_happened="I can't run that shell operation here",
-                why="This bounded shell skill blocks destructive and privilege-changing actions.",
-                next_action="Use a non-destructive path instead.",
+            return build_public_sentence_text(
+                "I can't run that command here",
+                "Use a non-destructive action instead.",
             )
         if blocked_reason == "operation_not_supported":
-            return compose_actionable_message(
-                what_happened="I can't do that file-management action here",
-                why="This bounded shell skill does not support that operation.",
-                next_action="Use one of the supported shell or filesystem actions instead.",
+            return build_public_sentence_text(
+                "I can't do that here",
+                "Use one of the supported shell or filesystem actions instead.",
             )
         if blocked_reason == "unsupported_manager":
-            return compose_actionable_message(
-                what_happened="I can't use that package manager here",
-                why="This bounded shell skill supports only a narrow allowlisted install path.",
-                next_action="Use a supported package manager instead.",
+            return build_public_sentence_text(
+                "I can't use that package manager here",
+                "Choose a supported package manager.",
             )
         if blocked_reason == "unsupported_scope":
-            return compose_actionable_message(
-                what_happened="I can't use that install scope here",
-                why="This bounded shell skill only supports specific validated install scopes.",
-                next_action="Use a supported install scope instead.",
+            return build_public_sentence_text(
+                "I can't use that install scope here",
+                "Choose a supported install scope.",
             )
         if blocked_reason == "invalid_package_name":
-            return compose_actionable_message(
-                what_happened="I can't start that install request",
-                why="The package name is not valid.",
-                next_action="Retry with a simple valid package name.",
+            return build_public_sentence_text(
+                "I can't start that install request",
+                "The package name is not valid.",
+                "Try again with a simple package name.",
             )
         if blocked_reason == "invalid_argument":
-            return compose_actionable_message(
-                what_happened="I can't run that shell request",
-                why="The argument is not valid for this bounded shell surface.",
-                next_action="Retry with a simple validated argument.",
+            return build_public_sentence_text(
+                "I can't run that request",
+                "The argument is not valid.",
+                "Try again with a simple argument.",
             )
         if blocked_reason == "outside_allowed_roots":
-            return compose_actionable_message(
-                what_happened="I can't use that path here",
-                why="It is outside the allowed local roots.",
-                next_action="Choose a path under the allowed local roots.",
+            return build_public_sentence_text(
+                "I can't use that path here",
+                "It's outside the allowed local files.",
+                "Choose a path inside the allowed local files.",
             )
         if blocked_reason == "sensitive_path_blocked":
-            return compose_actionable_message(
-                what_happened="I can't use that path here",
-                why="It is blocked by the local privacy policy.",
-                next_action="Choose a non-sensitive path instead.",
+            return build_public_sentence_text(
+                "I can't use that path here",
+                "It's protected.",
+                "Choose a different location.",
             )
         if blocked_reason == "not_directory":
-            return compose_actionable_message(
-                what_happened="I can't use that path for this request",
-                why="It is not a directory.",
-                next_action="Choose a directory path instead.",
+            return build_public_sentence_text(
+                "I can't use that path here",
+                "It isn't a directory.",
+                "Choose a directory path instead.",
             )
         if blocked_reason == "not_found":
-            return compose_actionable_message(
-                what_happened="I can't use that path for this request",
-                why="It does not exist.",
-                next_action="Check the path and try again.",
+            return build_public_sentence_text(
+                "I can't use that path here",
+                "I couldn't find it.",
+                "Check the path and try again.",
             )
         if blocked_reason == "path_exists":
-            return compose_actionable_message(
-                what_happened="I can't create that directory",
-                why="A non-directory path already exists there.",
-                next_action="Choose a different target path.",
+            return build_public_sentence_text(
+                "I can't create that directory",
+                "Something else already exists there.",
+                "Choose a different target path.",
             )
         if blocked_reason == "parent_not_directory":
-            return compose_actionable_message(
-                what_happened="I can't create that directory",
-                why="The parent directory does not exist or is not a directory.",
-                next_action="Create or choose a valid parent directory first.",
+            return build_public_sentence_text(
+                "I can't create that directory",
+                "The parent path isn't ready.",
+                "Choose a different parent path.",
             )
         if blocked_reason == "not_writable":
-            return compose_actionable_message(
-                what_happened="I can't write there",
-                why="That path is not writable.",
-                next_action="Choose a writable directory instead.",
+            return build_public_sentence_text(
+                "I can't write there",
+                "That path isn't writable.",
+                "Choose a writable directory instead.",
             )
         return str(payload.get("message") or "I couldn't complete that shell request.").strip() or "I couldn't complete that shell request."
 
@@ -7764,7 +7848,7 @@ class Orchestrator:
             package_label = str(preview.get("package") or package or "that package").strip() or "that package"
             question = (
                 f"I will install {package_label} using {command_preview}. "
-                "This mutates the local system. Reply yes to proceed or no to cancel."
+                "This mutates the local system. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id=user_id,
@@ -7820,7 +7904,7 @@ class Orchestrator:
         if not confirmed:
             question = (
                 f"I will switch chat back to {previous_model}. "
-                "This mutates the active chat target. Reply yes to proceed or no to cancel."
+                "This mutates the active chat target. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id,
@@ -7922,7 +8006,7 @@ class Orchestrator:
                 )
             question = (
                 f"I will create the directory {target}. "
-                "This mutates the local filesystem. Reply yes to proceed or no to cancel."
+                "This mutates the local filesystem. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id=user_id,
@@ -8739,7 +8823,7 @@ class Orchestrator:
         if not confirmed:
             question = (
                 f"I will switch chat to the best available local model {candidate_model_id}. "
-                "This mutates the configured chat model. Reply yes to proceed or no to cancel."
+                "This mutates the configured chat model. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id,
@@ -8931,10 +9015,7 @@ class Orchestrator:
             )
             ok = False
         else:
-            message = (
-                "No chat model is available right now. "
-                "If you want, I can help you start Ollama or switch to another configured provider."
-            )
+            message = build_no_llm_public_message()
             ok = False
 
         return self._runtime_truth_response(
@@ -9024,12 +9105,12 @@ class Orchestrator:
             if promote_default:
                 question = (
                     f"I will make {matched_model} the default chat model. "
-                    "This mutates the configured chat target. Reply yes to proceed or no to cancel."
+                    "This mutates the configured chat target. Say yes to continue, or no to cancel."
                 )
             else:
                 question = (
                     f"I will switch chat to {matched_model}. "
-                    "This mutates the active chat target. Reply yes to proceed or no to cancel."
+                    "This mutates the active chat target. Say yes to continue, or no to cancel."
                 )
             return self._confirmation_preview_response(
                 user_id,
@@ -9440,6 +9521,8 @@ class Orchestrator:
             return self._operational_status_response(user_id, text, kind)
         if kind == "assistant_capabilities":
             return self._assistant_capabilities_response()
+        if kind == "pack_capability_recommendation":
+            return self._pack_capability_recommendation_response(user_id, text)
         if kind in {"agent_memory_inspect", "agent_memory_preferences", "agent_memory_open_loops"}:
             return self._agent_memory_response(user_id, kind, query_text=text)
         if self._runtime_truth() is None:
@@ -9705,10 +9788,12 @@ class Orchestrator:
         task_type_override = str(context.get("task_type") or purpose).strip() or "chat"
         payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
         normalized_messages = self._normalize_chat_messages(context.get("messages"), text)
-        memory_context_text = str(context.get("memory_context_text") or "").strip()
-        if not memory_context_text:
-            memory_context_text = self._selective_chat_memory_context(user_id, text)
-        used_memory = bool(memory_context_text) or len(normalized_messages) > 1
+        explicit_memory_context_text = str(context.get("memory_context_text") or "").strip()
+        selected_memory_context_text = ""
+        if not explicit_memory_context_text:
+            selected_memory_context_text = self._selective_chat_memory_context(user_id, text)
+        preexisting_memory_context_text = explicit_memory_context_text or selected_memory_context_text
+        used_memory = bool(explicit_memory_context_text) or len(normalized_messages) > 1
         runtime_adapter_used = bool(self._chat_runtime_adapter)
         # Final SAFE MODE/frontdoor containment guard. Deterministic assistant
         # handling should still win even if a grounded request drifted this far.
@@ -9727,7 +9812,7 @@ class Orchestrator:
             payload=dict(payload),
             thread_id=str(context.get("thread_id") or "").strip() or None,
             messages=normalized_messages,
-            memory_context_text=memory_context_text,
+            memory_context_text=preexisting_memory_context_text,
         )
         normalized_messages = (
             list(working_memory_payload.get("messages"))
@@ -9735,9 +9820,6 @@ class Orchestrator:
             else normalized_messages
         )
         memory_context_text = str(working_memory_payload.get("memory_context_text") or "").strip()
-        used_memory = bool(memory_context_text) or len(normalized_messages) > 1 or bool(
-            working_memory_payload.get("used_working_memory")
-        )
         payload = dict(payload)
         payload["memory_context_text"] = memory_context_text
         prepared = None
@@ -10744,9 +10826,8 @@ class Orchestrator:
                 llm_text = str(result.get("text") or "").strip()
 
         answer_body = llm_text or "\n".join(self._authoritative_summary_lines(local_observations))
-        final_text = f"{answer_body}\n\nLOCAL_OBSERVATIONS\n{observations_json}"
         return OrchestratorResponse(
-            final_text,
+            answer_body,
             {
                 "skip_friction_formatting": True,
                 "local_observations": local_observations,
@@ -13756,6 +13837,10 @@ class Orchestrator:
 
                 if cmd.name == "health":
                     return self._cards_response(user_id, self._health_payload(user_id))
+
+            onboarding_response = self._onboarding_prompt_response(user_id, text, chat_context=context)
+            if onboarding_response is not None:
+                return onboarding_response
 
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):

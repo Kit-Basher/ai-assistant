@@ -42,7 +42,7 @@ class TestAgentCLI(unittest.TestCase):
             code = cli.main(["status"])
         self.assertEqual(0, code)
         text = output.getvalue()
-        self.assertIn("Agent is ready.", text)
+        self.assertIn("Ready.", text)
         self.assertIn("telegram: enabled_running", text)
         self.assertIn("message: Ready.", text)
 
@@ -50,11 +50,11 @@ class TestAgentCLI(unittest.TestCase):
         payload = {
             "ok": True,
             "ready": True,
-            "message": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+            "message": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             "runtime_mode": "READY",
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             },
             "telegram": {"state": "running"},
             "llm": {"provider": "ollama", "model": "ollama:qwen2.5:7b-instruct"},
@@ -81,11 +81,11 @@ class TestAgentCLI(unittest.TestCase):
         payload = {
             "ok": True,
             "ready": True,
-            "message": "Agent is ready. Using openrouter / openrouter:ai21/jamba-large-1.7.",
+            "message": "Ready. Using openrouter / openrouter:ai21/jamba-large-1.7.",
             "runtime_mode": "READY",
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using openrouter / openrouter:ai21/jamba-large-1.7.",
+                "summary": "Ready. Using openrouter / openrouter:ai21/jamba-large-1.7.",
             },
             "telegram": {"state": "running"},
             "llm": {"provider": "openrouter", "model": "openrouter:ai21/jamba-large-1.7"},
@@ -112,11 +112,11 @@ class TestAgentCLI(unittest.TestCase):
         payload = {
             "ok": True,
             "ready": True,
-            "message": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+            "message": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             "runtime_mode": "READY",
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             },
             "telegram": {"state": "running"},
             "llm": {"provider": "ollama", "model": "ollama:qwen2.5:7b-instruct"},
@@ -161,11 +161,11 @@ class TestAgentCLI(unittest.TestCase):
         ready_payload = {
             "ok": True,
             "ready": True,
-            "message": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+            "message": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             "runtime_mode": "READY",
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             },
             "telegram": {"state": "running"},
             "llm": {"provider": "ollama", "model": "ollama:qwen2.5:7b-instruct"},
@@ -198,11 +198,11 @@ class TestAgentCLI(unittest.TestCase):
         ready_payload = {
             "ok": True,
             "ready": True,
-            "message": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+            "message": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             "runtime_mode": "READY",
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             },
             "telegram": {"state": "running"},
             "llm": {"provider": "ollama", "model": "ollama:qwen2.5:7b-instruct"},
@@ -317,11 +317,11 @@ class TestAgentCLI(unittest.TestCase):
         payload = {
             "ok": True,
             "ready": True,
-            "message": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+            "message": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             "runtime_mode": "READY",
             "runtime_status": {
                 "runtime_mode": "READY",
-                "summary": "Agent is ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
             },
             "llm": {"provider": "ollama", "model": "ollama:qwen2.5:7b-instruct"},
         }
@@ -834,7 +834,7 @@ class TestAgentCLI(unittest.TestCase):
             ), redirect_stdout(output):
                 code = cli.main(None)
         self.assertEqual(0, code)
-        self.assertIn("Agent is ready.", output.getvalue())
+        self.assertIn("Ready.", output.getvalue())
 
     def test_main_uses_sys_argv_for_version_when_argv_none(self) -> None:
         output = io.StringIO()

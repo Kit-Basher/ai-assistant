@@ -1,0 +1,16 @@
+{
+  "fixture_id": "openclaw_mixed_skill",
+  "source_kind": "mixed-content marketplace-style skill",
+  "upstream_repo": "openclaw/skills",
+  "pinned_ref": "29c8c207fcdf20812d45d38c033dad3968bcefa9",
+  "source_url": "https://github.com/openclaw/skills/tree/29c8c207fcdf20812d45d38c033dad3968bcefa9/skills/durtydhiana/pai",
+  "source_files": [
+    "SKILL.md",
+    "README.md",
+    "README_EN.md",
+    "Tools/RebuildPAI.ts",
+    "Tools/IntegrityMaintenance.ts"
+  ],
+  "why_this_exists": "Demonstrates that safe text survives while executable tool files are stripped into a partial safe import.",
+  "expected_outcome": "partial_safe_import"
+}

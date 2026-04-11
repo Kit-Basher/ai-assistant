@@ -1,0 +1,14 @@
+{
+  "fixture_id": "vercel_blocked_native_skill",
+  "source_kind": "plugin-style / native-execution-oriented skill bundle",
+  "upstream_repo": "vercel-labs/skills",
+  "pinned_ref": "df0579f",
+  "source_url": "https://github.com/vercel-labs/skills/tree/df0579f",
+  "source_files": [
+    "package.json",
+    "README.md",
+    "skills/find-skills/SKILL.md"
+  ],
+  "why_this_exists": "Demonstrates that a real bundle with package metadata is blocked instead of being reduced to runnable content.",
+  "expected_outcome": "blocked_install"
+}

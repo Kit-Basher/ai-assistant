@@ -1,0 +1,22 @@
+{
+  "classification": "native_code_pack",
+  "status": "blocked",
+  "outcome_category": "blocked_install",
+  "summary_contains": [
+    "is not compatible with the current safe import policy",
+    "blocked it after review"
+  ],
+  "must_have_paths": [
+    "PACK.md",
+    "manifest.json",
+    "SKILL.md",
+    "prompts/main.md",
+    "prompts/examples.md",
+    "metadata/source.json",
+    "metadata/normalization.json",
+    "metadata/review.json"
+  ],
+  "must_not_have_paths": [
+    "package.json"
+  ]
+}

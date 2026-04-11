@@ -205,116 +205,57 @@ repo`, `switch temporarily to ...`, `make this the default`, and explicit model
 acquisition requests.
 
 ## Quick Start
-Canonical install path:
-- code checkout: `~/personal-agent`
-- mutable state: `~/.local/share/personal-agent`
-- operator config/policy: `~/.config/personal-agent`
-- user service: `~/.config/systemd/user/personal-agent-api.service`
+Recommended install path:
+1. Clone the repo to `~/personal-agent`.
+2. Run `bash scripts/install_local.sh --desktop-launcher`.
+3. Open Personal Agent from the desktop menu or browse to `http://127.0.0.1:8765/`.
 
-1. Clone or move the repo to `~/personal-agent`, then:
-   - `cd ~/personal-agent`
-2. Create a virtualenv and install the package:
-   - `python3 -m venv .venv`
-   - `. .venv/bin/activate`
-   - `pip install -e .`
-3. Install the user service:
-   - `mkdir -p ~/.config/systemd/user`
-   - `ln -sf ~/personal-agent/systemd/personal-agent-api.service ~/.config/systemd/user/personal-agent-api.service`
-   - `systemctl --user daemon-reload`
-4. Ensure the user service can survive reboot:
-   - `loginctl enable-linger "$USER"`
-5. Enable and start the runtime:
-   - `systemctl --user enable --now personal-agent-api.service`
-6. Run first-run setup and diagnostics:
-   - `python -m agent setup`
-   - `python -m agent doctor`
-7. Run the release smoke suite:
-   - if you are validating this install or preparing a release:
-     - `python scripts/release_smoke.py`
-   - for a live answer-shape check of RAM/VRAM observation:
-     - `python scripts/hardware_observe_smoke.py`
+That single install path:
+- creates or refreshes the user venv
+- installs the user service
+- starts the existing local backend
+- optionally installs the desktop launcher
 
-Upgrade path:
-- `cd ~/personal-agent`
-- `git pull --ff-only`
-- `. .venv/bin/activate`
-- `pip install -e .`
-- `python -m agent doctor --fix`
-- `systemctl --user daemon-reload`
-- `systemctl --user restart personal-agent-api.service`
-- `python -m agent status`
+If you want the service without the desktop launcher, omit `--desktop-launcher`.
+If you need manual install, recovery, or rollback steps, use
+`docs/operator/SETUP.md`.
 
-Recovery/reset path:
-- `python -m agent setup`
-- `python -m agent doctor --fix`
-- `systemctl --user restart personal-agent-api.service`
-- `python -m agent status`
+If you downloaded a release bundle instead of cloning the repo:
+1. Extract the bundle.
+2. Run `bash install.sh`.
+3. Open Personal Agent from the desktop menu or browse to `http://127.0.0.1:8765/`.
 
-Uninstall path:
-- `systemctl --user disable --now personal-agent-api.service`
-- `rm -f ~/.config/systemd/user/personal-agent-api.service`
-- `systemctl --user daemon-reload`
-- optionally remove `~/.config/personal-agent` and `~/.local/share/personal-agent`
-
-Legacy `install.sh`, `uninstall.sh`, and `doctor.sh` are intentionally retired
-and fail closed. Use the user-service path above instead.
-
-If you are upgrading an older repo-local install, `python -m agent doctor --fix`
-copies legacy `memory/agent.db` and `logs/agent.jsonl` into the canonical
-state directory before restart.
+If you downloaded the Debian package instead:
+1. Install the `.deb` with your normal Debian/Ubuntu package tools.
+2. Launch Personal Agent from the desktop menu or run `personal-agent-webui`.
+3. On first launch, the user service registers itself if needed and then opens the UI.
 
 Useful local commands:
 - `python -m agent status`
 - `python -m agent doctor`
 - `python -m agent health`
+- `python -m agent version`
 - `python -m agent llm_inventory`
 - `python -m agent memory`
-
-Diagnostics / recovery path:
-- `python -m agent setup`
-  - canonical first-run and guided recovery surface
-- `python -m agent doctor`
-  - deterministic local diagnostics
-- `python -m agent doctor --collect-diagnostics`
-  - one redacted local diagnostics bundle for support/debugging
-- `python -m agent doctor --fix`
-  - safe local repair for missing dirs, drop-ins, and legacy state migration
-
-Memory operator surfaces:
-- `python -m agent memory`
-  - plain resumable-state summary for the current thread
-  - if continuity memory is degraded, the summary says so explicitly instead of silently repairing it
-- continuity persistence remains full-record replace, but it is now revision-aware:
-  - per-key optimistic concurrency control is enforced at the storage write boundary
-  - successful writes increment a stored revision
-  - stale cross-runtime writes are rejected instead of silently overwriting newer state
-  - there is no merge-on-write path
-  - there is no cross-key atomic snapshot or cross-key merge behavior
-  - a stale runtime must reload before retrying a rejected save
-- `GET /memory/status` (loopback only)
-  - canonical inspect surface for deterministic continuity memory, optional `memory_v2`, and optional semantic memory
-  - includes current continuity revisions, last attempted write outcome, last successful write outcome, and last stale-write conflict metadata
-  - conflict metadata is observable, not auto-resolved
-- `POST /memory/reset` (loopback only)
-  - explicit preview + confirm reset surface
-  - supported components: `continuity`, `memory_v2`, `semantic`, or `all`
-  - no memory component is erased until `confirm=true`
 
 ## Release Artifacts
 - Canonical packaging metadata lives in `pyproject.toml`.
 - Canonical version truth lives in `VERSION`.
 - Canonical release build command:
   - `python scripts/build_dist.py --outdir dist --clean`
+- Debian package build command:
+  - `bash scripts/build_deb.sh --clean`
 - Expected artifacts:
   - `dist/personal_agent-<version>-py3-none-any.whl`
   - `dist/personal_agent-<version>.tar.gz`
+- Debian package artifact:
+  - `dist/personal-agent_<version>_amd64.deb`
 - Canonical packaged CLI entry points:
   - `personal-agent`
   - `personal-agent-api`
   - `personal-agent-telegram`
-- The canonical long-running service install for this release is still the repo
-  checkout plus user-systemd path above.
-- Debian/system packaging is not supported for this release.
+- Debian packaging is supported through the release `.deb` and user-service
+  activation model described in `docs/operator/SETUP.md`.
 - Legacy `packaging/` service/env artifacts are not the shipping install path.
 
 ## Product-Relevant Operator Surfaces
@@ -330,6 +271,8 @@ Memory operator surfaces:
 - `GET /runtime`
   - operator runtime snapshot
   - includes explicit runtime status plus provider/router summary
+- `GET /version`
+  - version/build metadata for support and release verification
 - `GET /llm/control_mode`
   - current SAFE/Controlled mode state
 - `POST /llm/control_mode`
@@ -389,16 +332,20 @@ surface.
 
 ## Release Smoke Suite
 Run this before calling a build releasable:
-- `python scripts/release_smoke.py`
+- `python scripts/release_gate.py`
 
-It is the canonical fast release gate. It runs a fixed deterministic set of
-tests covering:
+It is the canonical release gate. The fast pre-check inside it is
+`python scripts/release_smoke.py`. It runs a fixed deterministic set of checks
+covering:
 - fresh-install and first-run path checks
 - health/readiness/runtime restart truth
+- the shipped two-turn web UI/API conversation proof
 - chat/tool golden-path behavior
+- the assistant-behavior release gate
 - basic memory inspect/degrade behavior
 - safe external pack discovery/preview/install blocked-path behavior
 - redacted diagnostics/no-secrets sanity
+- syntax validation, diff sanity, and the heavier release validation suite
 
 A passing run means the core supported product path is still coherent and the
 main safety/recovery gates are intact.
@@ -409,8 +356,21 @@ If you want the heavier follow-up validation path, run:
 For live, non-blocking operator smoke checks on a running system, use:
 - `python scripts/hardware_observe_smoke.py`
 - `python scripts/live_product_smoke.py`
+- `python scripts/telegram_smoke.py`
+- `python scripts/hardware_discovery_smoke.py`
+- `python scripts/discovery_quality_smoke.py`
 - `python scripts/pack_route_smoke.py`
+- `python scripts/reference_pack_workflow_smoke.py`
 - `python scripts/webui_smoke.py`
+
+The Advanced drawer now includes read-only `State` and `Packs` sections backed by `GET /state` and `GET /packs/state`.
+
+For a small brief transcript check, use:
+- `python scripts/brief_smoke.py`
+
+`python scripts/pack_route_smoke.py` also supports a remote-download mode when `PACK_ROUTE_SMOKE_REMOTE_URL` is set.
+
+`python scripts/release_validation_extended.py --with-live-smokes` can also run the optional live hardware/discovery follow-up checks after the fast release gate passes.
 
 That extended suite adds slower checks such as fresh wheel-install validation
 and extra deferred-startup/restart coverage without bloating the main smoke
@@ -424,7 +384,8 @@ gate.
   portable text skills only.
 - There is no unrestricted shell surface and no unrestricted filesystem
   mutation.
-- Debian/system packaging is out of scope for this release.
+- The release bundle and Debian package are supported optional install paths;
+  legacy root/system packaging is out of scope for this release.
 - Foreign code/plugin packs are not executable.
 - Automatic switching, automatic installing, and automatic proposal adoption are
   out of scope for this release.

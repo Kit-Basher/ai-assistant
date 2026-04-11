@@ -299,6 +299,53 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual("normalized", install_payload["normalization_result"]["status"])
         self.assertEqual(1, len(self.runtime.pack_store.list_external_packs()))
 
+    def test_pack_source_preview_does_not_persist_registry_cache(self) -> None:
+        remote_url = "https://github.com/example/docs-skill/archive/main.zip"
+        with open(self.catalog_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "packs": [
+                        {
+                            "id": "docs-skill",
+                            "name": "Docs Skill",
+                            "summary": "Summarizes docs safely.",
+                            "author": "Example",
+                            "source_url": remote_url,
+                            "source_kind_hint": "github_archive",
+                            "latest_ref_hint": "main",
+                            "has_skill_md": True,
+                            "tags": ["docs"],
+                        }
+                    ]
+                },
+                handle,
+                ensure_ascii=True,
+            )
+        with open(self.sources_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "sources": [
+                        {
+                            "id": "local-registry",
+                            "kind": "local_catalog",
+                            "name": "Local Registry",
+                            "base_url": self.catalog_path,
+                            "enabled": True,
+                        }
+                    ]
+                },
+                handle,
+                ensure_ascii=True,
+            )
+
+        self.assertIsNone(self.runtime.pack_store.get_registry_source_cache("local-registry"))
+        preview_handler = _HandlerForTest(self.runtime, "/pack_sources/local-registry/packs/docs-skill/preview")
+        preview_handler.do_GET()
+        preview_payload = json.loads(preview_handler.body.decode("utf-8"))
+        self.assertEqual(200, preview_handler.status_code)
+        self.assertFalse(preview_payload["preview"]["fetched"])
+        self.assertIsNone(self.runtime.pack_store.get_registry_source_cache("local-registry"))
+
     def test_pack_install_partial_safe_import_returns_plain_actionable_message(self) -> None:
         pack_dir = os.path.join(self.tmpdir.name, "scripted_pack")
         os.makedirs(os.path.join(pack_dir, "scripts"), exist_ok=True)
@@ -314,7 +361,8 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual(200, install_handler.status_code)
         self.assertTrue(install_payload["ok"])
         self.assertEqual("partial_safe_import", install_payload["normalization_result"]["status"])
-        self.assertIn("only imported the safe parts", str(install_payload["message"] or "").lower())
+        self.assertIn("quarantined", str(install_payload["message"] or "").lower())
+        self.assertIn("safe parts", str(install_payload["message"] or "").lower())
         self.assertIn("unsafe", str(install_payload["why"] or "").lower())
         self.assertTrue(str(install_payload["next_action"] or "").strip())
 

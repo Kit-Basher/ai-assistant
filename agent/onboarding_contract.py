@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from agent.public_chat import build_no_llm_public_message
+
 
 ONBOARDING_NOT_STARTED = "NOT_STARTED"
 ONBOARDING_TOKEN_MISSING = "TOKEN_MISSING"
@@ -191,7 +193,7 @@ def onboarding_summary(
         model = _default_model(status)
         if model:
             return f"Chat model {model} is not healthy."
-        return "No chat model available right now."
+        return build_no_llm_public_message()
     if normalized == ONBOARDING_DEGRADED:
         return "Setup is partially complete but degraded."
     return "Setup has not started."

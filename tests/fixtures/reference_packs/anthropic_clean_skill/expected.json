@@ -1,0 +1,19 @@
+{
+  "classification": "portable_text_skill",
+  "status": "normalized",
+  "outcome_category": "normalized_safe_text",
+  "summary_contains": [
+    "looks like a portable text skill",
+    "Review the imported pack details before relying on it."
+  ],
+  "must_have_paths": [
+    "PACK.md",
+    "manifest.json",
+    "SKILL.md",
+    "prompts/main.md",
+    "prompts/examples.md",
+    "metadata/source.json",
+    "metadata/normalization.json",
+    "metadata/review.json"
+  ]
+}

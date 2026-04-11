@@ -720,3 +720,58 @@ This release-readiness pass is complete when all of the following are true:
 - A single release smoke suite can be run before shipping
 - Docs match actual product behavior
 - The product is boring in the good way: predictable, explicit, recoverable, and hard to misuse
+
+---
+
+# 9. Release / Ops Guardrails
+
+## Goal
+
+Make the ship, update, rollback, backup, and support path explicit enough that
+operators do not need tribal knowledge.
+
+## Tasks
+
+- [x] Define one canonical release gate
+- [x] Keep a fast pre-check separate from the heavier release validation path
+- [x] Document install, update, rollback, and recovery expectations
+- [x] Document backup/restore and known limits
+- [x] Expose version/build verification clearly in CLI/API docs
+- [x] Align operator docs with the actual shipping runtime path
+
+## Definition of Done
+
+- A release candidate has one obvious gate to run before shipping
+- A new operator can understand install, update, rollback, and recovery from docs alone
+- Support boundaries and known limits are explicit
+
+## Completion Notes
+
+- Files changed:
+  - `scripts/release_gate.py`
+  - `tests/test_release_gate.py`
+  - `README.md`
+  - `PROJECT_STATUS.md`
+  - `PRODUCT_RUNTIME_SPEC.md`
+  - `docs/operator/RELEASE.md`
+  - `docs/operator/BACKUP_RESTORE.md`
+  - `docs/operator/KNOWN_LIMITS.md`
+  - `docs/operator/SETUP.md`
+  - `docs/operator/doctor.md`
+  - `docs/operator/LOOKHERE.md`
+- Exact behavior changed:
+  - `python scripts/release_gate.py` is now the canonical ship gate
+  - `python scripts/release_smoke.py` is the fast pre-check inside that gate
+  - live web UI and live pack workflow smoke remain documented as separate
+    operator checks rather than mandatory gate steps because they depend on
+    live service timing/state that is not stable enough for every release
+    environment
+  - release/update/rollback/backup/known-limit guidance is now documented in one place and linked from the operator runbooks
+  - `GET /version` and `python -m agent version` are explicitly documented as support verification surfaces
+- Tests added/updated:
+  - added `tests/test_release_gate.py`
+  - `tests/test_release_smoke.py` continues to pin the fast pre-check node list that feeds the release gate
+- Intentionally deferred:
+  - no packaging architecture rewrite
+  - no new deployment target or new runtime packaging mode
+  - no broad observability/telemetry expansion beyond the release/support surfaces already shipped

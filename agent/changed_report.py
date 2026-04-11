@@ -89,7 +89,7 @@ def build_changed_report_from_system_facts(db: Any, user_id: str) -> ChangedRepo
         or "host"
     )
     kernel = (((latest.get("os") or {}).get("kernel") or {}).get("release")) or None
-    machine_summary = hostname if not kernel else f"{hostname} (kernel {kernel})"
+    machine_summary = f"This machine is {hostname}" if not kernel else f"This machine is {hostname} (kernel {kernel})"
 
     lines: list[str] = []
 

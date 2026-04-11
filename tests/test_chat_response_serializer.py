@@ -13,6 +13,7 @@ class TestChatResponseSerializer(unittest.TestCase):
             {
                 "route": "generic_chat",
                 "route_reason": "generic_chat",
+                "source_surface": "api",
                 "used_runtime_state": True,
                 "used_llm": True,
                 "used_memory": True,
@@ -23,6 +24,7 @@ class TestChatResponseSerializer(unittest.TestCase):
                 "fallback_used": False,
                 "attempts": [{"provider": "ollama", "model": "ollama:qwen3.5:4b"}],
                 "duration_ms": 12,
+                "selection_policy": {"mode": "internal"},
             },
         )
 
@@ -46,8 +48,6 @@ class TestChatResponseSerializer(unittest.TestCase):
         self.assertEqual("ollama", meta["provider"])
         self.assertEqual("ollama:qwen3.5:4b", meta["model"])
         self.assertEqual("generic_chat", meta["route"])
-        self.assertEqual("generic_chat", meta["route_reason"])
-        self.assertEqual("api", meta["source_surface"])
         self.assertFalse(meta["fallback_used"])
         self.assertTrue(meta["generic_fallback_used"])
         self.assertTrue(meta["generic_fallback_allowed"])
@@ -55,9 +55,12 @@ class TestChatResponseSerializer(unittest.TestCase):
         self.assertTrue(meta["used_llm"])
         self.assertTrue(meta["used_memory"])
         self.assertEqual(["search"], meta["used_tools"])
-        self.assertEqual({"status": "idle"}, meta["autopilot"])
-        self.assertEqual("thread-1", meta["thread_id"])
-        self.assertEqual("api:session-1", meta["user_id"])
+        self.assertNotIn("route_reason", meta)
+        self.assertNotIn("source_surface", meta)
+        self.assertNotIn("selection_policy", meta)
+        self.assertNotIn("autopilot", meta)
+        self.assertNotIn("thread_id", meta)
+        self.assertNotIn("user_id", meta)
         self.assertNotIn("setup", body)
 
     def test_serializes_runtime_payload_into_setup_shape(self) -> None:
@@ -106,16 +109,57 @@ class TestChatResponseSerializer(unittest.TestCase):
         meta = body["meta"]
         self.assertIsNone(meta["provider"])
         self.assertIsNone(meta["model"])
-        self.assertEqual("provider_status", meta["setup_type"])
         self.assertFalse(meta["used_llm"])
         self.assertTrue(meta["used_runtime_state"])
-        self.assertEqual(
+        self.assertNotIn("setup_type", meta)
+        self.assertNotIn("runtime_state_failure_reason", meta)
+        self.assertNotIn("selection_policy", meta)
+
+    def test_serializes_debug_metadata_only_when_requested(self) -> None:
+        response = OrchestratorResponse(
+            "OpenRouter is configured.",
             {
-                "mode": "prefer_local",
-                "reason": "provider_status_check",
+                "route": "provider_status",
+                "route_reason": "provider_status",
+                "source_surface": "api",
+                "used_runtime_state": True,
+                "used_llm": False,
+                "used_memory": False,
+                "used_tools": [],
+                "ok": True,
+                "provider": "openrouter",
+                "model": "openrouter:openai/gpt-4o-mini",
+                "fallback_used": False,
+                "attempts": [],
+                "duration_ms": 4,
+                "runtime_payload": {
+                    "type": "provider_status",
+                    "reason": "provider_status_check",
+                    "provider": "openrouter",
+                },
+                "selection_policy": {
+                    "mode": "prefer_local",
+                    "reason": "provider_status_check",
+                },
             },
-            meta["selection_policy"],
         )
+
+        serialized = serialize_orchestrator_chat_response(
+            response,
+            source_surface="api",
+            user_id="api:session-3",
+            thread_id="thread-3",
+            autopilot_meta={"status": "off"},
+            include_debug=True,
+        )
+
+        meta = serialized.body["meta"]
+        self.assertEqual("api", meta["source_surface"])
+        self.assertEqual("thread-3", meta["thread_id"])
+        self.assertEqual("api:session-3", meta["user_id"])
+        self.assertEqual("provider_status", meta["setup_type"])
+        self.assertEqual("provider_status_check", meta["runtime_state_failure_reason"])
+        self.assertEqual({"mode": "prefer_local", "reason": "provider_status_check"}, meta["selection_policy"])
 
 
 if __name__ == "__main__":

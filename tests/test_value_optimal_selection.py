@@ -186,8 +186,7 @@ class TestValueOptimalSelection(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual("openrouter:premium-reasoner", calls[0].get("model_override"))
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-        policy_meta = meta.get("selection_policy") if isinstance(meta.get("selection_policy"), dict) else {}
-        self.assertEqual("openrouter:premium-reasoner", policy_meta.get("premium_selected"))
+        self.assertNotIn("selection_policy", meta)
 
     def test_over_cap_escalation_returns_wizard_prompt(self) -> None:
         runtime = AgentRuntime(
@@ -229,8 +228,8 @@ class TestValueOptimalSelection(unittest.TestCase):
         assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
         self.assertIn("over the cost cap", str(assistant.get("content") or ""))
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
-        policy_meta = meta.get("selection_policy") if isinstance(meta.get("selection_policy"), dict) else {}
-        self.assertEqual("premium_over_cap", policy_meta.get("mode"))
+        self.assertEqual("generic_chat", meta.get("route"))
+        self.assertNotIn("selection_policy", meta)
         wizard_state = runtime._llm_fixit_store.state  # type: ignore[attr-defined]
         self.assertTrue(bool(wizard_state.get("active")))
         self.assertEqual("premium_over_cap", wizard_state.get("issue_code"))

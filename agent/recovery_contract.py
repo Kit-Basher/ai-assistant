@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from agent.failure_ux import build_failure_recovery
 
 RECOVERY_TELEGRAM_DOWN = "TELEGRAM_DOWN"
 RECOVERY_API_DOWN = "API_DOWN"
@@ -116,37 +117,58 @@ def detect_recovery_mode(
 
 
 def recovery_next_action(mode: str) -> str:
-    normalized = str(mode or "").strip().upper()
-    if normalized == RECOVERY_TELEGRAM_DOWN:
-        return "Run: systemctl --user restart personal-agent-telegram.service"
-    if normalized == RECOVERY_API_DOWN:
-        return "Run: systemctl --user restart personal-agent-api.service"
-    if normalized == RECOVERY_TOKEN_INVALID:
-        return "Run: python -m agent.secrets set telegram:bot_token"
-    if normalized == RECOVERY_LLM_UNAVAILABLE:
-        return "Run: python -m agent setup"
-    if normalized == RECOVERY_LOCK_CONFLICT:
-        return "Stop duplicate Telegram pollers, then restart personal-agent-telegram.service"
-    if normalized == RECOVERY_DEGRADED_READ_ONLY:
-        return "Run: python -m agent doctor"
-    return "Run: python -m agent doctor"
+    return str(build_failure_recovery(**_mode_failure_context(mode)).get("next_step") or "Run: python -m agent doctor")
 
 
 def recovery_summary(mode: str) -> str:
+    return str(build_failure_recovery(**_mode_failure_context(mode)).get("summary") or "Runtime failure reason is unknown.")
+
+
+def _mode_failure_context(mode: str) -> dict[str, Any]:
     normalized = str(mode or "").strip().upper()
     if normalized == RECOVERY_TELEGRAM_DOWN:
-        return "Telegram delivery is down."
+        return {
+            "kind": "dependency_unavailable",
+            "subject": "Telegram delivery",
+            "reason": "The Telegram service is not responding.",
+            "next_step": "Run: systemctl --user restart personal-agent-telegram.service",
+        }
     if normalized == RECOVERY_API_DOWN:
-        return "API service is down."
+        return {
+            "kind": "runtime_blocked",
+            "subject": "API service",
+            "reason": "The API service is not responding.",
+            "next_step": "Run: systemctl --user restart personal-agent-api.service",
+        }
     if normalized == RECOVERY_TOKEN_INVALID:
-        return "Telegram token is missing or invalid."
+        return {
+            "kind": "confirm_token_expired",
+            "subject": "Telegram token",
+            "reason": "The token is missing or invalid.",
+            "next_step": "Run: python -m agent.secrets set telegram:bot_token",
+        }
     if normalized == RECOVERY_LLM_UNAVAILABLE:
-        return "Chat LLM is unavailable."
+        return {
+            "kind": "runtime_degraded",
+            "subject": "Chat LLM",
+            "reason": "The active provider or model is unavailable.",
+            "next_step": "Run: python -m agent setup",
+        }
     if normalized == RECOVERY_LOCK_CONFLICT:
-        return "Telegram poll lock conflict detected."
+        return {
+            "kind": "db_busy",
+            "subject": "Telegram poll lock",
+            "reason": "Another Telegram process is holding the lock.",
+            "next_step": "Stop duplicate Telegram pollers, then restart personal-agent-telegram.service",
+        }
     if normalized == RECOVERY_DEGRADED_READ_ONLY:
-        return "Runtime is degraded in read-only mode."
-    return "Runtime failure reason is unknown."
+        return {
+            "kind": "runtime_degraded",
+            "subject": "Runtime",
+            "reason": "The runtime is degraded and running read-only.",
+            "next_step": "Run: python -m agent doctor",
+        }
+    return {"kind": "unknown"}
 
 
 def normalize_recovery_mode(mode: str) -> str:

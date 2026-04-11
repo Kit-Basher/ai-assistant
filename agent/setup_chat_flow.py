@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 import re
 
+from agent.packs.capability_recommendation import detect_pack_capability_need
 from agent.nl_router import classify_free_text
 
 
@@ -665,7 +666,11 @@ def _looks_like_local_model_inventory_query(normalized: str) -> bool:
     if (
         any(token in normalized_space for token in ("model", "models"))
         and any(token in normalized_space for token in ("local", "downloaded", "installed"))
-        and any(token in normalized_space for token in ("what", "which", "show", "show me", "list", "do we have", "any other"))
+        and (
+            any(token in normalized_space for token in ("available", "downloaded", "installed", "ready", "existing"))
+            or "do we have" in normalized_space
+            or "any other" in normalized_space
+        )
     ):
         return True
     if (
@@ -962,6 +967,16 @@ def _looks_like_model_scout_recommendation_query(normalized: str) -> bool:
         return True
     if any(phrase in working for phrase in _GENERIC_MODEL_REQUEST_PHRASES):
         return True
+    if re.search(r"\bmodels?\b", working) and any(
+        token in working for token in ("tiny", "small", "lightweight", "local", "ollama", "fast")
+    ) and any(
+        token in working for token in ("coding", "code", "coder", "vision", "image", "chat", "reasoning", "research")
+    ):
+        return True
+    if re.search(r"\bmodels?\b", working) and any(
+        token in working for token in ("newer than", "more recent than", "better than", "latest", "newest", "recent")
+    ) and any(token in working for token in ("chat", "coding", "code", "vision", "reasoning", "local")):
+        return True
     recommendation_hints = (
         "should i use",
         "should we use",
@@ -997,6 +1012,10 @@ def _looks_like_model_scout_discovery_query(normalized: str) -> bool:
     if not working:
         return False
     if any(phrase in working for phrase in _MODEL_DISCOVERY_HINT_PHRASES):
+        return True
+    if any(phrase in working for phrase in ("newer than", "more recent than", "newest than", "better than", "latest than")) and any(
+        token in working for token in ("chat", "coding", "code", "vision", "reasoning", "local", "model", "models", "qwen", "gemma", "llama")
+    ):
         return True
     if ("hugging face" in working or "huggingface" in working) and re.search(r"\bmodels?\b", working):
         return True
@@ -1614,6 +1633,16 @@ def classify_runtime_chat_route(
             "kind": "assistant_capabilities",
             "generic_allowed": False,
             "fallback_reason": "assistant_capabilities",
+        }
+    capability_need = detect_pack_capability_need(normalized)
+    if capability_need is not None:
+        return {
+            "route": "action_tool",
+            "kind": "pack_capability_recommendation",
+            "capability": capability_need.get("capability"),
+            "capability_label": capability_need.get("label"),
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
         }
     if _looks_like_model_ready_now_query(normalized):
         return {

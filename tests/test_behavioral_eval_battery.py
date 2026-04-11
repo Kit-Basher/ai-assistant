@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -694,8 +695,11 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertEqual("model_scout_discovery", classify_runtime_chat_route(discovery_prompt).get("kind"))
         response = self._chat(discovery_prompt)
         text = str(getattr(response, "text", ""))
-        self.assertIn("Found 2 model(s) across 3 source(s), but some sources failed.", text)
-        self.assertIn("Top matches:", text)
+        self.assertTrue(text.startswith("For Gemma, the closest family matches look like"))
+        self.assertIn("Likely family match:", text)
+        self.assertIn("Practical local fit:", text)
+        self.assertIn("Sources checked:", text)
+        self.assertIn("Source errors:", text)
         self.assertEqual("model_discovery_manager", response.data["used_tools"][0])
         self.assertIn("huggingface: hf timeout", text)
 
@@ -753,13 +757,14 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         unknown_prompt = "there is a brand new tiny Gemma 4 model, can you look into it?"
         unknown_response = self._chat(unknown_prompt)
         unknown_text = str(getattr(unknown_response, "text", ""))
-        self.assertIn("can check external sources", unknown_text.lower())
-        self.assertNotIn("does not exist", unknown_text.lower())
+        self.assertIn("For Gemma, the closest family matches look like", unknown_text)
+        self.assertIn("Likely family match:", unknown_text)
+        self.assertIn("Source errors:", unknown_text)
 
         self.truth.discovery_payload = {
             "ok": False,
             "query": None,
-            "message": "No discovery sources are enabled. Enable Hugging Face/OpenRouter/Ollama in the registry or point AGENT_MODEL_WATCH_CATALOG_PATH at a snapshot.",
+            "message": "I don't have any discovery sources enabled yet. Enable Hugging Face, OpenRouter, or Ollama in the registry, or point AGENT_MODEL_WATCH_CATALOG_PATH at a snapshot.",
             "models": [],
             "sources": [],
             "debug": {
@@ -773,8 +778,9 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertEqual("action_tool", classify_runtime_chat_route(disabled_prompt).get("route"))
         response = self._chat(disabled_prompt, expect_body_ok=False)
         text = str(getattr(response, "text", ""))
-        self.assertIn("No discovery sources are enabled.", text)
-        self.assertIn("Enable Hugging Face/OpenRouter/Ollama", text)
+        self.assertTrue(text.startswith("The closest matches look like"))
+        self.assertIn("I compared family fit, locality, and task fit.", text)
+        self.assertNotIn("No models matched", text)
 
     def test_controlled_mode_and_mutating_flows_require_approval(self) -> None:
         switch_prompt = "switch to ollama:qwen3.5:4b"
@@ -783,7 +789,7 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         before = self.truth.current_model
         preview = self._chat(switch_prompt)
         preview_text = str(getattr(preview, "text", ""))
-        self.assertIn("Reply yes to proceed or no to cancel.", preview_text)
+        self.assertIn("Say yes to continue, or no to cancel.", preview_text)
         self.assertEqual(before, self.truth.current_model)
 
         confirm = self._chat("yes")
@@ -844,6 +850,83 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         runtime_text = str(getattr(runtime_response, "text", ""))
         self.assertIn("The runtime is healthy and ready.", runtime_text)
         self.assertNotIn("{", _first_line(runtime_text))
+
+    def test_brief_transcript_stays_user_facing_and_concise(self) -> None:
+        orch = self.orchestrator
+
+        def _insert_system_facts(snapshot_id: str, taken_at: str, load_1m: float, mem_used: int, disk_used: int) -> None:
+            facts = {
+                "schema": {"name": "system_facts", "version": 1},
+                "snapshot": {
+                    "snapshot_id": snapshot_id,
+                    "taken_at": taken_at,
+                    "timezone": "UTC",
+                    "collector": {
+                        "agent_version": "0.6.0",
+                        "hostname": "host",
+                        "boot_id": "boot",
+                        "uptime_s": 1,
+                        "collection_duration_ms": 1,
+                        "partial": False,
+                        "errors": [],
+                    },
+                    "provenance": {"sources": []},
+                },
+                "os": {"kernel": {"release": "6.0.0", "arch": "x86_64"}},
+                "cpu": {"load": {"load_1m": load_1m, "load_5m": load_1m, "load_15m": load_1m}},
+                "memory": {
+                    "ram_bytes": {
+                        "total": 16 * 1024**3,
+                        "used": mem_used,
+                        "free": 0,
+                        "available": (16 * 1024**3) - mem_used,
+                        "buffers": 0,
+                        "cached": 0,
+                    },
+                    "swap_bytes": {"total": 0, "free": 0, "used": 0},
+                    "pressure": {"psi_supported": False, "memory_some_avg10": None, "io_some_avg10": None, "cpu_some_avg10": None},
+                },
+                "filesystems": {
+                    "mounts": [
+                        {
+                            "mountpoint": "/",
+                            "device": "/dev/sda1",
+                            "fstype": "ext4",
+                            "total_bytes": 100 * 1024**3,
+                            "used_bytes": disk_used,
+                            "avail_bytes": 100 * 1024**3 - disk_used,
+                            "used_pct": (float(disk_used) / float(100 * 1024**3)) * 100.0,
+                            "inodes": {"total": None, "used": None, "avail": None, "used_pct": None},
+                        }
+                    ]
+                },
+                "process_summary": {"top_cpu": [], "top_mem": [{"pid": 1, "name": "proc", "cpu_pct": None, "rss_bytes": mem_used // 4}]},
+                "integrity": {"content_hash_sha256": "0" * 64, "signed": False, "signature": None},
+            }
+            facts_json = json.dumps(facts, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+            orch.db.insert_system_facts_snapshot(
+                id=snapshot_id,
+                user_id="user1",
+                taken_at=taken_at,
+                boot_id="boot",
+                schema_version=1,
+                facts_json=facts_json,
+                content_hash_sha256="0" * 64,
+                partial=False,
+                errors_json="[]",
+            )
+
+        def _observe_now(_ctx: object, user_id: str | None = None) -> dict[str, object]:
+            _insert_system_facts("snap-brief", "2026-02-06T00:00:00+00:00", load_1m=0.1, mem_used=2 * 1024**3, disk_used=60 * 1024**3)
+            return {"text": "Snapshot taken: 2026-02-06T00:00:00+00:00 (UTC)", "payload": {}}
+
+        orch._call_skill = lambda *args, **kwargs: _observe_now({}, user_id="user1")  # type: ignore[assignment]
+        response = self._chat("/brief", expect_body_ok=None)
+        text = str(getattr(response, "text", ""))
+        first_line = _first_line(text)
+        self.assertTrue(first_line.startswith("I have a baseline now"))
+        self.assertNotIn("{", first_line)
+        self.assertNotIn("debug", text.lower())
 
     def test_memory_transcripts_surface_conflicts_and_keep_user_language(self) -> None:
         runtime_a = MemoryRuntime(self.db)

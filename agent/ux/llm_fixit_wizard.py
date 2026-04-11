@@ -82,6 +82,9 @@ class LLMFixitWizardStore:
             "pending_expires_ts": None,
             "pending_issue_code": None,
             "confirm_token": None,  # legacy compatibility
+            "last_confirm_token": None,
+            "last_confirmed_ts": None,
+            "last_confirmed_issue_code": None,
             "last_prompt_ts": None,
             "openrouter_last_test": None,
             "proposal_type": None,
@@ -155,6 +158,12 @@ class LLMFixitWizardStore:
             state["pending_expires_ts"] = None
         state["pending_issue_code"] = str(raw.get("pending_issue_code") or "").strip() or None
         state["confirm_token"] = pending_confirm  # legacy compatibility
+        state["last_confirm_token"] = str(raw.get("last_confirm_token") or "").strip() or None
+        try:
+            state["last_confirmed_ts"] = int(raw.get("last_confirmed_ts") or 0) or None
+        except (TypeError, ValueError):
+            state["last_confirmed_ts"] = None
+        state["last_confirmed_issue_code"] = str(raw.get("last_confirmed_issue_code") or "").strip() or None
         try:
             state["last_prompt_ts"] = int(raw.get("last_prompt_ts") or 0) or None
         except (TypeError, ValueError):
@@ -1007,8 +1016,8 @@ def build_plan_for_choice(
 
 def decision_issue_hash(decision: WizardDecision, status_payload: dict[str, Any]) -> str:
     payload = {
-        "issue_code": decision.issue_code,
-        "message": decision.message,
+        "issue_code": str(getattr(decision, "issue_code", "") or ""),
+        "message": str(getattr(decision, "message", "") or ""),
         "default_provider": _resolved_default_provider(status_payload),
         "default_model": _resolved_default_model(status_payload),
         "safe_mode_paused": bool((status_payload.get("safe_mode") or {}).get("paused", False)),
