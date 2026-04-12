@@ -1,0 +1,1 @@
+{"flags":["contains_executable_code","contains_executable_runtime","contains_package_manifest"],"hard_block_reasons":["native_code_pack_requires_execution"],"level":"critical","score":0.95}

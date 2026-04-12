@@ -1,0 +1,34 @@
+{
+  "name": "ops_supervisor",
+  "description": "Ops supervisor actions via local supervisor socket.",
+  "version": "0.1.0",
+  "permissions": ["ops:supervisor"],
+  "functions": [
+    {
+      "name": "restart_agent",
+      "description": "Request supervisor to restart the agent service.",
+      "args_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "service_status",
+      "description": "Fetch supervisor-based service status.",
+      "args_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "service_logs",
+      "description": "Fetch bounded service logs.",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "lines": { "type": "integer" }
+        }
+      }
+    }
+  ]
+}

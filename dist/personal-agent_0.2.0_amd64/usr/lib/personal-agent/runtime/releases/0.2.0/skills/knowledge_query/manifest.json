@@ -1,0 +1,18 @@
+{
+  "name": "knowledge_query",
+  "description": "Read-only queries over stored observations (disk snapshots, changes, reflections).",
+  "version": "0.1.0",
+  "permissions": ["db:read"],
+  "functions": [
+    {
+      "name": "knowledge_query",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "query": { "type": "string" }
+        },
+        "required": ["query"]
+      }
+    }
+  ]
+}

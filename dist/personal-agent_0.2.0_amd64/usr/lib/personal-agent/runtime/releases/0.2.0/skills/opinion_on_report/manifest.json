@@ -1,0 +1,19 @@
+{
+  "name": "opinion_on_report",
+  "description": "Generate opinions, risks, and cautions based strictly on provided factual reports.",
+  "version": "0.1.0",
+  "permissions": [],
+  "functions": [
+    {
+      "name": "opinion_on_report",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "facts": { "type": "object" },
+          "context_note": { "type": "string" }
+        },
+        "required": ["facts"]
+      }
+    }
+  ]
+}

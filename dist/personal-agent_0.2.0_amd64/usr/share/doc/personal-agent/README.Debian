@@ -1,0 +1,11 @@
+Personal Agent Debian package
+
+This package installs the browser-based UI, icon, launcher entry,
+and the canonical systemd user service unit.
+
+The user service is registered by the launcher on first use if it is
+not already enabled.
+
+Package removal deletes package-owned files. Remove user state with
+`personal-agent-uninstall --remove-state` before removing the package
+if you want a clean local reset.

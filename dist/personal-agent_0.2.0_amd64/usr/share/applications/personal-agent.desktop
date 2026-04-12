@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Personal Agent
+Comment=Open Personal Agent in your default browser
+Exec=/usr/bin/personal-agent-webui
+TryExec=/usr/bin/personal-agent-webui
+Icon=personal-agent
+Terminal=false
+Categories=Utility;Office;
+StartupNotify=true

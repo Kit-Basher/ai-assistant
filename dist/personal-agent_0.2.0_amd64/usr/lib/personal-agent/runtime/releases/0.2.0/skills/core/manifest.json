@@ -1,0 +1,97 @@
+{
+  "name": "core",
+  "description": "Core capture and project/task skills.",
+  "version": "0.1.0",
+  "permissions": ["db:read", "db:write", "net:none"],
+  "functions": [
+    {
+      "name": "remember_note",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string"}
+        },
+        "required": ["text"]
+      }
+    },
+    {
+      "name": "list_projects",
+      "args_schema": {"type": "object", "properties": {}}
+    },
+    {
+      "name": "add_project",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "pitch": {"type": "string"}
+        },
+        "required": ["name"]
+      }
+    },
+    {
+      "name": "add_task",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "project": {"type": "string"},
+          "title": {"type": "string"},
+          "effort_mins": {"type": "integer"},
+          "impact_1to5": {"type": "integer"}
+        },
+        "required": ["title"]
+      }
+    },
+    {
+      "name": "add_reminder",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "when_local": {"type": "string"},
+          "text": {"type": "string"}
+        },
+        "required": ["when_local", "text"]
+      }
+    },
+    {
+      "name": "set_reminder",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "when_ts": {"type": "string"},
+          "text": {"type": "string"}
+        },
+        "required": ["when_ts", "text"]
+      }
+    },
+    {
+      "name": "next_best_task",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "minutes": {"type": "integer"},
+          "energy": {"type": "string"}
+        },
+        "required": ["minutes", "energy"]
+      }
+    },
+    {
+      "name": "daily_plan",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "minutes": {"type": "integer"},
+          "energy": {"type": "string"}
+        },
+        "required": ["minutes", "energy"]
+      }
+    },
+    {
+      "name": "weekly_review",
+      "args_schema": {
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ]
+}

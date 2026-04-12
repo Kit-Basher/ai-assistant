@@ -1,0 +1,22 @@
+{
+  "chat::openrouter::openrouter:openai/gpt-4o-mini": {
+    "prompt_tokens": 12.0,
+    "completion_tokens": 2.0,
+    "samples": 1
+  },
+  "chat::ollama::ollama:qwen2.5:3b-instruct": {
+    "prompt_tokens": 121.41126417515625,
+    "completion_tokens": 24.064001521679685,
+    "samples": 9
+  },
+  "chat::ollama::ollama:llava:7b": {
+    "prompt_tokens": 193.3875,
+    "completion_tokens": 21.535,
+    "samples": 3
+  },
+  "chat::ollama::ollama:deepseek-r1:7b": {
+    "prompt_tokens": 152.78178940531248,
+    "completion_tokens": 206.99315622253906,
+    "samples": 9
+  }
+}

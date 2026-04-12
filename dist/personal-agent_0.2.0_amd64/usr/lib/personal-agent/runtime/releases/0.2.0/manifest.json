@@ -1,0 +1,11 @@
+{
+  "desktop_entry": "/usr/share/applications/personal-agent.desktop",
+  "icon": "/usr/share/icons/hicolor/scalable/apps/personal-agent.svg",
+  "launcher": "/usr/bin/personal-agent-webui",
+  "package_name": "personal-agent",
+  "package_version": "0.2.0",
+  "release_root": "/usr/lib/personal-agent/runtime/releases/0.2.0",
+  "runtime_root": "/usr/lib/personal-agent/runtime",
+  "service_unit": "/usr/lib/systemd/user/personal-agent-api.service",
+  "uninstaller": "/usr/bin/personal-agent-uninstall"
+}

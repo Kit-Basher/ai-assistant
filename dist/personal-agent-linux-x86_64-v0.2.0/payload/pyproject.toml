@@ -1,0 +1,40 @@
+[build-system]
+requires = []
+build-backend = "build_backend"
+backend-path = ["."]
+
+[project]
+name = "personal-agent"
+dynamic = ["version"]
+description = "Local-first AI assistant with grounded runtime truth and bounded native actions."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "openai>=1.0.0",
+  "python-telegram-bot>=22.6",
+]
+
+[project.scripts]
+personal-agent = "agent.cli:main"
+personal-agent-api = "agent.api_server:main"
+personal-agent-telegram = "telegram_adapter.bot:run"
+
+[tool.personal_agent_build]
+source_packages = ["agent", "telegram_adapter", "memory", "skills"]
+sdist_include = [
+  "agent",
+  "telegram_adapter",
+  "memory",
+  "skills",
+  "tests",
+  "systemd",
+  "scripts/build_dist.py",
+  "README.md",
+  "VERSION",
+  "requirements.txt",
+  "pyproject.toml",
+  "build_backend.py",
+]
+wheel_data_files = [
+  ["systemd/personal-agent-api.service", "share/personal-agent/systemd/personal-agent-api.service"],
+]

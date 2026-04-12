@@ -1,0 +1,17 @@
+{
+  "bundle_version": "0.2.0",
+  "payload": [
+    "agent",
+    "memory",
+    "skills",
+    "telegram_adapter",
+    "systemd",
+    "assets/icons/personal-agent.svg",
+    "bin/personal-agent-webui",
+    "build_backend.py",
+    "pyproject.toml",
+    "requirements.txt",
+    "VERSION"
+  ],
+  "source_repo": "/home/c/personal-agent"
+}

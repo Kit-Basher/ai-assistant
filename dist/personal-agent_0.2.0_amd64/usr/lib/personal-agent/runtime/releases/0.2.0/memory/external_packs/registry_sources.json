@@ -1,0 +1,428 @@
+{
+  "meta": {
+    "change_log": [
+      {
+        "changed_at": "2026-04-09T16:52:37Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "e41ac501bebcb1ad6d77133389637d669f054ca23716eb36e58f6f3f560b8487",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-anthropic_clean_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:40Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "e41ac501bebcb1ad6d77133389637d669f054ca23716eb36e58f6f3f560b8487",
+        "source_id": "workflow-anthropic_clean_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:40Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "ccbc2cdc46ffe7b23c9f28ca55961a8a6711b365f17bd178de3dec91b6f5116e",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-vercel_structured_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:45Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "ccbc2cdc46ffe7b23c9f28ca55961a8a6711b365f17bd178de3dec91b6f5116e",
+        "source_id": "workflow-vercel_structured_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:45Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "ed9ca5f1c928e378717faa92b23cb0fce0094abe0917cc47a2caa53608b0f476",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-fragmented_prompt_repo"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:51Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "ed9ca5f1c928e378717faa92b23cb0fce0094abe0917cc47a2caa53608b0f476",
+        "source_id": "workflow-fragmented_prompt_repo"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:51Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "b8ccd8e2a904c51abf3da1c85811f210c9c4fd140dedd56ff36e41191a0eb976",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-openclaw_mixed_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:56Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "b8ccd8e2a904c51abf3da1c85811f210c9c4fd140dedd56ff36e41191a0eb976",
+        "source_id": "workflow-openclaw_mixed_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:52:57Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "b692882aa1523d93ae4543077ebcebb8b1cf4c28ac5b110c82cecd374a03a950",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-vercel_blocked_native_skill"
+      },
+      {
+        "changed_at": "2026-04-09T16:53:02Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "b692882aa1523d93ae4543077ebcebb8b1cf4c28ac5b110c82cecd374a03a950",
+        "source_id": "workflow-vercel_blocked_native_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:05Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "894e30b8daf8d0748039489d8b9efbb52914ed88fddb7bfe16b2299f351fcdab",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-anthropic_clean_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:08Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "894e30b8daf8d0748039489d8b9efbb52914ed88fddb7bfe16b2299f351fcdab",
+        "source_id": "workflow-anthropic_clean_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:08Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "9b3de41cae597f15308723defa370d83b93569b04b40b9552169e98eb47f0ecd",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-vercel_structured_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:15Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "9b3de41cae597f15308723defa370d83b93569b04b40b9552169e98eb47f0ecd",
+        "source_id": "workflow-vercel_structured_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:15Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "d819341b3ae591c4d6773e48c7c88ea920f3d03146942903e2397feb9f4b2cd8",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-fragmented_prompt_repo"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:20Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "d819341b3ae591c4d6773e48c7c88ea920f3d03146942903e2397feb9f4b2cd8",
+        "source_id": "workflow-fragmented_prompt_repo"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:20Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "1361aff213d6f3fe3f50f34f7f81d90fd16b1431e20f3f9fd289bff4df5dd234",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-openclaw_mixed_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:24Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "1361aff213d6f3fe3f50f34f7f81d90fd16b1431e20f3f9fd289bff4df5dd234",
+        "source_id": "workflow-openclaw_mixed_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:24Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "enabled",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "db11c87b1be03fa72337b4fcdc1602e76f5315887b6fe3faab8f9795768725c5",
+        "operation": "create",
+        "previous_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "source_id": "workflow-vercel_blocked_native_skill"
+      },
+      {
+        "changed_at": "2026-04-09T20:42:29Z",
+        "changed_by": "127.0.0.1",
+        "changed_fields": [
+          "base_url",
+          "discovery_only",
+          "enabled",
+          "id",
+          "kind",
+          "name",
+          "notes",
+          "source_id",
+          "supports_compare_hint",
+          "supports_preview",
+          "supports_search"
+        ],
+        "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+        "operation": "delete",
+        "previous_catalog_hash": "db11c87b1be03fa72337b4fcdc1602e76f5315887b6fe3faab8f9795768725c5",
+        "source_id": "workflow-vercel_blocked_native_skill"
+      }
+    ],
+    "last_change": {
+      "changed_at": "2026-04-09T20:42:29Z",
+      "changed_by": "127.0.0.1",
+      "changed_fields": [
+        "base_url",
+        "discovery_only",
+        "enabled",
+        "id",
+        "kind",
+        "name",
+        "notes",
+        "source_id",
+        "supports_compare_hint",
+        "supports_preview",
+        "supports_search"
+      ],
+      "new_catalog_hash": "4e60a0deda7ee9d829904e581ebb31ee4b4a9ae1797281044a27ed0f698a9420",
+      "operation": "delete",
+      "previous_catalog_hash": "db11c87b1be03fa72337b4fcdc1602e76f5315887b6fe3faab8f9795768725c5",
+      "source_id": "workflow-vercel_blocked_native_skill"
+    }
+  },
+  "sources": []
+}

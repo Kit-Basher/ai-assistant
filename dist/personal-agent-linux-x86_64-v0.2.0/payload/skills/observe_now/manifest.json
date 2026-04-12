@@ -1,0 +1,18 @@
+{
+  "name": "observe_now",
+  "description": "Capture and persist a fresh system snapshot (explicit DB write).",
+  "version": "0.1.0",
+  "permissions": ["db:write", "sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "observe_now",
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}
+

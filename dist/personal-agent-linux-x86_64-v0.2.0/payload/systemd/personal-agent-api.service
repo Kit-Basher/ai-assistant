@@ -1,0 +1,18 @@
+[Unit]
+Description=Personal Agent API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/personal-agent
+ExecStart=%h/personal-agent/.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765
+Restart=on-failure
+RestartSec=2
+Environment=LLM_REGISTRY_PATH=%h/personal-agent/llm_registry.json
+Environment=AGENT_SECRET_STORE_PATH=%h/.local/share/personal-agent/secrets.enc.json
+Environment=LLM_USAGE_STATS_PATH=%h/.local/share/personal-agent/llm_usage_stats.json
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

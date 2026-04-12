@@ -1,0 +1,18 @@
+{
+  "name": "hardware_report",
+  "description": "Observe-only local hardware and machine inventory (CPU, GPU, RAM, storage, OS).",
+  "version": "0.1.0",
+  "permissions": ["sys:read", "net:none"],
+  "functions": [
+    {
+      "name": "hardware_report",
+      "read_only": true,
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {"type": "string"}
+        }
+      }
+    }
+  ]
+}
