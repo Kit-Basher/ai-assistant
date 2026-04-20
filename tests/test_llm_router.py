@@ -722,6 +722,56 @@ class TestLLMRouter(unittest.TestCase):
             provider_end = next(row for row in rows if str(row.get("type") or "") == "llm_provider_request_end")
             self.assertIsInstance(provider_end.get("payload", {}).get("duration_ms"), int)
 
+    def test_external_health_degraded_is_penalized_but_not_hard_blocked(self) -> None:
+        remote_a = FakeProvider("remote_a", [Response("remote-ok", "remote_a", "cheap")])
+        local = FakeProvider("local", [])
+        registry = _registry()
+        local_model = registry.models["local:chat"]
+        registry = Registry(
+            schema_version=registry.schema_version,
+            path=registry.path,
+            providers=registry.providers,
+            models={
+                **registry.models,
+                "local:chat": ModelConfig(
+                    **{**local_model.__dict__, "enabled": False}
+                ),
+            },
+            defaults=registry.defaults,
+            fallback_chain=registry.fallback_chain,
+        )
+        router = LLMRouter(
+            _config(),
+            providers={
+                "local": local,
+                "remote_a": remote_a,
+                "remote_b": FakeProvider("remote_b", []),
+            },
+            registry=registry,
+            policy=_policy(),
+            usage_stats=UsageStatsStore(None),
+        )
+        router.set_external_health_state(
+            {
+                "providers": {
+                    "remote_a": {
+                        "status": "degraded",
+                    }
+                },
+                "models": {
+                    "remote_a:cheap": {
+                        "provider_id": "remote_a",
+                        "status": "degraded",
+                    }
+                },
+                "last_run_at": int(time.time()),
+            }
+        )
+        result = router.chat([{"role": "user", "content": "hello"}], purpose="chat", task_type="chat")
+        self.assertTrue(result["ok"])
+        self.assertEqual("remote_a", result["provider"])
+        self.assertEqual(1, remote_a.calls)
+
 
 if __name__ == "__main__":
     unittest.main()

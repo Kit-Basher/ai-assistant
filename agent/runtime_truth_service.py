@@ -1131,8 +1131,6 @@ class RuntimeTruthService:
         provider_health = self._provider_health_row(provider_id)
         model_health_status = self._health_status(model_health)
         provider_health_status = self._health_status(provider_health)
-        if model_health_status == "ok" and provider_health_status != "ok":
-            provider_health_status = "ok"
         ready = bool(
             model_id
             and isinstance(current_row, dict)
@@ -1162,8 +1160,6 @@ class RuntimeTruthService:
         router_health_status = str(router_status.get("status") or "").strip().lower() or "unknown"
         if model_health_status == "unknown" and router_health_status in {"ok", "degraded", "down"}:
             model_health_status = router_health_status
-        if model_health_status == "ok" and provider_health_status != "ok":
-            provider_health_status = "ok"
         ready = bool(
             model_id
             and provider_id

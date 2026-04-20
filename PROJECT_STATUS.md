@@ -71,3 +71,8 @@ This is the current-state handover doc. Treat it as the source of truth when old
 - API responses now carry structured timing metadata for chat requests.
 - Confirmed diagnostics coverage was expanded to bluetooth/audio, storage/disk, printer/CUPS, and a generic device fallback path.
 - A recent robustness barrage tightened routing for messy direct prompts, confirmations, and vague system-trouble phrasing.
+- Degraded external provider/model health is no longer hard-blocked in the router; it is now a penalty signal.
+- Runtime truth no longer force-upgrades provider health to `ok` when model health is `ok`.
+- Inference routing now exposes adapter downgrade metadata when fallback call signatures are used.
+- Semantic memory context can now inject even when deterministic memory-v2 is disabled.
+- Multi-message chat handling now preserves existing compacted warm/cold memory layers instead of replacing them.

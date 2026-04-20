@@ -23,10 +23,17 @@ def select_model_for_task(
     trace_id: str | None = None,
     policy_name: str = "default",
     policy: dict[str, Any] | ValuePolicy | None = None,
+    optimization_profile: str | None = None,
 ) -> dict[str, Any]:
     normalized_inventory = normalize_model_inventory(inventory)
     normalized_task = normalize_task_request(task_request)
-    normalized_policy = policy if isinstance(policy, ValuePolicy) else normalize_policy(policy or {}, name=policy_name)
+    if isinstance(policy, ValuePolicy):
+        normalized_policy = policy
+    else:
+        policy_payload = dict(policy or {})
+        if optimization_profile:
+            policy_payload["optimization_profile"] = optimization_profile
+        normalized_policy = normalize_policy(policy_payload, name=policy_name)
     preferred_local = bool(normalized_task.get("preferred_local", True))
     task_type = str(normalized_task.get("task_type") or "chat")
     states = [
@@ -87,6 +94,7 @@ def select_model_for_task(
     if preferred_local and bool(selected.get("local", False)):
         reason_bits.append("local_first")
     reason_bits.append(f"task={task_type}")
+    reason_bits.append(f"profile={normalized_policy.optimization_profile}")
     fallback_states = build_fallback_candidates(
         normalized_inventory,
         task_request=normalized_task,

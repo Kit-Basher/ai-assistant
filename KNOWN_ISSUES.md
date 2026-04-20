@@ -5,6 +5,7 @@
 - Coverage is still uneven outside the current diagnostics presets and generic fallback.
 - Some common troubleshooting domains still need either a targeted preset or a better generic analysis path.
 - Short, messy follow-up phrasing can still expose router edge cases, especially when the thread changes topic abruptly.
+- Optimization profiles are now introduced for arbitration, but they still need broader endpoint-level controls and UI exposure.
 
 ## Infra / Deployment Issues
 
@@ -26,3 +27,5 @@
 - `generic_chat` being the main unresolved question: no longer the primary blocker.
 - Broadly obvious coding prompts being routed into disk-pressure troubleshooting: fixed.
 - Vague “system is weird” prompts being overcommitted into broad observe: fixed.
+- Semantic memory being blocked whenever deterministic memory-v2 is disabled: fixed.
+- External degraded health always being hard-blocked in router candidate selection: fixed.

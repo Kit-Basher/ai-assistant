@@ -3,10 +3,10 @@
 ## Next 5 Steps
 
 1. Watch which real workflows users keep repeating and prioritize those gaps first.
-2. Polish the flows that already work so they feel less brittle across turns, typos, and corrections.
-3. Fix recurring routing or contradiction mistakes before adding any new preset or feature.
-4. Keep timing, confirmation, grounding, and fallback-gap instrumentation visible for regressions.
-5. Add breadth only when repeated real use shows the gap is worth it.
+2. Verify recent router/runtime-truth fixes on a live prompt pack and capture remaining contradictions.
+3. Expand prompt-pack regressions with real failed turns from daily use and enforce pass criteria.
+4. Tighten memory continuity diagnostics (`deterministic` vs `semantic` path usage and skip reasons).
+5. Continue model arbitration hardening with explainable optimization profiles per request type.
 
 ## Do Not Do Now
 

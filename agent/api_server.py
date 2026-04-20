@@ -7438,6 +7438,7 @@ class AgentRuntime:
             if semantic_selection is not None:
                 debug = dict(base_debug)
                 debug["semantic"] = dict(semantic_selection.debug)
+                semantic_context_text = str(semantic_selection.merged_context_text or "").strip()
                 return {
                     "selected_ids": [],
                     "levels": {
@@ -7446,11 +7447,11 @@ class AgentRuntime:
                         MemoryLevel.PROCEDURAL.value: [],
                     },
                     "debug": debug,
-                    "merged_context_text": "",
+                    "merged_context_text": semantic_context_text,
                     "semantic": {
                         "selected_ids": [item.id for item in semantic_selection.candidates],
                         "debug": dict(semantic_selection.debug),
-                        "merged_context_text": semantic_selection.merged_context_text,
+                        "merged_context_text": semantic_context_text,
                     },
                 }
             return {

@@ -156,6 +156,7 @@ def choose_best_default_chat_candidate(
         "rejected_candidates": rejected_candidates[:10],
         "tier_candidates": tier_candidates,
         "policy_name": normalized_policy.name,
+        "optimization_profile": normalized_policy.optimization_profile,
         "tier_order": list(_EXTENDED_TIER_SEQUENCE if "remote" in allowed_tier_set else _DEFAULT_TIER_SEQUENCE),
         "local_first": True,
         "allow_remote_fallback": effective_allow_remote_fallback,

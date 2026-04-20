@@ -155,6 +155,7 @@ def prepare_chat_request(
         )
         premium_unbounded = ValuePolicy(
             name=normalized_premium_policy.name,
+            optimization_profile=normalized_premium_policy.optimization_profile,
             cost_cap_per_1m=1_000_000.0,
             allowlist=normalized_premium_policy.allowlist,
             quality_weight=normalized_premium_policy.quality_weight,

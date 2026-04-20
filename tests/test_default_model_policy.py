@@ -258,6 +258,15 @@ class TestDefaultModelPolicy(unittest.TestCase):
         self.assertIsNone(result["recommended_candidate"])
         self.assertEqual("cheap_remote_cap_exceeded", result["rejected_candidates"][0]["reason"])
         self.assertEqual(0.5, result["cheap_remote_cap_per_1m"])
+
+    def test_default_policy_reports_balanced_optimization_profile(self) -> None:
+        result = choose_best_default_chat_candidate(
+            config=_config(self.tmpdir.name, llm_routing_mode="prefer_cheap"),
+            registry_document=_registry_document(),
+            health_summary=_health_summary(local_status="down", free_status="down"),
+            env=self.env,
+        )
+        self.assertEqual("balanced", result["optimization_profile"])
         self.assertEqual(1.0, result["general_remote_cap_per_1m"])
 
     def test_over_cap_expensive_remote_is_not_selected(self) -> None:

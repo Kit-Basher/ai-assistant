@@ -70,7 +70,10 @@ def serialize_orchestrator_chat_response(
     generic_fallback_used = route == "generic_chat"
     generic_fallback_allowed = route == "generic_chat"
     generic_fallback_reason = str(response_data.get("generic_fallback_reason") or "").strip() or None
-    assistant_text = normalize_public_assistant_text(response.text, fallback="Done.")
+    assistant_text = normalize_public_assistant_text(
+        response.text,
+        fallback="I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.",
+    )
     ok = bool(response_data.get("ok", True))
 
     meta = build_public_chat_meta(

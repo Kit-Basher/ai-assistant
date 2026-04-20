@@ -8,7 +8,7 @@ import unittest
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
 from agent.memory_v2.types import MemoryItem, MemoryLevel
-from agent.working_memory import WorkingMemoryState, append_turn
+from agent.working_memory import WorkingMemoryState, append_turn, summarize_turn_chunk
 from unittest.mock import patch
 
 
@@ -157,7 +157,7 @@ class TestAPIServerMemoryInjection(unittest.TestCase):
         self.assertIn("memory_context_text", captured_payload)
         self.assertIn("MEMORY[S-DET]", str(captured_payload.get("memory_context_text") or ""))
 
-    def test_semantic_recall_never_injects_without_deterministic_context(self) -> None:
+    def test_semantic_recall_can_inject_when_deterministic_memory_is_disabled(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, memory_v2_enabled=False, semantic_memory_enabled=True))
 
         class _FakeSemanticService:
@@ -181,7 +181,7 @@ class TestAPIServerMemoryInjection(unittest.TestCase):
             intent="chat",
         )
         self.assertIsNotNone(memory)
-        self.assertEqual("", str(memory.get("merged_context_text") or ""))
+        self.assertIn("SEMANTIC_MEMORY[demo]", str(memory.get("merged_context_text") or ""))
         self.assertEqual([], memory.get("selected_ids"))
         self.assertIn("semantic", memory)
 
@@ -225,6 +225,48 @@ class TestAPIServerMemoryInjection(unittest.TestCase):
         routed_messages = route_mock.call_args.kwargs.get("messages") or []
         self.assertEqual("system", routed_messages[0]["role"])
         self.assertIn("Working memory summaries", routed_messages[0]["content"])
+
+    def test_multimessage_chat_preserves_existing_summary_layers(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        state = WorkingMemoryState()
+        for index in range(6):
+            role = "assistant" if index % 2 else "user"
+            append_turn(
+                state,
+                role=role,  # type: ignore[arg-type]
+                text=f"Historical turn {index} with continuity detail.",
+            )
+        state.warm_summaries.append(summarize_turn_chunk(state.hot_turns[:4], compression_level=2))
+        runtime.orchestrator()._memory_runtime.save_working_memory_state("api:default", state)  # noqa: SLF001
+
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={
+                "ok": True,
+                "text": "Continuing now.",
+                "provider": "ollama",
+                "model": "ollama:qwen3.5:4b",
+                "task_type": "chat",
+                "selection_reason": "healthy+approved+local_first+task=chat",
+                "fallback_used": False,
+                "error_kind": None,
+                "next_action": None,
+                "trace_id": "orch-test",
+                "data": {"selection": {"selected_model": "ollama:qwen3.5:4b", "provider": "ollama", "reason": "healthy"}},
+            },
+        ):
+            runtime.chat(
+                {
+                    "messages": [
+                        {"role": "user", "content": "Continue from the previous plan."},
+                        {"role": "assistant", "content": "Okay, I will continue."},
+                        {"role": "user", "content": "Focus on the routing issue first."},
+                    ],
+                    "min_context_tokens": 4096,
+                }
+            )
+        saved_state, _issue = runtime.orchestrator()._memory_runtime.load_working_memory_state("api:default")  # noqa: SLF001
+        self.assertGreaterEqual(len(saved_state.warm_summaries), 1)
 
     def test_public_identity_uses_configured_assistant_name(self) -> None:
         runtime = AgentRuntime(

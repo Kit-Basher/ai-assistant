@@ -33,6 +33,28 @@ class _FakeChatLLM:
         }
 
 
+class _LegacySignatureLLM(_FakeChatLLM):
+    def chat(self, messages, *, purpose="chat", provider_override=None, model_override=None, timeout_seconds=None):  # type: ignore[override]
+        self.chat_calls.append(
+            {
+                "messages": messages,
+                "kwargs": {
+                    "purpose": purpose,
+                    "provider_override": provider_override,
+                    "model_override": model_override,
+                    "timeout_seconds": timeout_seconds,
+                },
+            }
+        )
+        return {
+            "ok": True,
+            "text": "Legacy answer",
+            "provider": provider_override,
+            "model": model_override,
+            "duration_ms": 5,
+        }
+
+
 class TestInferenceRouter(unittest.TestCase):
     def test_route_inference_chat_uses_selector_result_and_normalizes_output(self) -> None:
         llm = _FakeChatLLM()
@@ -210,6 +232,46 @@ class TestInferenceRouter(unittest.TestCase):
         self.assertEqual("ollama", provider_end_payload.get("provider"))
         self.assertEqual("ollama:qwen2.5:3b-instruct", provider_end_payload.get("model"))
         self.assertIsInstance(provider_end_payload.get("duration_ms"), int)
+
+    def test_route_inference_reports_adapter_downgrade_for_legacy_chat_signature(self) -> None:
+        llm = _LegacySignatureLLM()
+        with patch(
+            "agent.llm.inference_router.build_model_inventory",
+            return_value=[
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "local": True,
+                    "available": True,
+                    "healthy": True,
+                    "approved": True,
+                    "capabilities": ["chat"],
+                }
+            ],
+        ), patch(
+            "agent.llm.inference_router.select_model_for_task",
+            return_value={
+                "selected_model": "ollama:qwen2.5:3b-instruct",
+                "provider": "ollama",
+                "reason": "healthy+approved+local_first+task=chat",
+                "fallbacks": [],
+                "trace_id": "orch-test",
+            },
+        ):
+            result = route_inference(
+                llm_client=llm,
+                messages=[{"role": "user", "content": "hello"}],
+                user_text="hello",
+                task_hint="hello",
+                purpose="chat",
+                trace_id="orch-test",
+                metadata={"source_surface": "api"},
+            )
+        self.assertTrue(bool(result.get("ok")))
+        data = result.get("data") if isinstance(result.get("data"), dict) else {}
+        downgrade = data.get("adapter_downgrade") if isinstance(data.get("adapter_downgrade"), dict) else {}
+        self.assertGreaterEqual(int(downgrade.get("attempt_index") or 0), 1)
+        self.assertIn("metadata", list(downgrade.get("dropped_keys") or []))
 
 
 if __name__ == "__main__":

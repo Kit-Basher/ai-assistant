@@ -1,0 +1,17 @@
+[
+  {
+    "id": "daily_coding_help",
+    "prompt": "debug this python traceback and suggest fix",
+    "expected_task_type": "coding"
+  },
+  {
+    "id": "health_check",
+    "prompt": "how is my pc doing right now",
+    "expected_task_type": "health"
+  },
+  {
+    "id": "deep_compare",
+    "prompt": "compare these options and reason step by step",
+    "expected_task_type": "reasoning"
+  }
+]

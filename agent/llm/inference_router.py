@@ -9,6 +9,7 @@ from agent.llm.install_planner import build_install_plan
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_selector import select_model_for_task
 from agent.llm.task_classifier import classify_task_request
+from agent.llm.value_policy import normalize_optimization_profile
 from agent.logging_utils import log_event
 from agent.public_chat import build_no_llm_public_message
 
@@ -112,6 +113,9 @@ def _normalize_router_result(
             payload["error_kind"] = error_kind
         if usage is not None:
             payload["usage"] = dict(usage)
+        adapter_downgrade = raw_result.get("adapter_downgrade")
+        if isinstance(adapter_downgrade, Mapping):
+            payload["adapter_downgrade"] = dict(adapter_downgrade)
         normalized = {
             "ok": ok,
             "text": text,
@@ -421,6 +425,10 @@ class InferenceRouter:
             trace_id=trace_id,
             policy_name="default",
             policy=getattr(llm_config, "default_policy", None),
+            optimization_profile=self._optimization_profile(
+                llm_config=llm_config,
+                allow_remote_fallback=allow_remote_fallback,
+            ),
         )
         if selection.get("selected_model"):
             return {"inventory": inventory, "selection": selection}
@@ -437,6 +445,17 @@ class InferenceRouter:
             "selection": selection,
             "plan": plan,
         }
+
+    @staticmethod
+    def _optimization_profile(*, llm_config: Any, allow_remote_fallback: bool) -> str:
+        if not allow_remote_fallback:
+            return "local_only"
+        routing_mode = str(getattr(llm_config, "llm_routing_mode", "") or "").strip().lower()
+        if routing_mode == "prefer_best":
+            return "best_quality"
+        if routing_mode == "prefer_cheap":
+            return "min_cost"
+        return normalize_optimization_profile(None, default="balanced")
 
     @staticmethod
     def _chat_kwargs(
@@ -506,8 +525,6 @@ class InferenceRouter:
                 for key, value in kwargs.items()
                 if key in {"purpose", "provider_override", "model_override", "timeout_seconds"}
             },
-            {key: value for key, value in kwargs.items() if key in {"purpose"}},
-            {},
         ):
             fingerprint = tuple(sorted((str(key), type(value).__name__) for key, value in candidate.items()))
             if fingerprint in seen:
@@ -516,9 +533,18 @@ class InferenceRouter:
             attempt_kwargs.append(candidate)
 
         last_type_error: TypeError | None = None
-        for candidate in attempt_kwargs:
+        for index, candidate in enumerate(attempt_kwargs):
             try:
-                return chat_fn(messages, **candidate)
+                result = chat_fn(messages, **candidate)
+                if index > 0 and isinstance(result, Mapping):
+                    dropped_keys = sorted(set(kwargs.keys()) - set(candidate.keys()))
+                    result_payload = dict(result)
+                    result_payload["adapter_downgrade"] = {
+                        "attempt_index": index,
+                        "dropped_keys": dropped_keys,
+                    }
+                    return result_payload
+                return result
             except TypeError as exc:
                 last_type_error = exc
                 continue

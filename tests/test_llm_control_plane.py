@@ -788,6 +788,83 @@ class TestLLMControlPlane(unittest.TestCase):
         )
         self.assertEqual("ollama:llava:7b", selection["selected_model"])
 
+    def test_selector_uses_min_cost_optimization_profile(self) -> None:
+        inventory = [
+            {
+                "id": "openrouter:cheap-chat",
+                "provider": "openrouter",
+                "installed": False,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat"],
+                "context_window": 65536,
+                "local": False,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 6,
+                "cost_rank": 2,
+                "price_in": 0.1,
+                "price_out": 0.1,
+            },
+            {
+                "id": "openrouter:premium-chat",
+                "provider": "openrouter",
+                "installed": False,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat"],
+                "context_window": 65536,
+                "local": False,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 10,
+                "cost_rank": 8,
+                "price_in": 2.5,
+                "price_out": 2.5,
+            },
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("hello there"),
+            allow_remote_fallback=True,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            optimization_profile="min_cost",
+            trace_id="sel-min-cost",
+        )
+        self.assertEqual("openrouter:cheap-chat", selection["selected_model"])
+        self.assertIn("profile=min_cost", str(selection.get("reason") or ""))
+
+    def test_selector_blocks_remote_in_local_only_profile(self) -> None:
+        inventory = [
+            {
+                "id": "openrouter:cheap-chat",
+                "provider": "openrouter",
+                "installed": False,
+                "available": True,
+                "healthy": True,
+                "capabilities": ["chat"],
+                "context_window": 65536,
+                "local": False,
+                "approved": True,
+                "reason": "healthy",
+                "quality_rank": 6,
+                "cost_rank": 2,
+                "price_in": 0.1,
+                "price_out": 0.1,
+            }
+        ]
+        selection = select_model_for_task(
+            inventory,
+            classify_task_request("hello there"),
+            allow_remote_fallback=True,
+            policy_name="default",
+            policy={"cost_cap_per_1m": 10.0, "allowlist": []},
+            optimization_profile="local_only",
+            trace_id="sel-local-only-profile",
+        )
+        self.assertIsNone(selection["selected_model"])
+
 
 if __name__ == "__main__":
     unittest.main()

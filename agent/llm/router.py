@@ -263,7 +263,7 @@ class LLMRouter:
         if not isinstance(row, dict):
             return False
         status = str(row.get("status") or "unknown").strip().lower()
-        if status in {"down", "degraded"}:
+        if status == "down":
             return True
         return False
 
@@ -520,6 +520,8 @@ class LLMRouter:
 
         penalty = 0.0
         now = float(self._time_fn())
+        external_provider_status = str((self._external_provider_health(model.provider) or {}).get("status") or "unknown").strip().lower()
+        external_model_status = str((self._external_model_health(model.id) or {}).get("status") or "unknown").strip().lower()
 
         if outcome.cooldown_until is not None and now < outcome.cooldown_until:
             if outcome.cooldown_reason == "rate_limit":
@@ -533,6 +535,10 @@ class LLMRouter:
         if total > 0:
             penalty += (float(outcome.failures) / float(total)) * 100.0
         penalty += float(min(outcome.failures, 20))
+        if external_provider_status == "degraded":
+            penalty += 200.0
+        if external_model_status == "degraded":
+            penalty += 200.0
         return penalty
 
     def _ordered_models(self, request: Request) -> list[ModelConfig]:

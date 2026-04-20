@@ -1414,7 +1414,18 @@ class Orchestrator:
         state, issue = self._memory_runtime.load_working_memory_state(user_id)
         had_working_memory_before = bool(state.warm_summaries or state.cold_state_blocks or state.hot_turns)
         if len(transcript_messages) > 1:
-            state = rebuild_state_from_messages(transcript_messages, previous_state=state)
+            if had_working_memory_before:
+                # Keep compacted warm/cold continuity for active threads and only
+                # append the recent transcript tail when the client sends history.
+                tail_messages = transcript_messages[-4:]
+                for row in tail_messages:
+                    append_working_memory_turn(
+                        state,
+                        role=str(row.get("role") or "user").strip().lower() or "user",
+                        text=str(row.get("content") or "").strip(),
+                    )
+            else:
+                state = rebuild_state_from_messages(transcript_messages, previous_state=state)
         elif transcript_messages:
             thread_state = self._memory_runtime.get_thread_state(user_id)
             for row in transcript_messages:

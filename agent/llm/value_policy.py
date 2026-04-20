@@ -43,6 +43,15 @@ _PREMIUM_REQUEST_HINTS = (
     "upgrade model",
     "stronger model",
 )
+_OPTIMIZATION_PROFILES = frozenset(
+    {
+        "balanced",
+        "best_quality",
+        "min_cost",
+        "local_only",
+        "low_latency",
+    }
+)
 
 
 def _safe_float(value: Any, default: float) -> float:
@@ -81,6 +90,7 @@ def _normalized_allowlist(value: Any) -> tuple[str, ...]:
 @dataclass(frozen=True)
 class ValuePolicy:
     name: str
+    optimization_profile: str
     cost_cap_per_1m: float
     allowlist: tuple[str, ...]
     quality_weight: float
@@ -108,8 +118,33 @@ def normalize_policy(raw: dict[str, Any] | None, *, name: str) -> ValuePolicy:
     data = raw if isinstance(raw, dict) else {}
     defaults = _PREMIUM_WEIGHTS if str(name).strip().lower() == "premium" else _DEFAULT_WEIGHTS
     default_cap = 12.0 if str(name).strip().lower() == "premium" else 6.0
+    optimization_profile = normalize_optimization_profile(data.get("optimization_profile"), default="balanced")
+    if optimization_profile == "min_cost":
+        defaults = {
+            "quality_weight": 0.75,
+            "price_weight": 0.08,
+            "latency_weight": 0.18,
+            "instability_weight": 0.45,
+        }
+    elif optimization_profile == "best_quality":
+        defaults = {
+            "quality_weight": 1.5,
+            "price_weight": 0.015,
+            "latency_weight": 0.2,
+            "instability_weight": 0.4,
+        }
+    elif optimization_profile == "low_latency":
+        defaults = {
+            "quality_weight": 0.9,
+            "price_weight": 0.03,
+            "latency_weight": 0.45,
+            "instability_weight": 0.45,
+        }
+    elif optimization_profile == "local_only":
+        default_cap = 0.0
     return ValuePolicy(
         name=str(name or "default").strip().lower() or "default",
+        optimization_profile=optimization_profile,
         cost_cap_per_1m=max(0.0, _safe_float(data.get("cost_cap_per_1m"), default_cap)),
         allowlist=_normalized_allowlist(data.get("allowlist")),
         quality_weight=max(0.0, _safe_float(data.get("quality_weight"), defaults["quality_weight"])),
@@ -117,6 +152,13 @@ def normalize_policy(raw: dict[str, Any] | None, *, name: str) -> ValuePolicy:
         latency_weight=max(0.0, _safe_float(data.get("latency_weight"), defaults["latency_weight"])),
         instability_weight=max(0.0, _safe_float(data.get("instability_weight"), defaults["instability_weight"])),
     )
+
+
+def normalize_optimization_profile(value: Any, *, default: str = "balanced") -> str:
+    normalized = str(value or "").strip().lower() or str(default or "balanced").strip().lower() or "balanced"
+    if normalized in _OPTIMIZATION_PROFILES:
+        return normalized
+    return "balanced"
 
 
 def _effective_cost_per_1m(candidate: dict[str, Any]) -> float:
@@ -205,6 +247,8 @@ def score_candidate_utility(
         rejected_by = "not_routable"
     elif policy.allowlist and model_id not in set(policy.allowlist):
         rejected_by = "not_in_allowlist"
+    elif policy.optimization_profile == "local_only" and not local:
+        rejected_by = "profile_local_only"
     elif (not local) and (not allow_remote_fallback):
         rejected_by = "remote_disabled"
     elif (not local) and expected_cost > float(policy.cost_cap_per_1m):
