@@ -6,6 +6,10 @@ export function buildStatusSummary(readyState) {
   const runtimeMode = String(readyState?.runtime_mode || "").trim().toUpperCase();
   const onboardingSummary = String(readyState?.onboarding?.summary || "").trim();
   const recoverySummary = String(readyState?.recovery?.summary || "").trim();
+  const chatUsable =
+    readyState?.chat_usable === true
+    || readyState?.ready === true
+    || runtimeMode === "READY";
 
   if (phase && ["starting", "listening", "warming"].includes(phase)) {
     return {
@@ -16,21 +20,21 @@ export function buildStatusSummary(readyState) {
     };
   }
 
-  if (readyState?.ready === true || runtimeMode === "READY") {
-    return {
-      label: "Ready",
-      tone: "ready",
-      ready: true,
-      description: "Ready to help."
-    };
-  }
-
   if (runtimeMode === "FAILED") {
     return {
       label: "Needs attention",
       tone: "danger",
       ready: false,
       description: recoverySummary || "Something needs attention. Ask me to take a look."
+    };
+  }
+
+  if (chatUsable) {
+    return {
+      label: "Ready",
+      tone: "ready",
+      ready: true,
+      description: "Ready to help."
     };
   }
 

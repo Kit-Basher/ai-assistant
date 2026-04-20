@@ -23,7 +23,8 @@
   - `python -m agent telegram_enable`
   - `python -m agent telegram_disable`
 - Telegram canonical UX routing is delegated to `agent/telegram_bridge.py`; keep transport safety in `telegram_adapter/bot.py`.
-- Manual debug runtime: `.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
+- Manual stable runtime: `~/.local/share/personal-agent/runtime/current/.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 8765`
+- Manual dev runtime: `~/personal-agent/.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 18765`
 
 ## Service Control
 
@@ -31,27 +32,35 @@ User service:
 - `systemctl --user status personal-agent-api.service`
 - `systemctl --user restart personal-agent-api.service`
 - `systemctl --user enable --now personal-agent-api.service`
+- `systemctl --user status personal-agent-api-dev.service`
+- `systemctl --user restart personal-agent-api-dev.service`
+- `systemctl --user enable --now personal-agent-api-dev.service`
 - reboot resilience: `loginctl enable-linger "$USER"`
 
 Desktop launcher:
-- recommended install for a new user:
+- stable daily-driver install for a new user:
+  - run the bundled `install.sh`
+- local maintainer stable install:
+  - run `bash scripts/promote_local_stable.sh`
+- checkout/dev install:
   - `bash scripts/install_local.sh --desktop-launcher`
 - distributed install:
-  - `bash install.sh`
+  - run the bundled `install.sh`
 - Debian install:
   - `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
 - launcher-only install/update:
   - `bash scripts/install_desktop_launcher.sh`
-- it installs a menu entry named `Personal Agent`
+- it installs `Personal Agent (Dev)` for checkout installs
 - it registers the user service if needed, then opens the existing local web UI
   in the default browser after a bounded `/ready` check
 - use it as a front door only; it does not create a second runtime mode
 
 Canonical local paths:
-- code: `~/personal-agent`
+- code checkout: `~/personal-agent`
 - state/logs/secrets: `~/.local/share/personal-agent`
 - config/policy: `~/.config/personal-agent`
-- service unit symlink: `~/.config/systemd/user/personal-agent-api.service`
+- stable service unit symlink: `~/.config/systemd/user/personal-agent-api.service`
+- dev service unit symlink: `~/.config/systemd/user/personal-agent-api-dev.service`
 
 Legacy `install.sh`, `uninstall.sh`, and `doctor.sh` are retired and fail
 closed. Use `docs/operator/SETUP.md` for install, upgrade, recovery, and

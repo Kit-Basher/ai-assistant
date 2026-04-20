@@ -12,6 +12,16 @@ from unittest.mock import patch
 from agent.doctor import (
     DoctorCheck,
     DoctorReport,
+    collect_bluetooth_audio_diagnostics_snapshot,
+    collect_diagnostics_snapshot,
+    collect_generic_device_fallback_diagnostics_snapshot,
+    collect_printer_cups_diagnostics_snapshot,
+    collect_storage_disk_diagnostics_snapshot,
+    render_bluetooth_audio_diagnostics_snapshot,
+    render_diagnostics_snapshot,
+    render_generic_device_fallback_diagnostics_snapshot,
+    render_printer_cups_diagnostics_snapshot,
+    render_storage_disk_diagnostics_snapshot,
     _telegram_enabled_for_doctor,
     _doctor_checks,
     _check_llm_availability,
@@ -177,6 +187,276 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertIn("recovery", payload)
         self.assertIn("backup_targets", payload["recovery"])
         self.assertIn("collect_diagnostics", payload["recovery"]["canonical_commands"])
+
+    def test_collect_diagnostics_snapshot_is_compact_and_redacted(self) -> None:
+        uname = "Linux test-host 6.8.0-1 x86_64"
+        nmcli = "wlp2s0:wifi:connected:HomeNetwork\nlo:loopback:connected:lo"
+        journal = (
+            "Apr 19 12:00:00 kernel: PM: suspend entry (deep)\n"
+            "Apr 19 12:00:02 kernel: network disconnected after suspend\n"
+            "Apr 19 12:00:05 kernel: PM: resume from suspend\n"
+        )
+
+        def _run_command(args, timeout_s=2.0):  # type: ignore[no-untyped-def]
+            if args[:2] == ["uname", "-a"]:
+                return type("R", (), {"stdout": uname, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["nmcli", "-t"]:
+                return type("R", (), {"stdout": nmcli, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["journalctl"]:
+                return type("R", (), {"stdout": journal, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            raise AssertionError(f"unexpected command: {args}")
+
+        with patch("agent.doctor.collect_system_health", return_value={"network": {"state": "up", "up_interfaces": ["wlp2s0"], "default_route": True, "dns_configured": True}}):
+            snapshot = collect_diagnostics_snapshot(run_command_fn=_run_command)
+
+        self.assertEqual("Linux test-host 6.8.0-1 x86_64", snapshot["os"]["text"])
+        self.assertEqual("nmcli", snapshot["network"]["source"])
+        self.assertEqual(2, len(snapshot["network"]["nmcli_rows"]))
+        self.assertEqual(3, snapshot["suspend_resume"]["match_count"])
+        self.assertIn("Suspend/resume logs contain failure markers.", snapshot["summary"]["assessment"])
+        text = render_diagnostics_snapshot(snapshot)
+        self.assertIn("Diagnostics snapshot", text)
+        self.assertIn("OS/kernel:", text)
+        self.assertIn("Suspend/resume matches:", text)
+        self.assertNotIn("Run: uname", text)
+        self.assertNotIn("journalctl", text)
+
+    def test_collect_bluetooth_audio_diagnostics_snapshot_is_compact_and_structured(self) -> None:
+        service = (
+            "bluetooth.service - Bluetooth service\n"
+            "   Loaded: loaded (/usr/lib/systemd/system/bluetooth.service; enabled; preset: enabled)\n"
+            "   Active: active (running) since Fri 2026-04-19 12:00:00 UTC; 1min ago\n"
+        )
+        controller = (
+            "Controller AA:BB:CC:DD:EE:FF test-host [default]\n"
+            "        Alias: test-host\n"
+            "        Powered: yes\n"
+            "        Discoverable: no\n"
+            "        Pairable: yes\n"
+            "        Discovering: no\n"
+        )
+        devices = "Device 11:22:33:44:55:66 Headphones\nDevice AA:BB:CC:DD:EE:FF Speaker"
+        info_1 = (
+            "Device 11:22:33:44:55:66 (public)\n"
+            "        Name: Headphones\n"
+            "        Paired: yes\n"
+            "        Connected: no\n"
+            "        Trusted: yes\n"
+        )
+        info_2 = (
+            "Device AA:BB:CC:DD:EE:FF (public)\n"
+            "        Name: Speaker\n"
+            "        Paired: yes\n"
+            "        Connected: yes\n"
+            "        Trusted: yes\n"
+        )
+        journal = (
+            "Apr 19 12:00:00 kernel: bluetoothd[123]: profiles/audio: disconnect\n"
+            "Apr 19 12:00:02 kernel: bluetoothd[123]: reconnect failed\n"
+        )
+
+        def _run_command(args, timeout_s=2.0):  # type: ignore[no-untyped-def]
+            if args[:3] == ["systemctl", "status", "bluetooth"]:
+                return type("R", (), {"stdout": service, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["bluetoothctl", "show"]:
+                return type("R", (), {"stdout": controller, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["bluetoothctl", "paired-devices"]:
+                return type("R", (), {"stdout": devices, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["bluetoothctl", "info"] and args[2] == "11:22:33:44:55:66":
+                return type("R", (), {"stdout": info_1, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["bluetoothctl", "info"] and args[2] == "AA:BB:CC:DD:EE:FF":
+                return type("R", (), {"stdout": info_2, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["journalctl"]:
+                return type("R", (), {"stdout": journal, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            raise AssertionError(f"unexpected command: {args}")
+
+        snapshot = collect_bluetooth_audio_diagnostics_snapshot(run_command_fn=_run_command)
+        self.assertEqual("bluetooth_audio", snapshot["preset"])
+        self.assertEqual("active", snapshot["bluetooth"]["service"]["active_state"])
+        self.assertTrue(snapshot["bluetooth"]["controller"]["powered"])
+        self.assertEqual(2, snapshot["bluetooth"]["devices"]["paired_count"])
+        self.assertEqual(1, snapshot["bluetooth"]["devices"]["connected_count"])
+        self.assertEqual(2, snapshot["bluetooth"]["logs"]["match_count"])
+        self.assertIn("Recent Bluetooth logs contain failure markers.", snapshot["summary"]["assessment"])
+        text = render_bluetooth_audio_diagnostics_snapshot(snapshot)
+        self.assertIn("Bluetooth/audio diagnostics", text)
+        self.assertIn("Service: active=active", text)
+        self.assertIn("Controller: address=AA:BB:CC:DD:EE:FF", text)
+        self.assertIn("Devices: paired=2; connected=1", text)
+        self.assertIn("Logs: matches=2", text)
+        self.assertNotIn("systemctl status bluetooth", text)
+        self.assertNotIn("journalctl", text)
+
+    def test_collect_storage_disk_diagnostics_snapshot_is_compact_and_structured(self) -> None:
+        df_output = (
+            "Filesystem     Type  Size  Used Avail Use% Mounted on\n"
+            "/dev/nvme0n1p2 ext4  100G   96G    4G  96% /\n"
+            "/dev/nvme0n1p3 ext4  200G  120G   80G  60% /home\n"
+            "/dev/nvme0n1p4 ext4   50G   45G    5G  90% /var\n"
+        )
+        journal = (
+            "Apr 19 12:00:00 kernel: app[123]: write failed: No space left on device\n"
+            "Apr 19 12:00:01 kernel: app[123]: disk full while saving\n"
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home_dir = Path(tmpdir) / "home"
+            (home_dir / "Downloads").mkdir(parents=True, exist_ok=True)
+            (home_dir / "Videos").mkdir(parents=True, exist_ok=True)
+
+            def _run_command(args, timeout_s=2.0):  # type: ignore[no-untyped-def]
+                if args[:1] == ["df"]:
+                    return type("R", (), {"stdout": df_output, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+                if args[:1] == ["du"] and args[-1] == str(home_dir):
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "stdout": f"1024 {home_dir / 'Downloads'}\n2048 {home_dir / 'Videos'}\n3072 {home_dir}\n",
+                            "permission_denied": False,
+                            "not_available": False,
+                            "error": None,
+                            "returncode": 0,
+                        },
+                    )()
+                if args[:1] == ["du"] and args[-1] == "/var":
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "stdout": "4096 /var/cache\n2048 /var/log\n6144 /var\n",
+                            "permission_denied": False,
+                            "not_available": False,
+                            "error": None,
+                            "returncode": 0,
+                        },
+                    )()
+                if args[:1] == ["du"] and args[-1] == "/tmp":
+                    return type(
+                        "R",
+                        (),
+                        {
+                            "stdout": "512 /tmp/session\n1024 /tmp\n",
+                            "permission_denied": False,
+                            "not_available": False,
+                            "error": None,
+                            "returncode": 0,
+                        },
+                    )()
+                if args[:1] == ["journalctl"]:
+                    return type("R", (), {"stdout": journal, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+                raise AssertionError(f"unexpected command: {args}")
+
+            with patch("agent.doctor.Path.home", return_value=home_dir):
+                snapshot = collect_storage_disk_diagnostics_snapshot(run_command_fn=_run_command)
+
+        self.assertEqual("storage_disk", snapshot["preset"])
+        self.assertEqual(3, len(snapshot["storage"]["filesystems"]["rows"]))
+        self.assertEqual(5, snapshot["storage"]["consumers"]["match_count"])
+        self.assertEqual(2, snapshot["storage"]["logs"]["match_count"])
+        self.assertIn("Recent logs contain disk-full or write-failure markers.", snapshot["summary"]["assessment"])
+        text = render_storage_disk_diagnostics_snapshot(snapshot)
+        self.assertIn("Storage/disk diagnostics", text)
+        self.assertIn("Filesystem:", text)
+        self.assertIn("Mount/device:", text)
+        self.assertIn("Consumers:", text)
+        self.assertIn("Log matches: 2", text)
+        self.assertNotIn("journalctl", text)
+
+    def test_collect_printer_cups_diagnostics_snapshot_is_compact_and_structured(self) -> None:
+        service = (
+            "cups.service - CUPS Scheduler\n"
+            "   Loaded: loaded (/usr/lib/systemd/system/cups.service; enabled; preset: enabled)\n"
+            "   Active: active (running) since Fri 2026-04-19 12:00:00 UTC; 1min ago\n"
+        )
+        printers = (
+            "printer HP_LaserJet is idle. enabled since Fri 19 Apr 2026 12:00:00 PM UTC\n"
+            "printer Brother_Office is offline. disabled since Fri 19 Apr 2026 11:30:00 AM UTC\n"
+            "system default destination: HP_LaserJet\n"
+        )
+        jobs = (
+            "HP_LaserJet-42 user 1234 Fri 19 Apr 2026 12:01:00 PM UTC\n"
+            "Brother_Office-43 user 4321 Fri 19 Apr 2026 12:02:00 PM UTC\n"
+        )
+        journal = (
+            "Apr 19 12:00:00 host cups[123]: printer HP_LaserJet resumed\n"
+            "Apr 19 12:00:02 host cups[123]: filter failed for job 42\n"
+        )
+
+        def _run_command(args, timeout_s=2.0):  # type: ignore[no-untyped-def]
+            if args[:3] == ["systemctl", "status", "cups"]:
+                return type("R", (), {"stdout": service, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["lpstat", "-p"]:
+                return type("R", (), {"stdout": printers, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:2] == ["lpstat", "-o"]:
+                return type("R", (), {"stdout": jobs, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["journalctl"]:
+                return type("R", (), {"stdout": journal, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            raise AssertionError(f"unexpected command: {args}")
+
+        snapshot = collect_printer_cups_diagnostics_snapshot(run_command_fn=_run_command)
+        self.assertEqual("printer_cups", snapshot["preset"])
+        self.assertEqual("active", snapshot["printer"]["service"]["active_state"])
+        self.assertEqual("HP_LaserJet", snapshot["printer"]["printers"]["default_printer"])
+        self.assertEqual(2, snapshot["printer"]["printers"]["printer_count"])
+        self.assertEqual(2, snapshot["printer"]["jobs"]["match_count"])
+        self.assertEqual(2, snapshot["printer"]["logs"]["match_count"])
+        self.assertIn("Recent CUPS logs contain failure markers.", snapshot["summary"]["assessment"])
+        text = render_printer_cups_diagnostics_snapshot(snapshot)
+        self.assertIn("Printer/CUPS diagnostics", text)
+        self.assertIn("Service: active=active", text)
+        self.assertIn("Printers: default=HP_LaserJet", text)
+        self.assertIn("Jobs: count=2", text)
+        self.assertIn("Log matches: 2", text)
+        self.assertNotIn("journalctl", text)
+
+    def test_collect_generic_device_fallback_snapshot_is_compact_and_structured(self) -> None:
+        uname = "Linux test-host 6.8.0-1 x86_64"
+        usb = (
+            "Bus 001 Device 002: ID 046d:0825 Logitech, Inc. Webcam C270\n"
+            "Bus 001 Device 003: ID 0bda:58f4 Realtek Semiconductor Corp.\n"
+        )
+        pci = (
+            "00:02.0 VGA compatible controller [0300]: Intel Corporation Device [8086:46a6]\n"
+            "00:14.0 USB controller [0c03]: Intel Corporation Device [8086:7aa8]\n"
+        )
+        journal = (
+            "Apr 19 12:00:00 host kernel: usb 1-1: device descriptor read/64, error -71\n"
+            "Apr 19 12:00:01 host kernel: webcam: not detected after resume\n"
+        )
+        dmesg = (
+            "[  10.000000] usb 1-1: reset full-speed USB device number 2 using xhci_hcd\n"
+            "[  10.100000] webcam: firmware failed to load\n"
+        )
+
+        def _run_command(args, timeout_s=2.0):  # type: ignore[no-untyped-def]
+            if args[:2] == ["uname", "-a"]:
+                return type("R", (), {"stdout": uname, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["lsusb"]:
+                return type("R", (), {"stdout": usb, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["lspci"]:
+                return type("R", (), {"stdout": pci, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["journalctl"]:
+                return type("R", (), {"stdout": journal, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            if args[:1] == ["dmesg"]:
+                return type("R", (), {"stdout": dmesg, "permission_denied": False, "not_available": False, "error": None, "returncode": 0})()
+            raise AssertionError(f"unexpected command: {args}")
+
+        snapshot = collect_generic_device_fallback_diagnostics_snapshot(run_command_fn=_run_command)
+        self.assertEqual("generic_device_fallback", snapshot["preset"])
+        self.assertEqual("Linux test-host 6.8.0-1 x86_64", snapshot["device"]["os"]["text"])
+        self.assertEqual(2, snapshot["device"]["presence"]["usb"]["match_count"])
+        self.assertEqual(2, snapshot["device"]["presence"]["pci"]["match_count"])
+        self.assertEqual(2, snapshot["device"]["logs"]["journal"]["match_count"])
+        self.assertEqual(2, snapshot["device"]["logs"]["dmesg"]["match_count"])
+        self.assertIn("device or driver failure markers", snapshot["summary"]["assessment"])
+        text = render_generic_device_fallback_diagnostics_snapshot(snapshot)
+        self.assertIn("General device diagnostics", text)
+        self.assertIn("OS/kernel:", text)
+        self.assertIn("USB presence:", text)
+        self.assertIn("PCI presence:", text)
+        self.assertIn("Logs: journal=2; dmesg=2", text)
+        self.assertNotIn("journalctl", text)
 
     def test_main_collect_diagnostics_json_returns_bundle_path(self) -> None:
         checks = [DoctorCheck("x", "OK", "ok")]

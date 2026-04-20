@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from agent.config import Config, load_config
+from agent.config import Config, default_registry_root_path, load_config, packaged_asset_root_path, runtime_instance
 from agent.chat_response_serializer import serialize_orchestrator_chat_response
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import (
@@ -576,6 +576,7 @@ class AgentRuntime:
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
         _mark("runtime.init.secret_store")
         self._repo_root = Path(__file__).resolve().parents[1]
+        self.runtime_instance = runtime_instance()
         self.started_at = datetime.now(timezone.utc)
         self.started_at_iso = self.started_at.isoformat()
         self.pid = os.getpid()
@@ -588,7 +589,7 @@ class AgentRuntime:
 
         registry_path = config.llm_registry_path
         if not registry_path:
-            registry_path = str(self._repo_root / "llm_registry.json")
+            registry_path = str(default_registry_root_path())
         self.registry_store = RegistryStore(registry_path)
         _mark("runtime.init.registry_store", registry_path=self.registry_store.path)
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
@@ -596,9 +597,7 @@ class AgentRuntime:
         self.pack_store = PackStore(self.config.db_path)
         self._skill_governance_store = SkillGovernanceStore(self.config.db_path)
         self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
-        self.webui_dist_path = Path(
-            os.getenv("AGENT_WEBUI_DIST_PATH", "").strip() or str(self._repo_root / "agent" / "webui" / "dist")
-        ).resolve()
+        self.webui_dist_path = packaged_asset_root_path().resolve()
         self.webui_dev_proxy = _is_truthy(os.getenv("WEBUI_DEV_PROXY"))
         self.webui_dev_url = os.getenv("WEBUI_DEV_URL", "http://127.0.0.1:1420").strip() or "http://127.0.0.1:1420"
         self.listening_url = self._default_listening_url()
@@ -3929,8 +3928,8 @@ class AgentRuntime:
             truth = self.runtime_truth_service()
             if truth is None:
                 return False
-            current = truth.current_chat_target_status()
-            return bool((current if isinstance(current, dict) else {}).get("ready", False))
+            ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
+            return bool(ready_payload.get("ready", False)) if isinstance(ready_payload, dict) else False
         except Exception:
             return False
 
@@ -3941,6 +3940,9 @@ class AgentRuntime:
             truth = self.runtime_truth_service()
             if truth is None:
                 return False
+            ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
+            if isinstance(ready_payload, dict) and bool(ready_payload.get("ready", False)):
+                return True
             current = truth.current_chat_target_status()
             current_row = current if isinstance(current, dict) else {}
             if bool(current_row.get("ready", False)):
@@ -4664,7 +4666,8 @@ class AgentRuntime:
         core_status = self._runtime_core_status_payload()
         return {
             "ok": True,
-            "service": "personal-agent-api",
+            "service": "personal-agent-api-dev" if self.runtime_instance == "dev" else "personal-agent-api",
+            "runtime_instance": self.runtime_instance,
             "time": datetime.now(timezone.utc).isoformat(),
             "version": self.version,
             "git_commit": self.git_commit,
@@ -4709,6 +4712,7 @@ class AgentRuntime:
             "started_at": self.started_at_iso,
             "pid": self.pid,
             "listening": self.listening_url,
+            "runtime_instance": self.runtime_instance,
         }
 
     # Operator/public provider view. Assistant/runtime decisions must use
@@ -10089,6 +10093,7 @@ class AgentRuntime:
             "retry_attempts": self._router.policy.retry_attempts,
             "timeout_seconds": self._router.policy.default_timeout_seconds,
             "secret_storage": self.secret_store.backend_name,
+            "runtime_instance": self.runtime_instance,
         }
 
     def update_config(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -20146,7 +20151,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
     ) -> dict[str, Any]:
         question = (
             str(assessment.next_question or "").strip()
-            or "I can do that. Which of these is your goal: chat, ask, or model check/switch?"
+            or "I can help with that. What would you like me to focus on?"
         )
         envelope = validate_envelope(
             {
@@ -20166,7 +20171,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
         envelope_payload["clarification"] = {
             "reason": "intent_ambiguity",
             "hints": [
-                "Tell me whether you want chat, ask, or model check/switch.",
+                "Tell me a bit more about what you want help with.",
             ],
             "suggested_intents": [],
         }
@@ -21124,7 +21129,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         },
                     )
                     if is_no_llm_error_kind(error_kind):
-                        base_message = build_no_llm_public_message()
+                        base_message = build_no_llm_public_message(
+                            runtime_ready=bool(self.ready_status().get("ready", False))
+                        )
                     else:
                         base_message = assistant_text or "I couldn't complete that request."
                     friendly_message = friendly_error_message(

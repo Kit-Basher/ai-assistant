@@ -103,6 +103,27 @@ class TestMemoryRuntime(unittest.TestCase):
         pending_item = result.get("pending_item") if isinstance(result.get("pending_item"), dict) else {}
         self.assertEqual("p1", pending_item.get("pending_id"))
 
+    def test_followup_accepts_natural_confirmation_variants(self) -> None:
+        self.runtime.set_thread_state("u1", thread_id="thread-a")
+        self.runtime.add_pending_item(
+            "u1",
+            {
+                "pending_id": "p1",
+                "kind": "confirmation",
+                "origin_tool": "printer_cups",
+                "question": "Run diagnostics?",
+                "options": ["yes", "no"],
+                "created_at": 1,
+                "expires_at": 9999999999,
+                "thread_id": "thread-a",
+                "status": "WAITING_FOR_USER",
+            },
+        )
+        for text in ("yes do it", "sure go ahead", "please do it"):
+            result = self.runtime.resolve_followup("u1", text, "thread-a")
+            self.assertEqual("match", result["type"], text)
+            self.assertEqual("accept", result["intent"], text)
+
     def test_memory_summary_reports_resumable(self) -> None:
         self.runtime.set_thread_state("u1", thread_id="thread-a", current_topic="model setup")
         self.runtime.record_user_request("u1", "setup ollama")

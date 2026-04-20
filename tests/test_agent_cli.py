@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -414,6 +415,21 @@ class TestAgentCLI(unittest.TestCase):
         self.assertIn(["restart", "personal-agent-telegram.service"], commands)
         self.assertIn("effective_state: enabled_running", output.getvalue())
 
+    def test_run_systemctl_user_retries_once_after_timeout(self) -> None:
+        calls: list[float | None] = []
+
+        def _runner(args, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append(kwargs.get("timeout"))
+            if len(calls) == 1:
+                raise subprocess.TimeoutExpired(args, kwargs.get("timeout"))
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        with patch("agent.cli.subprocess.run", side_effect=_runner):
+            result = cli._run_systemctl_user(["restart", "personal-agent-telegram.service"], timeout_seconds=0.1)
+
+        self.assertEqual(0, result.returncode)
+        self.assertGreaterEqual(len(calls), 2)
+
     def test_telegram_disable_command_stops_service(self) -> None:
         output = io.StringIO()
         states = [
@@ -798,6 +814,34 @@ class TestAgentCLI(unittest.TestCase):
         text = output.getvalue().strip()
         self.assertIn("version=9.9.9", text)
         self.assertIn("commit=abc1234", text)
+
+    def test_split_status_subcommand_prints_runtime_identity(self) -> None:
+        output = io.StringIO()
+        with patch("agent.cli.runtime_instance", return_value="stable"), patch(
+            "agent.cli.runtime_root_path",
+            return_value=Path("/opt/personal-agent/runtime/current"),
+        ), patch(
+            "agent.cli.runtime_service_name",
+            return_value="personal-agent-api.service",
+        ), patch(
+            "agent.cli.runtime_launcher_name",
+            return_value="personal-agent-webui",
+        ), patch(
+            "agent.cli.runtime_api_base_url",
+            return_value="http://127.0.0.1:8765",
+        ), patch("agent.cli.runtime_port", return_value=8765), patch(
+            "agent.cli.Path.home",
+            return_value=Path("/home/test"),
+        ), redirect_stdout(output):
+            code = cli.main(["split_status"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("runtime_instance: stable", text)
+        self.assertIn("runtime_root: /opt/personal-agent/runtime/current", text)
+        self.assertIn("service_name: personal-agent-api.service", text)
+        self.assertIn("launcher_target: /home/test/.local/share/personal-agent/bin/personal-agent-webui", text)
+        self.assertIn("api_base_url: http://127.0.0.1:8765", text)
+        self.assertIn("legacy_checkout_service: retired", text)
 
     def test_memory_subcommand_prints_summary(self) -> None:
         payload = {"ok": True, "message": "Memory summary (thread user:1):\nPending items: 0"}

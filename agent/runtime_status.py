@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Callable
 
+from agent.config import runtime_service_name
 from agent.diagnostics import CommandResult, redact_secrets, run_command
 from memory.db import MemoryDB
 
 
 _SERVICE_UNITS = (
-    "personal-agent-api.service",
+    runtime_service_name(),
     "personal-agent-telegram.service",
 )
 
@@ -160,7 +161,7 @@ def build_runtime_status_report(
         audit_count_text = str(audit_count)
 
     notes: list[str] = []
-    api_service = next((row for row in services if row["unit"] == "personal-agent-api.service"), None)
+    api_service = next((row for row in services if row["unit"] == runtime_service_name()), None)
     telegram_service = next((row for row in services if row["unit"] == "personal-agent-telegram.service"), None)
     api_state = str((api_service or {}).get("active_state") or "unknown")
     telegram_state = str((telegram_service or {}).get("active_state") or "unknown")

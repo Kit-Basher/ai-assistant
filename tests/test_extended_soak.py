@@ -616,7 +616,7 @@ class TestExtendedSoak(unittest.TestCase):
             degraded = recommend_packs_for_capability(prompt, pack_store=store, pack_registry_discovery=_BrokenDiscovery())
             self.assertIsNotNone(degraded, msg=f"degraded recommendation missing at cycle {cycle}")
             assert degraded is not None
-            self.assertEqual("text_only", degraded["fallback"], msg=f"degraded fallback drift at cycle {cycle}: {degraded}")
+            self.assertEqual("propose_new_capability", degraded["fallback"], msg=f"degraded fallback drift at cycle {cycle}: {degraded}")
             self.assertTrue(degraded["source_errors"], msg=f"degraded source errors missing at cycle {cycle}: {degraded}")
 
     def test_fixit_extended_soak_consumes_tokens_and_clears_pending_state(self) -> None:

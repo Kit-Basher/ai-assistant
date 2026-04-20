@@ -325,7 +325,9 @@ class TestAdversarialRequests(unittest.TestCase):
         self.assertEqual("missing", result.get("status"))
         self.assertTrue(isinstance(result.get("source_errors"), list))
         rendered = render_pack_capability_response(result)
-        self.assertIn("I can keep responding in text", rendered)
+        self.assertIn("couldn't check", rendered.lower())
+        self.assertIn("voice helper", rendered.lower())
+        self.assertIn("reads text aloud", rendered.lower())
 
     def test_enable_before_install_returns_truthful_not_found(self) -> None:
         runtime = self._runtime()

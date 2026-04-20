@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from agent.config import runtime_service_name
 from agent.public_chat import build_no_llm_public_message
 
 
@@ -167,7 +168,7 @@ def onboarding_next_action(
     if normalized == ONBOARDING_SERVICES_DOWN:
         if telegram_enabled and telegram_state in {"stopped", "crash_loop"}:
             return "Run: systemctl --user restart personal-agent-telegram.service"
-        return "Run: systemctl --user restart personal-agent-api.service"
+        return f"Run: systemctl --user restart {runtime_service_name()}"
     if normalized == ONBOARDING_LLM_MISSING:
         return "Run: python -m agent setup"
     if normalized == ONBOARDING_DEGRADED:
@@ -215,7 +216,7 @@ def onboarding_steps(state: str) -> list[str]:
         ]
     if normalized == ONBOARDING_SERVICES_DOWN:
         return [
-            "Run: systemctl --user restart personal-agent-api.service",
+            f"Run: systemctl --user restart {runtime_service_name()}",
             "If Telegram is enabled: run systemctl --user restart personal-agent-telegram.service",
             "Run: python -m agent status",
         ]

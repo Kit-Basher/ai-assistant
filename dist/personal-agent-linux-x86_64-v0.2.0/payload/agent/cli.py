@@ -14,7 +14,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from agent.config import load_config, resolved_default_log_path
+from agent.config import (
+    load_config,
+    resolved_default_log_path,
+    runtime_api_base_url,
+    runtime_instance,
+    runtime_launcher_name,
+    runtime_port,
+    runtime_root_path,
+    runtime_service_name,
+)
 from agent.doctor import main as doctor_main
 from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import (
@@ -958,20 +967,66 @@ def _resolve_git_commit() -> str:
 def _cmd_version(_args: argparse.Namespace) -> int:
     build_info = read_build_info(repo_root=_repo_root(), timeout_seconds=0.3)
     print(
-        f"version={build_info.version} commit={build_info.git_commit or 'unknown'}",
+        f"version={build_info.version} commit={build_info.git_commit or 'unknown'} runtime_instance={runtime_instance()}",
         flush=True,
     )
     return 0
 
 
-def _run_systemctl_user(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["systemctl", "--user", *args],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=2.0,
+def _cmd_split_status(_args: argparse.Namespace) -> int:
+    runtime_root = runtime_root_path()
+    launcher_name = runtime_launcher_name()
+    launcher_path = Path.home() / ".local" / "share" / "personal-agent" / "bin" / launcher_name
+    launcher_target = launcher_path
+    try:
+        launcher_target = launcher_path.resolve()
+    except Exception:
+        launcher_target = launcher_path
+    print(
+        "\n".join(
+            [
+                f"runtime_instance: {runtime_instance()}",
+                f"runtime_root: {runtime_root}",
+                f"service_name: {runtime_service_name()}",
+                f"launcher_target: {launcher_path}",
+                f"launcher_resolved_target: {launcher_target}",
+                f"api_base_url: {runtime_api_base_url()}",
+                f"api_port: {runtime_port()}",
+                "legacy_checkout_service: retired",
+            ]
+        ),
+        flush=True,
     )
+    return 0
+
+
+def _run_systemctl_user(
+    args: list[str],
+    *,
+    timeout_seconds: float = 10.0,
+    retries: int = 1,
+    retry_delay_seconds: float = 0.5,
+) -> subprocess.CompletedProcess[str]:
+    attempts = max(0, int(retries)) + 1
+    timeout = float(timeout_seconds)
+    last_error: subprocess.TimeoutExpired | None = None
+    for attempt in range(attempts):
+        try:
+            return subprocess.run(
+                ["systemctl", "--user", *args],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                raise
+            time.sleep(float(retry_delay_seconds))
+    if last_error is not None:
+        raise last_error
+    raise subprocess.TimeoutExpired(["systemctl", "--user", *args], timeout)
 
 
 def _render_telegram_status(state: dict[str, Any]) -> str:
@@ -1086,6 +1141,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("telegram_enable", help="Enable and start the Telegram optional adapter")
     sub.add_parser("telegram_disable", help="Disable and stop the Telegram optional adapter")
     sub.add_parser("version", help="Show version and git commit")
+    sub.add_parser("split_status", help="Show stable/dev split summary")
     return parser
 
 
@@ -1140,6 +1196,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_telegram_disable(args)
     if command == "version":
         return _cmd_version(args)
+    if command == "split_status":
+        return _cmd_split_status(args)
 
     return _print_error(
         title="Unknown command",

@@ -334,7 +334,7 @@ class TestStateTruthUnification(unittest.TestCase):
         self.assertIn("Voice output is installed, but it is disabled.", rendered)
         self.assertTrue(
             "Say yes and I'll show the install preview." in rendered
-            or "I can keep responding in text." in rendered
+            or "I can still help you set it up" in rendered
         )
 
     def test_recommendation_degrades_to_text_only_when_discovery_is_unavailable(self) -> None:
@@ -350,9 +350,11 @@ class TestStateTruthUnification(unittest.TestCase):
         )
         self.assertIsNotNone(recommendation)
         assert recommendation is not None
-        self.assertEqual("text_only", recommendation["fallback"])
+        self.assertEqual("propose_new_capability", recommendation["fallback"])
         rendered = render_pack_capability_response(recommendation)
-        self.assertIn("I can keep responding in text.", rendered)
+        self.assertIn("couldn't check", rendered.lower())
+        self.assertIn("voice helper", rendered.lower())
+        self.assertIn("reads text aloud", rendered.lower())
         self.assertNotIn("install preview", rendered.lower())
 
 

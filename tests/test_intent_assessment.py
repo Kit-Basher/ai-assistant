@@ -18,15 +18,17 @@ class TestIntentAssessment(unittest.TestCase):
         self.assertEqual("modelops_check", assessment.candidates[0].intent)
         self.assertGreaterEqual(float(assessment.candidates[0].score), 0.85)
 
-    def test_ambiguous_help_clarifies(self) -> None:
+    def test_general_real_world_question_defaults_to_chat(self) -> None:
         assessment = assess_intent_deterministic(
-            user_text_raw="help",
-            user_text_norm="help",
+            user_text_raw="I'm downloading a file and it's taking forever, can you tell why?",
+            user_text_norm="i'm downloading a file and it's taking forever, can you tell why?",
             route_intent="chat",
             context={},
         )
-        self.assertEqual("clarify", assessment.decision)
-        self.assertTrue(str(assessment.next_question or "").strip())
+        self.assertEqual("proceed", assessment.decision)
+        self.assertIsNone(assessment.next_question)
+        self.assertTrue(assessment.candidates)
+        self.assertNotIn("chat, ask, or model check/switch", str(assessment.next_question or ""))
 
     def test_ordering_is_deterministic(self) -> None:
         first = assess_intent_deterministic(

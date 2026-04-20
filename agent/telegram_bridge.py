@@ -16,6 +16,7 @@ from urllib import error as urllib_error
 from urllib import request as urllib_request
 
 from agent.doctor import run_doctor_report
+from agent.cards import render_cards_markdown, validate_cards_payload
 from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import bootstrap_needed
 from agent.onboarding_contract import ONBOARDING_READY
@@ -580,7 +581,10 @@ def _structured_error_text(payload: dict[str, Any]) -> str | None:
     if payload.get("ok") is not False:
         return None
     if is_no_llm_error_kind(payload.get("error_kind")):
-        return build_no_llm_public_message()
+        runtime_ready = bool(payload.get("runtime_ready"))
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        runtime_ready = runtime_ready or bool(meta.get("runtime_ready"))
+        return build_no_llm_public_message(runtime_ready=runtime_ready)
     detail = str(payload.get("message") or "").strip() or None
     return build_public_sentence_text(
         "I couldn't finish that request",
@@ -624,9 +628,12 @@ def build_telegram_chat_payload_result(
     assistant = payload.get("assistant") if isinstance(payload.get("assistant"), dict) else {}
     meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
     setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
+    cards_payload = payload.get("cards_payload") if isinstance(payload.get("cards_payload"), dict) else {}
     proxy_meta = payload.get("_proxy_meta") if isinstance(payload.get("_proxy_meta"), dict) else {}
     if is_no_llm_error_kind(payload.get("error_kind")):
-        message = build_no_llm_public_message()
+        runtime_ready = bool(payload.get("runtime_ready"))
+        runtime_ready = runtime_ready or bool(meta.get("runtime_ready"))
+        message = build_no_llm_public_message(runtime_ready=runtime_ready)
     else:
         message = str(
             (assistant or {}).get("content")
@@ -635,6 +642,12 @@ def build_telegram_chat_payload_result(
             or meta.get("summary")
             or ""
         ).strip()
+        if cards_payload:
+            ok, _error = validate_cards_payload(cards_payload)
+            if ok:
+                rendered_cards = render_cards_markdown(cards_payload)
+                if rendered_cards.strip():
+                    message = rendered_cards
         if not message:
             message = str(_structured_error_text(payload) or "").strip()
     route = str(meta.get("route") or "generic_chat").strip().lower() or "generic_chat"
@@ -659,6 +672,7 @@ def build_telegram_chat_payload_result(
         "legacy_compatibility": legacy_compatibility,
         "generic_fallback_used": bool(meta.get("generic_fallback_used", False)),
         "generic_fallback_reason": str(meta.get("generic_fallback_reason") or "").strip() or None,
+        "cards_payload": dict(cards_payload) if cards_payload else None,
         "chat_meta": {
             **meta,
             "proxy_elapsed_ms": (

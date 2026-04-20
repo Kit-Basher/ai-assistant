@@ -76,9 +76,11 @@ _TOKEN_RE = re.compile(r"\b\d+:[A-Za-z0-9_-]{20,}\b")
 _ENV_SECRET_RE = re.compile(r"(\b[A-Z0-9_]*(?:TOKEN|API_KEY)[A-Z0-9_]*=)([^\s]+)", re.IGNORECASE)
 
 
-def redact_secrets(text: str) -> str:
+def redact_secrets(text: str | bytes) -> str:
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
     if not text:
-        return text
+        return ""
     redacted_lines: list[str] = []
     for line in text.splitlines():
         line = _TOKEN_RE.sub("[REDACTED]", line)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime, timezone
+from copy import deepcopy
 from typing import Any
 import re
 
@@ -48,6 +50,42 @@ class RuntimeTruthService:
 
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
+
+    _SNAPSHOT_CACHE_TTL_SECONDS = 2.0
+
+    def _snapshot_cache(self) -> dict[str, dict[str, Any]]:
+        cache = getattr(self, "_snapshot_cache_store", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._snapshot_cache_store = cache
+        return cache
+
+    def _cached_snapshot(self, key: str, builder: Any) -> Any:
+        cache = self._snapshot_cache()
+        now = time.monotonic()
+        entry = cache.get(key)
+        if isinstance(entry, dict):
+            created_at = float(entry.get("created_at") or 0.0)
+            if created_at and now - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                return deepcopy(entry.get("value"))
+        value = builder()
+        cache[key] = {"created_at": now, "value": deepcopy(value)}
+        return deepcopy(value)
+
+    def _timed_cached_snapshot(self, key: str, builder: Any) -> tuple[Any, int]:
+        cache = self._snapshot_cache()
+        now = time.monotonic()
+        entry = cache.get(key)
+        if isinstance(entry, dict):
+            created_at = float(entry.get("created_at") or 0.0)
+            if created_at and now - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = entry.get("value")
+                return deepcopy(value), 0
+        started = time.monotonic()
+        value = builder()
+        elapsed_ms = int(max(0.0, time.monotonic() - started) * 1000)
+        cache[key] = {"created_at": time.monotonic(), "value": deepcopy(value)}
+        return deepcopy(value), elapsed_ms
 
     def _filesystem_allowed_roots(self) -> list[str]:
         config = getattr(self.runtime, "config", None)
@@ -104,6 +142,12 @@ class RuntimeTruthService:
         return dict(state) if isinstance(state, dict) else {}
 
     def _router_snapshot(self) -> dict[str, Any]:
+        cache = self._snapshot_cache().get("router_snapshot")
+        if isinstance(cache, dict):
+            created_at = float(cache.get("created_at") or 0.0)
+            if created_at and time.monotonic() - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = cache.get("value")
+                return dict(value) if isinstance(value, dict) else {}
         router = getattr(self.runtime, "_router", None)
         snapshot_reader = getattr(router, "doctor_snapshot", None)
         if not callable(snapshot_reader):
@@ -112,7 +156,12 @@ class RuntimeTruthService:
             snapshot = snapshot_reader()
         except Exception:
             return {}
-        return dict(snapshot) if isinstance(snapshot, dict) else {}
+        payload = dict(snapshot) if isinstance(snapshot, dict) else {}
+        self._snapshot_cache()["router_snapshot"] = {
+            "created_at": time.monotonic(),
+            "value": dict(payload),
+        }
+        return dict(payload)
 
     def _router_model_status(
         self,
@@ -254,11 +303,23 @@ class RuntimeTruthService:
         return None
 
     def _model_manager_state(self) -> dict[str, Any]:
+        cache = self._snapshot_cache().get("model_manager_state")
+        if isinstance(cache, dict):
+            created_at = float(cache.get("created_at") or 0.0)
+            if created_at and time.monotonic() - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = cache.get("value")
+                return dict(value) if isinstance(value, dict) else {"schema_version": 1, "targets": {}}
         try:
             path = model_manager_state_path_for_runtime(self.runtime)
-            return load_model_manager_state(path)
+            payload = load_model_manager_state(path)
         except Exception:
-            return {"schema_version": 1, "targets": {}}
+            payload = {"schema_version": 1, "targets": {}}
+        normalized = dict(payload) if isinstance(payload, dict) else {"schema_version": 1, "targets": {}}
+        self._snapshot_cache()["model_manager_state"] = {
+            "created_at": time.monotonic(),
+            "value": dict(normalized),
+        }
+        return dict(normalized)
 
     def _policy_flags(self) -> dict[str, Any]:
         runtime_policy_reader = getattr(self.runtime, "_chat_control_policy", None)
@@ -455,6 +516,13 @@ class RuntimeTruthService:
             runtime_mode=str(normalized_status.get("runtime_mode") or "DEGRADED"),
             startup_phase=startup_phase,
         )
+        chat_usable = bool(ready)
+        llm_available = getattr(self.runtime, "llm_available", None)
+        if not chat_usable and callable(llm_available):
+            try:
+                chat_usable = bool(llm_available())
+            except Exception:
+                chat_usable = bool(ready)
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.runtime.started_at).total_seconds()))
         recent_messages = self.runtime._ready_recent_telegram_messages(limit=5)
         runtime_state_label = str(failure_recovery.get("state_label") or "").strip() if isinstance(failure_recovery, dict) else ""
@@ -472,11 +540,12 @@ class RuntimeTruthService:
         return {
             "ok": True,
             "ready": bool(ready),
+            "chat_usable": bool(chat_usable),
             "phase": phase,
             "startup_phase": startup_phase,
             "runtime_mode": str(normalized_status.get("runtime_mode") or "DEGRADED"),
             "next_action": normalized_status.get("next_action"),
-            "state_label": runtime_state_label or ("Ready" if ready else "Not ready"),
+            "state_label": runtime_state_label or ("Ready" if chat_usable or ready else "Not ready"),
             "reason": runtime_reason or None,
             "blocker": runtime_blocker or None,
             "next_step": runtime_next_step or None,
@@ -576,6 +645,8 @@ class RuntimeTruthService:
                 or str(recovery_row.get("state_label") or "").strip()
                 or ("Ready" if runtime_mode == "ready" else "Not ready")
             )
+            if bool(ready.get("chat_usable", ready.get("ready", False))) and state_label != "Ready":
+                state_label = "Ready"
             reason = (
                 str(ready.get("reason") or ready_runtime_status.get("reason") or "").strip()
                 or str(recovery_row.get("reason") or "").strip()
@@ -643,18 +714,20 @@ class RuntimeTruthService:
                 show_conf_pref = (memory_db.get_preference("show_confidence") or "on").strip().lower()
                 response_style = _norm_text(memory_db.get_preference("response_style")) or "concise"
             return {
-                "ok": True,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "runtime": {
-                    "status": runtime_mode,
-                    "state_label": state_label,
-                    "summary": summary,
-                    "reason": reason,
-                    "next_action": next_step,
-                    "next_step": next_step,
-                    "blocker": blocked_reason,
-                    "recovery": recovery_row if recovery_row else ready.get("failure_recovery"),
-                },
+            "ok": True,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "chat_usable": bool(ready.get("chat_usable", ready.get("ready", False))),
+            "runtime": {
+                "status": runtime_mode,
+                "state_label": state_label,
+                "summary": summary,
+                "reason": reason,
+                "next_action": next_step,
+                "next_step": next_step,
+                "blocker": blocked_reason,
+                "recovery": recovery_row if recovery_row else ready.get("failure_recovery"),
+                "chat_usable": bool(ready.get("chat_usable", ready.get("ready", False))),
+            },
                 "model": {
                     "provider": model_provider,
                     "model": model_id,
@@ -867,6 +940,12 @@ class RuntimeTruthService:
         }
 
     def _runtime_inventory_rows(self) -> list[dict[str, Any]]:
+        cache = self._snapshot_cache().get("runtime_inventory_rows")
+        if isinstance(cache, dict):
+            created_at = float(cache.get("created_at") or 0.0)
+            if created_at and time.monotonic() - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = cache.get("value")
+                return [dict(row) for row in value] if isinstance(value, list) else []
         document = (
             self.runtime.registry_document
             if isinstance(getattr(self.runtime, "registry_document", None), dict)
@@ -965,6 +1044,10 @@ class RuntimeTruthService:
             if model_id not in canonical_ids:
                 continue
             filtered_rows.append(dict(row))
+        self._snapshot_cache()["runtime_inventory_rows"] = {
+            "created_at": time.monotonic(),
+            "value": [dict(row) for row in filtered_rows],
+        }
         return filtered_rows
 
     def _resolved_default_model(self) -> str | None:
@@ -1286,9 +1369,18 @@ class RuntimeTruthService:
         }
 
     def current_chat_target_status(self) -> dict[str, Any]:
+        cache_key = "current_chat_target_status"
+        cached = self._snapshot_cache().get(cache_key)
+        if isinstance(cached, dict):
+            created_at = float(cached.get("created_at") or 0.0)
+            if created_at and time.monotonic() - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = cached.get("value")
+                return deepcopy(value) if isinstance(value, dict) else {}
+
+        started = time.monotonic()
         configured = self._configured_chat_target_status()
         truth = self.chat_target_truth()
-        return {
+        payload = {
             **configured,
             "provider": truth.get("effective_provider") or configured.get("provider"),
             "model": truth.get("effective_model") or configured.get("model"),
@@ -1310,6 +1402,15 @@ class RuntimeTruthService:
             "degraded_reason": truth.get("degraded_reason"),
             "source": "runtime_truth.chat_target_truth",
         }
+        payload["truth_timing_ms"] = {
+            "current_chat_target_status_ms": int(max(0.0, time.monotonic() - started) * 1000),
+            "cache_hit": False,
+        }
+        self._snapshot_cache()[cache_key] = {
+            "created_at": time.monotonic(),
+            "value": deepcopy(payload),
+        }
+        return deepcopy(payload)
 
     def _provider_status_snapshot(
         self,
@@ -1498,6 +1599,15 @@ class RuntimeTruthService:
         return approved
 
     def model_inventory_status(self) -> dict[str, Any]:
+        cache_key = "model_inventory_status"
+        cached = self._snapshot_cache().get(cache_key)
+        if isinstance(cached, dict):
+            created_at = float(cached.get("created_at") or 0.0)
+            if created_at and time.monotonic() - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = cached.get("value")
+                return deepcopy(value) if isinstance(value, dict) else {}
+
+        started = time.monotonic()
         target_status = self._configured_chat_target_status()
         rows: list[dict[str, Any]] = []
         models_doc = (
@@ -1602,7 +1712,7 @@ class RuntimeTruthService:
             }
             for row in rows
         ]
-        return {
+        payload = {
             "active_provider": str(target_status.get("provider") or "").strip().lower() or None,
             "active_model": str(target_status.get("model") or "").strip() or None,
             "configured_provider": str(target_status.get("provider") or "").strip().lower() or None,
@@ -1618,6 +1728,15 @@ class RuntimeTruthService:
             "models": rows,
             "source": "runtime_inventory+model_manager_lifecycle",
         }
+        payload["truth_timing_ms"] = {
+            "model_inventory_status_ms": int(max(0.0, time.monotonic() - started) * 1000),
+            "cache_hit": False,
+        }
+        self._snapshot_cache()[cache_key] = {
+            "created_at": time.monotonic(),
+            "value": deepcopy(payload),
+        }
+        return deepcopy(payload)
 
     def filesystem_list_directory(
         self,
@@ -1884,6 +2003,15 @@ class RuntimeTruthService:
         }
 
     def model_readiness_status(self) -> dict[str, Any]:
+        cache_key = "model_readiness_status"
+        cached = self._snapshot_cache().get(cache_key)
+        if isinstance(cached, dict):
+            created_at = float(cached.get("created_at") or 0.0)
+            if created_at and time.monotonic() - created_at <= self._SNAPSHOT_CACHE_TTL_SECONDS:
+                value = cached.get("value")
+                return deepcopy(value) if isinstance(value, dict) else {}
+
+        started = time.monotonic()
         inventory = self.model_inventory_status()
         policy = self._policy_flags()
         router_snapshot = self._router_snapshot()
@@ -2140,7 +2268,15 @@ class RuntimeTruthService:
         }
         if hasattr(self, "_router_snapshot_cache"):
             delattr(self, "_router_snapshot_cache")
-        return result
+        result["truth_timing_ms"] = {
+            "model_readiness_status_ms": int(max(0.0, time.monotonic() - started) * 1000),
+            "cache_hit": False,
+        }
+        self._snapshot_cache()[cache_key] = {
+            "created_at": time.monotonic(),
+            "value": deepcopy(result),
+        }
+        return deepcopy(result)
 
     @staticmethod
     def _selection_candidate_health_status(row: dict[str, Any]) -> str:

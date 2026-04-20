@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 from agent.filesystem_skill import FileSystemSkill
 from agent.knowledge_cache import facts_hash
+from agent.onboarding_flow import onboarding_completed_key
 from agent.orchestrator import Orchestrator, OrchestratorResponse
+from skills.resource_governor import collector
 from agent.shell_skill import ShellSkill
 from agent.public_chat import build_no_llm_public_message
 from agent.tool_contract import normalize_tool_request
@@ -168,6 +170,12 @@ class _FakeRuntimeTruthService:
             "ready": self.current_ready,
             "health_status": self.current_model_health_status,
             "provider_health_status": self.current_provider_health_status,
+            "configured_provider": self.default_provider,
+            "configured_model": self.default_model,
+            "effective_provider": self.effective_provider,
+            "effective_model": self.effective_model,
+            "effective_ready": self.current_ready,
+            "truth_timing_ms": {"current_chat_target_status_ms": 1, "cache_hit": False},
         }
 
     def chat_target_truth(self) -> dict[str, object]:
@@ -330,6 +338,7 @@ class _FakeRuntimeTruthService:
             "remote_registered_models": [dict(row) for row in rows if not bool(row.get("local", False))],
             "models": rows,
             "source": "fake-runtime-inventory",
+            "truth_timing_ms": {"model_inventory_status_ms": 1, "cache_hit": False},
         }
 
     def model_readiness_status(self) -> dict[str, object]:
@@ -409,6 +418,7 @@ class _FakeRuntimeTruthService:
             "other_usable_models": [dict(row) for row in ready_rows if not bool(row.get("active", False))],
             "not_ready_models": not_ready_rows,
             "source": "fake-runtime-readiness",
+            "truth_timing_ms": {"model_readiness_status_ms": 1, "cache_hit": False},
         }
 
     def setup_status(self) -> dict[str, object]:
@@ -652,6 +662,22 @@ class _FakeRuntimeTruthService:
             "provider": self.current_provider,
             "model": self.current_model,
                 "summary": "Ready.",
+        }
+
+    def ready_status(self) -> dict[str, object]:
+        self.calls.append(("ready_status", None))
+        return {
+            "ok": True,
+            "ready": bool(self.current_ready),
+            "phase": "ready" if self.current_ready else "degraded",
+            "startup_phase": "ready" if self.current_ready else "starting",
+            "runtime_mode": "READY" if self.current_ready else "DEGRADED",
+            "failure_code": None,
+            "summary": "Ready." if self.current_ready else "Not ready.",
+            "runtime_status": {
+                "runtime_mode": "READY" if self.current_ready else "DEGRADED",
+                "summary": "Ready." if self.current_ready else "Not ready.",
+            },
         }
 
     def list_managed_adapters(self) -> dict[str, object]:
@@ -1696,8 +1722,190 @@ class TestOrchestrator(unittest.TestCase):
         messages = call.get("messages") if isinstance(call, dict) else []
         system_text = str((messages or [{}])[0].get("content") if messages else "")
         self.assertIn("Always identify as the local Personal Agent", system_text)
-        self.assertIn("Do not invent a name, persona, company, or origin story.", system_text)
-        self.assertIn("friendly, calm, competent, concise, and practical", system_text)
+
+    def test_runtime_ready_allows_normal_chat_despite_stale_onboarding_state(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="hi from llm")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_ready = True
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+        )
+        self.db.set_user_pref(onboarding_completed_key("user1"), "false")
+
+        response = orchestrator.handle_message("hello", "user1", chat_context={"source_surface": "webui"})
+
+        self.assertEqual("hi from llm", response.text)
+        self.assertEqual(1, len(llm.chat_calls))
+        self.assertNotIn("not ready", response.text.lower())
+        self.assertEqual("true", str(self.db.get_user_pref(onboarding_completed_key("user1")) or "").strip().lower())
+
+    def test_coding_prompt_does_not_fall_into_disk_pressure_observe_path(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="here is the script")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        response = orchestrator.handle_message(
+            "Write a Bash script that finds the 10 largest files under a directory and ignores .git and node_modules.",
+            "user-coding",
+        )
+
+        self.assertEqual("generic_chat", response.data["route"])
+        self.assertEqual(1, len(llm.chat_calls))
+        self.assertIn("here is the script", response.text)
+        self.assertNotIn("Disk pressure culprit", response.text)
+
+    def test_double_check_followup_uses_recent_context_without_not_ready_gate(self) -> None:
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_ready = True
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            runtime_truth_service=runtime_truth,
+        )
+        orchestrator._last_interpretable_result["user1"] = {
+            "created_ts": 0,
+            "route": "runtime_status",
+            "kind": "runtime_status",
+            "user_text": "why is ollama slow?",
+            "response_text": "Ollama is reachable.",
+            "summary": "Ollama is reachable.",
+            "payload": {
+                "type": "runtime_status",
+                "summary": "Ollama is reachable.",
+            },
+            "used_tools": ["resource_report"],
+        }
+
+        with patch(
+            "agent.orchestrator.resource_followup",
+            return_value="fresh grounded answer",
+        ) as mock_followup:
+            response = orchestrator.handle_message("i dont think it is, can you double check please?", "user1")
+
+        self.assertEqual("fresh grounded answer", response.text)
+        self.assertNotIn("not ready to chat yet", response.text.lower())
+        self.assertNotIn("open setup", response.text.lower())
+        mock_followup.assert_called_once()
+
+    def test_confusion_turn_clarifies_without_resetting_to_not_ready(self) -> None:
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_ready = True
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            runtime_truth_service=runtime_truth,
+        )
+        orchestrator._last_interpretable_result["user1"] = {
+            "created_ts": 0,
+            "route": "runtime_status",
+            "kind": "runtime_status",
+            "user_text": "what is ollama doing?",
+            "response_text": "Ollama is reachable.",
+            "summary": "Ollama is reachable.",
+            "payload": {
+                "type": "runtime_status",
+                "summary": "Ollama is reachable.",
+            },
+            "used_tools": ["resource_report"],
+        }
+
+        response = orchestrator.handle_message("wat?", "user1", chat_context={"source_surface": "webui"})
+
+        self.assertIn("continue with that", response.text.lower())
+        self.assertNotIn("not ready to chat yet", response.text.lower())
+
+    def test_correction_turn_reassesses_without_generic_choice_prompt(self) -> None:
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_ready = True
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            runtime_truth_service=runtime_truth,
+        )
+        orchestrator._last_interpretable_result["user1"] = {
+            "created_ts": 0,
+            "route": "operational_status",
+            "kind": "resource_report",
+            "user_text": "how is memory looking?",
+            "response_text": "Memory is getting tight.",
+            "summary": "Memory is getting tight.",
+            "payload": {
+                "type": "resource_report",
+                "kind": "resource_report",
+                "summary": "Memory is getting tight.",
+                "memory": {
+                    "total": int(62.7 * (1024**3)),
+                    "used": int(12.8 * (1024**3)),
+                    "available": int(49.9 * (1024**3)),
+                    "free": int(49.9 * (1024**3)),
+                    "used_pct": 20.4,
+                    "buffers": 0,
+                    "cached": 0,
+                    "shared": 0,
+                },
+                "swap": {"total": int(8 * (1024**3)), "used": int(4 * (1024**3))},
+                "cpu_count": 8,
+                "loads": {"1m": 1.0, "5m": 0.8, "15m": 0.6},
+            },
+            "used_tools": ["resource_report"],
+        }
+
+        response = orchestrator.handle_message("that's wrong, please reassess", "user1")
+
+        lowered = response.text.lower()
+        self.assertIn("you’re right", lowered)
+        self.assertIn("not under pressure", lowered)
+        self.assertNotIn("getting tight", lowered)
+        self.assertNotIn("do you want runtime status", lowered)
+        self.assertNotIn("setup help", lowered)
+        self.assertEqual("assistant_clarification", response.data["route"])
+        self.assertEqual("assistant_correction", response.data["runtime_payload"]["type"])
+
+    def test_linux_tool_suggestions_do_not_keep_windows_only_tools(self) -> None:
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_ready = True
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            runtime_truth_service=runtime_truth,
+        )
+        response = OrchestratorResponse(
+            "Use SpeedFan to check temperatures.",
+            {"route": "generic_chat", "used_llm": True, "provider": "ollama", "model": "llama3"},
+        )
+
+        with patch("agent.orchestrator.platform.system", return_value="Linux"):
+            guarded = orchestrator._apply_assistant_response_guard(
+                user_id="user1",
+                user_text="tell me how to check temperatures",
+                response=response,
+            )
+
+        self.assertNotIn("SpeedFan", guarded.text)
+        self.assertIn("lm-sensors", guarded.text.lower())
 
     def test_runtime_provider_query_uses_runtime_truth_service_without_llm(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -1721,6 +1929,81 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual([], response.data["used_tools"])
         self.assertEqual(0, len(llm.chat_calls))
         self.assertIn(("provider_status", "openrouter"), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
+
+    def test_providers_status_response_uses_runtime_truth_without_guard(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        response = orchestrator._providers_status_response()
+
+        self.assertEqual("provider_status", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        self.assertIn("providers", response.data.get("runtime_payload", {}))
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_runtime_status_unavailable_still_explains_live_ollama_instances(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            runtime_truth_service=None,
+        )
+        live_snapshot = {
+            "taken_at": "2026-04-13T12:00:00+00:00",
+            "snapshot_local_date": "2026-04-13",
+            "hostname": "testhost",
+            "cpu_count": 8,
+            "loadavg": (1.0, 0.8, 0.6),
+            "mem": {
+                "total": 64 * 1024**3,
+                "used": 20 * 1024**3,
+                "available": 44 * 1024**3,
+                "free": 44 * 1024**3,
+                "buffers": 0,
+                "cached": 0,
+                "shared": 0,
+                "used_pct": 31.25,
+            },
+            "swap": {"total": 0, "used": 0},
+            "top_cpu": [
+                {"pid": 201, "name": "ollama", "cpu_ticks": 2200, "rss_bytes": 12 * 1024**3},
+                {"pid": 202, "name": "ollama runner", "cpu_ticks": 700, "rss_bytes": 6 * 1024**3},
+            ],
+            "top_rss": [
+                {"pid": 201, "name": "ollama", "cpu_ticks": 2200, "rss_bytes": 12 * 1024**3},
+                {"pid": 202, "name": "ollama runner", "cpu_ticks": 700, "rss_bytes": 6 * 1024**3},
+            ],
+            "proc_stats": {"procs_scanned": 2, "errors_skipped": 0},
+        }
+        with patch.object(collector, "collect_live_snapshot", return_value=live_snapshot), patch.object(
+            collector,
+            "collect_live_process_index",
+            return_value=[
+                {"pid": 201, "name": "ollama"},
+                {"pid": 202, "name": "ollama runner"},
+            ],
+        ):
+            response = orchestrator.handle_message("why are there 2 ollama instances?", "user1")
+
+        lowered = response.text.lower()
+        self.assertNotIn("can't read a clean runtime status", lowered)
+        self.assertIn("ollama", lowered)
+        self.assertTrue("server" in lowered or "worker" in lowered or "helper" in lowered)
 
     def test_runtime_and_model_status_queries_use_runtime_truth_without_llm(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -1740,12 +2023,22 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("model_status", model_response.data["route"])
         self.assertFalse(model_response.data["used_llm"])
         self.assertIn(("current_chat_target_status", None), runtime_truth.calls)
+        self.assertNotIn(("chat_target_truth", None), runtime_truth.calls)
         self.assertNotIn(("model_controller_policy_status", None), runtime_truth.calls)
+        model_payload = model_response.data.get("runtime_payload") if isinstance(model_response.data.get("runtime_payload"), dict) else {}
+        self.assertIn("truth_timing_ms", model_payload)
+        self.assertIn("current_chat_target_status_ms", model_payload["truth_timing_ms"])
         self.assertIn("chat is currently using", model_response.text.lower())
         self.assertEqual("runtime_status", runtime_response.data["route"])
         self.assertFalse(runtime_response.data["used_llm"])
         self.assertIn(("runtime_status", "runtime_status"), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
+        self.assertTrue(runtime_response.data.get("skip_post_response_hooks", False))
+        runtime_timing = runtime_response.data.get("orchestrator_timing_ms") if isinstance(runtime_response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(runtime_timing.get("assistant_response_guard_ms", -1)))
+        self.assertTrue(runtime_response.data.get("skip_post_response_hooks", False))
+        timing = runtime_response.data.get("orchestrator_timing_ms") if isinstance(runtime_response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
 
     def test_assistant_capabilities_mentions_pack_suggestions(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -1766,6 +2059,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("missing capability", response.text.lower())
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(0, len(llm.chat_calls))
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
 
     def test_filesystem_queries_use_native_skill_without_llm_fallback(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -2155,7 +2451,11 @@ class TestOrchestrator(unittest.TestCase):
             orchestrator,
             "_handle_nl_observe",
             return_value=OrchestratorResponse("Memory used: 42%", {"summary": "Memory used: 42%"}),
-        ) as observe_mock, patch(
+        ) as observe_mock, patch.object(
+            orchestrator,
+            "_apply_assistant_response_guard",
+            side_effect=AssertionError("post-response guard should not run"),
+        ), patch(
             "agent.orchestrator.route_inference",
             side_effect=AssertionError("LLM should not run"),
         ):
@@ -2168,6 +2468,12 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(memory_response.data["used_llm"])
         self.assertIn("doctor", doctor_response.text.lower())
         self.assertIn("memory", memory_response.text.lower())
+        self.assertTrue(doctor_response.data.get("skip_post_response_hooks", False))
+        self.assertTrue(memory_response.data.get("skip_post_response_hooks", False))
+        doctor_timing = doctor_response.data.get("orchestrator_timing_ms") if isinstance(doctor_response.data.get("orchestrator_timing_ms"), dict) else {}
+        memory_timing = memory_response.data.get("orchestrator_timing_ms") if isinstance(memory_response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(doctor_timing.get("assistant_response_guard_ms", -1)))
+        self.assertEqual(0, int(memory_timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_governance_adapter_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2190,6 +2496,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("governance_managed_adapters", payload.get("type"))
         self.assertIn("Telegram", response.text)
         self.assertIn(("list_managed_adapters", None), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_governance_pending_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2212,6 +2521,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("governance_pending", payload.get("type"))
         self.assertIn("scheduled_sync", response.text)
         self.assertIn(("list_pending_governance_requests", None), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_governance_skill_status_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2235,6 +2547,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("safe", payload.get("mode"))
         self.assertIn("Mode: SAFE MODE.", response.text)
         self.assertIn(("model_controller_policy_status", None), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_governance_execution_mode_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2258,6 +2573,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("safe", payload.get("mode"))
         self.assertIn("Mode: SAFE MODE.", response.text)
         self.assertIn(("model_controller_policy_status", None), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_model_policy_status_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2280,6 +2598,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("model_policy_status", payload.get("type"))
         self.assertIn("local first", response.text.lower())
         self.assertIn(("model_policy_status", None), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_model_policy_current_choice_query_uses_runtime_truth_service_without_llm(self) -> None:
@@ -2302,6 +2623,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("model_policy_explanation", payload.get("type"))
         self.assertIn("current default already matches the best candidate", response.text.lower())
         self.assertIn(("model_policy_status", None), runtime_truth.calls)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_model_policy_candidate_queries_use_runtime_truth_service_without_llm(self) -> None:
@@ -2324,10 +2648,12 @@ class TestOrchestrator(unittest.TestCase):
         free_payload = free_remote.data.get("runtime_payload") if isinstance(free_remote.data.get("runtime_payload"), dict) else {}
         self.assertEqual("model_policy_candidate", free_payload.get("type"))
         self.assertIn("free remote", free_remote.text.lower())
+        self.assertTrue(free_remote.data.get("skip_post_response_hooks", False))
         self.assertEqual("model_policy_status", provider_reason.data["route"])
         provider_payload = provider_reason.data.get("runtime_payload") if isinstance(provider_reason.data.get("runtime_payload"), dict) else {}
         self.assertEqual("model_policy_explanation", provider_payload.get("type"))
         self.assertIn("openrouter", provider_reason.text.lower())
+        self.assertTrue(provider_reason.data.get("skip_post_response_hooks", False))
         self.assertIn(("model_policy_candidate", {"tier": "free_remote", "status": None}), runtime_truth.calls)
         self.assertIn(("model_policy_provider_candidate", "openrouter"), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
@@ -2620,12 +2946,12 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("model_status", first.data["route"])
         self.assertEqual("setup_flow", second.data["route"])
-        self.assertEqual("setup_flow", third.data["route"])
+        self.assertEqual("interpretation_followup", third.data["route"])
         self.assertFalse(second.data["used_llm"])
         self.assertFalse(third.data["used_llm"])
         self.assertIn("ollama is currently down", second.text.lower())
         self.assertIn("reconfigure ollama", second.text.lower())
-        self.assertIn("ollama is currently down", third.text.lower())
+        self.assertIn("likely cause", third.text.lower())
         self.assertNotIn("chat, ask, or model check/switch", second.text.lower())
         self.assertNotIn("chat, ask, or model check/switch", third.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
@@ -3046,6 +3372,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("current chat model ollama:qwen3.5:4b is not healthy right now", lowered)
         self.assertNotIn("what can i help you with", lowered)
         self.assertNotIn("no chat model available", lowered)
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
 
     def test_safe_mode_containment_blocks_generic_escape_for_setup_explanation(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="What can I help you with?")
@@ -3375,6 +3704,28 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("setup needs attention right now", lowered)
         self.assertNotIn("what can i help you with", lowered)
 
+    def test_grounded_process_followup_uses_fresh_resource_probe(self) -> None:
+        orchestrator = self._orchestrator()
+        with patch.object(
+            orchestrator,
+            "_looks_like_grounded_system_query",
+            return_value=True,
+        ), patch(
+            "agent.orchestrator.resource_followup",
+            return_value="live-answer",
+        ) as mock_followup:
+            response = orchestrator._grounded_system_fallback_response(
+                "user1",
+                "is pid 3367 still running?",
+                allow_actions=False,
+            )
+
+        self.assertIsNotNone(response)
+        self.assertEqual("live-answer", response.text)
+        mock_followup.assert_called_once()
+        self.assertEqual("process_state", mock_followup.call_args.args[2])
+        self.assertEqual("is pid 3367 still running?", mock_followup.call_args.kwargs.get("question"))
+
     def test_assistant_unmatched_runtime_overview_prompt_returns_grounded_status(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="I am DeepSeek.")
         runtime_truth = _FakeRuntimeTruthService()
@@ -3634,10 +3985,12 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("setup looks okay right now", response.text.lower())
         self.assertIn("ollama is reachable", response.text.lower())
         self.assertIn("ollama:qwen2.5:3b-instruct", response.text.lower())
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
 
     def test_setup_explanation_without_chat_model_uses_canonical_no_llm_copy(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_ready = False
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -3665,6 +4018,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(build_no_llm_public_message(), response.text)
         self.assertNotIn("No chat model is available right now", response.text)
         self.assertNotIn("provider", response.text.lower())
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
 
     def test_direct_model_switch_asks_specific_clarification_when_bare_name_is_ambiguous(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -3723,9 +4077,20 @@ class TestOrchestrator(unittest.TestCase):
             for prompt in prompts:
                 with self.subTest(prompt=prompt):
                     runtime_truth.calls.clear()
-                    response = orchestrator.handle_message(prompt, "user1")
+                    with patch.object(
+                        orchestrator,
+                        "_apply_assistant_response_guard",
+                        side_effect=AssertionError("post-response guard should not run"),
+                    ):
+                        response = orchestrator.handle_message(prompt, "user1")
                     self.assertEqual("model_status", response.data["route"])
                     self.assertFalse(response.data["used_llm"])
+                    self.assertTrue(response.data.get("skip_post_response_hooks", False))
+                    timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+                    self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
+                    payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+                    self.assertIn("truth_timing_ms", payload)
+                    self.assertIn("canonical_model_inventory_snapshot_ms", payload["truth_timing_ms"])
                     self.assertIn("local installed chat models", response.text.lower())
                     self.assertIn("ollama:qwen3.5:4b", response.text.lower())
                     self.assertIn("ollama:qwen2.5:7b-instruct", response.text.lower())
@@ -3953,7 +4318,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("voice_output", payload.get("capability_required"))
         self.assertIn("installed, but it is disabled", response.text)
         self.assertIn("not enabled as a live capability", response.text)
-        self.assertIn("text", response.text.lower())
+        self.assertIn("keep this in text", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_installed_and_healthy_pack_is_task_unconfirmed_without_auto_install(self) -> None:
@@ -4012,6 +4377,171 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("installed and healthy", response.text)
         self.assertIn("can't confirm it's usable for this task yet", response.text)
         self.assertIn("task compatibility not confirmed", response.text)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_paraphrased_voice_request_routes_to_existing_pack_flow(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                if query not in {"voice", "speech", "audio", "tts"}:
+                    return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+                return {
+                    "source": {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "local-voice",
+                                "name": "Local Voice",
+                                "summary": "Local speech output for this machine.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "/tmp/local-voice",
+                            }
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Can you read this page back to me in speech?", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertIn("Voice output isn't installed.", response.text)
+        self.assertIn("Local Voice", response.text)
+        self.assertIn("install preview", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_partial_custom_gap_proposes_a_small_helper(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _EmptyDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _EmptyDiscovery()  # type: ignore[assignment]
+
+        prompt = "Can you help me sketch an assistant that coordinates my studio light cues with my music cues during live shows?"
+        response = orchestrator.handle_message(prompt, "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertIn("I can help with the text side", response.text)
+        self.assertIn("small helper", response.text.lower())
+        self.assertIn("narrowest thing to add", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_direct_custom_gap_proposes_a_narrow_new_helper(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _EmptyDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _EmptyDiscovery()  # type: ignore[assignment]
+
+        prompt = "Make an assistant that coordinates my studio light cues with my music cues during live shows."
+        response = orchestrator.handle_message(prompt, "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertNotIn("I can help with the text side", response.text)
+        self.assertIn("couldn't find a ready-made helper", response.text.lower())
+        self.assertIn("narrowest thing to add", response.text.lower())
+        self.assertNotIn("install preview", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_discovery_unavailable_still_proposes_a_narrow_helper(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _BrokenDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                raise RuntimeError("temporary discovery failure")
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _BrokenDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Can you read this page back to me in speech?", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertIn("couldn't check", response.text.lower())
+        self.assertIn("voice helper", response.text.lower())
+        self.assertIn("reads text aloud", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_task_model_recommendation_questions_use_model_scout_without_llm(self) -> None:
@@ -4312,7 +4842,8 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
         self.assertIn("Coding tools isn't installed.", response.text)
-        self.assertIn("I can keep responding in text.", response.text)
+        self.assertIn("coding helper", response.text.lower())
+        self.assertIn("small helper that helps with coding and terminal work", response.text.lower())
         self.assertNotIn("Best coding option:", response.text)
         self.assertNotIn("No change has been made.", response.text)
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
@@ -5619,6 +6150,527 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("VRAM is available on NVIDIA RTX 4080", response.text)
         self.assertFalse(response.text.startswith("CPU load"))
 
+    def test_diagnostics_capture_flow_requests_confirmation_then_returns_compact_snapshot(self) -> None:
+        orchestrator = self._orchestrator()
+        snapshot = {
+            "trace_id": "doctor-123",
+            "generated_at": "2026-04-19T12:00:00+00:00",
+            "os": {
+                "available": True,
+                "source": "uname -a",
+                "text": "Linux test-host 6.8.0-1 x86_64",
+                "error_kind": None,
+            },
+            "network": {
+                "source": "nmcli",
+                "nmcli_available": True,
+                "system_summary": {
+                    "state": "degraded",
+                    "up_interfaces": ["wlp2s0"],
+                    "default_route": False,
+                    "dns_configured": True,
+                },
+                "nmcli_rows": [
+                    {"device": "wlp2s0", "type": "wifi", "state": "connected", "connection": "HomeNetwork"},
+                ],
+            },
+            "suspend_resume": {
+                "source": "journalctl -b",
+                "available": True,
+                "match_count": 2,
+                "matches": [
+                    "kernel: PM: suspend entry (deep)",
+                    "kernel: network disconnected after suspend",
+                ],
+            },
+            "summary": {
+                "status": "warn",
+                "notes": ["Network is not fully up in the snapshot."],
+                "next_action": "Check NetworkManager and the Wi-Fi driver after suspend.",
+            },
+        }
+
+        with (
+            patch("agent.orchestrator.collect_diagnostics_snapshot", return_value=snapshot) as collect_call,
+            patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat should not be used")),
+        ):
+            preview = orchestrator.handle_message("My Wi-Fi drops after suspend. Can you help me figure out why?", "user-1")
+
+        self.assertEqual(0, collect_call.call_count)
+        self.assertIn("Do you want me to do that?", preview.text)
+        preview_data = preview.data or {}
+        self.assertEqual("diagnostics_capture", preview_data.get("route"))
+        preview_payload = preview_data.get("runtime_payload") if isinstance(preview_data.get("runtime_payload"), dict) else {}
+        self.assertTrue(bool(preview_payload.get("requires_confirmation")))
+        self.assertFalse(bool(preview_payload.get("mutating", True)))
+        self.assertNotIn("uname", preview.text.lower())
+        self.assertNotIn("journalctl", preview.text.lower())
+
+        with patch("agent.orchestrator.collect_diagnostics_snapshot", return_value=snapshot) as collect_call:
+            confirmed = orchestrator.handle_message("yes", "user-1")
+
+        self.assertEqual(1, collect_call.call_count)
+        self.assertEqual("diagnostics_capture", confirmed.data.get("route"))
+        payload = confirmed.data.get("runtime_payload") if isinstance(confirmed.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("collect_diagnostics", payload.get("kind"))
+        cards_payload = payload.get("cards_payload") if isinstance(payload.get("cards_payload"), dict) else {}
+        self.assertEqual("Diagnostics snapshot", ((cards_payload.get("cards") or [{}])[0] or {}).get("title"))
+        self.assertIn("Diagnostics snapshot", confirmed.text)
+        self.assertIn("OS/kernel:", confirmed.text)
+        self.assertIn("Network:", confirmed.text)
+        self.assertIn("Suspend/resume matches:", confirmed.text)
+        self.assertIn("Check NetworkManager and the Wi-Fi driver after suspend.", confirmed.text)
+        self.assertIn("diagnostics_snapshot", payload)
+        self.assertNotIn("Run:", confirmed.text)
+
+    def test_bluetooth_diagnostics_capture_flow_requests_confirmation_then_returns_compact_snapshot(self) -> None:
+        orchestrator = self._orchestrator()
+        snapshot = {
+            "preset": "bluetooth_audio",
+            "bluetooth": {
+                "service": {
+                    "available": True,
+                    "source": "systemctl status bluetooth",
+                    "active_state": "active",
+                    "loaded_state": "loaded",
+                },
+                "controller": {
+                    "available": True,
+                    "source": "bluetoothctl show",
+                    "address": "AA:BB:CC:DD:EE:FF",
+                    "controller": "test-host",
+                    "alias": "test-host",
+                    "powered": True,
+                    "discoverable": False,
+                    "pairable": True,
+                    "discovering": False,
+                },
+                "devices": {
+                    "source": "bluetoothctl paired-devices",
+                    "available": True,
+                    "paired_count": 1,
+                    "connected_count": 0,
+                    "devices": [
+                        {
+                            "address": "11:22:33:44:55:66",
+                            "name": "Headphones",
+                            "connected": False,
+                            "paired": True,
+                            "trusted": True,
+                        }
+                    ],
+                },
+                "logs": {
+                    "source": "journalctl -u bluetooth",
+                    "available": True,
+                    "match_count": 2,
+                    "matches": [
+                        "bluetoothd[123]: profiles/audio: disconnect",
+                        "bluetoothd[123]: reconnect failed",
+                    ],
+                },
+            },
+            "summary": {
+                "status": "warn",
+                "notes": ["Recent Bluetooth logs contain failure markers."],
+                "next_action": "Re-test the Bluetooth device and check whether it reconnects after suspend.",
+            },
+        }
+
+        with (
+            patch("agent.orchestrator.collect_bluetooth_audio_diagnostics_snapshot", return_value=snapshot) as collect_call,
+            patch("agent.orchestrator.collect_diagnostics_snapshot", side_effect=AssertionError("generic diagnostics should not be used")),
+            patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat should not be used")),
+        ):
+            preview = orchestrator.handle_message("My Bluetooth headphones disconnect after sleep. Can you help me figure out why?", "user-2")
+
+        self.assertEqual(0, collect_call.call_count)
+        self.assertIn("Do you want me to do that?", preview.text)
+        preview_data = preview.data or {}
+        self.assertEqual("diagnostics_capture", preview_data.get("route"))
+        preview_payload = preview_data.get("runtime_payload") if isinstance(preview_data.get("runtime_payload"), dict) else {}
+        self.assertEqual("bluetooth_audio", preview_payload.get("capture_scope"))
+        self.assertEqual("collect_bluetooth_audio_diagnostics", preview_payload.get("kind"))
+        self.assertNotIn("systemctl status bluetooth", preview.text.lower())
+
+        with patch("agent.orchestrator.collect_bluetooth_audio_diagnostics_snapshot", return_value=snapshot) as collect_call:
+            confirmed = orchestrator.handle_message("yes", "user-2")
+
+        self.assertEqual(1, collect_call.call_count)
+        self.assertEqual("diagnostics_capture", confirmed.data.get("route"))
+        payload = confirmed.data.get("runtime_payload") if isinstance(confirmed.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("collect_bluetooth_audio_diagnostics", payload.get("kind"))
+        cards_payload = payload.get("cards_payload") if isinstance(payload.get("cards_payload"), dict) else {}
+        self.assertEqual("Bluetooth/audio diagnostics", ((cards_payload.get("cards") or [{}])[0] or {}).get("title"))
+        self.assertIn("Bluetooth/audio diagnostics", confirmed.text)
+        self.assertIn("Service:", confirmed.text)
+        self.assertIn("Controller:", confirmed.text)
+        self.assertIn("Devices:", confirmed.text)
+        self.assertIn("Logs:", confirmed.text)
+        self.assertIn("diagnostics_snapshot", payload)
+        self.assertNotIn("journalctl", confirmed.text.lower())
+
+    def test_storage_diagnostics_capture_flow_requests_confirmation_then_returns_compact_snapshot(self) -> None:
+        orchestrator = self._orchestrator()
+        snapshot = {
+            "preset": "storage_disk",
+            "storage": {
+                "filesystems": {
+                    "source": "df -hT --local --output=source,fstype,size,used,avail,pcent,target",
+                    "available": True,
+                    "rows": [
+                        {
+                            "device": "/dev/nvme0n1p2",
+                            "mountpoint": "/",
+                            "fstype": "ext4",
+                            "size": "100G",
+                            "used": "96G",
+                            "avail": "4G",
+                            "used_pct": 96.0,
+                        },
+                        {
+                            "device": "/dev/nvme0n1p3",
+                            "mountpoint": "/home",
+                            "fstype": "ext4",
+                            "size": "200G",
+                            "used": "120G",
+                            "avail": "80G",
+                            "used_pct": 60.0,
+                        },
+                    ],
+                },
+                "consumers": {
+                    "source": "du -x -B1 -d 1 <candidate paths>",
+                    "available": True,
+                    "match_count": 2,
+                    "entries": [
+                        {"path": "/home/user/Downloads", "size_bytes": 8 * 1024**3, "base_path": "/home/user"},
+                        {"path": "/var/cache", "size_bytes": 4 * 1024**3, "base_path": "/var"},
+                    ],
+                },
+                "logs": {
+                    "source": "journalctl -b",
+                    "available": True,
+                    "match_count": 2,
+                    "matches": [
+                        "app[123]: write failed: No space left on device",
+                        "app[123]: retry failed",
+                    ],
+                },
+            },
+            "summary": {
+                "status": "critical",
+                "notes": ["High filesystem usage on / (96.0%)."],
+                "next_action": "Free space on the fullest filesystem and retry the save.",
+            },
+        }
+
+        with (
+            patch("agent.orchestrator.collect_storage_disk_diagnostics_snapshot", return_value=snapshot) as collect_call,
+            patch("agent.orchestrator.collect_diagnostics_snapshot", side_effect=AssertionError("generic diagnostics should not be used")),
+            patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat should not be used")),
+        ):
+            preview = orchestrator.handle_message("My disk is full and I can't save files. Can you help me figure out why?", "user-3")
+
+        self.assertEqual(0, collect_call.call_count)
+        self.assertIn("Do you want me to do that?", preview.text)
+        preview_data = preview.data or {}
+        self.assertEqual("diagnostics_capture", preview_data.get("route"))
+        preview_payload = preview_data.get("runtime_payload") if isinstance(preview_data.get("runtime_payload"), dict) else {}
+        self.assertEqual("storage_disk", preview_payload.get("capture_scope"))
+        self.assertEqual("collect_storage_disk_diagnostics", preview_payload.get("kind"))
+        self.assertNotIn("df -hT", preview.text.lower())
+
+        with patch("agent.orchestrator.collect_storage_disk_diagnostics_snapshot", return_value=snapshot) as collect_call:
+            confirmed = orchestrator.handle_message("yes", "user-3")
+
+        self.assertEqual(1, collect_call.call_count)
+        self.assertEqual("diagnostics_capture", confirmed.data.get("route"))
+        payload = confirmed.data.get("runtime_payload") if isinstance(confirmed.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("collect_storage_disk_diagnostics", payload.get("kind"))
+        cards_payload = payload.get("cards_payload") if isinstance(payload.get("cards_payload"), dict) else {}
+        self.assertEqual("Storage/disk diagnostics", ((cards_payload.get("cards") or [{}])[0] or {}).get("title"))
+        self.assertIn("Storage/disk diagnostics", confirmed.text)
+        self.assertIn("Filesystem:", confirmed.text)
+        self.assertIn("Mount/device:", confirmed.text)
+        self.assertIn("Consumers:", confirmed.text)
+        self.assertIn("Log matches:", confirmed.text)
+        self.assertIn("diagnostics_snapshot", payload)
+        self.assertNotIn("journalctl", confirmed.text.lower())
+
+    def test_printer_diagnostics_capture_flow_requests_confirmation_then_returns_compact_snapshot(self) -> None:
+        orchestrator = self._orchestrator()
+        snapshot = {
+            "preset": "printer_cups",
+            "printer": {
+                "service": {
+                    "available": True,
+                    "source": "systemctl status cups",
+                    "active_state": "active",
+                    "active_detail": "active (running) since Fri 2026-04-19 12:00:00 UTC; 1min ago",
+                    "loaded_state": "loaded",
+                    "loaded_detail": "loaded (/usr/lib/systemd/system/cups.service; enabled; preset: enabled)",
+                },
+                "printers": {
+                    "source": "lpstat -p -d",
+                    "available": True,
+                    "default_printer": "HP_LaserJet",
+                    "printer_count": 2,
+                    "rows": [
+                        {
+                            "name": "HP_LaserJet",
+                            "state": "idle",
+                            "enabled": True,
+                            "accepting": True,
+                            "details": "is idle. enabled since Fri 19 Apr 2026 12:00:00 PM UTC",
+                        },
+                        {
+                            "name": "Brother_Office",
+                            "state": "offline",
+                            "enabled": False,
+                            "accepting": False,
+                            "details": "is offline. disabled since Fri 19 Apr 2026 11:30:00 AM UTC",
+                        },
+                    ],
+                },
+                "jobs": {
+                    "source": "lpstat -o",
+                    "available": True,
+                    "match_count": 2,
+                    "rows": [
+                        {"queue": "HP_LaserJet", "job_id": "42", "owner": "user", "text": "HP_LaserJet-42 user 1234 Fri 19 Apr 2026 12:01:00 PM UTC"},
+                        {"queue": "Brother_Office", "job_id": "43", "owner": "user", "text": "Brother_Office-43 user 4321 Fri 19 Apr 2026 12:02:00 PM UTC"},
+                    ],
+                },
+                "logs": {
+                    "source": "journalctl -u cups",
+                    "available": True,
+                    "match_count": 2,
+                    "matches": [
+                        "cups[123]: printer HP_LaserJet resumed",
+                        "cups[123]: filter failed for job 42",
+                    ],
+                },
+            },
+            "summary": {
+                "status": "warn",
+                "notes": ["Print queue shows 2 job(s)."],
+                "next_action": "Clear or re-submit the print queue, then retry the job.",
+            },
+        }
+
+        with (
+            patch("agent.orchestrator.collect_printer_cups_diagnostics_snapshot", return_value=snapshot) as collect_call,
+            patch("agent.orchestrator.collect_diagnostics_snapshot", side_effect=AssertionError("generic diagnostics should not be used")),
+            patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat should not be used")),
+        ):
+            preview = orchestrator.handle_message("My printer is offline and print jobs are stuck. Can you help me figure out why?", "user-4")
+
+        self.assertEqual(0, collect_call.call_count)
+        self.assertIn("Do you want me to do that?", preview.text)
+        preview_data = preview.data or {}
+        self.assertEqual("diagnostics_capture", preview_data.get("route"))
+        preview_payload = preview_data.get("runtime_payload") if isinstance(preview_data.get("runtime_payload"), dict) else {}
+        self.assertEqual("printer_cups", preview_payload.get("capture_scope"))
+        self.assertEqual("collect_printer_cups_diagnostics", preview_payload.get("kind"))
+        self.assertNotIn("lpstat -p -d", preview.text.lower())
+
+        with patch("agent.orchestrator.collect_printer_cups_diagnostics_snapshot", return_value=snapshot) as collect_call:
+            confirmed = orchestrator.handle_message("yes", "user-4")
+
+        self.assertEqual(1, collect_call.call_count)
+        self.assertEqual("diagnostics_capture", confirmed.data.get("route"))
+        payload = confirmed.data.get("runtime_payload") if isinstance(confirmed.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("collect_printer_cups_diagnostics", payload.get("kind"))
+        cards_payload = payload.get("cards_payload") if isinstance(payload.get("cards_payload"), dict) else {}
+        self.assertEqual("Printer/CUPS diagnostics", ((cards_payload.get("cards") or [{}])[0] or {}).get("title"))
+        self.assertIn("Printer/CUPS diagnostics", confirmed.text)
+        self.assertIn("Printers:", confirmed.text)
+        self.assertIn("Jobs:", confirmed.text)
+        self.assertIn("Log matches:", confirmed.text)
+        self.assertIn("diagnostics_snapshot", payload)
+        self.assertNotIn("journalctl", confirmed.text.lower())
+
+    def test_confirmation_variants_are_accepted_for_pending_diagnostics(self) -> None:
+        orchestrator = self._orchestrator()
+        snapshot = {
+            "preset": "printer_cups",
+            "printer": {
+                "service": {"available": True, "source": "systemctl status cups", "active_state": "active", "loaded_state": "loaded"},
+                "printers": {"source": "lpstat -p -d", "available": True, "default_printer": "HP_LaserJet", "printer_count": 1, "rows": []},
+                "jobs": {"source": "lpstat -o", "available": True, "match_count": 0, "rows": []},
+                "logs": {"source": "journalctl -u cups", "available": True, "match_count": 0, "matches": []},
+            },
+            "summary": {"status": "warn", "notes": ["Printer snapshot ready."], "next_action": "Try printing again."},
+        }
+
+        for index, confirmation in enumerate(("yes do it", "sure go ahead", "please do it"), start=1):
+            user_id = f"user-confirm-{index}"
+            with patch("agent.orchestrator.collect_printer_cups_diagnostics_snapshot", return_value=snapshot):
+                preview = orchestrator.handle_message("printer stuck again, jobs wont print", user_id)
+                self.assertEqual("diagnostics_capture", preview.data.get("route"))
+                confirmed = orchestrator.handle_message(confirmation, user_id)
+
+            self.assertEqual("diagnostics_capture", confirmed.data.get("route"))
+            self.assertIn("Printer/CUPS diagnostics", confirmed.text)
+            self.assertNotIn("I’m not sure. What exactly are you referring to?", confirmed.text)
+
+    def test_vague_system_trouble_prompts_for_clarification_instead_of_broad_observe(self) -> None:
+        orchestrator = self._orchestrator()
+
+        response = orchestrator.handle_message("my pc is acting weird", "user-vague")
+
+        self.assertEqual("assistant_clarification", response.data.get("route"))
+        self.assertIn("What symptom should I focus on", response.text)
+        self.assertNotIn("Hardware inventory", response.text)
+
+    def test_generic_device_fallback_capture_flow_requests_confirmation_then_returns_compact_snapshot(self) -> None:
+        orchestrator = self._orchestrator()
+        snapshot = {
+            "preset": "generic_device_fallback",
+            "device": {
+                "os": {
+                    "available": True,
+                    "source": "uname -a",
+                    "text": "Linux test-host 6.8.0-1 x86_64",
+                    "error_kind": None,
+                },
+                "presence": {
+                    "usb": {
+                        "available": True,
+                        "source": "lsusb",
+                        "match_count": 2,
+                        "lines": [
+                            "Bus 001 Device 002: ID 046d:0825 Logitech, Inc. Webcam C270",
+                            "Bus 001 Device 003: ID 0bda:58f4 Realtek Semiconductor Corp.",
+                        ],
+                        "error_kind": None,
+                    },
+                    "pci": {
+                        "available": True,
+                        "source": "lspci -nn",
+                        "match_count": 2,
+                        "lines": [
+                            "00:02.0 VGA compatible controller [0300]: Intel Corporation Device [8086:46a6]",
+                            "00:14.0 USB controller [0c03]: Intel Corporation Device [8086:7aa8]",
+                        ],
+                        "error_kind": None,
+                    },
+                },
+                "logs": {
+                    "journal": {
+                        "available": True,
+                        "source": "journalctl -b -p warning",
+                        "match_count": 2,
+                        "matches": [
+                            "kernel: usb 1-1: device descriptor read/64, error -71",
+                            "kernel: webcam: not detected after resume",
+                        ],
+                        "error_kind": None,
+                    },
+                    "dmesg": {
+                        "available": True,
+                        "source": "dmesg --ctime --level=err,warn",
+                        "match_count": 2,
+                        "matches": [
+                            "usb 1-1: reset full-speed USB device number 2 using xhci_hcd",
+                            "webcam: firmware failed to load",
+                        ],
+                        "error_kind": None,
+                    },
+                },
+            },
+            "summary": {
+                "status": "warn",
+                "notes": ["Recent system logs contain device or driver failure markers."],
+                "next_action": "Retry the device action and check whether it appears after reconnecting or rebooting.",
+            },
+        }
+
+        with (
+            patch("agent.orchestrator.collect_generic_device_fallback_diagnostics_snapshot", return_value=snapshot) as collect_call,
+            patch("agent.orchestrator.collect_diagnostics_snapshot", side_effect=AssertionError("generic diagnostics should not be used")),
+            patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat should not be used")),
+        ):
+            preview = orchestrator.handle_message("My webcam isn't detected after sleep. Can you help me figure out why?", "user-4")
+
+        self.assertEqual(0, collect_call.call_count)
+        self.assertIn("Want me to do that?", preview.text)
+        preview_data = preview.data or {}
+        self.assertEqual("diagnostics_capture", preview_data.get("route"))
+        preview_payload = preview_data.get("runtime_payload") if isinstance(preview_data.get("runtime_payload"), dict) else {}
+        self.assertEqual("generic_device_fallback", preview_payload.get("capture_scope"))
+        self.assertEqual("collect_generic_device_fallback_diagnostics", preview_payload.get("kind"))
+        self.assertNotIn("lsusb", preview.text.lower())
+
+        with patch("agent.orchestrator.collect_generic_device_fallback_diagnostics_snapshot", return_value=snapshot) as collect_call:
+            confirmed = orchestrator.handle_message("yes", "user-4")
+
+        self.assertEqual(1, collect_call.call_count)
+        self.assertEqual("diagnostics_capture", confirmed.data.get("route"))
+        payload = confirmed.data.get("runtime_payload") if isinstance(confirmed.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("collect_generic_device_fallback_diagnostics", payload.get("kind"))
+        cards_payload = payload.get("cards_payload") if isinstance(payload.get("cards_payload"), dict) else {}
+        self.assertEqual("General device diagnostics", ((cards_payload.get("cards") or [{}])[0] or {}).get("title"))
+        self.assertIn("General device diagnostics", confirmed.text)
+        self.assertIn("USB presence:", confirmed.text)
+        self.assertIn("PCI presence:", confirmed.text)
+        self.assertIn("Logs:", confirmed.text)
+        self.assertIn("diagnostics_snapshot", payload)
+
+    def test_generic_device_fallback_logs_gap_event_with_trace_and_prefix(self) -> None:
+        orchestrator = self._orchestrator()
+        with patch("agent.orchestrator.nl_route", return_value={"intent": "DIAGNOSTICS_CAPTURE_GENERIC_DEVICE_FALLBACK_REQUEST"}), patch.object(
+            orchestrator,
+            "_diagnostics_capture_preview_response",
+            return_value=OrchestratorResponse(
+                "preview",
+                {"route": "diagnostics_capture", "skip_post_response_hooks": True},
+            ),
+        ) as preview_mock, patch.object(orchestrator, "_record_runtime_event") as record_mock:
+            response = orchestrator.handle_message(
+                "My webcam is not detected after sleep and I need help figuring out why.",
+                "user-4",
+                chat_context={"trace_id": "trace-123", "source_surface": "api"},
+            )
+
+        self.assertEqual("preview", response.text)
+        preview_mock.assert_called_once()
+        record_mock.assert_called_once()
+        event_name, = record_mock.call_args.args
+        self.assertEqual("diagnostics_fallback", event_name)
+        fields = record_mock.call_args.kwargs
+        self.assertEqual("diagnostics_fallback", fields.get("route"))
+        self.assertEqual("diagnostics_capture_generic_device_fallback_request", fields.get("intent_label"))
+        self.assertEqual("trace-123", fields.get("trace_id"))
+        self.assertTrue(str(fields.get("text_prefix") or "").startswith("My webcam is not detected after sleep"))
+        self.assertLessEqual(len(str(fields.get("text_prefix") or "")), 83)
+
+    def test_resource_summary_acknowledges_monitor_mismatch_without_fabricating_zeroes(self) -> None:
+        orchestrator = self._orchestrator()
+        summary, followups = orchestrator._domain_summary_and_followups(  # type: ignore[attr-defined]
+            "resource_governor",
+            "resource_report",
+            {
+                "payload": {
+                    "source": "live",
+                    "loads": {"1m": 0.42},
+                    "memory": {
+                        "used": int(21.3 * 1024**3),
+                        "total": int(67.4 * 1024**3),
+                        "available": int(46.1 * 1024**3),
+                        "free": int(12.4 * 1024**3),
+                    },
+                    "memory_note": "MemAvailable includes reclaimable cache/buffers/shared memory: cached 8G, buffers 512M, shared 256M",
+                }
+            },
+            "actual system monitor reading: 21.3 GB / 31.6% steady use",
+        )
+        self.assertIn("wrong or incomplete", summary.lower())
+        self.assertIn("21.3 GiB", summary)
+        self.assertNotIn("0.0%", summary)
+        self.assertIn("memory delta", " ".join(followups).lower())
+
     def test_runtime_configure_ollama_routes_to_setup_flow_without_llm(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
@@ -5680,14 +6732,22 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
-            response = orchestrator.handle_message("what model are you using right now?", "user1")
+            with patch.object(
+                orchestrator,
+                "_apply_assistant_response_guard",
+                side_effect=AssertionError("post-response guard should not run"),
+            ):
+                response = orchestrator.handle_message("what model are you using right now?", "user1")
 
         self.assertEqual("model_status", response.data["route"])
         self.assertIn("configured to use", response.text.lower())
         self.assertIn("best healthy target would be", response.text.lower())
         self.assertIn("ollama:qwen3.5:4b", response.text)
-        self.assertIn(("chat_target_truth", None), runtime_truth.calls)
+        self.assertNotIn(("chat_target_truth", None), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
+        self.assertTrue(response.data.get("skip_post_response_hooks", False))
+        timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
+        self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
 
     def test_skill_context_exposes_bound_canonical_route_only(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="hi from llm")

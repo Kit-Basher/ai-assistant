@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from agent.config import runtime_service_name
 from agent.failure_ux import build_failure_recovery
 
 RECOVERY_TELEGRAM_DOWN = "TELEGRAM_DOWN"
@@ -138,7 +139,7 @@ def _mode_failure_context(mode: str) -> dict[str, Any]:
             "kind": "runtime_blocked",
             "subject": "API service",
             "reason": "The API service is not responding.",
-            "next_step": "Run: systemctl --user restart personal-agent-api.service",
+            "next_step": f"Run: systemctl --user restart {runtime_service_name()}",
         }
     if normalized == RECOVERY_TOKEN_INVALID:
         return {

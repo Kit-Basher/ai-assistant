@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -9,8 +10,35 @@ from pathlib import Path
 _APP_NAME = "personal-agent"
 
 
-def repo_root_path() -> Path:
+def code_root_path() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def repo_root_path() -> Path:
+    return code_root_path()
+
+
+def runtime_root_path() -> Path:
+    env_value = os.getenv("PERSONAL_AGENT_RUNTIME_ROOT", "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    prefix = Path(sys.prefix)
+    if sys.prefix != sys.base_prefix and (prefix / "pyvenv.cfg").is_file():
+        venv_root = prefix.parent
+        if venv_root.name == ".venv":
+            venv_root = venv_root.parent
+        if venv_root.name == "current":
+            return venv_root
+        releases_root = venv_root.parent
+        if releases_root.name == "releases":
+            current_root = releases_root.parent / "current"
+            try:
+                if current_root.exists() and current_root.resolve() == venv_root:
+                    return current_root
+            except OSError:
+                pass
+        return venv_root
+    return code_root_path()
 
 
 def canonical_state_dir() -> Path:
@@ -34,23 +62,61 @@ def legacy_repo_db_path() -> Path:
 
 
 def legacy_repo_log_path() -> Path:
-    return repo_root_path() / "logs" / "agent.jsonl"
+    return code_root_path() / "logs" / "agent.jsonl"
+
+
+def packaged_asset_root_path() -> Path:
+    env_value = os.getenv("AGENT_WEBUI_DIST_PATH", "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return runtime_root_path() / "agent" / "webui" / "dist"
+
+
+def skills_root_path() -> Path:
+    env_value = os.getenv("AGENT_SKILLS_PATH", "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return code_root_path() / "skills"
+
+
+def default_registry_root_path() -> Path:
+    env_value = os.getenv("LLM_REGISTRY_PATH", "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return canonical_state_dir() / "llm_registry.json"
+
+
+def runtime_instance() -> str:
+    value = os.getenv("PERSONAL_AGENT_INSTANCE", "").strip().lower()
+    if value in {"dev", "stable"}:
+        return value
+    if (code_root_path() / ".git").exists():
+        return "dev"
+    return "stable"
+
+
+def runtime_service_name() -> str:
+    return "personal-agent-api-dev.service" if runtime_instance() == "dev" else "personal-agent-api.service"
+
+
+def runtime_launcher_name() -> str:
+    return "personal-agent-webui-dev" if runtime_instance() == "dev" else "personal-agent-webui"
+
+
+def runtime_port() -> int:
+    return 18765 if runtime_instance() == "dev" else 8765
+
+
+def runtime_api_base_url() -> str:
+    return f"http://127.0.0.1:{runtime_port()}"
 
 
 def resolved_default_db_path() -> str:
-    canonical = canonical_db_path()
-    legacy = legacy_repo_db_path()
-    if canonical.exists() or not legacy.exists():
-        return str(canonical)
-    return str(legacy)
+    return str(canonical_db_path())
 
 
 def resolved_default_log_path() -> str:
-    canonical = canonical_log_path()
-    legacy = legacy_repo_log_path()
-    if canonical.exists() or not legacy.exists():
-        return str(canonical)
-    return str(legacy)
+    return str(canonical_log_path())
 
 
 @dataclass(frozen=True)
@@ -237,10 +303,9 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     openai_model_worker = os.getenv("OPENAI_MODEL_WORKER", "").strip() or None
     agent_timezone = os.getenv("AGENT_TIMEZONE", "America/Regina")
 
-    base_dir = str(repo_root_path())
     db_path = os.getenv("AGENT_DB_PATH", resolved_default_db_path())
     log_path = os.getenv("AGENT_LOG_PATH", resolved_default_log_path())
-    skills_path = os.getenv("AGENT_SKILLS_PATH", os.path.join(base_dir, "skills"))
+    skills_path = str(skills_root_path())
 
     llm_provider = os.getenv("LLM_PROVIDER", "none").strip().lower() or "none"
     enable_llm_presentation = (
@@ -307,14 +372,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     allow_cloud = os.getenv("ALLOW_CLOUD", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
     prefer_local = os.getenv("PREFER_LOCAL", "true").strip().lower() in {"1", "true", "yes", "y", "on"}
     llm_timeout_seconds = int(os.getenv("LLM_TIMEOUT_SECONDS", "20") or 20)
-    registry_env = os.getenv("LLM_REGISTRY_PATH", "").strip()
-    default_registry_path = os.path.join(base_dir, "llm_registry.json")
-    if registry_env:
-        llm_registry_path = registry_env
-    elif os.path.isfile(default_registry_path):
-        llm_registry_path = default_registry_path
-    else:
-        llm_registry_path = None
+    llm_registry_path = str(default_registry_root_path())
     llm_routing_mode = os.getenv("LLM_ROUTING_MODE", "auto").strip().lower() or "auto"
     llm_retry_attempts = int(os.getenv("LLM_RETRY_ATTEMPTS", "3") or 3)
     llm_retry_base_delay_ms = int(os.getenv("LLM_RETRY_BASE_DELAY_MS", "200") or 200)

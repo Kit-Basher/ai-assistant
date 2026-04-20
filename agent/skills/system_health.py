@@ -8,6 +8,8 @@ import subprocess
 import time
 from typing import Any, Callable
 
+from agent.config import runtime_port, runtime_service_name
+
 
 RunCommand = Callable[..., subprocess.CompletedProcess[str]]
 
@@ -280,12 +282,12 @@ def _collect_services(run_command: RunCommand) -> dict[str, Any]:
             "reachable": _tcp_reachable("127.0.0.1", 11434),
         },
         "personal_agent": {
-            "service_name": "personal-agent-api.service",
+            "service_name": runtime_service_name(),
             "service_scope": "user",
-            "service_state": _systemctl_state("personal-agent-api.service", user=True, run_command=run_command),
+            "service_state": _systemctl_state(runtime_service_name(), user=True, run_command=run_command),
             "host": "127.0.0.1",
-            "port": 8765,
-            "reachable": _tcp_reachable("127.0.0.1", 8765),
+            "port": runtime_port(),
+            "reachable": _tcp_reachable("127.0.0.1", runtime_port()),
         },
     }
 
@@ -370,7 +372,7 @@ def _derive_warnings(
         warnings.append("Ollama is unreachable on 127.0.0.1:11434.")
     personal_agent = services.get("personal_agent") if isinstance(services.get("personal_agent"), dict) else {}
     if not bool(personal_agent.get("reachable", False)):
-        warnings.append("Personal Agent API is unreachable on 127.0.0.1:8765.")
+        warnings.append(f"Personal Agent API is unreachable on 127.0.0.1:{runtime_port()}.")
     if str(network.get("state") or "").strip().lower() == "down":
         warnings.append("No active non-loopback network interface was detected.")
     return warnings

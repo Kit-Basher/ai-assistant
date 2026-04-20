@@ -26,7 +26,7 @@ from agent.llm.model_manager import (
 )
 from agent.llm.types import LLMError, Response, Usage
 from agent.model_watch_catalog import write_snapshot_atomic
-from agent.public_chat import build_no_llm_public_message
+from agent.public_chat import build_no_llm_public_message, build_trivial_social_turn_message
 from agent.modelops.discovery import ModelInfo
 from agent.orchestrator import OrchestratorResponse
 from agent.safe_mode_ux import build_safe_mode_paused_message
@@ -128,6 +128,68 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("controlled", control_mode.get("mode"))
         self.assertIn("allow_remote_switch", control_mode)
         self.assertIn("approval_required_actions", control_mode)
+
+    def test_assistant_chat_availability_follows_ready_status_even_if_target_snapshot_is_stale(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        truth = runtime.runtime_truth_service()
+
+        with patch.object(runtime, "_safe_mode_enabled", return_value=True), patch.object(
+            truth,
+            "ready_status",
+            return_value={
+                "ok": True,
+                "ready": True,
+                "phase": "ready",
+                "runtime_mode": "READY",
+                "summary": "Ready.",
+            },
+        ), patch.object(
+            truth,
+            "current_chat_target_status",
+            return_value={
+                "provider": "ollama",
+                "model": "ollama:qwen3.5:4b",
+                "ready": False,
+                "health_status": "down",
+                "provider_health_status": "down",
+            },
+        ):
+            self.assertTrue(runtime.assistant_chat_available())
+            self.assertTrue(runtime.assistant_frontdoor_active())
+
+    def test_ready_and_state_expose_chat_usability_when_llm_is_available(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        observability = {
+            "telegram": {"configured": False, "effective_state": "disabled"},
+            "telegram_state": "disabled",
+            "telegram_enabled": False,
+            "llm_status": {},
+            "canonical_llm_runtime_status": {},
+            "startup_phase": "ready",
+            "phase": "ready",
+            "warmup_remaining": [],
+            "normalized_status": {
+                "runtime_mode": "DEGRADED",
+                "next_action": "Keep going.",
+            },
+            "ready": False,
+        }
+
+        with patch.object(runtime, "_runtime_observability_context", return_value=observability), patch.object(
+            runtime,
+            "llm_available",
+            return_value=True,
+        ):
+            ready_payload = runtime.ready_status()
+            state_payload = runtime.ui_state()
+
+        self.assertFalse(bool(ready_payload.get("ready")))
+        self.assertTrue(bool(ready_payload.get("chat_usable")))
+        self.assertTrue(bool(state_payload.get("chat_usable")))
+        self.assertIn("chat_usable", ready_payload)
+        self.assertIn("chat_usable", state_payload)
+        runtime_state = state_payload.get("runtime") if isinstance(state_payload.get("runtime"), dict) else {}
+        self.assertEqual("Ready", runtime_state.get("state_label"))
 
     def test_health_is_explicit_before_and_after_process_restart_with_deferred_warmup(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path), defer_bootstrap_warmup=True)
@@ -1005,7 +1067,7 @@ class TestAPIServerRuntime(unittest.TestCase):
         ):
             ok_chat, body = runtime.chat(
                 {
-                    "messages": [{"role": "user", "content": "hello"}],
+                    "messages": [{"role": "user", "content": "tell me a joke"}],
                     "memory_context_text": "MEMORY[S-DET]",
                     "session_id": "session-1",
                     "thread_id": "thread-1",
@@ -1014,12 +1076,12 @@ class TestAPIServerRuntime(unittest.TestCase):
 
         self.assertTrue(ok_chat)
         self.assertTrue(body["ok"])
-        self.assertEqual("hello", captured.get("text"))
+        self.assertEqual("tell me a joke", captured.get("text"))
         self.assertEqual("api:session-1", captured.get("user_id"))
         chat_context = captured.get("chat_context") if isinstance(captured.get("chat_context"), dict) else {}
         self.assertEqual("thread-1", chat_context.get("thread_id"))
         self.assertEqual("MEMORY[S-DET]", chat_context.get("memory_context_text"))
-        self.assertEqual([{"role": "user", "content": "hello"}], chat_context.get("messages"))
+        self.assertEqual([{"role": "user", "content": "tell me a joke"}], chat_context.get("messages"))
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
         self.assertEqual("generic_chat", meta.get("route"))
         self.assertTrue(bool(meta.get("used_runtime_state")))
@@ -1141,6 +1203,19 @@ class TestAPIServerRuntime(unittest.TestCase):
                             "provider": "openrouter",
                             "configured": False,
                         },
+                        "cards_payload": {
+                            "cards": [
+                                {
+                                    "title": "Provider status",
+                                    "lines": ["provider: openrouter", "configured: no"],
+                                    "severity": "warn",
+                                }
+                            ],
+                            "raw_available": False,
+                            "summary": "Provider is not configured.",
+                            "confidence": 1.0,
+                            "next_questions": [],
+                        },
                     },
                 )
 
@@ -1161,6 +1236,19 @@ class TestAPIServerRuntime(unittest.TestCase):
                     "type": "provider_status",
                     "provider": "openrouter",
                     "configured": False,
+                },
+                "cards_payload": {
+                    "cards": [
+                        {
+                            "title": "Provider status",
+                            "lines": ["provider: openrouter", "configured: no"],
+                            "severity": "warn",
+                        }
+                    ],
+                    "raw_available": False,
+                    "summary": "Provider is not configured.",
+                    "confidence": 1.0,
+                    "next_questions": [],
                 },
             },
             route="provider_status",
@@ -1191,8 +1279,8 @@ class TestAPIServerRuntime(unittest.TestCase):
     def test_chat_preserves_response_envelope_for_preflight_short_circuit(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         prepared = PreparedChatRequest(
-            messages=[{"role": "user", "content": "hello"}],
-            last_user_text="hello",
+            messages=[{"role": "user", "content": "tell me about the premium route"}],
+            last_user_text="tell me about the premium route",
             provider_override="openrouter",
             model_override="openrouter:base-chat",
             require_tools=False,
@@ -1233,7 +1321,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             "chat",
             side_effect=AssertionError("runtime.chat should not call _router.chat directly"),
         ):
-            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
+            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "tell me about the premium route"}]})
 
         self.assertTrue(ok_chat)
         self.assertTrue(body["ok"])
@@ -1281,6 +1369,195 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual([], meta.get("used_tools"))
         self.assertEqual("ollama", meta.get("provider"))
         self.assertEqual("ollama:llama3", meta.get("model"))
+        chat_timing_ms = meta.get("chat_timing_ms") if isinstance(meta.get("chat_timing_ms"), dict) else {}
+        self.assertIn("route_decision_ms", chat_timing_ms)
+        self.assertIn("orchestrator_ms", chat_timing_ms)
+        self.assertIn("llm_request_ms", chat_timing_ms)
+        self.assertIn("serialization_ms", chat_timing_ms)
+        self.assertIn("total_ms", chat_timing_ms)
+        self.assertEqual(4, int(chat_timing_ms.get("llm_request_ms") or 0))
+
+    def test_chat_trivial_social_turn_bypasses_orchestrator_and_llm(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _FakeOrchestrator:
+            def handle_message(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+                raise AssertionError("social turns should not invoke the orchestrator")
+
+        with patch.object(runtime, "orchestrator", return_value=_FakeOrchestrator()), patch.object(
+            runtime,
+            "_auto_bootstrap_local_chat_model",
+            side_effect=AssertionError("social turns should not auto-bootstrap"),
+        ):
+            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "hello"}]})
+
+        self.assertTrue(ok_chat)
+        self.assertTrue(body["ok"])
+        assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
+        expected_text = build_trivial_social_turn_message("hello")
+        self.assertEqual(expected_text, assistant.get("content"))
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        self.assertEqual("generic_chat", meta.get("route"))
+        self.assertFalse(bool(meta.get("used_llm")))
+        self.assertFalse(bool(meta.get("used_runtime_state")))
+        self.assertFalse(bool(meta.get("used_memory")))
+        self.assertEqual("social_turn", meta.get("assistant_turn_type"))
+        self.assertEqual("greeting", meta.get("assistant_turn_kind"))
+        chat_timing_ms = meta.get("chat_timing_ms") if isinstance(meta.get("chat_timing_ms"), dict) else {}
+        self.assertIn("route_decision_ms", chat_timing_ms)
+        self.assertIn("serialization_ms", chat_timing_ms)
+        self.assertIn("total_ms", chat_timing_ms)
+        self.assertEqual(0, int(chat_timing_ms.get("orchestrator_ms") or 0))
+
+    def test_chat_trivial_social_turn_variants_remain_deterministic(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _FakeOrchestrator:
+            def handle_message(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]
+                raise AssertionError("social turns should not invoke the orchestrator")
+
+        with patch.object(runtime, "orchestrator", return_value=_FakeOrchestrator()), patch.object(
+            runtime,
+            "_auto_bootstrap_local_chat_model",
+            side_effect=AssertionError("social turns should not auto-bootstrap"),
+        ):
+            for text in ["hi", "hey", "thanks", "ok", "good morning", "good evening"]:
+                with self.subTest(text=text):
+                    ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": text}]})
+                    self.assertTrue(ok_chat)
+                    assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
+                    self.assertEqual(build_trivial_social_turn_message(text), assistant.get("content"))
+                    meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                    self.assertEqual("social_turn", meta.get("assistant_turn_type"))
+                    self.assertFalse(bool(meta.get("used_llm")))
+                    self.assertIsInstance(meta.get("chat_timing_ms"), dict)
+
+    def test_chat_model_status_routes_expose_truth_timing(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _TruthStub:
+            def current_chat_target_status(self) -> dict[str, object]:
+                return {
+                    "provider": "ollama",
+                    "model": "ollama:qwen3.5:4b",
+                    "ready": True,
+                    "health_status": "ok",
+                    "provider_health_status": "ok",
+                    "configured_provider": "ollama",
+                    "configured_model": "ollama:qwen3.5:4b",
+                    "effective_provider": "ollama",
+                    "effective_model": "ollama:qwen3.5:4b",
+                    "effective_ready": True,
+                    "truth_timing_ms": {"current_chat_target_status_ms": 7, "cache_hit": False},
+                }
+
+            def model_inventory_status(self) -> dict[str, object]:
+                return {
+                    "active_provider": "ollama",
+                    "active_model": "ollama:qwen3.5:4b",
+                    "configured_provider": "ollama",
+                    "configured_model": "ollama:qwen3.5:4b",
+                    "models": [
+                        {
+                            "model_id": "ollama:qwen3.5:4b",
+                            "provider_id": "ollama",
+                            "local": True,
+                            "usable_now": True,
+                            "active": True,
+                            "available": True,
+                        }
+                    ],
+                    "local_installed_models": [
+                        {
+                            "model_id": "ollama:qwen3.5:4b",
+                            "provider_id": "ollama",
+                            "local": True,
+                            "usable_now": True,
+                            "active": True,
+                            "available": True,
+                        }
+                    ],
+                    "source": "stub",
+                    "truth_timing_ms": {
+                        "model_inventory_status_ms": 5,
+                        "cache_hit": False,
+                    },
+                }
+
+            def model_readiness_status(self) -> dict[str, object]:
+                return {
+                    "active_provider": "ollama",
+                    "active_model": "ollama:qwen3.5:4b",
+                    "configured_provider": "ollama",
+                    "configured_model": "ollama:qwen3.5:4b",
+                    "models": [
+                        {
+                            "model_id": "ollama:qwen3.5:4b",
+                            "provider_id": "ollama",
+                            "local": True,
+                            "usable_now": True,
+                            "active": True,
+                            "availability_reason": "healthy and ready now",
+                        }
+                    ],
+                    "ready_now_models": [],
+                    "usable_models": [],
+                    "other_ready_now_models": [],
+                    "other_usable_models": [],
+                    "not_ready_models": [],
+                    "source": "stub",
+                    "truth_timing_ms": {
+                        "model_readiness_status_ms": 11,
+                        "cache_hit": False,
+                    },
+                }
+
+        truth = _TruthStub()
+        runtime.orchestrator()._runtime_truth_service = truth
+        with patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("LLM should not run"),
+        ):
+            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "what model are you using right now"}]})
+            self.assertTrue(ok_chat)
+            meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+            self.assertEqual("model_status", meta.get("route"))
+            self.assertFalse(bool(meta.get("used_llm")))
+            self.assertIn("truth_timing_ms", meta)
+            self.assertIn("current_chat_target_status_ms", meta["truth_timing_ms"])
+            self.assertTrue(bool(meta.get("skip_post_response_hooks")))
+            self.assertIn("orchestrator_timing_ms", meta)
+            self.assertEqual(0, int(meta["orchestrator_timing_ms"].get("assistant_response_guard_ms", -1)))
+
+            ok_chat, body = runtime.chat(
+                {
+                    "messages": [{"role": "user", "content": "what model are you using right now"}],
+                    "source_surface": "webui",
+                    "purpose": "chat",
+                    "task_type": "chat",
+                }
+            )
+            self.assertTrue(ok_chat)
+            meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+            self.assertEqual("model_status", meta.get("route"))
+            self.assertFalse(bool(meta.get("used_llm")))
+            self.assertIn("truth_timing_ms", meta)
+            self.assertIn("current_chat_target_status_ms", meta["truth_timing_ms"])
+            self.assertTrue(bool(meta.get("skip_post_response_hooks")))
+            self.assertIn("orchestrator_timing_ms", meta)
+            self.assertEqual(0, int(meta["orchestrator_timing_ms"].get("assistant_response_guard_ms", -1)))
+
+            ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": "what local models do we have"}]})
+            self.assertTrue(ok_chat)
+            meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+            self.assertEqual("model_status", meta.get("route"))
+            self.assertFalse(bool(meta.get("used_llm")))
+            self.assertIn("truth_timing_ms", meta)
+            self.assertIn("model_inventory_status_ms", meta["truth_timing_ms"])
+            self.assertIn("model_readiness_status_ms", meta["truth_timing_ms"])
+            self.assertTrue(bool(meta.get("skip_post_response_hooks")))
+            self.assertIn("orchestrator_timing_ms", meta)
+            self.assertEqual(0, int(meta["orchestrator_timing_ms"].get("assistant_response_guard_ms", -1)))
 
     def test_defaults_treats_known_provider_prefix_as_full_id(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -3256,6 +3533,94 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("acquirable", readiness_row["acquisition_state"])
         self.assertEqual("acquirable", readiness_row["availability_state"])
 
+    def test_runtime_truth_inventory_and_readiness_cache_inventory_snapshot(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.registry_document = {
+            "schema_version": 2,
+            "defaults": {},
+            "providers": {
+                "ollama": {
+                    "base_url": "http://127.0.0.1:11434",
+                    "local": True,
+                    "enabled": True,
+                }
+            },
+            "models": {
+                "ollama:qwen2.5:3b-instruct": {
+                    "provider": "ollama",
+                    "model": "qwen2.5:3b-instruct",
+                    "capabilities": ["chat"],
+                    "enabled": True,
+                    "available": True,
+                    "quality_rank": 4,
+                }
+            },
+        }
+        runtime._save_registry_document(runtime.registry_document)
+        truth = runtime.runtime_truth_service()
+        inventory_rows = [
+            {
+                "id": "ollama:qwen2.5:3b-instruct",
+                "provider": "ollama",
+                "installed": False,
+                "available": False,
+                "healthy": False,
+                "capabilities": ["chat"],
+                "local": True,
+                "approved": True,
+                "reason": "model_not_installed",
+                "quality_rank": 4,
+                "cost_rank": 1,
+                "health_status": "down",
+                "health_failure_kind": "model_not_installed",
+                "health_reason": "model_not_installed",
+                "model_name": "qwen2.5:3b-instruct",
+                "runtime_known": True,
+                "routable": False,
+            }
+        ]
+
+        with patch.object(truth, "_runtime_inventory_rows", return_value=inventory_rows) as inventory_rows_mock, patch.object(
+            truth,
+            "_configured_chat_target_status",
+            return_value={
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:3b-instruct",
+                "ready": False,
+                "health_status": "down",
+                "provider_health_status": "ok",
+            },
+        ), patch.object(
+            truth,
+            "_provider_status_snapshot",
+            return_value={
+                "provider": "ollama",
+                "configured": True,
+                "connection_state": "configured_and_usable",
+                "selection_state": "configured_and_usable",
+                "policy_blocked": False,
+                "auth_required": False,
+                "secret_present": False,
+                "health_status": "ok",
+            },
+        ), patch.object(
+            truth,
+            "_model_health_row",
+            return_value={"status": "down", "last_error_kind": "model_not_installed"},
+        ), patch.object(
+            truth,
+            "_router_snapshot",
+            return_value={},
+        ):
+            inventory = truth.model_inventory_status()
+            readiness = truth.model_readiness_status()
+
+        self.assertEqual(1, inventory_rows_mock.call_count)
+        self.assertIn("truth_timing_ms", inventory)
+        self.assertIn("truth_timing_ms", readiness)
+        self.assertIn("model_inventory_status_ms", inventory["truth_timing_ms"])
+        self.assertIn("model_readiness_status_ms", readiness["truth_timing_ms"])
+
     def test_runtime_truth_marks_acquirable_local_model_blocked_in_safe_mode(self) -> None:
         runtime = AgentRuntime(
             _config(
@@ -3707,6 +4072,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             ("recommend a research model", "action_tool"),
             ("should I switch models", "action_tool"),
             ("which model are you using?", "model_status"),
+            ("and provider?", "model_status"),
             ("is the agent healthy?", "runtime_status"),
             ("can you tell if everything is working with the agent?", "runtime_status"),
             ("can you read the runtime now?", "runtime_status"),
@@ -3727,6 +4093,67 @@ class TestAPIServerRuntime(unittest.TestCase):
                 self.assertNotIn("Which of these is your goal", str(response.get("message") or ""))
                 meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
                 self.assertEqual(expected_route, meta.get("route"))
+                if expected_route in {"model_status", "provider_status", "runtime_status", "operational_status"}:
+                    self.assertTrue(bool(meta.get("skip_post_response_hooks")))
+                    self.assertIn("orchestrator_timing_ms", meta)
+                    self.assertEqual(0, int(meta["orchestrator_timing_ms"].get("assistant_response_guard_ms", -1)))
+
+    def test_chat_general_question_defaults_to_conversational_reply_without_internal_modes(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        natural_reply = "It sounds like the download is slow because of network congestion."
+        payload = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "I'm downloading a file and it's taking forever, can you tell why?",
+                }
+            ],
+            "user_id": "api:download",
+            "thread_id": "api:download:thread",
+        }
+
+        with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch.object(
+            runtime,
+            "chat",
+            return_value=(
+                True,
+                {
+                    "ok": True,
+                    "assistant": {"role": "assistant", "content": natural_reply},
+                    "message": natural_reply,
+                    "meta": {"route": "generic_chat", "used_llm": True, "provider": "ollama", "model": "qwen3.5:4b"},
+                },
+            ),
+        ) as chat_mock:
+            handler = _HandlerForTest(runtime, payload)
+            handler.do_POST()
+
+        response = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(1, chat_mock.call_count)
+        self.assertEqual("generic_chat", (response.get("meta") or {}).get("route"))
+        message = str(response.get("message") or (response.get("assistant") or {}).get("content") or "")
+        self.assertIn("download", message.lower())
+        self.assertNotIn("Which of these is your goal", message)
+        self.assertNotIn("chat, ask, or model check/switch", message)
+        self.assertNotIn("Tell me whether you want chat, ask, or model check/switch.", message)
 
     def test_chat_confirmation_followup_bypasses_short_message_clarification(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4155,6 +4582,10 @@ class TestAPIServerRuntime(unittest.TestCase):
                 self.assertNotIn("messages must be a non-empty list", str(response.get("message") or ""))
                 meta = response.get("meta") if isinstance(response.get("meta"), dict) else {}
                 self.assertEqual(expected_route, meta.get("route"))
+                if expected_route in {"model_status", "provider_status", "runtime_status", "operational_status"}:
+                    self.assertTrue(bool(meta.get("skip_post_response_hooks")))
+                    self.assertIn("orchestrator_timing_ms", meta)
+                    self.assertEqual(0, int(meta["orchestrator_timing_ms"].get("assistant_response_guard_ms", -1)))
 
     def test_chat_typo_tolerant_model_queries_route_deterministically(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4187,6 +4618,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         utterances = (
             ("waht model are you using?", "model_status"),
             ("wat models are availble?", "model_status"),
+            ("what model u on right now?", "model_status"),
+            ("wut local models u got?", "model_status"),
+            ("r u healthy right now?", "runtime_status"),
             ("ollma status", "provider_status"),
         )
 
@@ -4404,7 +4838,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         second_meta = second.response_payload.get("meta") if isinstance(second.response_payload.get("meta"), dict) else {}
         third_meta = third.response_payload.get("meta") if isinstance(third.response_payload.get("meta"), dict) else {}
         self.assertEqual("setup_flow", second_meta.get("route"))
-        self.assertEqual("setup_flow", third_meta.get("route"))
+        self.assertTrue(bool(second_meta.get("skip_post_response_hooks")))
+        self.assertEqual(0, int(second_meta.get("orchestrator_timing_ms", {}).get("assistant_response_guard_ms", -1)))
+        self.assertEqual("interpretation_followup", third_meta.get("route"))
         self.assertIn("ollama is currently down", str(second.response_payload.get("message") or "").lower())
         self.assertIn("reconfigure ollama", str(second.response_payload.get("message") or "").lower())
         self.assertIn("ollama is currently down", str(third.response_payload.get("message") or "").lower())
@@ -4645,12 +5081,16 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertNotIn("install a local chat model", message.lower())
 
         self.assertEqual("setup_flow", second_meta.get("route"))
+        self.assertTrue(bool(second_meta.get("skip_post_response_hooks")))
+        self.assertEqual(0, int(second_meta.get("orchestrator_timing_ms", {}).get("assistant_response_guard_ms", -1)))
         self.assertIn("ollama is reachable", second_message.lower())
         self.assertIn("current chat model ollama:qwen3.5:4b is not healthy right now", second_message.lower())
         self.assertIn("1) recheck ollama:qwen3.5:4b now", second_message.lower())
         self.assertIn("2) switch to ollama:qwen2.5:3b-instruct", second_message.lower())
 
         self.assertEqual("setup_flow", third_meta.get("route"))
+        self.assertTrue(bool(third_meta.get("skip_post_response_hooks")))
+        self.assertEqual(0, int(third_meta.get("orchestrator_timing_ms", {}).get("assistant_response_guard_ms", -1)))
         self.assertIn("ollama is reachable", third_message.lower())
         self.assertIn("not healthy right now", third_message.lower())
 
@@ -4756,7 +5196,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             },
         }
         payload = {
-            "messages": [{"role": "user", "content": "Hello"}],
+            "messages": [{"role": "user", "content": "Tell me how setup works."}],
             "source_surface": "api",
             "user_id": "api:no-llm",
             "thread_id": "api:no-llm:thread",
@@ -4800,6 +5240,153 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("generic_chat", meta.get("route"))
         self.assertFalse(bool(meta.get("used_llm")))
         self.assertNotIn("runtime_payload", json.dumps(response, ensure_ascii=True).lower())
+
+    def test_chat_no_llm_uses_ready_aware_guidance_when_runtime_is_ready(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": True,
+            "phase": "ready",
+            "runtime_mode": "READY",
+            "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+            "runtime_status": {
+                "runtime_mode": "READY",
+                "summary": "Ready. Using ollama / ollama:qwen2.5:3b-instruct.",
+                "next_action": None,
+            },
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "Tell me how setup works."}],
+            "source_surface": "api",
+            "user_id": "api:no-llm-ready",
+            "thread_id": "api:no-llm-ready:thread",
+        }
+        handler = _HandlerForTest(runtime, payload)
+        truth = runtime.runtime_truth_service()
+
+        with (
+            patch.object(truth, "ready_status", return_value=ready_payload),
+            patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            patch.object(orchestrator, "_llm_chat_available", return_value=False),
+            patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            patch("agent.api_server.detect_low_confidence", return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "hello"})),
+            patch("agent.api_server.classify_ambiguity", return_value=SimpleNamespace(ambiguous=False, reason="none")),
+            patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+        ):
+            handler.do_POST()
+
+        response = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(bool(response.get("ok")))
+        text = str((response.get("assistant") or {}).get("content") or response.get("message") or "")
+        self.assertEqual(build_no_llm_public_message(runtime_ready=True), text)
+        self.assertNotIn("not ready to chat yet", text.lower())
+
+    def test_chat_no_llm_uses_ready_aware_guidance_when_chat_is_usable_even_if_ready_flag_is_false(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": False,
+            "chat_usable": True,
+            "phase": "degraded",
+            "runtime_mode": "DEGRADED",
+            "summary": "Setup is not fully ready yet.",
+            "runtime_status": {
+                "runtime_mode": "DEGRADED",
+                "summary": "Setup is not fully ready yet.",
+                "next_action": None,
+            },
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "Tell me how setup works."}],
+            "source_surface": "api",
+            "user_id": "api:no-llm-usable",
+            "thread_id": "api:no-llm-usable:thread",
+        }
+        handler = _HandlerForTest(runtime, payload)
+        truth = runtime.runtime_truth_service()
+
+        with (
+            patch.object(truth, "ready_status", return_value=ready_payload),
+            patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            patch.object(orchestrator, "_llm_chat_available", return_value=False),
+            patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            patch("agent.api_server.detect_low_confidence", return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "hello"})),
+            patch("agent.api_server.classify_ambiguity", return_value=SimpleNamespace(ambiguous=False, reason="none")),
+            patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+        ):
+            handler.do_POST()
+
+        response = handler.response_payload
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(bool(response.get("ok")))
+        text = str((response.get("assistant") or {}).get("content") or response.get("message") or "")
+        self.assertEqual(build_no_llm_public_message(runtime_ready=True), text)
+        self.assertNotIn("not ready to chat yet", text.lower())
 
     def test_safe_mode_pause_message_stays_plain_and_assistant_facing(self) -> None:
         message = build_safe_mode_paused_message(

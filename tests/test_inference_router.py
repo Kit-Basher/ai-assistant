@@ -5,12 +5,13 @@ import unittest
 from unittest.mock import patch
 
 from agent.llm.inference_router import route_inference
+from agent.public_chat import build_no_llm_public_message
 
 
 class _FakeChatLLM:
     def __init__(self) -> None:
         self.chat_calls: list[dict[str, object]] = []
-        self.config = object()
+        self.config = types.SimpleNamespace(log_path="/tmp/router.log", llm_routing_mode="auto")
         self.registry = types.SimpleNamespace(defaults=types.SimpleNamespace(allow_remote_fallback=True))
 
     def enabled(self) -> bool:
@@ -117,6 +118,98 @@ class TestInferenceRouter(unittest.TestCase):
         data = result.get("data") if isinstance(result.get("data"), dict) else {}
         self.assertIn("selection", data)
         self.assertIn("plan", data)
+
+    def test_route_inference_chat_uses_ready_aware_no_llm_guidance_when_runtime_ready(self) -> None:
+        llm = _FakeChatLLM()
+        with patch(
+            "agent.llm.inference_router.build_model_inventory",
+            return_value=[],
+        ), patch(
+            "agent.llm.inference_router.select_model_for_task",
+            return_value={
+                "selected_model": None,
+                "provider": None,
+                "reason": "no_suitable_model",
+                "fallbacks": [],
+                "trace_id": "orch-test",
+            },
+        ), patch(
+            "agent.llm.inference_router.build_install_plan",
+            return_value={
+                "needed": True,
+                "approved": True,
+                "plan": [{"action": "ollama.pull_model", "model": "qwen2.5:3b-instruct"}],
+                "next_action": "Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve",
+            },
+        ):
+            result = route_inference(
+                llm_client=llm,
+                messages=[{"role": "user", "content": "tell me a joke"}],
+                user_text="tell me a joke",
+                task_hint="tell me a joke",
+                purpose="chat",
+                trace_id="orch-test",
+                metadata={"runtime_ready": True},
+            )
+        self.assertFalse(bool(result.get("ok")))
+        self.assertNotEqual(build_no_llm_public_message(), result.get("text"))
+        self.assertIn("runtime is ready", str(result.get("text") or "").lower())
+
+    def test_route_inference_emits_selection_and_provider_timing_events(self) -> None:
+        llm = _FakeChatLLM()
+        events: list[tuple[str, dict[str, object]]] = []
+
+        def _capture(log_path: str | None, event_name: str, payload: dict[str, object]) -> None:
+            _ = log_path
+            events.append((event_name, dict(payload)))
+
+        with patch(
+            "agent.llm.inference_router.build_model_inventory",
+            return_value=[
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "provider": "ollama",
+                    "local": True,
+                    "available": True,
+                    "healthy": True,
+                    "approved": True,
+                    "capabilities": ["chat"],
+                }
+            ],
+        ), patch(
+            "agent.llm.inference_router.select_model_for_task",
+            return_value={
+                "selected_model": "ollama:qwen2.5:3b-instruct",
+                "provider": "ollama",
+                "reason": "healthy+approved+local_first+task=chat",
+                "fallbacks": [],
+                "trace_id": "orch-test",
+            },
+        ), patch("agent.llm.inference_router.log_event", side_effect=_capture):
+            result = route_inference(
+                llm_client=llm,
+                messages=[{"role": "user", "content": "hello"}],
+                user_text="hello",
+                task_hint="hello",
+                purpose="chat",
+                trace_id="orch-test",
+            )
+
+        self.assertTrue(bool(result.get("ok")))
+        event_names = [name for name, _payload in events]
+        self.assertIn("llm_routing_selection", event_names)
+        self.assertIn("llm_provider_request_start", event_names)
+        self.assertIn("llm_provider_request_end", event_names)
+        selection_payload = next(payload for name, payload in events if name == "llm_routing_selection")
+        provider_start_payload = next(payload for name, payload in events if name == "llm_provider_request_start")
+        provider_end_payload = next(payload for name, payload in events if name == "llm_provider_request_end")
+        self.assertEqual("ollama:qwen2.5:3b-instruct", selection_payload.get("selected_model"))
+        self.assertIsInstance(selection_payload.get("selection_ms"), int)
+        self.assertEqual("ollama", provider_start_payload.get("provider"))
+        self.assertEqual("ollama:qwen2.5:3b-instruct", provider_start_payload.get("model"))
+        self.assertEqual("ollama", provider_end_payload.get("provider"))
+        self.assertEqual("ollama:qwen2.5:3b-instruct", provider_end_payload.get("model"))
+        self.assertIsInstance(provider_end_payload.get("duration_ms"), int)
 
 
 if __name__ == "__main__":

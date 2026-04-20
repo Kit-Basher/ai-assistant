@@ -317,7 +317,7 @@ class TestWebuiConversationSmoke(unittest.TestCase):
                 self.assertIn("Ready", str(ready_body.get("summary") or ""))
 
                 chat_payload = {
-                    "messages": [{"role": "user", "content": "Hello"}],
+                    "messages": [{"role": "user", "content": "What should I do first?"}],
                     "session_id": "webui-smoke-session",
                     "thread_id": "webui-smoke-thread",
                     "user_id": "webui-smoke-user",
@@ -376,7 +376,7 @@ class TestWebuiConversationSmoke(unittest.TestCase):
                 self.assertEqual("webui-smoke-thread", str(second_call["chat_context"].get("thread_id") or ""))
                 self.assertEqual("webui", str(first_call["chat_context"].get("source_surface") or ""))
                 self.assertEqual("webui", str(second_call["chat_context"].get("source_surface") or ""))
-                self.assertEqual("Hello", str(first_call["chat_context"].get("messages")[-1]["content"]))
+                self.assertEqual("What should I do first?", str(first_call["chat_context"].get("messages")[-1]["content"]))
                 self.assertEqual("What should I do first?", str(second_call["chat_context"].get("messages")[-1]["content"]))
             finally:
                 if server is not None and thread is not None:
@@ -459,7 +459,7 @@ class TestWebuiConversationSmoke(unittest.TestCase):
                 self.assertEqual("Run: python -m agent setup", str(runtime_status.get("next_action") or ""))
 
                 chat_payload = {
-                    "messages": [{"role": "user", "content": "Hello"}],
+                    "messages": [{"role": "user", "content": "What should I do first?"}],
                     "session_id": "webui-no-llm-session",
                     "thread_id": "webui-no-llm-thread",
                     "user_id": "webui-no-llm-user",

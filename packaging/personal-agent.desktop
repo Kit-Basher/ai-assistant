@@ -1,8 +1,8 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Personal Agent
-Comment=Open Personal Agent in your default browser
+Name=__PERSONAL_AGENT_NAME__
+Comment=__PERSONAL_AGENT_COMMENT__
 Exec=__PERSONAL_AGENT_LAUNCHER__
 TryExec=__PERSONAL_AGENT_LAUNCHER__
 Icon=personal-agent

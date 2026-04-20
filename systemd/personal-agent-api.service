@@ -1,5 +1,7 @@
+# DEPRECATED: legacy checkout-based service retained only for compatibility tests
+# and historical reference. Do not use this unit for the stable daily-driver.
 [Unit]
-Description=Personal Agent API
+Description=Personal Agent API (Legacy Checkout, Deprecated)
 After=network.target
 
 [Service]

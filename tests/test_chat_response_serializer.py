@@ -115,6 +115,54 @@ class TestChatResponseSerializer(unittest.TestCase):
         self.assertNotIn("runtime_state_failure_reason", meta)
         self.assertNotIn("selection_policy", meta)
 
+    def test_serializes_cards_payload_for_compact_cards(self) -> None:
+        response = OrchestratorResponse(
+            "*Diagnostics snapshot*\n\n- OS/kernel: Linux\n- Next action: Check NetworkManager",
+            {
+                "route": "diagnostics_capture",
+                "used_runtime_state": False,
+                "used_llm": False,
+                "used_memory": False,
+                "used_tools": ["doctor"],
+                "ok": True,
+                "runtime_payload": {
+                    "type": "diagnostics_capture",
+                    "kind": "collect_diagnostics",
+                    "status": "warn",
+                },
+                "cards_payload": {
+                    "cards": [
+                        {
+                            "title": "Diagnostics snapshot",
+                            "lines": ["OS/kernel: Linux", "Next action: Check NetworkManager"],
+                            "severity": "warn",
+                        }
+                    ],
+                    "raw_available": False,
+                    "summary": "Network is not fully up.",
+                    "confidence": 1.0,
+                    "next_questions": [],
+                },
+            },
+        )
+
+        serialized = serialize_orchestrator_chat_response(
+            response,
+            source_surface="api",
+            user_id="api:session-4",
+            thread_id="thread-4",
+            autopilot_meta={"status": "off"},
+        )
+
+        self.assertEqual("diagnostics_capture", serialized.route)
+        self.assertEqual(
+            ["doctor"],
+            serialized.body["meta"]["used_tools"],
+        )
+        self.assertIn("*Diagnostics snapshot*", serialized.body["assistant"]["content"])
+        self.assertIn("cards_payload", serialized.body)
+        self.assertEqual("Diagnostics snapshot", serialized.body["cards_payload"]["cards"][0]["title"])
+
     def test_serializes_debug_metadata_only_when_requested(self) -> None:
         response = OrchestratorResponse(
             "OpenRouter is configured.",

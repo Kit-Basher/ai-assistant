@@ -25,9 +25,13 @@ class TestSetupChatFlow(unittest.TestCase):
         cases = (
             ("agent doctor", "operational_status", "operational_doctor"),
             ("how much memory am I using?", "operational_status", "operational_observe"),
+            ("what is using my RAM?", "operational_status", "operational_observe"),
             ("how is my storage?", "operational_status", "operational_observe"),
             ("disk usage", "operational_status", "operational_observe"),
             ("ram usage", "operational_status", "operational_observe"),
+            ("my download is going slowly, can you tell why?", "operational_status", "operational_observe"),
+            ("my pc is slow", "operational_status", "operational_observe"),
+            ("laggy system", "operational_status", "operational_observe"),
             ("what other pc stats can you find?", "operational_status", "operational_observe"),
             ("can you tell what CPU and GPU I have?", "operational_status", "operational_observe"),
             ("can you see the GPU?", "operational_status", "operational_observe"),
@@ -186,6 +190,20 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertEqual("pack_capability_recommendation", decision.get("kind"))
                 self.assertEqual(capability, decision.get("capability"))
                 self.assertFalse(bool(decision.get("generic_allowed")))
+
+    def test_paraphrased_and_custom_capability_requests_route_off_generic_chat(self) -> None:
+        paraphrase = classify_runtime_chat_route("Can you read this page back to me in speech?")
+        custom = classify_runtime_chat_route("Make an assistant that coordinates my studio light cues with my music cues during live shows.")
+
+        self.assertEqual("action_tool", paraphrase.get("route"))
+        self.assertEqual("pack_capability_recommendation", paraphrase.get("kind"))
+        self.assertEqual("voice_output", paraphrase.get("capability"))
+        self.assertFalse(bool(paraphrase.get("generic_allowed")))
+
+        self.assertEqual("action_tool", custom.get("route"))
+        self.assertEqual("capability_gap_plan", custom.get("kind"))
+        self.assertEqual("helper", custom.get("capability_label"))
+        self.assertFalse(bool(custom.get("generic_allowed")))
 
     def test_cheap_cloud_recommendation_phrases_route_to_action_tool(self) -> None:
         cases = (

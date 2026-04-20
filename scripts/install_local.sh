@@ -4,7 +4,6 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${AGENT_INSTALL_PYTHON:-python3}"
 systemctl_bin="${AGENT_INSTALL_SYSTEMCTL:-systemctl}"
-xdg_open_bin="${AGENT_INSTALL_XDG_OPEN:-xdg-open}"
 node_bin="${AGENT_INSTALL_NODE:-node}"
 npm_bin="${AGENT_INSTALL_NPM:-npm}"
 install_launcher=0
@@ -35,7 +34,7 @@ while [ "$#" -gt 0 ]; do
             cat <<'EOF'
 Usage: bash scripts/install_local.sh [--desktop-launcher] [--check-webui-build]
 
-Recommended first-run install path for Personal Agent.
+Developer checkout install for Personal Agent.
 EOF
             exit 0
             ;;
@@ -54,9 +53,6 @@ need_command "$systemctl_bin" "systemctl is required for the user service path. 
 if ! "$systemctl_bin" --user show-environment >/dev/null 2>&1; then
     die "systemd --user is not available. Start a login session or run: loginctl enable-linger \"$USER\"."
 fi
-if [ "$install_launcher" -eq 1 ]; then
-    need_command "$xdg_open_bin" "xdg-open is required for the desktop launcher. Install it, or rerun without --desktop-launcher."
-fi
 if [ "$check_webui_build" -eq 1 ]; then
     need_command "$node_bin" "node is required to rebuild the web UI. Install Node.js, then rerun."
     need_command "$npm_bin" "npm is required to rebuild the web UI. Install npm, then rerun."
@@ -69,16 +65,22 @@ if [ ! -x ".venv/bin/python" ]; then
 fi
 
 ".venv/bin/python" -m pip install -e .
-".venv/bin/python" -m agent doctor --fix
-bash "$repo_root/scripts/install_user_service.sh"
+PERSONAL_AGENT_INSTANCE=dev ".venv/bin/python" -m agent doctor --fix
+AGENT_USER_SERVICE_NAME=personal-agent-api-dev.service bash "$repo_root/scripts/install_user_service.sh"
 
 if [ "$install_launcher" -eq 1 ]; then
+    AGENT_LAUNCHER_NAME=personal-agent-webui-dev \
+    AGENT_LAUNCHER_DESKTOP_NAME=personal-agent-dev \
+    AGENT_LAUNCHER_DISPLAY_NAME='Personal Agent (Dev)' \
+    AGENT_LAUNCHER_COMMENT='Open the checkout runtime in your default browser' \
+    AGENT_LAUNCHER_SERVICE_NAME=personal-agent-api-dev.service \
+    AGENT_LAUNCHER_WEBUI_URL=http://127.0.0.1:18765/ \
     bash "$repo_root/scripts/install_desktop_launcher.sh"
 fi
 
 printf '%s\n' "Personal Agent install complete."
-printf '%s\n' "Open: http://127.0.0.1:8765/"
-printf '%s\n' "Service: systemctl --user status personal-agent-api.service"
+printf '%s\n' "Open: http://127.0.0.1:18765/"
+printf '%s\n' "Service: systemctl --user status personal-agent-api-dev.service"
 if [ "$install_launcher" -eq 1 ]; then
-    printf '%s\n' "Launcher: Personal Agent (menu) or personal-agent-webui"
+    printf '%s\n' "Launcher: Personal Agent (Dev) or personal-agent-webui-dev"
 fi

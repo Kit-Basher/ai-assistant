@@ -20,7 +20,24 @@ from pathlib import Path
 from agent.intent_router import route_message
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
-from agent.doctor import run_doctor_report
+from agent.doctor import (
+    build_bluetooth_audio_diagnostics_cards_payload,
+    build_diagnostics_cards_payload,
+    build_generic_device_fallback_diagnostics_cards_payload,
+    build_printer_cups_diagnostics_cards_payload,
+    build_storage_disk_diagnostics_cards_payload,
+    collect_bluetooth_audio_diagnostics_snapshot,
+    collect_diagnostics_snapshot,
+    collect_generic_device_fallback_diagnostics_snapshot,
+    collect_printer_cups_diagnostics_snapshot,
+    collect_storage_disk_diagnostics_snapshot,
+    render_bluetooth_audio_diagnostics_snapshot,
+    render_diagnostics_snapshot,
+    render_generic_device_fallback_diagnostics_snapshot,
+    render_printer_cups_diagnostics_snapshot,
+    render_storage_disk_diagnostics_snapshot,
+    run_doctor_report,
+)
 from agent.runner import Runner
 from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
@@ -31,6 +48,8 @@ from agent.knowledge_cache import KnowledgeQueryCache, facts_hash
 from agent.conversation_memory import record_event
 import agent.memory_ingest as memory_ingest
 from agent.packs.capability_recommendation import (
+    build_capability_gap_response,
+    classify_capability_gap_request,
     detect_pack_capability_need,
     recommend_packs_for_capability,
     render_pack_capability_response,
@@ -39,13 +58,14 @@ from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
+from agent.resource_insights import summarize_resource_report
 from agent.changed_report import build_changed_report_from_system_facts
 from agent.policy import evaluate_policy
 import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
 from agent.cards import render_cards_markdown
-from agent.nl_router import build_cards_payload, nl_route
+from agent.nl_router import build_cards_payload, looks_like_system_performance_question, nl_route
 from agent.nl_policy import can_run_nl_skill
 from agent.friction import compute_next_action, compute_options, compute_plan, compute_summary
 from agent.identity import (
@@ -181,10 +201,18 @@ _COMMAND_STARTERS = {
 _AUTHORITATIVE_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
     "system.performance": (
         "slow",
+        "slowly",
         "lag",
         "lagging",
+        "laggy",
         "stutter",
         "stuttering",
+        "sluggish",
+        "dragging",
+        "going slowly",
+        "running slowly",
+        "taking forever",
+        "unresponsive",
         "fps",
         "bottleneck",
         "throttle",
@@ -316,6 +344,8 @@ _INTERPRETATION_FOLLOWUP_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("explain", re.compile(r"\b(explain it to me|explain that|what does that mean|summari[sz]e that|what'?s the important part)\b", re.IGNORECASE)),
     ("concern", re.compile(r"\b(should i worry|do i need to worry|is that bad|is that normal|anything unusual|is there anything to be concerned about there)\b", re.IGNORECASE)),
     ("action", re.compile(r"\b(what should i do)\b", re.IGNORECASE)),
+    ("repair", re.compile(r"\b(?:fix|repair)\s+ollama\b", re.IGNORECASE)),
+    ("process_state", re.compile(r"\b(still running|still alive|still there|is it running|is that running|is it gone|killed|kill\b|terminate\b|stop\b|close\b|quit\b|end\b|exited|pid\s*\d+|process\b|instance(?:s)?|qemu|qemu-system|virtualbox|vmware|browser|chrome|chromium|firefox|double check|double-check|recheck|check again|check please|look again|confirm it|verify)\b", re.IGNORECASE)),
 )
 _DEEP_SYSTEM_FOLLOWUP_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(can you learn more|learn more|show me more|what else can you find|dig deeper)\b", re.IGNORECASE),
@@ -493,6 +523,8 @@ def classify_authoritative_domain(text: str) -> set[str]:
     for domain, keywords in _AUTHORITATIVE_DOMAIN_KEYWORDS.items():
         if any(_contains_keyword(normalized, keyword) for keyword in keywords):
             domains.add(domain)
+    if looks_like_system_performance_question(text):
+        domains.add("system.performance")
     return domains
 
 
@@ -721,9 +753,19 @@ class Orchestrator:
         except Exception:
             return False
 
-    @staticmethod
-    def _bootstrap_no_chat_text() -> str:
-        return build_no_llm_public_message()
+    def _runtime_ready_for_chat(self) -> bool:
+        truth = self._runtime_truth()
+        ready_builder = getattr(truth, "ready_status", None)
+        if callable(ready_builder):
+            try:
+                ready_payload = dict(ready_builder())
+                return bool(ready_payload.get("chat_usable", ready_payload.get("ready", False)))
+            except Exception:
+                return False
+        return False
+
+    def _bootstrap_no_chat_text(self) -> str:
+        return build_no_llm_public_message(runtime_ready=self._runtime_ready_for_chat())
 
     def _bootstrap_no_chat_response(self) -> OrchestratorResponse:
         return OrchestratorResponse(self._bootstrap_no_chat_text())
@@ -1456,6 +1498,35 @@ class Orchestrator:
             pass
 
     @staticmethod
+    def _diagnostics_fallback_text_prefix(text: str, *, limit: int = 80) -> str | None:
+        normalized = " ".join(str(text or "").split()).strip()
+        if not normalized:
+            return None
+        if len(normalized) <= max(1, int(limit)):
+            return normalized
+        return normalized[: max(1, int(limit))].rstrip() + "..."
+
+    @staticmethod
+    def _diagnostics_fallback_intent_label(intent: str | None) -> str | None:
+        normalized = str(intent or "").strip().lower()
+        return normalized or None
+
+    def _record_diagnostics_fallback_event(
+        self,
+        *,
+        trace_id: str | None,
+        intent_label: str | None,
+        text: str,
+    ) -> None:
+        self._record_runtime_event(
+            "diagnostics_fallback",
+            route="diagnostics_fallback",
+            intent_label=self._diagnostics_fallback_intent_label(intent_label),
+            text_prefix=self._diagnostics_fallback_text_prefix(text),
+            trace_id=str(trace_id or "").strip() or None,
+        )
+
+    @staticmethod
     def _router_error_kind(result: dict[str, Any]) -> str | None:
         if not isinstance(result, dict):
             return None
@@ -1490,6 +1561,7 @@ class Orchestrator:
         error_kind: str | None = None,
         ok: bool = True,
         next_question: str | None = None,
+        skip_post_response_hooks: bool = False,
     ) -> OrchestratorResponse:
         data: dict[str, Any] = {
             "route": str(route or "runtime_status").strip().lower() or "runtime_status",
@@ -1501,6 +1573,8 @@ class Orchestrator:
             "skip_epistemic_gate": True,
             "ok": bool(ok),
         }
+        if skip_post_response_hooks or str(route or "").strip().lower() == "model_status":
+            data["skip_post_response_hooks"] = True
         if error_kind:
             data["error_kind"] = str(error_kind).strip()
         if next_question:
@@ -1510,6 +1584,9 @@ class Orchestrator:
             if isinstance(payload_copy.get("summary"), str):
                 payload_copy["summary"] = normalize_persona_text(payload_copy.get("summary"))
             data["runtime_payload"] = payload_copy
+            truth_timing_ms = payload_copy.get("truth_timing_ms")
+            if isinstance(truth_timing_ms, dict) and truth_timing_ms:
+                data["truth_timing_ms"] = dict(truth_timing_ms)
         return OrchestratorResponse(normalize_persona_text(str(text or "").strip() or "Done."), data)
 
     def _runtime_state_unavailable_response(
@@ -1518,6 +1595,7 @@ class Orchestrator:
         route: str,
         used_memory: bool = False,
         reason: str | None = None,
+        skip_post_response_hooks: bool = False,
     ) -> OrchestratorResponse:
         message = normalize_persona_text("I can't read a clean runtime status from the current state yet.")
         return self._runtime_truth_response(
@@ -1525,6 +1603,7 @@ class Orchestrator:
             route=route,
             used_memory=used_memory,
             error_kind="runtime_state_unavailable",
+            skip_post_response_hooks=skip_post_response_hooks,
             payload={
                 "type": "runtime_state_unavailable",
                 "summary": message,
@@ -1558,6 +1637,8 @@ class Orchestrator:
         preview_payload: dict[str, Any] | None = None,
         used_memory: bool = False,
         used_runtime_state: bool = True,
+        mutating: bool = True,
+        skip_post_response_hooks: bool = False,
     ) -> OrchestratorResponse:
         self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
         now_epoch = int(datetime.now(timezone.utc).timestamp())
@@ -1600,7 +1681,7 @@ class Orchestrator:
                 "confirmation_token": pending_id,
                 "confirm_command": "yes",
                 "cancel_command": "no",
-                "mutating": True,
+                "mutating": bool(mutating),
                 "action": str(action.get("operation") or "").strip() or None,
             }
         )
@@ -1611,6 +1692,148 @@ class Orchestrator:
             used_memory=used_memory,
             used_runtime_state=used_runtime_state,
             next_question=question,
+            payload=payload,
+            skip_post_response_hooks=skip_post_response_hooks,
+        )
+
+    def _diagnostics_capture_preview_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        snapshot_scope: str = "minimal",
+    ) -> OrchestratorResponse:
+        if snapshot_scope == "bluetooth_audio":
+            question = normalize_persona_text(
+                "I can gather a compact Bluetooth/audio diagnostics snapshot for you, including service status, controller info, and recent Bluetooth logs. Do you want me to do that?"
+            )
+            title = "Bluetooth/audio diagnostics"
+            preview_payload = {
+                "type": "action_confirmation_required",
+                "kind": "collect_bluetooth_audio_diagnostics",
+                "summary": question,
+                "capture_scope": "bluetooth_audio",
+                "details": "Compact Bluetooth/audio snapshot only; no raw logs pasted into chat.",
+            }
+        elif snapshot_scope == "storage_disk":
+            question = normalize_persona_text(
+                "I can gather a compact storage/disk diagnostics snapshot for you, including filesystem usage, likely space consumers, and recent write-failure logs. Do you want me to do that?"
+            )
+            title = "Storage/disk diagnostics"
+            preview_payload = {
+                "type": "action_confirmation_required",
+                "kind": "collect_storage_disk_diagnostics",
+                "summary": question,
+                "capture_scope": "storage_disk",
+                "details": "Compact storage/disk snapshot only; no raw logs pasted into chat.",
+            }
+        elif snapshot_scope == "printer_cups":
+            question = normalize_persona_text(
+                "I can gather a compact printer/CUPS diagnostics snapshot for you, including service status, printer list, queue, and recent CUPS logs. Do you want me to do that?"
+            )
+            title = "Printer/CUPS diagnostics"
+            preview_payload = {
+                "type": "action_confirmation_required",
+                "kind": "collect_printer_cups_diagnostics",
+                "summary": question,
+                "capture_scope": "printer_cups",
+                "details": "Compact printer/CUPS snapshot only; no raw logs pasted into chat.",
+            }
+        elif snapshot_scope == "generic_device_fallback":
+            question = normalize_persona_text(
+                "I don't have a specialized diagnostics path for this, but I can gather a general system snapshot. Want me to do that?"
+            )
+            title = "General device diagnostics"
+            preview_payload = {
+                "type": "action_confirmation_required",
+                "kind": "collect_generic_device_fallback_diagnostics",
+                "summary": question,
+                "capture_scope": "generic_device_fallback",
+                "details": "Compact general device snapshot only; no raw logs pasted into chat.",
+            }
+        else:
+            question = normalize_persona_text(
+                "I can gather a compact diagnostics snapshot for you, including OS/kernel info, network status, and recent suspend/resume logs. Do you want me to do that?"
+            )
+            title = "Diagnostics capture"
+            preview_payload = {
+                "type": "action_confirmation_required",
+                "kind": "collect_diagnostics",
+                "summary": question,
+                "capture_scope": "minimal",
+                "details": "Compact snapshot only; no raw logs pasted into chat.",
+            }
+        self._record_conversation_topic(user_id, "diagnostics_capture", "question")
+        return self._confirmation_preview_response(
+            user_id,
+            route="diagnostics_capture",
+            question=question,
+            used_tools=["doctor"],
+            action={
+                "operation": "collect_diagnostics",
+                "params": {
+                    "request_text": str(text or "").strip(),
+                    "snapshot_scope": snapshot_scope,
+                },
+            },
+            title=title,
+            preview_payload=preview_payload,
+            used_memory=False,
+            used_runtime_state=False,
+            mutating=False,
+            skip_post_response_hooks=True,
+        )
+
+    def _collect_diagnostics_response(
+        self,
+        user_id: str,
+        request_text: str | None = None,
+        *,
+        snapshot_scope: str = "minimal",
+    ) -> OrchestratorResponse:
+        if snapshot_scope == "bluetooth_audio":
+            snapshot = collect_bluetooth_audio_diagnostics_snapshot()
+            cards_payload = build_bluetooth_audio_diagnostics_cards_payload(snapshot)
+            summary_text = render_bluetooth_audio_diagnostics_snapshot(snapshot)
+            payload_kind = "collect_bluetooth_audio_diagnostics"
+        elif snapshot_scope == "storage_disk":
+            snapshot = collect_storage_disk_diagnostics_snapshot()
+            cards_payload = build_storage_disk_diagnostics_cards_payload(snapshot)
+            summary_text = render_storage_disk_diagnostics_snapshot(snapshot)
+            payload_kind = "collect_storage_disk_diagnostics"
+        elif snapshot_scope == "printer_cups":
+            snapshot = collect_printer_cups_diagnostics_snapshot()
+            cards_payload = build_printer_cups_diagnostics_cards_payload(snapshot)
+            summary_text = render_printer_cups_diagnostics_snapshot(snapshot)
+            payload_kind = "collect_printer_cups_diagnostics"
+        elif snapshot_scope == "generic_device_fallback":
+            snapshot = collect_generic_device_fallback_diagnostics_snapshot()
+            cards_payload = build_generic_device_fallback_diagnostics_cards_payload(snapshot)
+            summary_text = render_generic_device_fallback_diagnostics_snapshot(snapshot)
+            payload_kind = "collect_generic_device_fallback_diagnostics"
+        else:
+            snapshot = collect_diagnostics_snapshot()
+            cards_payload = build_diagnostics_cards_payload(snapshot)
+            summary_text = render_diagnostics_snapshot(snapshot)
+            payload_kind = "collect_diagnostics"
+        summary = snapshot.get("summary") if isinstance(snapshot.get("summary"), dict) else {}
+        self._record_conversation_topic(user_id, "diagnostics_capture", "question")
+        payload = {
+            "type": "diagnostics_capture",
+            "kind": payload_kind,
+            "request_text": str(request_text or "").strip() or None,
+            "snapshot_scope": snapshot_scope,
+            "diagnostics_snapshot": snapshot,
+            "cards_payload": cards_payload,
+            "summary": summary_text,
+            "status": str(summary.get("status") or "ok"),
+        }
+        return self._runtime_truth_response(
+            text=summary_text,
+            route="diagnostics_capture",
+            used_runtime_state=False,
+            used_tools=["doctor"],
+            skip_post_response_hooks=True,
             payload=payload,
         )
 
@@ -1658,6 +1881,13 @@ class Orchestrator:
             )
         if operation == "model_switch_back":
             return self._execute_model_controller_switch_back(user_id)
+        if operation == "collect_diagnostics":
+            snapshot_scope = str(params.get("snapshot_scope") or "minimal").strip().lower() or "minimal"
+            return self._collect_diagnostics_response(
+                user_id,
+                str(params.get("request_text") or "").strip() or None,
+                snapshot_scope=snapshot_scope,
+            )
         return self._runtime_truth_response(
             text="That pending confirmation target is no longer available.",
             route="action_tool",
@@ -1760,6 +1990,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text="\n".join(lines).strip(),
             route="assistant_capabilities",
+            skip_post_response_hooks=True,
             payload={
                 "type": "assistant_capabilities",
                 "areas": [dict(row) for row in areas],
@@ -1861,13 +2092,43 @@ class Orchestrator:
                 return "Something went wrong while handling that request. I'm having trouble accessing that right now."
         return normalized
 
+    def _sanitize_linux_tool_recommendations(self, text: str) -> str:
+        if platform.system().strip().lower() != "linux":
+            return text
+        normalized = str(text or "")
+        if not normalized:
+            return normalized
+        replacement_map = {
+            r"(?i)\bspeedfan\b": "lm-sensors",
+            r"(?i)\bhwinfo\b": "lm-sensors",
+            r"(?i)\btask manager\b": "htop",
+            r"(?i)\bprocess explorer\b": "htop",
+        }
+        changed = False
+        sanitized = normalized
+        for pattern, replacement in replacement_map.items():
+            updated = re.sub(pattern, replacement, sanitized)
+            if updated != sanitized:
+                changed = True
+                sanitized = updated
+        lowered = sanitized.lower()
+        if changed and "lm-sensors" in lowered and "htop" not in lowered:
+            if sanitized.endswith("."):
+                sanitized = sanitized[:-1]
+            sanitized = f"{sanitized}. On Linux, lm-sensors and htop are the better native tools."
+        elif "windows-only" in lowered or "windows only" in lowered:
+            sanitized = "On Linux, use lm-sensors or htop instead."
+        return sanitized
+
     def _apply_assistant_response_guard(
         self,
         *,
         user_id: str,
         user_text: str,
         response: OrchestratorResponse,
+        timings_ms: dict[str, int] | None = None,
     ) -> OrchestratorResponse:
+        guard_started = time.monotonic()
         response_data = self._response_data(response)
         route = str(response_data.get("route") or "").strip().lower()
         used_llm = bool(response_data.get("used_llm", False))
@@ -1881,9 +2142,14 @@ class Orchestrator:
                 provider=provider,
                 model=model,
             )
+        guarded_text = self._sanitize_linux_tool_recommendations(guarded_text)
         guarded_text = normalize_persona_text(guarded_text)
         if self._assistant_frontdoor_engaged(user_text):
             lowered_guarded_text = str(guarded_text or "").strip().lower()
+            runtime_ready_started = time.monotonic()
+            runtime_ready = self._runtime_ready_for_chat()
+            if timings_ms is not None:
+                timings_ms["runtime_ready_ms"] = int(max(0.0, time.monotonic() - runtime_ready_started) * 1000)
             bootstrap_recovery_text = any(
                 marker in lowered_guarded_text
                 for marker in (
@@ -1898,12 +2164,17 @@ class Orchestrator:
                 generic_chat_like
                 and not used_llm
                 and not error_kind
+                and not runtime_ready
                 and (
                     generic_fallback_used
                     or not self._llm_chat_available()
                     or bootstrap_recovery_text
                 )
             )
+            if runtime_ready and bootstrap_recovery_text:
+                guarded_text = self._bootstrap_no_chat_text()
+                bootstrap_recovery_text = False
+                preserve_raw_recovery = False
             guarded_text = self._translate_assistant_internal_error(
                 guarded_text if not preserve_raw_recovery else str(response.text or ""),
                 response_data=response_data,
@@ -1921,6 +2192,8 @@ class Orchestrator:
                 if fallback is not None:
                     return fallback
                 guarded_text = "I couldn't verify that from the current runtime state."
+        if timings_ms is not None:
+            timings_ms["assistant_response_guard_ms"] = int(max(0.0, time.monotonic() - guard_started) * 1000)
         if guarded_text == response.text:
             return response
         return OrchestratorResponse(guarded_text, response_data)
@@ -2201,9 +2474,14 @@ class Orchestrator:
                 action = ""
                 if assessment in {"mildly high", "concerning"}:
                     action = f" If you want to act on one thing, start with {top_name}."
+                if assessment in {"mildly high", "concerning"}:
+                    return (
+                        f"The main issue is that {top_name} is the biggest memory user in this snapshot at {top_value}.{compare} "
+                        f"{meaning} Based on this snapshot, I would call that {assessment}, not automatically a crisis.{action}"
+                    )
                 return (
-                    f"The main issue is that {top_name} is using {top_value}, which is driving most of the memory pressure.{compare} "
-                    f"{meaning} Based on this snapshot, I would call that {assessment}, not automatically a crisis.{action}"
+                    f"The main memory user in this snapshot is {top_name} at {top_value}.{compare} "
+                    f"{meaning} Based on the numeric evidence, I would call this normal, not under pressure."
                 )
             if followup_kind == "action":
                 return (
@@ -2212,8 +2490,13 @@ class Orchestrator:
                     f"If you take one action, start with {top_name}."
                 )
             return (
-                f"The important part is that {top_name} is using {top_value}, so most of the pressure is concentrated there rather than spread evenly across the system."
+                f"The important part is that {top_name} is using {top_value}, so it is the largest memory user in this snapshot rather than a sign of pressure."
                 f"{compare} {meaning} I would describe the current state as {assessment}."
+            )
+        if followup_kind == "repair":
+            return (
+                f"Likely cause: {summary} I can help you reconfigure Ollama if you want. "
+                f"I would describe the current state as {assessment}."
             )
         if followup_kind == "action":
             return (
@@ -2318,6 +2601,17 @@ class Orchestrator:
         context = self._current_interpretable_result(user_id)
         if not context:
             return None
+        if followup_kind == "process_state":
+            response_text = resource_followup(self.db, user_id, "process_state", self.timezone, question=text)
+            return self._merge_response_data(
+                OrchestratorResponse(response_text),
+                route="interpretation_followup",
+                used_runtime_state=False,
+                used_llm=False,
+                used_memory=True,
+                used_tools=["resource_report"],
+                ok=True,
+            )
         fact_lines = self._context_fact_lines(context)
         fallback_text = self._fallback_interpretation_summary(context, followup_kind)
         if not self._llm_chat_available():
@@ -2411,6 +2705,110 @@ class Orchestrator:
         return any(pattern.search(normalized) for pattern in _DEEP_SYSTEM_FOLLOWUP_PATTERNS)
 
     @staticmethod
+    def _process_state_followup_requested(text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        return bool(
+            re.search(
+                r"\b(still running|still alive|still there|is it running|is that running|is it gone|killed|kill\b|terminate\b|stop\b|close\b|quit\b|end\b|exited|pid\s*\d+|process\b|instance(?:s)?|qemu|qemu-system|virtualbox|vmware|browser|chrome|chromium|firefox|double check|double-check|recheck|check again|check please|look again|confirm it|verify)\b",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _process_state_action_requested(text: str) -> bool:
+        normalized = str(text or "").strip()
+        if not normalized:
+            return False
+        return bool(
+            re.search(
+                r"\b(kill|terminate|stop|close|quit|end)\b|\bprocess\b|\bpid\s*\d+\b",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_confusion_prompt(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return bool(
+            re.fullmatch(
+                r"(?:what|wat|huh|hmm+|hm+|what now|say again|repeat that|come again|pardon|sorry)[?.!\s]*",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_correction_prompt(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return bool(
+            re.search(
+                r"(?:\b(?:that(?:'s| is)?|this(?:'s| is)?)\s+(?:wrong|not right|incorrect|off|inaccurate)\b|"
+                r"\b(?:does|do|did)\s+not\s+indicate\b|"
+                r"\bdoesn't\s+indicate\b|"
+                r"\bthat(?:'s| is)\s+not\s+what\s+i\s+meant\b|"
+                r"\b(?:reassess|re-evaluate|reevaluate|double-check|double check|check again|look again|verify)\b)",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_vague_system_trouble(text: str) -> bool:
+        normalized = " ".join(normalize_setup_text(text).replace("/", " ").lower().split())
+        if not normalized:
+            return False
+        if not any(token in normalized for token in ("pc", "computer", "laptop", "system", "machine")):
+            return False
+        if any(
+            token in normalized
+            for token in (
+                "slow",
+                "lag",
+                "disk",
+                "storage",
+                "printer",
+                "bluetooth",
+                "camera",
+                "webcam",
+                "audio",
+                "sound",
+                "network",
+                "wifi",
+                "ram",
+                "memory",
+                "gpu",
+                "graphics",
+                "boot",
+                "crash",
+                "error",
+                "freeze",
+                "stuck",
+                "after sleep",
+                "after suspend",
+                "not detected",
+                "not working",
+                "cannot save",
+                "can't save",
+                "out of space",
+            )
+        ):
+            return False
+        return bool(
+            re.search(
+                r"\b(weird|weirdly|acting weird|acting up|something is off|what'?s up|what is up|off|strange|odd|broken|not right|something wrong)\b",
+                normalized,
+                re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
     def _is_machine_observe_context(context: dict[str, Any]) -> bool:
         if not isinstance(context, dict):
             return False
@@ -2429,6 +2827,21 @@ class Orchestrator:
             return True
         user_text = str(context.get("user_text") or "").strip().lower()
         return any(token in user_text for token in ("pc", "cpu", "gpu", "ram", "storage", "machine", "system"))
+
+    def _vague_system_trouble_clarification_response(self, *, used_memory: bool, reason: str) -> OrchestratorResponse:
+        question = "What symptom should I focus on: slow, broken, full, not detected, or something else?"
+        return self._runtime_truth_response(
+            text=question,
+            route="assistant_clarification",
+            used_memory=used_memory,
+            used_runtime_state=False,
+            next_question=question,
+            payload={
+                "type": "assistant_system_trouble_clarification",
+                "reason": str(reason or "vague_system_trouble").strip() or "vague_system_trouble",
+                "summary": question,
+            },
+        )
 
     def _deep_system_followup_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         if not self._deep_system_followup_requested(text):
@@ -2457,6 +2870,44 @@ class Orchestrator:
                 "kind": "deep_system_observe",
                 "summary": summary,
                 **payload,
+            },
+        )
+
+    def _assistant_correction_response(
+        self,
+        *,
+        user_id: str,
+        used_memory: bool,
+        reason: str,
+    ) -> OrchestratorResponse:
+        context = self._current_interpretable_result(user_id)
+        if self._is_machine_observe_context(context):
+            payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+            payload_type = str(payload.get("type") or context.get("kind") or "").strip().lower()
+            if payload_type == "resource_report" or isinstance(payload.get("memory"), dict):
+                reassessment_data = summarize_resource_report(payload, text=str(reason or context.get("user_text") or ""))
+                reassessment = str(reassessment_data.get("summary") or "").strip()
+                if not reassessment:
+                    reassessment = "I reassessed the live memory data, and it does not indicate pressure."
+            else:
+                reassessment = self._fallback_interpretation_summary(context, "explain")
+            message = normalize_persona_text(f"You’re right, that doesn’t indicate pressure. {reassessment}")
+        else:
+            summary = str(context.get("summary") or "").strip()
+            if summary:
+                message = normalize_persona_text(f"You’re right, I should reassess that. {summary}")
+            else:
+                message = "You’re right, I should reassess that."
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_memory=used_memory,
+            used_runtime_state=False,
+            next_question=message,
+            payload={
+                "type": "assistant_correction",
+                "reason": str(reason or "correction_turn").strip() or "correction_turn",
+                "summary": message,
             },
         )
 
@@ -2707,6 +3158,7 @@ class Orchestrator:
                 route="setup_flow",
                 used_memory=True,
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         current_target = truth.current_chat_target_status()
         previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
@@ -3025,6 +3477,7 @@ class Orchestrator:
             route="action_tool",
             used_runtime_state=True,
             used_tools=["model_scout"],
+            skip_post_response_hooks=True,
             payload={
                 "type": "model_scout",
                 "summary": message,
@@ -4807,6 +5260,19 @@ class Orchestrator:
         return self._model_scout_inventory_response(focus_terms=focus_terms)
 
     def _handle_action_tool_intent(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if self._process_state_action_requested(text):
+            response_text = resource_followup(self.db, user_id, "process_state", self.timezone, question=text)
+            return self._runtime_truth_response(
+                text=response_text,
+                route="runtime_status",
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_runtime_state=False,
+                used_tools=["resource_report"],
+                payload={
+                    "type": "process_state_followup",
+                    "summary": response_text,
+                },
+            )
         intent_kind = self._time_date_intent_kind(text)
         if intent_kind is not None:
             return self._local_time_response(intent_kind)
@@ -4843,6 +5309,9 @@ class Orchestrator:
         normalized = normalize_setup_text(text)
         if not normalized or not self._looks_like_grounded_system_query(text):
             return None
+        if self._process_state_followup_requested(text):
+            response_text = resource_followup(self.db, user_id, "process_state", self.timezone, question=text)
+            return OrchestratorResponse(response_text)
         provider_hint = self._mentioned_provider_id(normalized)
         state = self._current_runtime_setup_state(user_id)
         if _looks_like_model_lifecycle_query(normalized):
@@ -4884,7 +5353,22 @@ class Orchestrator:
             return None
         if not self._assistant_frontdoor_engaged(text):
             return None
-        if self._runtime_truth() is None:
+        truth = self._runtime_truth()
+        if truth is None:
+            if self._process_state_followup_requested(text):
+                response_text = resource_followup(self.db, user_id, "top_memory", self.timezone, question=text)
+                return self._runtime_truth_response(
+                    text=response_text,
+                    route="runtime_status",
+                    used_memory=False,
+                    used_runtime_state=False,
+                    used_llm=False,
+                    used_tools=["resource_report"],
+                    payload={
+                        "type": "resource_report",
+                        "summary": response_text,
+                    },
+                )
             return None
 
         state = self._current_runtime_setup_state(user_id)
@@ -4975,6 +5459,32 @@ class Orchestrator:
             },
         )
 
+    def _assistant_confusion_recovery_response(
+        self,
+        *,
+        user_id: str,
+        used_memory: bool,
+        reason: str,
+    ) -> OrchestratorResponse:
+        context = self._current_interpretable_result(user_id)
+        summary = str(context.get("summary") or "").strip()
+        if summary:
+            message = f"I was following: {summary} Do you want me to continue with that or switch to something else?"
+        else:
+            message = "I was following your last request. Do you want me to continue with that or switch topics?"
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_memory=used_memory,
+            used_runtime_state=False,
+            next_question=message,
+            payload={
+                "type": "assistant_confusion_recovery",
+                "reason": str(reason or "confusion_turn").strip() or "confusion_turn",
+                "summary": message,
+            },
+        )
+
     def _assistant_unmatched_fallback_response(
         self,
         *,
@@ -5004,6 +5514,21 @@ class Orchestrator:
     ) -> OrchestratorResponse | None:
         if str(text or "").strip().startswith("/"):
             return None
+        context = self._current_interpretable_result(user_id)
+        if self._looks_like_confusion_prompt(text):
+            used_memory = bool(self._current_runtime_setup_state(user_id))
+            return self._assistant_confusion_recovery_response(
+                user_id=user_id,
+                used_memory=used_memory,
+                reason="confusion_turn",
+            )
+        if self._looks_like_correction_prompt(text) and context:
+            used_memory = bool(self._current_runtime_setup_state(user_id))
+            return self._assistant_correction_response(
+                user_id=user_id,
+                used_memory=used_memory,
+                reason="correction_turn",
+            )
         if not self._assistant_frontdoor_engaged(text):
             return None
         used_memory = bool(self._current_runtime_setup_state(user_id))
@@ -5028,11 +5553,23 @@ class Orchestrator:
                 setup_state = str(setup.get("setup_state") or "").strip().lower() or "unavailable"
                 if setup_state != "ready":
                     return self._setup_explanation_response(used_memory=used_memory)
+            if context:
+                return self._assistant_confusion_recovery_response(
+                    user_id=user_id,
+                    used_memory=used_memory,
+                    reason="short_help_prompt",
+                )
             return self._assistant_unmatched_clarification_response(
                 used_memory=used_memory,
                 reason="short_help_prompt",
             )
 
+        if context:
+            return self._assistant_confusion_recovery_response(
+                user_id=user_id,
+                used_memory=used_memory,
+                reason="active_context",
+            )
         return None
 
     @staticmethod
@@ -5308,6 +5845,9 @@ class Orchestrator:
         return discovery
 
     def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        gap = classify_capability_gap_request(text)
+        if str(gap.get("request_kind") or "").strip().lower() != "capability":
+            return None
         need = detect_pack_capability_need(text)
         if need is None:
             return None
@@ -5319,7 +5859,16 @@ class Orchestrator:
         )
         if recommendation is None:
             return None
-        message = render_pack_capability_response(recommendation)
+        rendered_recommendation = dict(recommendation)
+        rendered_recommendation["classification"] = gap.get("classification")
+        rendered_recommendation["proposal_summary"] = gap.get("proposal_summary")
+        rendered_recommendation["helper_name"] = gap.get("helper_name")
+        message = render_pack_capability_response(rendered_recommendation)
+        if str(gap.get("classification") or "").strip().lower() == "can_partially_answer_but_capability_would_help":
+            helper_name = str(gap.get("helper_name") or "").strip() or "helper"
+            message = normalize_persona_text(
+                f"I can help with the text side, but this would be better as a small {helper_name}. {message}"
+            )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -5330,10 +5879,40 @@ class Orchestrator:
                 "type": "pack_capability_recommendation",
                 "summary": message,
                 "recommendation": recommendation,
+                "classification": gap.get("classification"),
                 "capability_required": recommendation.get("capability_required"),
                 "comparison_mode": recommendation.get("comparison_mode"),
                 "fallback": recommendation.get("fallback"),
                 "next_step": recommendation.get("next_step"),
+            },
+        )
+
+    def _capability_gap_planning_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        plan = build_capability_gap_response(
+            text,
+            pack_store=self._pack_store,
+            pack_registry_discovery=self._pack_registry_discovery(),
+        )
+        if plan is None:
+            return None
+        message = str(plan.get("summary") or "").strip()
+        if not message:
+            return None
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_planning"],
+            payload={
+                "type": "capability_gap_plan",
+                "summary": message,
+                "plan": plan,
+                "classification": plan.get("classification"),
+                "capability_required": plan.get("capability_required"),
+                "capability_label": plan.get("capability_label"),
+                "fallback": plan.get("fallback"),
+                "next_step": plan.get("next_step"),
             },
         )
 
@@ -5344,6 +5923,16 @@ class Orchestrator:
         *,
         chat_context: dict[str, Any] | None = None,
     ) -> OrchestratorResponse | None:
+        truth = self._runtime_truth()
+        if truth is not None:
+            try:
+                ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
+            except Exception:
+                ready_payload = {}
+            if isinstance(ready_payload, dict) and bool(ready_payload.get("ready", False)):
+                self._clear_onboarding_state(user_id)
+                mark_onboarding_completed(self.db, user_id)
+                return None
         state = self._current_onboarding_state(user_id)
         stage = str(state.get("stage") or "").strip().lower()
         if stage in {"entry", "intent"}:
@@ -5926,6 +6515,7 @@ class Orchestrator:
                     used_memory=True,
                     used_runtime_state=True,
                     used_tools=["provider_repair_check"] if repair_attempted else [],
+                    skip_post_response_hooks=True,
                     payload={
                         "type": "provider_repair_options",
                         "provider": provider_hint,
@@ -5951,6 +6541,7 @@ class Orchestrator:
                     used_memory=True,
                     used_runtime_state=True,
                     used_tools=["provider_repair_check"] if repair_attempted else [],
+                    skip_post_response_hooks=True,
                     payload={
                         "type": "provider_repair_options",
                         "provider": provider_hint,
@@ -5971,6 +6562,7 @@ class Orchestrator:
                 used_memory=True,
                 used_runtime_state=True,
                 used_tools=["provider_repair_check"] if repair_attempted else [],
+                skip_post_response_hooks=True,
                 payload={
                     "type": "provider_repair",
                     "provider": provider_hint,
@@ -6004,6 +6596,7 @@ class Orchestrator:
             used_memory=True,
             used_runtime_state=True,
             used_tools=["provider_repair_check"] if repair_attempted else [],
+            skip_post_response_hooks=True,
             payload={
                 "type": "provider_repair",
                 "provider": provider_hint,
@@ -6025,6 +6618,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="provider_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         snapshot = truth.provider_status(provider_id)
         target_truth = (
@@ -6062,6 +6656,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="provider_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "provider_status",
                 "provider": provider_key,
@@ -6082,6 +6677,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="provider_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         status_payload = truth.providers_status()
         rows = status_payload.get("providers") if isinstance(status_payload.get("providers"), list) else []
@@ -6137,6 +6733,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="provider_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "providers_status",
                 "title": "Provider status",
@@ -6151,6 +6748,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="runtime_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         status_payload = truth.runtime_status(kind)
         message = normalize_persona_text(
@@ -6160,6 +6758,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="runtime_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "runtime_status",
                 **dict(status_payload),
@@ -6185,6 +6784,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.list_managed_adapters()
         rows = payload.get("managed_adapters") if isinstance(payload.get("managed_adapters"), list) else []
@@ -6209,6 +6809,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_managed_adapters",
                 "title": "Managed adapters",
@@ -6223,6 +6824,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.list_background_tasks()
         rows = payload.get("background_tasks") if isinstance(payload.get("background_tasks"), list) else []
@@ -6246,6 +6848,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_background_tasks",
                 "title": "Background tasks",
@@ -6260,6 +6863,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.list_governance_blocks()
         rows = payload.get("blocked_skills") if isinstance(payload.get("blocked_skills"), list) else []
@@ -6275,6 +6879,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_blocks",
                 "title": "Blocked skills",
@@ -6289,6 +6894,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.list_pending_governance_requests()
         pending_skills = payload.get("pending_skills") if isinstance(payload.get("pending_skills"), list) else []
@@ -6329,6 +6935,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_pending",
                 "title": "Pending governance approvals",
@@ -6343,6 +6950,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         adapters_payload = truth.list_managed_adapters()
         tasks_payload = truth.list_background_tasks()
@@ -6381,6 +6989,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_overview",
                 "title": "Execution governance",
@@ -6397,6 +7006,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.get_skill_governance_status(skill_id)
         if bool(payload.get("needs_skill_id", False)):
@@ -6405,6 +7015,7 @@ class Orchestrator:
                 text=message,
                 route="governance_status",
                 next_question=message,
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_skill_status",
                     "found": False,
@@ -6419,6 +7030,7 @@ class Orchestrator:
             return self._runtime_truth_response(
                 text=message,
                 route="governance_status",
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_skill_status",
                     "found": False,
@@ -6436,6 +7048,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_skill_status",
                 "title": "Skill governance",
@@ -6450,6 +7063,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         normalized_target = str(target_id or "").strip() or None
         if not normalized_target:
@@ -6458,6 +7072,7 @@ class Orchestrator:
                 text=message,
                 route="governance_status",
                 next_question=message,
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_execution_mode",
                     "found": False,
@@ -6474,6 +7089,7 @@ class Orchestrator:
             return self._runtime_truth_response(
                 text=message,
                 route="governance_status",
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_execution_mode",
                     "title": "Execution mode",
@@ -6494,6 +7110,7 @@ class Orchestrator:
             return self._runtime_truth_response(
                 text=message,
                 route="governance_status",
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_execution_mode",
                     "title": "Execution mode",
@@ -6517,6 +7134,7 @@ class Orchestrator:
             return self._runtime_truth_response(
                 text=message,
                 route="governance_status",
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_execution_mode",
                     "title": "Execution mode",
@@ -6533,6 +7151,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_execution_mode",
                 "title": "Execution mode",
@@ -6548,6 +7167,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="governance_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.get_managed_adapter_status(adapter_id)
         adapter = payload.get("adapter") if isinstance(payload.get("adapter"), dict) else {}
@@ -6557,6 +7177,7 @@ class Orchestrator:
                 text=message,
                 route="governance_status",
                 next_question=message,
+                skip_post_response_hooks=True,
                 payload={
                     "type": "governance_adapter_detail",
                     "found": False,
@@ -6577,6 +7198,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="governance_status",
+            skip_post_response_hooks=True,
             payload={
                 "type": "governance_adapter_detail",
                 "title": f"{adapter_label} adapter",
@@ -6593,15 +7215,10 @@ class Orchestrator:
                 reason="runtime_truth_service_unavailable",
             )
         current = truth.current_chat_target_status()
-        target_truth = (
-            truth.chat_target_truth()
-            if callable(getattr(truth, "chat_target_truth", None))
-            else {}
-        )
-        configured_provider = str(current.get("provider") or target_truth.get("configured_provider") or "").strip().lower() or None
-        configured_model = str(current.get("model") or target_truth.get("configured_model") or "").strip() or None
-        effective_provider = str(target_truth.get("effective_provider") or configured_provider or "").strip().lower() or None
-        effective_model = str(target_truth.get("effective_model") or configured_model or "").strip() or None
+        configured_provider = str(current.get("provider") or current.get("configured_provider") or "").strip().lower() or None
+        configured_model = str(current.get("model") or current.get("configured_model") or "").strip() or None
+        effective_provider = str(current.get("effective_provider") or configured_provider or "").strip().lower() or None
+        effective_model = str(current.get("effective_model") or configured_model or "").strip() or None
         if not configured_model and not effective_model:
             return self._runtime_state_unavailable_response(
                 route="model_status",
@@ -6612,6 +7229,11 @@ class Orchestrator:
         provider_health_status = str(current.get("provider_health_status") or "").strip().lower() or "unknown"
         model_health_status = str(current.get("health_status") or "").strip().lower() or "unknown"
         ready = bool(current.get("ready", False))
+        truth_timing_ms = (
+            dict(current.get("truth_timing_ms") or {})
+            if isinstance(current.get("truth_timing_ms"), dict)
+            else {}
+        )
         if ready:
             message = f"Chat is currently using {configured_model} on {provider_label}."
         elif effective_model and effective_provider and effective_model != configured_model:
@@ -6627,21 +7249,25 @@ class Orchestrator:
             message = f"Chat is configured to use {configured_model} on {provider_label}, but that model is not healthy right now."
         else:
             message = f"Chat is configured to use {configured_model or effective_model} on {provider_label}, but it is not ready right now."
+        payload = {
+            "type": "model_status",
+            "provider": effective_provider or configured_provider,
+            "model_id": effective_model or configured_model,
+            "configured_provider": configured_provider,
+            "configured_model": configured_model,
+            "title": "Current model",
+            "ready": ready,
+            "health_status": model_health_status,
+            "provider_health_status": provider_health_status,
+            "summary": message,
+        }
+        if truth_timing_ms:
+            payload["truth_timing_ms"] = dict(truth_timing_ms)
         return self._runtime_truth_response(
             text=message,
             route="model_status",
-            payload={
-                "type": "model_status",
-                "provider": effective_provider or configured_provider,
-                "model_id": effective_model or configured_model,
-                "configured_provider": configured_provider,
-                "configured_model": configured_model,
-                "title": "Current model",
-                "ready": ready,
-                "health_status": model_health_status,
-                "provider_health_status": provider_health_status,
-                "summary": message,
-            },
+            payload=payload,
+            skip_post_response_hooks=True,
         )
 
     @staticmethod
@@ -6995,8 +7621,13 @@ class Orchestrator:
     def _canonical_model_inventory_snapshot(self, truth: Any) -> dict[str, Any]:
         inventory_fn = getattr(truth, "model_inventory_status", None)
         readiness_fn = getattr(truth, "model_readiness_status", None)
+        snapshot_started = time.monotonic()
+        inventory_started = time.monotonic()
         inventory = inventory_fn() if callable(inventory_fn) else {}
+        inventory_ms = int(max(0.0, time.monotonic() - inventory_started) * 1000)
+        readiness_started = time.monotonic()
         readiness = readiness_fn() if callable(readiness_fn) else {}
+        readiness_ms = int(max(0.0, time.monotonic() - readiness_started) * 1000)
         inventory = dict(inventory) if isinstance(inventory, dict) else {}
         readiness = dict(readiness) if isinstance(readiness, dict) else {}
 
@@ -7017,6 +7648,11 @@ class Orchestrator:
                 "inventory": {},
                 "readiness": {},
                 "source": "canonical_inventory+readiness",
+                "truth_timing_ms": {
+                    "model_inventory_status_ms": inventory_ms,
+                    "model_readiness_status_ms": readiness_ms,
+                    "canonical_model_inventory_snapshot_ms": int(max(0.0, time.monotonic() - snapshot_started) * 1000),
+                },
             }
 
         inventory_rows = [
@@ -7119,6 +7755,11 @@ class Orchestrator:
             "inventory": dict(inventory),
             "readiness": dict(readiness),
             "source": "canonical_inventory+readiness",
+            "truth_timing_ms": {
+                "model_inventory_status_ms": inventory_ms,
+                "model_readiness_status_ms": readiness_ms,
+                "canonical_model_inventory_snapshot_ms": int(max(0.0, time.monotonic() - snapshot_started) * 1000),
+            },
         }
 
     def _model_inventory_response(
@@ -7173,6 +7814,9 @@ class Orchestrator:
             "not_ready_models": not_ready_rows,
             "source": payload.get("source"),
         }
+        truth_timing_ms = payload.get("truth_timing_ms") if isinstance(payload.get("truth_timing_ms"), dict) else {}
+        if truth_timing_ms:
+            response_payload["truth_timing_ms"] = dict(truth_timing_ms)
 
         if local_only:
             scope_label = "Ollama local" if provider_key == "ollama" else "local"
@@ -7235,6 +7879,7 @@ class Orchestrator:
                 "inventory_provider": provider_key,
                 "summary": message,
             },
+            skip_post_response_hooks=True,
         )
 
     def _available_models_response(self) -> OrchestratorResponse:
@@ -8256,6 +8901,7 @@ class Orchestrator:
                 route="operational_status",
                 used_runtime_state=False,
                 used_tools=["doctor"],
+                skip_post_response_hooks=True,
                 payload={
                     "type": "operational_status",
                     "kind": "doctor",
@@ -8269,6 +8915,7 @@ class Orchestrator:
                 route="operational_status",
                 used_runtime_state=False,
                 used_tools=["status"],
+                skip_post_response_hooks=True,
                 payload={
                     "type": "operational_status",
                     "kind": "status",
@@ -8283,6 +8930,7 @@ class Orchestrator:
                 route="operational_status",
                 used_runtime_state=False,
                 used_tools=["observe_system_health"],
+                skip_post_response_hooks=True,
                 payload={
                     "type": "operational_status",
                     "kind": "observe_system_health",
@@ -8301,6 +8949,7 @@ class Orchestrator:
                 for item in (nl_decision.get("skills") if isinstance(nl_decision.get("skills"), list) else [])
                 if isinstance(item, dict) and str(item.get("function") or "").strip()
             ],
+            skip_post_response_hooks=True,
             payload={
                 "type": "operational_status",
                 "kind": str(nl_decision.get("intent") or "OBSERVE_PC"),
@@ -8375,6 +9024,7 @@ class Orchestrator:
         ok: bool = True,
         error_kind: str | None = None,
         extra_payload: dict[str, Any] | None = None,
+        skip_post_response_hooks: bool = False,
     ) -> OrchestratorResponse:
         message = self._model_controller_policy_message(payload)
         runtime_payload = {
@@ -8392,6 +9042,7 @@ class Orchestrator:
             used_tools=used_tools,
             ok=ok,
             error_kind=error_kind,
+            skip_post_response_hooks=skip_post_response_hooks,
         )
 
     def _model_controller_policy_response(self) -> OrchestratorResponse:
@@ -8400,11 +9051,13 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.model_controller_policy_status()
         return self._model_controller_policy_payload_response(
             dict(payload) if isinstance(payload, dict) else {},
             route="model_policy_status",
+            skip_post_response_hooks=True,
         )
 
     def _control_mode_change_response(self, requested_mode: str) -> OrchestratorResponse:
@@ -8471,6 +9124,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.model_policy_status()
         cheap_cap = self._format_cost_per_1m(payload.get("cheap_remote_cap_per_1m"))
@@ -8498,6 +9152,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="model_policy_status",
+            skip_post_response_hooks=True,
             payload={
                 **dict(payload),
                 "type": "model_policy_status",
@@ -8512,6 +9167,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.model_policy_status()
         cheap_cap = self._format_cost_per_1m(payload.get("cheap_remote_cap_per_1m"))
@@ -8523,6 +9179,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="model_policy_status",
+            skip_post_response_hooks=True,
             payload={
                 **dict(payload),
                 "type": "model_policy_status",
@@ -8537,6 +9194,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.model_policy_status()
         current_candidate = payload.get("current_candidate") if isinstance(payload.get("current_candidate"), dict) else {}
@@ -8565,6 +9223,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="model_policy_status",
+            skip_post_response_hooks=True,
             payload={
                 **dict(payload),
                 "type": "model_policy_explanation",
@@ -8579,6 +9238,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         provider_key = str(provider_id or "").strip().lower() or None
         provider_payload = truth.model_policy_provider_candidate(provider_key)
@@ -8627,6 +9287,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="model_policy_status",
+            skip_post_response_hooks=True,
             payload={
                 **dict(provider_payload),
                 "type": "model_policy_explanation",
@@ -8642,6 +9303,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         payload = truth.model_policy_candidate()
         candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else None
@@ -8657,6 +9319,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="model_policy_status",
+            skip_post_response_hooks=True,
             payload={
                 **dict(payload),
                 "type": "model_policy_candidate",
@@ -8671,6 +9334,7 @@ class Orchestrator:
             return self._runtime_state_unavailable_response(
                 route="model_policy_status",
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         tier_key = str(tier or "").strip().lower() or None
         payload = truth.model_policy_candidate(tier_key)
@@ -8689,6 +9353,7 @@ class Orchestrator:
         return self._runtime_truth_response(
             text=message,
             route="model_policy_status",
+            skip_post_response_hooks=True,
             payload={
                 **dict(payload),
                 "type": "model_policy_candidate",
@@ -8861,6 +9526,7 @@ class Orchestrator:
                 route="setup_flow",
                 used_memory=used_memory,
                 reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
             )
         snapshot = truth.provider_status("ollama")
         current = truth.current_chat_target_status()
@@ -9015,7 +9681,7 @@ class Orchestrator:
             )
             ok = False
         else:
-            message = build_no_llm_public_message()
+            message = build_no_llm_public_message(runtime_ready=self._runtime_ready_for_chat())
             ok = False
 
         return self._runtime_truth_response(
@@ -9023,6 +9689,7 @@ class Orchestrator:
             route="setup_flow",
             used_memory=used_memory,
             used_runtime_state=True,
+            skip_post_response_hooks=True,
             payload={
                 "type": "setup_explanation",
                 "ok": ok,
@@ -9523,6 +10190,8 @@ class Orchestrator:
             return self._assistant_capabilities_response()
         if kind == "pack_capability_recommendation":
             return self._pack_capability_recommendation_response(user_id, text)
+        if kind == "capability_gap_plan":
+            return self._capability_gap_planning_response(user_id, text)
         if kind in {"agent_memory_inspect", "agent_memory_preferences", "agent_memory_open_loops"}:
             return self._agent_memory_response(user_id, kind, query_text=text)
         if self._runtime_truth() is None:
@@ -9974,6 +10643,7 @@ class Orchestrator:
                     "source_surface": source_surface,
                     "channel": channel,
                     "latency_fallback": bool(latency_fallback),
+                    "runtime_ready": bool(self._runtime_ready_for_chat()),
                     "selection_reason": (
                         str(getattr(prepared, "selection_reason", "") or "").strip()
                         if prepared is not None
@@ -11859,22 +12529,50 @@ class Orchestrator:
         *,
         chat_context: dict[str, Any] | None = None,
     ) -> OrchestratorResponse:
+        orchestrator_started = time.monotonic()
         response = self._handle_message_impl(text, user_id, chat_context=chat_context)
+        orchestrator_timing_ms: dict[str, int] = {
+            "message_impl_ms": int(max(0.0, time.monotonic() - orchestrator_started) * 1000),
+        }
         response_data = response.data if isinstance(response.data, dict) else {}
+        skip_assistant_response_guard = bool(response_data.get("skip_post_response_hooks", False))
         if bool(response_data.get("skip_epistemic_gate", False)):
             final_response = response
+            orchestrator_timing_ms["epistemic_layer_ms"] = 0
         else:
+            epistemic_started = time.monotonic()
             final_response = self._apply_epistemic_layer(user_id, text, response)
-        final_response = self._apply_assistant_response_guard(
-            user_id=user_id,
-            user_text=text,
-            response=final_response,
-        )
+            orchestrator_timing_ms["epistemic_layer_ms"] = int(
+                max(0.0, time.monotonic() - epistemic_started) * 1000
+            )
+        post_hooks_started = time.monotonic()
+        if skip_assistant_response_guard:
+            orchestrator_timing_ms["assistant_response_guard_ms"] = 0
+            orchestrator_timing_ms["runtime_ready_ms"] = 0
+        else:
+            guard_timing_ms: dict[str, int] = {}
+            final_response = self._apply_assistant_response_guard(
+                user_id=user_id,
+                user_text=text,
+                response=final_response,
+                timings_ms=guard_timing_ms,
+            )
+            orchestrator_timing_ms["assistant_response_guard_ms"] = guard_timing_ms.get(
+                "assistant_response_guard_ms",
+                int(max(0.0, time.monotonic() - post_hooks_started) * 1000),
+            )
+            if "runtime_ready_ms" in guard_timing_ms:
+                orchestrator_timing_ms["runtime_ready_ms"] = guard_timing_ms["runtime_ready_ms"]
+        remember_started = time.monotonic()
         self._remember_interpretable_result(
             user_id=user_id,
             user_text=text,
             response=final_response,
         )
+        orchestrator_timing_ms["remember_interpretable_result_ms"] = int(
+            max(0.0, time.monotonic() - remember_started) * 1000
+        )
+        chat_memory_started = time.monotonic()
         try:
             self._record_chat_working_memory_turn(
                 user_id=user_id,
@@ -11884,6 +12582,8 @@ class Orchestrator:
             )
         except Exception:
             pass
+        orchestrator_timing_ms["chat_memory_turn_ms"] = int(max(0.0, time.monotonic() - chat_memory_started) * 1000)
+        memory_action_started = time.monotonic()
         try:
             self._memory_runtime.record_agent_action(
                 user_id,
@@ -11892,7 +12592,18 @@ class Orchestrator:
             )
         except Exception:
             pass
-        return final_response
+        orchestrator_timing_ms["memory_action_ms"] = int(max(0.0, time.monotonic() - memory_action_started) * 1000)
+        orchestrator_timing_ms["post_response_hooks_ms"] = int(max(0.0, time.monotonic() - post_hooks_started) * 1000)
+        orchestrator_timing_ms["total_ms"] = int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+        final_data = dict(final_response.data) if isinstance(final_response.data, dict) else {}
+        existing_timing = final_data.get("orchestrator_timing_ms")
+        if isinstance(existing_timing, dict):
+            merged_timing = dict(existing_timing)
+            merged_timing.update(orchestrator_timing_ms)
+        else:
+            merged_timing = dict(orchestrator_timing_ms)
+        final_data["orchestrator_timing_ms"] = merged_timing
+        return OrchestratorResponse(final_response.text, final_data)
 
     @staticmethod
     def _memory_action_kind_for_response(*, text: str, response: OrchestratorResponse) -> str | None:
@@ -13854,6 +14565,12 @@ class Orchestrator:
                 deeper_system_response = self._deep_system_followup_response(user_id, runtime_text)
                 if deeper_system_response is not None:
                     return deeper_system_response
+                if self._looks_like_vague_system_trouble(runtime_text):
+                    used_memory = bool(self._current_runtime_setup_state(user_id))
+                    return self._vague_system_trouble_clarification_response(
+                        used_memory=used_memory,
+                        reason="vague_system_trouble",
+                    )
                 runtime_response = self._handle_runtime_truth_chat(user_id, runtime_text)
                 if runtime_response is not None:
                     return runtime_response
@@ -13989,6 +14706,43 @@ class Orchestrator:
             if not text.strip().startswith("/"):
                 nl_decision = nl_route(text)
                 nl_intent = nl_decision.get("intent")
+                if nl_intent == "DIAGNOSTICS_CAPTURE_STORAGE_DISK_REQUEST":
+                    return self._diagnostics_capture_preview_response(
+                        user_id,
+                        text,
+                        snapshot_scope="storage_disk",
+                    )
+                if nl_intent == "DIAGNOSTICS_CAPTURE_PRINTER_CUPS_REQUEST":
+                    return self._diagnostics_capture_preview_response(
+                        user_id,
+                        text,
+                        snapshot_scope="printer_cups",
+                    )
+                if nl_intent == "DIAGNOSTICS_CAPTURE_GENERIC_DEVICE_FALLBACK_REQUEST":
+                    self._record_diagnostics_fallback_event(
+                        trace_id=str(context.get("trace_id") or "").strip() or None,
+                        intent_label=nl_intent,
+                        text=text,
+                    )
+                    return self._diagnostics_capture_preview_response(
+                        user_id,
+                        text,
+                        snapshot_scope="generic_device_fallback",
+                    )
+                if nl_intent == "DIAGNOSTICS_CAPTURE_BLUETOOTH_AUDIO_REQUEST":
+                    return self._diagnostics_capture_preview_response(
+                        user_id,
+                        text,
+                        snapshot_scope="bluetooth_audio",
+                    )
+                if nl_intent == "DIAGNOSTICS_CAPTURE_REQUEST":
+                    return self._diagnostics_capture_preview_response(user_id, text)
+                if nl_intent == "OBSERVE_PC" and self._looks_like_vague_system_trouble(text):
+                    used_memory = bool(self._current_runtime_setup_state(user_id))
+                    return self._vague_system_trouble_clarification_response(
+                        used_memory=used_memory,
+                        reason="vague_system_trouble",
+                    )
                 if nl_intent in {"OBSERVE_PC", "EXPLAIN_PREVIOUS"}:
                     return self._handle_nl_observe(user_id, text, nl_decision)
                 if nl_intent == "MEMORY_WRITE_REQUEST":
@@ -14130,6 +14884,22 @@ class Orchestrator:
                         )
                         return self._cards_response(user_id, payload)
                 if nl_intent == "CHITCHAT":
+                    if self._looks_like_confusion_prompt(text):
+                        used_memory = bool(self._current_runtime_setup_state(user_id))
+                        return self._assistant_confusion_recovery_response(
+                            user_id=user_id,
+                            used_memory=used_memory,
+                            reason="confusion_turn",
+                        )
+                    if self._looks_like_correction_prompt(text):
+                        context = self._current_interpretable_result(user_id)
+                        if context:
+                            used_memory = bool(self._current_runtime_setup_state(user_id))
+                            return self._assistant_correction_response(
+                                user_id=user_id,
+                                used_memory=used_memory,
+                                reason="correction_turn",
+                            )
                     if not self._llm_chat_available():
                         return self._bootstrap_no_chat_response()
 
@@ -14216,7 +14986,13 @@ class Orchestrator:
 
             if decision.get("type") == "resource_followup":
                 question = decision.get("question") or ""
-                response_text = resource_followup(self.db, user_id, _resource_followup_kind(question), self.timezone)
+                response_text = resource_followup(
+                    self.db,
+                    user_id,
+                    _resource_followup_kind(question),
+                    self.timezone,
+                    question=str(question or ""),
+                )
                 return OrchestratorResponse(response_text)
 
             if decision.get("type") == "skill_call":
@@ -14280,10 +15056,33 @@ class Orchestrator:
 
             if decision.get("type") == "greeting":
                 self._last_offer_topic[user_id] = "brief_offer"
+                if self._looks_like_confusion_prompt(text):
+                    used_memory = bool(self._current_runtime_setup_state(user_id))
+                    return self._assistant_confusion_recovery_response(
+                        user_id=user_id,
+                        used_memory=used_memory,
+                        reason="confusion_turn",
+                    )
                 if not self._llm_chat_available():
                     return self._bootstrap_no_chat_response()
                 return OrchestratorResponse("Hi. I’m ready to help. Tell me what you want to do.")
 
+            if self._looks_like_confusion_prompt(text) and not self._llm_chat_available():
+                used_memory = bool(self._current_runtime_setup_state(user_id))
+                return self._assistant_confusion_recovery_response(
+                    user_id=user_id,
+                    used_memory=used_memory,
+                    reason="confusion_turn",
+                )
+            if self._looks_like_correction_prompt(text) and not self._llm_chat_available():
+                context = self._current_interpretable_result(user_id)
+                if context:
+                    used_memory = bool(self._current_runtime_setup_state(user_id))
+                    return self._assistant_correction_response(
+                        user_id=user_id,
+                        used_memory=used_memory,
+                        reason="correction_turn",
+                    )
             if not self._llm_chat_available():
                 return self._bootstrap_no_chat_response()
             return OrchestratorResponse("I’m not sure what you need yet. Send 'help' for commands.")
@@ -15153,13 +15952,40 @@ class Orchestrator:
         if skill_name == "resource_governor":
             loads = (payload or {}).get("loads") or {}
             mem = (payload or {}).get("memory") or {}
+            source = str((payload or {}).get("source") or "").strip().lower()
+            correction_requested = bool(
+                re.search(
+                    r"\b(actual system monitor|monitor reading|that's wrong|that is wrong|wrong or incomplete|my earlier reading|incorrect|contradict)\b",
+                    text or "",
+                    re.IGNORECASE,
+                )
+            )
             used = int(mem.get("used", 0))
             total = int(mem.get("total", 0))
-            pct = (used / total * 100.0) if total else 0.0
-            return f"CPU load 1m {float(loads.get('1m', 0.0)):.2f}; memory {pct:.1f}% used", [
-                "Show only CPU deltas",
-                "Show only memory deltas",
-            ]
+            if total <= 0 or used < 0 or source in {"snapshot_empty", "snapshot_invalid", "unavailable", "live_invalid"}:
+                if correction_requested:
+                    summary = "My earlier memory reading was wrong or incomplete, and I could not ground a live memory probe."
+                else:
+                    summary = "Live memory data is unavailable right now."
+                return summary, ["Retry the live probe", "Show hardware inventory"]
+            analysis = (payload or {}).get("cause_analysis")
+            if not isinstance(analysis, dict):
+                analysis = summarize_resource_report(payload or {}, text=text)
+            summary = str(analysis.get("summary") or "").strip()
+            if not summary:
+                used_gib = used / float(1024**3)
+                total_gib = total / float(1024**3)
+                summary = (
+                    f"{'Live memory probe' if source == 'live' else 'Stored resource snapshot'}: "
+                    f"memory {used_gib:.1f}G used of {total_gib:.1f}G total"
+                )
+            if correction_requested:
+                summary += " My earlier memory reading was wrong or incomplete."
+            followups = [str(item) for item in (analysis.get("followups") if isinstance(analysis, dict) else []) if str(item).strip()]
+            for item in ["Show only CPU deltas", "Show only memory deltas"]:
+                if item not in followups:
+                    followups.append(item)
+            return summary, followups or ["Show only CPU deltas", "Show only memory deltas"]
         return "Status snapshot ready.", ["Show details", "What changed since last snapshot?"]
 
     def _handle_nl_observe(self, user_id: str, text: str, decision: dict[str, Any]) -> OrchestratorResponse:
@@ -15271,6 +16097,11 @@ class Orchestrator:
 
 def _resource_followup_kind(question: str) -> str:
     lowered = (question or "").lower()
+    if any(
+        phrase in lowered
+        for phrase in ("still running", "still alive", "still there", "is it running", "is it gone", "killed", "kill ", "terminate", "stop ", "close ", "quit ", "end ", "exited", "pid ", "pid:")
+    ):
+        return "process_state"
     if "using the most memory" in lowered or "using memory" in lowered:
         return "top_memory"
     if "using cpu" in lowered:

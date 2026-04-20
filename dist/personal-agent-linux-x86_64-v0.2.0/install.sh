@@ -87,7 +87,7 @@ cp -a "$bundle_root/payload/." "$release_root/"
 install -m 755 "$bundle_root/uninstall.sh" "$release_root/bin/personal-agent-uninstall"
 
 "$python_bin" -m venv "$release_root/.venv"
-"$release_root/.venv/bin/python" -m pip install -e "$release_root"
+"$release_root/.venv/bin/python" -m pip install "$release_root"
 "$release_root/.venv/bin/python" -m agent doctor --fix
 
 ln -sfn "$release_root" "$current_root"
@@ -127,7 +127,10 @@ Environment=AGENT_DB_PATH=$state_root/agent.db
 Environment=AGENT_LOG_PATH=$state_root/agent.jsonl
 Environment=AGENT_PERMISSIONS_PATH=$state_root/permissions.json
 Environment=AGENT_AUDIT_LOG_PATH=$state_root/audit.jsonl
+Environment=AGENT_SKILLS_PATH=$current_root/skills
 Environment=AGENT_WEBUI_DIST_PATH=$current_root/agent/webui/dist
+Environment=PERSONAL_AGENT_RUNTIME_ROOT=$current_root
+Environment=PERSONAL_AGENT_INSTANCE=stable
 StandardOutput=journal
 StandardError=journal
 

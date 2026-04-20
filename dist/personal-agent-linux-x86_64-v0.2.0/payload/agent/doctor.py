@@ -32,6 +32,10 @@ from agent.config import (
     canonical_state_dir,
     load_config,
     resolved_default_db_path,
+    runtime_port,
+    runtime_instance,
+    runtime_root_path,
+    runtime_service_name,
 )
 
 
@@ -674,7 +678,7 @@ def _check_llm_availability(api_base: str) -> DoctorCheck:
                 check_id="llm.availability",
                 status="WARN",
                 detail_short=f"/llm/status unavailable: {payload_or_error}",
-                next_action="Run: systemctl --user restart personal-agent-api.service",
+                next_action=f"Run: systemctl --user restart {runtime_service_name()}",
             )
         payload = payload_or_error if isinstance(payload_or_error, dict) else {}
     provider = str(payload.get("default_provider") or "unknown").strip() or "unknown"
@@ -759,7 +763,7 @@ def _doctor_checks(
         _check_secret_store_path(),
         _check_required_dirs(),
         _check_write_mode_safe(),
-        _check_systemd_service("personal-agent-api.service", "systemd.api_service"),
+        _check_systemd_service(runtime_service_name(), "systemd.api_service"),
         _check_llm_availability(api_base_url),
         _check_logging_to_stdout(),
     ]
@@ -913,7 +917,7 @@ def _recovery_manifest() -> dict[str, Any]:
             "Configured discovery sources and policies live under the canonical config/state directories and are included by copying those paths.",
         ],
         "restore_steps": [
-            "Stop personal-agent-api.service and personal-agent-telegram.service if they are running.",
+            f"Stop {runtime_service_name()} and personal-agent-telegram.service if they are running.",
             "Restore the copied operator config and state files to their canonical paths.",
             "Run: python -m agent doctor --fix",
             "Restart the user services and confirm /ready and /health are healthy.",
@@ -930,8 +934,16 @@ def _recovery_manifest() -> dict[str, Any]:
 
 
 def _diagnostics_paths_manifest(repo_root: Path) -> dict[str, str]:
+    instance = runtime_instance()
+    service_name = "personal-agent-api-dev.service" if instance == "dev" else "personal-agent-api.service"
+    launcher_target = "personal-agent-webui-dev" if instance == "dev" else "personal-agent-webui"
     return {
+        "runtime_instance": instance,
         "repo_root": str(repo_root),
+        "runtime_root": str(runtime_root_path()),
+        "install_mode": "editable_checkout" if instance == "dev" else "stable_installed",
+        "service_name": service_name,
+        "launcher_target": launcher_target,
         "config_dir": str(canonical_config_dir()),
         "state_dir": str(canonical_state_dir()),
         "db_path": str(resolved_default_db_path()),
@@ -954,7 +966,7 @@ def _diagnostics_fetch(url: str) -> dict[str, Any]:
 
 
 def _diagnostics_runtime_payloads(api_base_url: str) -> dict[str, Any]:
-    base = str(api_base_url or "http://127.0.0.1:8765").rstrip("/")
+    base = str(api_base_url or f"http://127.0.0.1:{runtime_port()}").rstrip("/")
     return {
         "health": _diagnostics_fetch(f"{base}/health"),
         "ready": _diagnostics_fetch(f"{base}/ready"),
@@ -1044,7 +1056,7 @@ def run_doctor_report(
     online: bool = False,
     fix: bool = False,
     collect_diagnostics: bool = False,
-    api_base_url: str = "http://127.0.0.1:8765",
+    api_base_url: str = f"http://127.0.0.1:{runtime_port()}",
     now_epoch: int | None = None,
 ) -> DoctorReport:
     configure_logging_if_needed()
@@ -1137,7 +1149,7 @@ def main(argv: list[str] | None = None) -> int:
         help="write one redacted local diagnostics bundle and print its path",
     )
     parser.add_argument("--online", action="store_true", help="allow online Telegram token validation")
-    parser.add_argument("--api-base-url", default="http://127.0.0.1:8765", help="local API base URL")
+    parser.add_argument("--api-base-url", default=f"http://127.0.0.1:{runtime_port()}", help="local API base URL")
     parser.add_argument("--repo-root", default=None, help="override repo root")
     args = parser.parse_args(argv)
 

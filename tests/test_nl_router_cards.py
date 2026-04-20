@@ -1,10 +1,11 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.cards import render_cards_markdown, validate_cards_payload
 from agent.nl_router import classify_free_text, nl_route
-from agent.orchestrator import Orchestrator
+from agent.orchestrator import Orchestrator, OrchestratorResponse
 from memory.db import MemoryDB
 
 
@@ -32,6 +33,9 @@ class TestNLRouterCards(unittest.TestCase):
         self.assertEqual(classify_free_text("can you run a check and see if you can learn more?"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("can you dig deeper into my system?"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("run a system check"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("my download is going slowly, can you tell why?"), "EXPLAIN_PREVIOUS")
+        self.assertEqual(classify_free_text("my pc is slow"), "OBSERVE_PC")
+        self.assertEqual(classify_free_text("laggy system"), "OBSERVE_PC")
         self.assertEqual(classify_free_text("remember this for later"), "MEMORY_WRITE_REQUEST")
         self.assertEqual(classify_free_text("plan my day"), "PLAN_DAY")
         self.assertEqual(classify_free_text("can you help me plan my day?"), "PLAN_DAY")
@@ -39,6 +43,40 @@ class TestNLRouterCards(unittest.TestCase):
         self.assertEqual(classify_free_text("what do you remember about me?"), "MEMORY_INSPECT")
         self.assertEqual(classify_free_text("what are we working on?"), "MEMORY_INSPECT")
         self.assertEqual(classify_free_text("what do you know about my system?"), "MEMORY_INSPECT")
+        self.assertEqual(
+            classify_free_text("My Wi-Fi drops after suspend. Can you help me figure out why?"),
+            "DIAGNOSTICS_CAPTURE_REQUEST",
+        )
+        self.assertEqual(
+            classify_free_text("My Bluetooth headphones disconnect after sleep. Can you help me figure out why?"),
+            "DIAGNOSTICS_CAPTURE_BLUETOOTH_AUDIO_REQUEST",
+        )
+        self.assertEqual(
+            classify_free_text("My disk is full and I can't save files. Can you help me figure out why?"),
+            "DIAGNOSTICS_CAPTURE_STORAGE_DISK_REQUEST",
+        )
+        self.assertEqual(
+            classify_free_text("My printer is offline and print jobs are stuck. Can you help me figure out why?"),
+            "DIAGNOSTICS_CAPTURE_PRINTER_CUPS_REQUEST",
+        )
+        self.assertEqual(
+            classify_free_text("My webcam isn't detected after sleep. Can you help me figure out why?"),
+            "DIAGNOSTICS_CAPTURE_GENERIC_DEVICE_FALLBACK_REQUEST",
+        )
+        self.assertNotEqual(
+            classify_free_text("what is eating space on my drive?"),
+            "DIAGNOSTICS_CAPTURE_STORAGE_DISK_REQUEST",
+        )
+        self.assertNotEqual(
+            classify_free_text("how do I print a document?"),
+            "DIAGNOSTICS_CAPTURE_PRINTER_CUPS_REQUEST",
+        )
+        self.assertNotEqual(
+            classify_free_text("can you help me write a script?"),
+            "DIAGNOSTICS_CAPTURE_GENERIC_DEVICE_FALLBACK_REQUEST",
+        )
+        self.assertEqual(classify_free_text("Write a Bash script that finds the 10 largest files under a directory."), "UNKNOWN")
+        self.assertEqual(classify_free_text("how do I pair bluetooth headphones?"), "UNKNOWN")
         self.assertEqual(classify_free_text("hello"), "CHITCHAT")
         self.assertEqual(classify_free_text("lorem ipsum"), "UNKNOWN")
 
@@ -93,6 +131,28 @@ class TestNLRouterCards(unittest.TestCase):
                 {"skill": "storage_governor", "function": "storage_report"},
             ],
         )
+
+    def test_slowdown_questions_use_observe_path_not_generic_chat(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+        )
+        observe_response = OrchestratorResponse(
+            "observed",
+            {"skip_friction_formatting": True, "cards_payload": {"cards": [], "raw_available": False, "summary": "observed", "confidence": 1.0, "next_questions": []}},
+        )
+
+        with (
+            patch.object(orchestrator, "_handle_nl_observe", return_value=observe_response) as observe_call,
+            patch.object(orchestrator, "_llm_chat", side_effect=AssertionError("generic chat should not be used")),
+        ):
+            response = orchestrator.handle_message("my download is going slowly, can you tell why?", "user-1")
+
+        self.assertEqual("observed", response.text)
+        self.assertEqual(1, observe_call.call_count)
 
     def test_card_schema_validation(self) -> None:
         payload = {

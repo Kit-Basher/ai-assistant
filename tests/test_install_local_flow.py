@@ -78,7 +78,9 @@ def _write_fake_python(bin_dir: Path, *, version: str, logs_dir: Path) -> None:
         "    template_path=\"${2-}\"\n"
         "    desktop_path=\"${3-}\"\n"
         "    launcher_path=\"${4-}\"\n"
-        "    perl -0pe \"s#__PERSONAL_AGENT_LAUNCHER__#${launcher_path}#g\" \"$template_path\" > \"$desktop_path\"\n"
+        "    desktop_name=\"${5-}\"\n"
+        "    desktop_comment=\"${6-}\"\n"
+        "    perl -0pe \"s#__PERSONAL_AGENT_LAUNCHER__#${launcher_path}#g; s#__PERSONAL_AGENT_NAME__#${desktop_name}#g; s#__PERSONAL_AGENT_COMMENT__#${desktop_comment}#g\" \"$template_path\" > \"$desktop_path\"\n"
         "    exit 0\n"
         "    ;;\n"
         "esac\n"
@@ -147,14 +149,14 @@ class TestInstallLocalFlow(unittest.TestCase):
             second = _run_script(script, env=env, args=["--desktop-launcher"])
             self.assertEqual(0, second.returncode, second.stderr)
 
-            service_unit = home / ".config" / "systemd" / "user" / "personal-agent-api.service"
-            launcher_path = home / ".local" / "share" / "personal-agent" / "bin" / "personal-agent-webui"
-            desktop_path = home / ".local" / "share" / "applications" / "personal-agent.desktop"
+            service_unit = home / ".config" / "systemd" / "user" / "personal-agent-api-dev.service"
+            launcher_path = home / ".local" / "share" / "personal-agent" / "bin" / "personal-agent-webui-dev"
+            desktop_path = home / ".local" / "share" / "applications" / "personal-agent-dev.desktop"
             icon_path = home / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps" / "personal-agent.svg"
-            shell_alias = home / ".local" / "bin" / "personal-agent-webui"
+            shell_alias = home / ".local" / "bin" / "personal-agent-webui-dev"
 
             self.assertTrue(service_unit.is_symlink())
-            self.assertEqual(REPO_ROOT / "systemd" / "personal-agent-api.service", service_unit.resolve())
+            self.assertEqual(REPO_ROOT / "systemd" / "personal-agent-api-dev.service", service_unit.resolve())
             self.assertTrue(launcher_path.is_file())
             self.assertTrue(desktop_path.is_file())
             self.assertTrue(icon_path.is_file())
@@ -163,10 +165,10 @@ class TestInstallLocalFlow(unittest.TestCase):
 
             rendered = desktop_path.read_text(encoding="utf-8")
             self.assertIn(str(launcher_path), rendered)
-            self.assertIn("Personal Agent", rendered)
+            self.assertIn("Personal Agent (Dev)", rendered)
 
             self.assertIn("daemon-reload", systemctl_log.read_text(encoding="utf-8"))
-            self.assertIn("enable --now personal-agent-api.service", systemctl_log.read_text(encoding="utf-8"))
+            self.assertIn("enable --now personal-agent-api-dev.service", systemctl_log.read_text(encoding="utf-8"))
             self.assertFalse(xdg_open_log.exists())
 
     def test_install_local_rejects_old_python_before_partial_install(self) -> None:

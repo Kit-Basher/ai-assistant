@@ -580,7 +580,10 @@ def _structured_error_text(payload: dict[str, Any]) -> str | None:
     if payload.get("ok") is not False:
         return None
     if is_no_llm_error_kind(payload.get("error_kind")):
-        return build_no_llm_public_message()
+        runtime_ready = bool(payload.get("runtime_ready"))
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        runtime_ready = runtime_ready or bool(meta.get("runtime_ready"))
+        return build_no_llm_public_message(runtime_ready=runtime_ready)
     detail = str(payload.get("message") or "").strip() or None
     return build_public_sentence_text(
         "I couldn't finish that request",
@@ -626,7 +629,9 @@ def build_telegram_chat_payload_result(
     setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
     proxy_meta = payload.get("_proxy_meta") if isinstance(payload.get("_proxy_meta"), dict) else {}
     if is_no_llm_error_kind(payload.get("error_kind")):
-        message = build_no_llm_public_message()
+        runtime_ready = bool(payload.get("runtime_ready"))
+        runtime_ready = runtime_ready or bool(meta.get("runtime_ready"))
+        message = build_no_llm_public_message(runtime_ready=runtime_ready)
     else:
         message = str(
             (assistant or {}).get("content")

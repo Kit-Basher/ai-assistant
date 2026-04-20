@@ -375,7 +375,7 @@ class TestRegressionSoak(unittest.TestCase):
         for _ in range(3):
             result = recommend_packs_for_capability(prompt, pack_store=store, pack_registry_discovery=_BrokenDiscovery())
             self.assertIsNotNone(result)
-            self.assertEqual("text_only", result["fallback"])
+            self.assertEqual("propose_new_capability", result["fallback"])
             self.assertEqual("missing", result["status"])
             self.assertTrue(result["source_errors"])
 

@@ -5,10 +5,18 @@ import json
 import socket
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from urllib import error as urllib_error
 from unittest.mock import patch
 
-from telegram_adapter.bot import _chat_proxy_timeout_seconds, _handle_message, _post_local_api_chat_json, _post_local_api_chat_json_async
+from telegram_adapter.bot import (
+    _chat_proxy_timeout_seconds,
+    _handle_message,
+    _handle_telegram_text_via_local_api,
+    _post_local_api_chat_json,
+    _post_local_api_chat_json_async,
+    _telegram_message_age_ms,
+)
 from agent.public_chat import build_no_llm_public_message
 
 
@@ -43,9 +51,10 @@ class _FakeDB:
 
 
 class _FakeMessage:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, date: datetime | None = None) -> None:
         self.text = text
         self.message_id = 1
+        self.date = date or datetime.now(timezone.utc)
         self.replies: list[dict[str, str | None]] = []
         self._next_message_id = 100
 
@@ -73,9 +82,9 @@ class _FakeChat:
 
 
 class _FakeUpdate:
-    def __init__(self, chat_id: int, text: str) -> None:
+    def __init__(self, chat_id: int, text: str, *, date: datetime | None = None) -> None:
         self.effective_chat = _FakeChat(chat_id)
-        self.effective_message = _FakeMessage(text)
+        self.effective_message = _FakeMessage(text, date=date)
 
 
 class _FakeContext:
@@ -105,9 +114,13 @@ def _read_log_rows(path: str) -> list[dict[str, object]]:
         return [json.loads(line) for line in handle.read().splitlines() if line.strip()]
 
 
+def _log_event_rows(rows: list[dict[str, object]], event_type: str) -> list[dict[str, object]]:
+    return [row for row in rows if str(row.get("type") or "") == event_type]
+
+
 def _chat_api_response(text: str, *, data: dict[str, object] | None = None) -> dict[str, object]:
     meta_source = dict(data) if isinstance(data, dict) else {}
-    return {
+    payload = {
         "ok": bool(meta_source.get("ok", True)),
         "assistant": {"content": text},
         "message": text,
@@ -123,9 +136,166 @@ def _chat_api_response(text: str, *, data: dict[str, object] | None = None) -> d
         },
         "error_kind": meta_source.get("error_kind"),
     }
+    if isinstance(meta_source.get("cards_payload"), dict):
+        payload["cards_payload"] = dict(meta_source["cards_payload"])
+    return payload
 
 
 class TestTelegramAdapter(unittest.TestCase):
+    def test_telegram_message_age_ms_uses_message_timestamp(self) -> None:
+        received_at = datetime(2026, 4, 19, 12, 0, 0, tzinfo=timezone.utc)
+        message_date = received_at - timedelta(milliseconds=1534)
+        message = _FakeMessage("hello", date=message_date)
+        self.assertEqual(1534, _telegram_message_age_ms(message, received_at=received_at))
+
+    def test_trivial_social_turn_uses_local_fast_path_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = f"{tmpdir}/agent.log"
+
+            async def _scenario() -> dict[str, object]:
+                with patch(
+                    "telegram_adapter.bot._post_local_api_chat_json_async",
+                    side_effect=AssertionError("social turns must not call the local API"),
+                ):
+                    return await _handle_telegram_text_via_local_api(
+                        text="hello",
+                        chat_id="42",
+                        trace_id="trace-1",
+                        bot_data={},
+                        log_path=log_path,
+                        runtime=None,
+                        orchestrator=None,
+                        runtime_version=None,
+                        runtime_git_commit=None,
+                        runtime_started_ts=None,
+                    )
+
+            result = asyncio.run(_scenario())
+            self.assertTrue(bool(result.get("ok")))
+            self.assertFalse(bool(result.get("used_llm")))
+            self.assertEqual("telegram_social_turn", result.get("handler_name"))
+            chat_meta = result.get("chat_meta") if isinstance(result.get("chat_meta"), dict) else {}
+            self.assertEqual("social_turn", chat_meta.get("assistant_turn_type"))
+            self.assertEqual("greeting", chat_meta.get("assistant_turn_kind"))
+            self.assertTrue(bool(chat_meta.get("fast_path")))
+
+            event_types = [str(row.get("type") or "") for row in _read_log_rows(log_path)]
+            self.assertIn("telegram.social_turn.fast_path", event_types)
+
+    def test_deterministic_status_routes_skip_placeholder_and_log_latency_breakdown(self) -> None:
+        cases = [
+            ("what model are you using right now", "model_status", "Current model is ollama:qwen3.5:4b."),
+            ("what local models are available", "model_status", "Local models are qwen3.5:4b and llama3.1:8b."),
+            ("is the agent healthy right now", "runtime_status", "Runtime is ready."),
+            ("is openrouter configured?", "provider_status", "OpenRouter is configured."),
+        ]
+
+        async def _fake_post(payload: dict[str, object]) -> dict[str, object]:
+            messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+            text = str(((messages[-1] if messages else {}) or {}).get("content") or "")
+            if text == "what model are you using right now":
+                return _chat_api_response(
+                    "Current model is ollama:qwen3.5:4b.",
+                    data={"route": "model_status", "used_runtime_state": True, "used_llm": False},
+                )
+            if text == "what local models are available":
+                return _chat_api_response(
+                    "Local models are qwen3.5:4b and llama3.1:8b.",
+                    data={"route": "model_status", "used_runtime_state": True, "used_llm": False},
+                )
+            if text == "is the agent healthy right now":
+                return _chat_api_response(
+                    "Runtime is ready.",
+                    data={"route": "runtime_status", "used_runtime_state": True, "used_llm": False},
+                )
+            return _chat_api_response(
+                "OpenRouter is configured.",
+                data={"route": "provider_status", "used_runtime_state": True, "used_llm": False},
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = f"{tmpdir}/agent.log"
+            context = _FakeContext(
+                {
+                    "orchestrator": _FakeOrchestrator(_FakeResponse("unused")),
+                    "db": _FakeDB(),
+                    "log_path": log_path,
+                }
+            )
+            context.application.bot_data["fetch_local_api_chat_json"] = _fake_post
+
+            for index, (prompt, expected_route, expected_reply) in enumerate(cases, start=1):
+                update = _FakeUpdate(800 + index, prompt, date=datetime.now(timezone.utc) - timedelta(seconds=2))
+                asyncio.run(_handle_message(update, context))
+                self.assertEqual(expected_reply, str(update.effective_message.replies[-1]["text"] or ""))
+                self.assertEqual(1, len(update.effective_message.replies))
+                self.assertNotIn("Thinking…", str(update.effective_message.replies[0]["text"] or ""))
+
+            rows = _read_log_rows(log_path)
+            summary_rows = _log_event_rows(rows, "telegram.latency_summary")
+            self.assertEqual(len(cases), len(summary_rows))
+            self.assertEqual(0, len(_log_event_rows(rows, "telegram.placeholder_send.start")))
+
+            for summary_row, (_, expected_route, _) in zip(summary_rows, cases, strict=True):
+                payload = summary_row.get("payload") if isinstance(summary_row.get("payload"), dict) else {}
+                self.assertEqual(expected_route, payload.get("selected_route"))
+                self.assertEqual("deferred", payload.get("placeholder_policy"))
+                self.assertFalse(bool(payload.get("placeholder_used")))
+                self.assertIsInstance(payload.get("telegram_message_age_ms"), int)
+                self.assertIsInstance(payload.get("local_api_request_ms"), int)
+                self.assertIsInstance(payload.get("response_delivery_ms"), int)
+                self.assertIsInstance(payload.get("visible_total_ms"), int)
+
+    def test_diagnostics_capture_route_renders_compact_card(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = f"{tmpdir}/agent.log"
+            update = _FakeUpdate(900, "my wifi drops after suspend")
+            context = _FakeContext(
+                {
+                    "orchestrator": _FakeOrchestrator(_FakeResponse("unused")),
+                    "db": _FakeDB(),
+                    "log_path": log_path,
+                }
+            )
+
+            async def _fake_post(_payload: dict[str, object]) -> dict[str, object]:
+                return _chat_api_response(
+                    "I can gather a compact diagnostics snapshot for you. Do you want me to do that?",
+                    data={
+                        "route": "diagnostics_capture",
+                        "used_runtime_state": False,
+                        "used_llm": False,
+                        "cards_payload": {
+                            "cards": [
+                                {
+                                    "title": "Diagnostics snapshot",
+                                    "lines": [
+                                        "OS/kernel: Linux test-host 6.8.0-1",
+                                        "Network: state: up; up interfaces: wlp2s0",
+                                        "Suspend/resume: matches: 2",
+                                        "Assessment: Network is not fully up.",
+                                        "Next action: Check NetworkManager and the Wi-Fi driver after suspend.",
+                                    ],
+                                    "severity": "warn",
+                                }
+                            ],
+                            "raw_available": False,
+                            "summary": "Network is not fully up.",
+                            "confidence": 1.0,
+                            "next_questions": [],
+                        },
+                    },
+                )
+
+            context.application.bot_data["fetch_local_api_chat_json"] = _fake_post
+            asyncio.run(_handle_message(update, context))
+
+            reply_text = str(update.effective_message.replies[-1]["text"] or "")
+            self.assertEqual("Markdown", update.effective_message.replies[-1]["parse_mode"])
+            self.assertIn("*Diagnostics snapshot*", reply_text)
+            self.assertIn("Assessment: Network is not fully up.", reply_text)
+            self.assertIn("Next action: Check NetworkManager and the Wi-Fi driver after suspend.", reply_text)
+
     def test_text_message_routes_through_api_proxy_and_sends_reply(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = f"{tmpdir}/agent.log"
@@ -697,124 +867,159 @@ class TestTelegramAdapter(unittest.TestCase):
             finish_rows = [row for row in rows if str(row.get("type") or "") == "telegram.local_api_chat.finish"]
             self.assertTrue(all(str((row.get("payload") or {}).get("execution_mode") or "") == "async_http" for row in finish_rows))
 
-    def test_same_chat_proxy_requests_are_rejected_while_in_flight(self) -> None:
+    def test_same_chat_two_quick_messages_are_serialized_without_busy_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = f"{tmpdir}/agent.log"
-            orchestrator = _FakeOrchestrator(_FakeResponse("unused"))
-            first_update = _FakeUpdate(303, "first slow")
-            second_update = _FakeUpdate(303, "second fast")
-            context = _FakeContext(
-                {
-                    "orchestrator": orchestrator,
-                    "db": _FakeDB(),
-                    "log_path": log_path,
-                }
-            )
-            order: list[str] = []
-            active_calls = {"count": 0, "max": 0}
-            first_started = asyncio.Event()
-
-            async def _fake_post(payload: dict[str, object]) -> dict[str, object]:
-                messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
-                text = str(((messages[-1] if messages else {}) or {}).get("content") or "")
-                active_calls["count"] += 1
-                active_calls["max"] = max(active_calls["max"], active_calls["count"])
-                order.append(f"start:{text}")
-                try:
-                    if text == "first slow":
-                        first_started.set()
-                        await asyncio.sleep(0.06)
-                        return _chat_api_response("first reply", data={"route": "generic_chat"})
-                    return _chat_api_response("second reply", data={"route": "generic_chat"})
-                finally:
-                    order.append(f"end:{text}")
-                    active_calls["count"] -= 1
-            context.application.bot_data["fetch_local_api_chat_json"] = _fake_post
-
-            async def _scenario() -> None:
-                first_task = asyncio.create_task(_handle_message(first_update, context))
-                for _ in range(20):
-                    if first_started.is_set():
-                        break
-                    await asyncio.sleep(0.005)
-                second_task = asyncio.create_task(_handle_message(second_update, context))
-                await asyncio.wait_for(first_task, timeout=0.3)
-                await asyncio.wait_for(second_task, timeout=0.3)
-
-            asyncio.run(_scenario())
-
-            self.assertEqual(1, active_calls["max"])
-            self.assertEqual(["start:first slow", "end:first slow"], order)
-            self.assertIn("still working on your last request", str(second_update.effective_message.replies[-1]["text"] or "").lower())
-            rows = _read_log_rows(log_path)
-            message_rows = [
-                row.get("payload")
-                for row in rows
-                if str(row.get("type") or "") == "telegram_message" and isinstance(row.get("payload"), dict)
-            ]
-            self.assertTrue(any(str(row.get("selected_route") or "") == "chat_busy" for row in message_rows))
-            self.assertTrue(any(bool(row.get("proxy_overlap_rejected")) for row in message_rows if isinstance(row, dict)))
-
-    def test_same_chat_burst_uses_busy_reply_not_timeout_reply(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = f"{tmpdir}/agent.log"
             context = _FakeContext(
                 {
                     "orchestrator": _FakeOrchestrator(_FakeResponse("unused")),
                     "db": _FakeDB(),
-                    "log_path": log_path,
+                    "log_path": f"{tmpdir}/agent.log",
                 }
             )
-            updates = [
-                _FakeUpdate(404, "what model are you using?"),
-                _FakeUpdate(404, "is openrouter configured?"),
-                _FakeUpdate(404, "configure openrouter"),
-                _FakeUpdate(404, "what managed adapters exist?"),
-            ]
+            first_update = _FakeUpdate(303, "first slow")
+            second_update = _FakeUpdate(303, "second quick")
+            release = asyncio.Event()
+            seen: list[str] = []
             first_started = asyncio.Event()
 
             async def _fake_post(payload: dict[str, object]) -> dict[str, object]:
                 messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
                 text = str(((messages[-1] if messages else {}) or {}).get("content") or "")
-                if text == "what model are you using?":
+                seen.append(text)
+                if text == "first slow":
                     first_started.set()
-                    await asyncio.sleep(0.08)
-                    return _chat_api_response("Chat is currently using ollama:qwen3.5:4b on Ollama.", data={"route": "model_status"})
-                return _chat_api_response("unexpected", data={"route": "generic_chat"})
+                    await release.wait()
+                    return _chat_api_response("first reply", data={"route": "generic_chat"})
+                return _chat_api_response("second reply", data={"route": "generic_chat"})
 
             context.application.bot_data["fetch_local_api_chat_json"] = _fake_post
 
             async def _scenario() -> None:
-                first_task = asyncio.create_task(_handle_message(updates[0], context))
+                first_task = asyncio.create_task(_handle_message(first_update, context))
                 await asyncio.wait_for(first_started.wait(), timeout=0.2)
-                burst_tasks = [asyncio.create_task(_handle_message(update, context)) for update in updates[1:]]
+                second_task = asyncio.create_task(_handle_message(second_update, context))
+                await asyncio.wait_for(second_task, timeout=0.2)
+                release.set()
                 await asyncio.wait_for(first_task, timeout=0.3)
-                for task in burst_tasks:
-                    await asyncio.wait_for(task, timeout=0.3)
-                for _ in range(20):
-                    if "ollama:qwen3.5:4b" in str(updates[0].effective_message.replies[-1]["text"] or ""):
+                for _ in range(40):
+                    if second_update.effective_message.replies and str(second_update.effective_message.replies[-1]["text"] or "") == "second reply":
                         break
                     await asyncio.sleep(0.01)
 
             asyncio.run(_scenario())
 
-            self.assertIn("ollama:qwen3.5:4b", str(updates[0].effective_message.replies[-1]["text"] or ""))
-            for update in updates[1:]:
-                reply = str(update.effective_message.replies[-1]["text"] or "")
-                self.assertIn("still working on your last request", reply.lower())
-                self.assertNotIn("couldn't get a reply from the agent in time", reply.lower())
+            rows = _read_log_rows(f"{tmpdir}/agent.log")
+            self.assertEqual(["first slow", "second quick"], seen)
+            self.assertEqual("first reply", str(first_update.effective_message.replies[-1]["text"] or ""))
+            self.assertEqual("second reply", str(second_update.effective_message.replies[-1]["text"] or ""))
+            self.assertNotIn("still working on your last request", str(second_update.effective_message.replies[-1]["text"] or "").lower())
+            self.assertGreaterEqual(len(_log_event_rows(rows, "telegram.local_api_chat.pending_promoted")), 1)
 
-            rows = _read_log_rows(log_path)
-            message_rows = [
-                row.get("payload")
-                for row in rows
-                if str(row.get("type") or "") == "telegram_message" and isinstance(row.get("payload"), dict)
-            ]
-            busy_rows = [row for row in message_rows if str(row.get("selected_route") or "") == "chat_busy"]
-            self.assertEqual(3, len(busy_rows))
-            self.assertTrue(all(bool(row.get("proxy_overlap_rejected")) for row in busy_rows))
-            self.assertTrue(all(str(row.get("proxy_failure_kind") or "") == "same_chat_in_flight" for row in busy_rows))
-            self.assertTrue(all(int(row.get("proxy_elapsed_ms") or 0) == 0 for row in busy_rows))
+    def test_same_chat_three_quick_messages_keep_first_and_latest_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = _FakeContext(
+                {
+                    "orchestrator": _FakeOrchestrator(_FakeResponse("unused")),
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                }
+            )
+            first_update = _FakeUpdate(404, "first slow")
+            middle_update = _FakeUpdate(404, "middle")
+            latest_update = _FakeUpdate(404, "latest")
+            release = asyncio.Event()
+            seen: list[str] = []
+            first_started = asyncio.Event()
+
+            async def _fake_post(payload: dict[str, object]) -> dict[str, object]:
+                messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+                text = str(((messages[-1] if messages else {}) or {}).get("content") or "")
+                seen.append(text)
+                if text == "first slow":
+                    first_started.set()
+                    await release.wait()
+                    return _chat_api_response("first reply", data={"route": "generic_chat"})
+                if text == "latest":
+                    return _chat_api_response("latest reply", data={"route": "generic_chat"})
+                return _chat_api_response("middle reply", data={"route": "generic_chat"})
+
+            context.application.bot_data["fetch_local_api_chat_json"] = _fake_post
+
+            async def _scenario() -> None:
+                first_task = asyncio.create_task(_handle_message(first_update, context))
+                await asyncio.wait_for(first_started.wait(), timeout=0.2)
+                middle_task = asyncio.create_task(_handle_message(middle_update, context))
+                latest_task = asyncio.create_task(_handle_message(latest_update, context))
+                await asyncio.wait_for(middle_task, timeout=0.2)
+                await asyncio.wait_for(latest_task, timeout=0.2)
+                release.set()
+                await asyncio.wait_for(first_task, timeout=0.3)
+                for _ in range(40):
+                    if latest_update.effective_message.replies and str(latest_update.effective_message.replies[-1]["text"] or "") == "latest reply":
+                        break
+                    await asyncio.sleep(0.01)
+
+            asyncio.run(_scenario())
+
+            rows = _read_log_rows(f"{tmpdir}/agent.log")
+            self.assertEqual(["first slow", "latest"], seen)
+            self.assertEqual("first reply", str(first_update.effective_message.replies[-1]["text"] or ""))
+            self.assertEqual("latest reply", str(latest_update.effective_message.replies[-1]["text"] or ""))
+            self.assertEqual(0, len(middle_update.effective_message.replies))
+            overwritten_rows = _log_event_rows(rows, "telegram.local_api_chat.pending_overwritten")
+            promoted_rows = _log_event_rows(rows, "telegram.local_api_chat.pending_promoted")
+            self.assertEqual(1, len(overwritten_rows))
+            self.assertEqual(1, len(promoted_rows))
+            self.assertTrue(bool((overwritten_rows[0].get("payload") or {}).get("replaced_pending")))
+            self.assertTrue(bool((promoted_rows[0].get("payload") or {}).get("promoted")))
+
+    def test_same_chat_pending_request_is_processed_if_active_request_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            context = _FakeContext(
+                {
+                    "orchestrator": _FakeOrchestrator(_FakeResponse("unused")),
+                    "db": _FakeDB(),
+                    "log_path": f"{tmpdir}/agent.log",
+                }
+            )
+            first_update = _FakeUpdate(505, "first fail")
+            second_update = _FakeUpdate(505, "second after fail")
+            release = asyncio.Event()
+            first_started = asyncio.Event()
+            seen: list[str] = []
+
+            async def _fake_post(payload: dict[str, object]) -> dict[str, object]:
+                messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+                text = str(((messages[-1] if messages else {}) or {}).get("content") or "")
+                seen.append(text)
+                if text == "first fail":
+                    first_started.set()
+                    await release.wait()
+                    raise RuntimeError("boom")
+                return _chat_api_response("second reply", data={"route": "generic_chat"})
+
+            context.application.bot_data["fetch_local_api_chat_json"] = _fake_post
+
+            async def _scenario() -> None:
+                first_task = asyncio.create_task(_handle_message(first_update, context))
+                await asyncio.wait_for(first_started.wait(), timeout=0.2)
+                second_task = asyncio.create_task(_handle_message(second_update, context))
+                await asyncio.wait_for(second_task, timeout=0.2)
+                release.set()
+                await asyncio.wait_for(first_task, timeout=0.3)
+                for _ in range(40):
+                    if len(second_update.effective_message.replies) and str(second_update.effective_message.replies[-1]["text"] or "") == "second reply":
+                        break
+                    await asyncio.sleep(0.01)
+
+            asyncio.run(_scenario())
+
+            rows = _read_log_rows(f"{tmpdir}/agent.log")
+            self.assertIn("first fail", seen)
+            self.assertIn("second after fail", seen)
+            self.assertIn("agent encountered an error", str(first_update.effective_message.replies[-1]["text"] or "").lower())
+            self.assertEqual("second reply", str(second_update.effective_message.replies[-1]["text"] or ""))
+            self.assertGreaterEqual(len(_log_event_rows(rows, "telegram.local_api_chat.pending_promoted")), 1)
 
 
 if __name__ == "__main__":

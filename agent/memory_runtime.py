@@ -40,6 +40,12 @@ _FOLLOWUP_POSITIVE = {
     "go ahead",
     "that one",
     "show me more",
+    "yes do it",
+    "yep",
+    "yup",
+    "sure go ahead",
+    "please do it",
+    "confirm",
 }
 _FOLLOWUP_NEGATIVE = {"no", "n", "cancel", "stop", "never mind", "nevermind"}
 _NEW_THREAD_PHRASES = {"new topic", "different topic", "switch topic", "separate question"}

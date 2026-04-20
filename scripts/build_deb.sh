@@ -171,8 +171,12 @@ shutil.copy2(repo_root / "VERSION", release_root / "VERSION")
 
 desktop_template = (repo_root / "packaging" / "personal-agent.desktop").read_text(encoding="utf-8")
 desktop_rendered = desktop_template.replace("__PERSONAL_AGENT_LAUNCHER__", "/usr/bin/personal-agent-webui")
+desktop_rendered = desktop_rendered.replace("__PERSONAL_AGENT_NAME__", "Personal Agent")
+desktop_rendered = desktop_rendered.replace("__PERSONAL_AGENT_COMMENT__", "Open Personal Agent in your default browser")
 if "__PERSONAL_AGENT_LAUNCHER__" in desktop_rendered:
     raise SystemExit("desktop launcher placeholder was not replaced")
+if "__PERSONAL_AGENT_NAME__" in desktop_rendered or "__PERSONAL_AGENT_COMMENT__" in desktop_rendered:
+    raise SystemExit("desktop metadata placeholder was not replaced")
 (desktop_dir / "personal-agent.desktop").write_text(desktop_rendered, encoding="utf-8")
 
 shutil.copy2(repo_root / "assets" / "icons" / "personal-agent.svg", icon_dir / "personal-agent.svg")

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 import re
 
-from agent.packs.capability_recommendation import detect_pack_capability_need
+from agent.packs.capability_recommendation import classify_capability_gap_request
 from agent.nl_router import classify_free_text
 
 
@@ -1639,13 +1639,25 @@ def classify_runtime_chat_route(
             "generic_allowed": False,
             "fallback_reason": "assistant_capabilities",
         }
-    capability_need = detect_pack_capability_need(normalized)
-    if capability_need is not None:
+    capability_gap = classify_capability_gap_request(normalized)
+    if str(capability_gap.get("request_kind") or "").strip().lower() == "capability" and str(
+        capability_gap.get("classification") or ""
+    ).strip().lower() != "can_answer_locally":
+        capability_key = str(capability_gap.get("capability") or "").strip().lower() or None
+        if capability_key is not None:
+            return {
+                "route": "action_tool",
+                "kind": "pack_capability_recommendation",
+                "capability": capability_key,
+                "capability_label": capability_gap.get("label"),
+                "generic_allowed": False,
+                "fallback_reason": "action_tool",
+            }
         return {
             "route": "action_tool",
-            "kind": "pack_capability_recommendation",
-            "capability": capability_need.get("capability"),
-            "capability_label": capability_need.get("label"),
+            "kind": "capability_gap_plan",
+            "capability_label": capability_gap.get("label"),
+            "capability_classification": capability_gap.get("classification"),
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }

@@ -11,7 +11,11 @@
     "build_backend.py",
     "pyproject.toml",
     "requirements.txt",
-    "VERSION"
+    "VERSION",
+    "README.md",
+    "personal_agent_bootstrap.py",
+    "personal_agent_bootstrap.pth",
+    "sitecustomize.py"
   ],
   "source_repo": "/home/c/personal-agent"
 }

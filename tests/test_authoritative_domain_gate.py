@@ -95,6 +95,9 @@ class TestAuthoritativeDomainGate(unittest.TestCase):
         self.assertEqual({"system.performance"}, classify_authoritative_domain("am i throttling while gaming?"))
         self.assertEqual({"system.health"}, classify_authoritative_domain("show failed units and journal errors"))
         self.assertEqual({"system.storage"}, classify_authoritative_domain("what is eating space on my drive"))
+        self.assertEqual({"system.performance"}, classify_authoritative_domain("my download is going slowly, can you tell why?"))
+        self.assertEqual({"system.performance"}, classify_authoritative_domain("my pc is slow"))
+        self.assertEqual({"system.performance"}, classify_authoritative_domain("laggy system"))
         self.assertEqual(set(), classify_authoritative_domain("draft a short email update"))
 
     def test_ask_authoritative_enforcement_calls_metrics_and_injects_observations(self) -> None:

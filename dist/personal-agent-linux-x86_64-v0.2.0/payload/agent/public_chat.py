@@ -45,6 +45,7 @@ _INTERNAL_JSON_KEYS = {
 }
 _JSON_OBJECT_RE = re.compile(r"^\s*[\[{].*[\]}]\s*$", re.DOTALL)
 _NO_LLM_PUBLIC_MESSAGE = "I’m not ready to chat yet. Open Setup to finish getting me ready."
+_READY_LLM_PUBLIC_MESSAGE = "The runtime is ready, but I can’t reach chat right now. Try again in a moment or ask for status or setup help."
 _NO_LLM_ERROR_KINDS = {
     "llm_unavailable",
     "no_chat_model",
@@ -101,8 +102,8 @@ def build_public_sentence_text(*parts: str | None) -> str:
     return normalize_persona_text(" ".join(sentences))
 
 
-def build_no_llm_public_message() -> str:
-    return _NO_LLM_PUBLIC_MESSAGE
+def build_no_llm_public_message(*, runtime_ready: bool = False) -> str:
+    return _READY_LLM_PUBLIC_MESSAGE if runtime_ready else _NO_LLM_PUBLIC_MESSAGE
 
 
 def is_no_llm_error_kind(error_kind: str | None) -> bool:

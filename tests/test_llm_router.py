@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 import unittest
+import tempfile
+import json
 
 from agent.config import Config
 from agent.llm.policy import RoutingPolicy
@@ -671,6 +673,54 @@ class TestLLMRouter(unittest.TestCase):
         self.assertEqual("remote_a", result["provider"])
         self.assertEqual(0, local.calls)
         self.assertEqual(1, remote_a.calls)
+
+    def test_external_health_down_excludes_candidate_without_cooldown(self) -> None:
+        remote_a = FakeProvider("remote_a", [Response("remote-ok", "remote_a", "cheap")])
+        local = FakeProvider("local", [Response("local-should-not-run", "local", "chat")])
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = f"{tmpdir}/router.log"
+            router = LLMRouter(
+                _config(),
+                providers={
+                    "local": local,
+                    "remote_a": remote_a,
+                    "remote_b": FakeProvider("remote_b", []),
+                },
+                registry=_registry(),
+                policy=_policy(),
+                usage_stats=UsageStatsStore(None),
+                log_path=log_path,
+            )
+            router.set_external_health_state(
+                {
+                    "providers": {
+                        "local": {
+                            "status": "down",
+                        }
+                    },
+                    "models": {
+                        "local:chat": {
+                            "provider_id": "local",
+                            "status": "down",
+                        }
+                    },
+                    "last_run_at": int(time.time()),
+                }
+            )
+
+            result = router.chat([{"role": "user", "content": "hello"}], purpose="chat", task_type="chat")
+
+            self.assertTrue(result["ok"])
+            self.assertEqual("remote_a", result["provider"])
+            self.assertEqual(0, local.calls)
+            self.assertEqual(1, remote_a.calls)
+            with open(log_path, "r", encoding="utf-8") as handle:
+                rows = [json.loads(line) for line in handle.read().splitlines() if line.strip()]
+            event_names = [str(row.get("type") or "") for row in rows]
+            self.assertIn("llm_provider_request_start", event_names)
+            self.assertIn("llm_provider_request_end", event_names)
+            provider_end = next(row for row in rows if str(row.get("type") or "") == "llm_provider_request_end")
+            self.assertIsInstance(provider_end.get("payload", {}).get("duration_ms"), int)
 
 
 if __name__ == "__main__":

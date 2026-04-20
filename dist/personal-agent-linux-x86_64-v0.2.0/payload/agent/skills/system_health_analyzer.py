@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent.resource_insights import classify_memory_pressure
+
 
 def _warning(
     *,
@@ -119,8 +121,13 @@ def analyze_system_health(observed: dict[str, Any]) -> dict[str, Any]:
 
     total_memory = int(memory.get("total_bytes") or 0)
     available_memory = int(memory.get("available_bytes") or 0)
-    available_pct = (available_memory / float(total_memory) * 100.0) if total_memory > 0 else 100.0
-    if total_memory > 0 and available_pct < 8.0:
+    memory_pressure = classify_memory_pressure(
+        total_bytes=total_memory,
+        available_bytes=available_memory,
+        swap_used_bytes=int(memory.get("swap_used_bytes") or 0),
+    )
+    available_pct = float(memory_pressure.get("available_pct") or 0.0) * 100.0 if total_memory > 0 else 100.0
+    if bool(memory_pressure.get("is_pressure")) and available_pct < 8.0:
         status = _escalate(status, "critical")
         warnings.append(
             _warning(
@@ -138,7 +145,7 @@ def analyze_system_health(observed: dict[str, Any]) -> dict[str, Any]:
             label="Inspect top memory processes",
             next_action="Run: ps -eo pid,comm,%mem,%cpu --sort=-%mem | head",
         )
-    elif total_memory > 0 and available_pct < 15.0:
+    elif bool(memory_pressure.get("is_pressure")):
         status = _escalate(status, "warn")
         warnings.append(
             _warning(

@@ -1,0 +1,25 @@
+[Unit]
+Description=Personal Agent API (Dev Checkout)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/personal-agent
+ExecStart=%h/personal-agent/.venv/bin/python -m agent.api_server --host 127.0.0.1 --port 18765
+Restart=on-failure
+RestartSec=2
+Environment=PERSONAL_AGENT_INSTANCE=dev
+Environment=LLM_REGISTRY_PATH=%h/.local/share/personal-agent/llm_registry.json
+Environment=AGENT_SECRET_STORE_PATH=%h/.local/share/personal-agent/secrets.enc.json
+Environment=LLM_USAGE_STATS_PATH=%h/.local/share/personal-agent/llm_usage_stats.json
+Environment=AGENT_DB_PATH=%h/.local/share/personal-agent/agent.db
+Environment=AGENT_LOG_PATH=%h/.local/share/personal-agent/agent.jsonl
+Environment=AGENT_PERMISSIONS_PATH=%h/.local/share/personal-agent/permissions.json
+Environment=AGENT_AUDIT_LOG_PATH=%h/.local/share/personal-agent/audit.jsonl
+Environment=AGENT_SKILLS_PATH=%h/personal-agent/skills
+Environment=AGENT_WEBUI_DIST_PATH=%h/personal-agent/agent/webui/dist
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

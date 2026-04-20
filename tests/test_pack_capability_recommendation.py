@@ -4,6 +4,8 @@ from pathlib import Path
 import unittest
 
 from agent.packs.capability_recommendation import (
+    classify_capability_gap_request,
+    build_capability_gap_response,
     detect_pack_capability_need,
     recommend_packs_for_capability,
     render_pack_capability_response,
@@ -41,6 +43,7 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
     def test_clear_capability_prompts_are_detected(self) -> None:
         cases = (
             ("Talk to me out loud", "voice_output"),
+            ("Can you read this page back to me in speech?", "voice_output"),
             ("Use the avatar", "avatar_visual"),
             ("Open the robot camera feed", "camera_feed"),
             ("Help me code", "dev_tools"),
@@ -53,6 +56,23 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
 
     def test_ambiguous_prompt_is_ignored(self) -> None:
         self.assertIsNone(detect_pack_capability_need("help me with the thing"))
+
+    def test_knowledge_questions_do_not_trigger_capability_creation(self) -> None:
+        store = _FakePackStore([])
+        discovery = _FakeDiscovery([], {})
+        for text in ("what is speed tool", "what is Xorg", "what is voice output"):
+            with self.subTest(text=text):
+                assessment = classify_capability_gap_request(text)
+                self.assertEqual("knowledge", assessment.get("request_kind"))
+                self.assertEqual("can_answer_locally", assessment.get("classification"))
+                self.assertIsNone(detect_pack_capability_need(text))
+                self.assertIsNone(
+                    build_capability_gap_response(
+                        text,
+                        pack_store=store,
+                        pack_registry_discovery=discovery,
+                    )
+                )
 
     def test_onboarding_capability_families_use_the_existing_recommendation_flow(self) -> None:
         store = _FakePackStore([])

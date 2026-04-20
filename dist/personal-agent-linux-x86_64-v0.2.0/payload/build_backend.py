@@ -121,6 +121,14 @@ def _generated_wheel_package_files() -> list[tuple[str, bytes]]:
 
 def _iter_source_files() -> list[Path]:
     rows: list[Path] = []
+    root_files = [
+        ROOT / "personal_agent_bootstrap.py",
+        ROOT / "personal_agent_bootstrap.pth",
+        ROOT / "sitecustomize.py",
+    ]
+    for path in root_files:
+        if path.is_file():
+            rows.append(path.relative_to(ROOT))
     for package_name in _source_packages():
         root = ROOT / package_name
         if not root.exists():
@@ -139,6 +147,14 @@ def _iter_source_files() -> list[Path]:
 
 def _iter_sdist_files() -> list[Path]:
     rows: list[Path] = []
+    root_files = [
+        ROOT / "personal_agent_bootstrap.py",
+        ROOT / "personal_agent_bootstrap.pth",
+        ROOT / "sitecustomize.py",
+    ]
+    for path in root_files:
+        if path.exists():
+            rows.append(path.relative_to(ROOT))
     for item in _sdist_includes():
         target = ROOT / item
         if not target.exists():

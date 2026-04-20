@@ -61,6 +61,19 @@ class TestSystemHealthAnalyzer(unittest.TestCase):
         self.assertEqual("memory", result["warnings"][0]["component"])
         self.assertEqual("inspect_memory_processes", result["suggestions"][0]["id"])
 
+    def test_high_available_memory_stays_ok(self) -> None:
+        observed = _observed_payload()
+        observed["memory"] = {
+            "total_bytes": 64 * 1024**3,
+            "used_bytes": 11 * 1024**3,
+            "available_bytes": 53 * 1024**3,
+            "used_pct": 17.2,
+        }
+        result = analyze_system_health(observed)
+        self.assertEqual("ok", result["status"])
+        self.assertEqual([], result["warnings"])
+        self.assertEqual([], result["suggestions"])
+
     def test_service_warn(self) -> None:
         observed = _observed_payload()
         observed["services"] = {

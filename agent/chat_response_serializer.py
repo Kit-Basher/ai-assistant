@@ -93,6 +93,9 @@ def serialize_orchestrator_chat_response(
     }
     if isinstance(runtime_payload, dict):
         body["setup"] = runtime_payload
+    cards_payload = response_data.get("cards_payload")
+    if isinstance(cards_payload, dict):
+        body["cards_payload"] = dict(cards_payload)
     next_question = str(response_data.get("next_question") or "").strip()
     if next_question:
         body["next_question"] = next_question

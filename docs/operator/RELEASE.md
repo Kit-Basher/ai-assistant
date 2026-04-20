@@ -59,14 +59,14 @@ Manual/operator checks before calling a build releasable:
 - verify the Debian package builds:
   - `bash scripts/build_deb.sh --clean`
 - install the release bundle on a clean user-local root:
-  - `bash install.sh`
+  - run the bundled `install.sh`
 - install the Debian package on a clean machine or clean local state:
   - `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
 - reinstall the same bundle once to confirm idempotence
 - reinstall the same Debian package once to confirm idempotence
 - uninstall once with state preserved and once with `--remove-state`
 - remove the Debian package and, if desired, run `personal-agent-uninstall --remove-state`
-- install on a clean machine or clean local state with:
+- install the checkout/dev path on a clean machine or clean local state with:
   - `bash scripts/install_local.sh --desktop-launcher`
 - fresh startup on a clean runtime state
 - first web-ui launch shows onboarding only on a fresh state, and second launch
@@ -101,17 +101,21 @@ Release blockers:
 
 Canonical install/update path:
 
-- repo checkout at `~/personal-agent`
-- virtualenv under the checkout
-- `pip install -e .`
-- user service `personal-agent-api.service`
+- stable runtime install under `~/.local/share/personal-agent/runtime`
+- stable desktop launcher and user service `personal-agent-api.service`
 
 Update:
 
-- pull or otherwise update the checkout
-- run `pip install -e .`
-- restart the user service
+- install the new stable bundle or package over the old stable runtime
+- restart the stable user service
 - re-run the release gate before shipping
+
+Checkout/dev install and update remain developer-only:
+
+- repo checkout at `~/personal-agent`
+- virtualenv under the checkout
+- `pip install -e .`
+- user service `personal-agent-api-dev.service`
 
 Rollback:
 

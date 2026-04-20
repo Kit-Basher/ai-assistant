@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping
 
+from agent.config import runtime_port, runtime_service_name
 from agent.diagnostics import run_command
 from agent.onboarding_contract import (
     ONBOARDING_DEGRADED,
@@ -28,7 +29,7 @@ from agent.telegram_runtime_state import get_telegram_runtime_state
 from agent.telegram_runtime_state import telegram_control_env
 
 
-_DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
+_DEFAULT_API_BASE_URL = f"http://127.0.0.1:{runtime_port()}"
 
 
 def _norm(value: Any) -> str:
@@ -139,7 +140,7 @@ def probe_api_service_state() -> dict[str, Any]:
             "systemctl",
             "--user",
             "show",
-            "personal-agent-api.service",
+            runtime_service_name(),
             "-p",
             "ActiveState",
             "-p",
@@ -327,7 +328,7 @@ def _safe_suggestions(
         ]
     if onboarding_state == "SERVICES_DOWN":
         suggestions = [
-            "systemctl --user restart personal-agent-api.service",
+            f"systemctl --user restart {runtime_service_name()}",
         ]
         if telegram_enabled:
             suggestions.append("systemctl --user restart personal-agent-telegram.service")

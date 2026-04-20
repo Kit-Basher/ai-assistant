@@ -169,10 +169,11 @@ class InferenceRouter:
     ) -> dict[str, Any]:
         normalized_purpose = _normalize_text(purpose) or "chat"
         normalized_trace_id = _normalize_text(trace_id) or None
+        runtime_ready = bool(metadata.get("runtime_ready")) if isinstance(metadata, dict) else False
         if not _is_llm_client_available(self.llm_client):
             return _normalized_error_result(
                 error_kind="llm_unavailable",
-                text=build_no_llm_public_message(),
+                text=build_no_llm_public_message(runtime_ready=runtime_ready),
                 task_type=task_type or "chat",
                 selection_reason="llm_unavailable",
                 trace_id=normalized_trace_id,
@@ -220,7 +221,7 @@ class InferenceRouter:
                     error_kind = _normalize_text((selection or {}).get("reason")) or "no_suitable_model"
                     return _normalized_error_result(
                         error_kind=error_kind,
-                        text=build_no_llm_public_message(),
+                        text=build_no_llm_public_message(runtime_ready=runtime_ready),
                         task_type=str(normalized_task.get("task_type") or "chat"),
                         selection_reason=selection_reason,
                         trace_id=normalized_trace_id,

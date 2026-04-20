@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 import copy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,7 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from agent.config import Config, load_config
+from agent.config import Config, default_registry_root_path, load_config, packaged_asset_root_path, runtime_instance
 from agent.chat_response_serializer import serialize_orchestrator_chat_response
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import (
@@ -89,7 +89,12 @@ from agent.runtime_contract import (
     normalize_user_facing_status,
 )
 from agent.persona import normalize_persona_text
-from agent.public_chat import build_no_llm_public_message, is_no_llm_error_kind
+from agent.public_chat import (
+    build_no_llm_public_message,
+    build_trivial_social_turn_message,
+    classify_trivial_social_turn,
+    is_no_llm_error_kind,
+)
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
@@ -225,7 +230,7 @@ from agent.recovery_contract import (
     recovery_next_action,
     recovery_summary,
 )
-from agent.orchestrator import Orchestrator, classify_authoritative_domain, has_local_observations_block
+from agent.orchestrator import Orchestrator, OrchestratorResponse, classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
 from agent.secret_store import SecretStore
@@ -576,6 +581,7 @@ class AgentRuntime:
         self.secret_store = SecretStore(path=os.getenv("AGENT_SECRET_STORE_PATH", "").strip() or None)
         _mark("runtime.init.secret_store")
         self._repo_root = Path(__file__).resolve().parents[1]
+        self.runtime_instance = runtime_instance()
         self.started_at = datetime.now(timezone.utc)
         self.started_at_iso = self.started_at.isoformat()
         self.pid = os.getpid()
@@ -588,7 +594,7 @@ class AgentRuntime:
 
         registry_path = config.llm_registry_path
         if not registry_path:
-            registry_path = str(self._repo_root / "llm_registry.json")
+            registry_path = str(default_registry_root_path())
         self.registry_store = RegistryStore(registry_path)
         _mark("runtime.init.registry_store", registry_path=self.registry_store.path)
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
@@ -596,9 +602,7 @@ class AgentRuntime:
         self.pack_store = PackStore(self.config.db_path)
         self._skill_governance_store = SkillGovernanceStore(self.config.db_path)
         self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
-        self.webui_dist_path = Path(
-            os.getenv("AGENT_WEBUI_DIST_PATH", "").strip() or str(self._repo_root / "agent" / "webui" / "dist")
-        ).resolve()
+        self.webui_dist_path = packaged_asset_root_path().resolve()
         self.webui_dev_proxy = _is_truthy(os.getenv("WEBUI_DEV_PROXY"))
         self.webui_dev_url = os.getenv("WEBUI_DEV_URL", "http://127.0.0.1:1420").strip() or "http://127.0.0.1:1420"
         self.listening_url = self._default_listening_url()
@@ -3578,6 +3582,31 @@ class AgentRuntime:
             "events": self._runtime_events.snapshot(limit=max(1, min(int(limit), 100))),
         }
 
+    def diagnostics_fallback_summary(self, *, limit: int = 10) -> dict[str, Any]:
+        events = [
+            row
+            for row in self._runtime_events.snapshot(limit=100)
+            if str(row.get("event") or "").strip().lower() == "diagnostics_fallback"
+        ]
+        counts: Counter[str] = Counter()
+        for row in events:
+            category = (
+                str(row.get("intent_label") or "").strip()
+                or str(row.get("snapshot_scope") or "").strip()
+                or "unknown"
+            )
+            counts[category] += 1
+        top_rows = [
+            {"category": category, "count": count}
+            for category, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[: max(1, int(limit))]
+        ]
+        return {
+            "ok": True,
+            "limit": max(1, int(limit)),
+            "total": len(events),
+            "categories": top_rows,
+        }
+
     def record_runtime_event(self, event_name: str, **fields: Any) -> dict[str, Any]:
         return self._runtime_events.log_runtime_event(event_name, **fields)
 
@@ -3929,8 +3958,8 @@ class AgentRuntime:
             truth = self.runtime_truth_service()
             if truth is None:
                 return False
-            current = truth.current_chat_target_status()
-            return bool((current if isinstance(current, dict) else {}).get("ready", False))
+            ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
+            return bool(ready_payload.get("ready", False)) if isinstance(ready_payload, dict) else False
         except Exception:
             return False
 
@@ -3941,6 +3970,9 @@ class AgentRuntime:
             truth = self.runtime_truth_service()
             if truth is None:
                 return False
+            ready_payload = truth.ready_status() if callable(getattr(truth, "ready_status", None)) else {}
+            if isinstance(ready_payload, dict) and bool(ready_payload.get("ready", False)):
+                return True
             current = truth.current_chat_target_status()
             current_row = current if isinstance(current, dict) else {}
             if bool(current_row.get("ready", False)):
@@ -4664,7 +4696,8 @@ class AgentRuntime:
         core_status = self._runtime_core_status_payload()
         return {
             "ok": True,
-            "service": "personal-agent-api",
+            "service": "personal-agent-api-dev" if self.runtime_instance == "dev" else "personal-agent-api",
+            "runtime_instance": self.runtime_instance,
             "time": datetime.now(timezone.utc).isoformat(),
             "version": self.version,
             "git_commit": self.git_commit,
@@ -4709,6 +4742,7 @@ class AgentRuntime:
             "started_at": self.started_at_iso,
             "pid": self.pid,
             "listening": self.listening_url,
+            "runtime_instance": self.runtime_instance,
         }
 
     # Operator/public provider view. Assistant/runtime decisions must use
@@ -9284,6 +9318,7 @@ class AgentRuntime:
         # bootstrap compatibility, logging, and serializer invocation here;
         # all chat decisions live in the orchestrator.
         request_started_epoch = int(time.time())
+        chat_started_monotonic = time.monotonic()
         trace_id = str(payload.get("trace_id") or "").strip() or f"chat-{request_started_epoch}"
         request_id = str(payload.get("request_id") or "").strip() or uuid.uuid4().hex
         messages = self._normalize_messages(payload)
@@ -9292,10 +9327,27 @@ class AgentRuntime:
 
         source_surface = str(payload.get("source_surface") or "api").strip().lower() or "api"
         last_user_text = str(messages[-1].get("content") or "").strip()
-        route_decision = self.chat_route_decision(payload, last_user_text)
+        route_decision_started = time.monotonic()
+        social_turn_kind = classify_trivial_social_turn(last_user_text)
+        route_decision = self.chat_route_decision(payload, last_user_text) if not social_turn_kind else {"route": "generic_chat"}
+        route_decision_ms = int(max(0.0, time.monotonic() - route_decision_started) * 1000)
+        bootstrap_ms = 0
+        llm_request_ms = 0
+        orchestrator_ms = 0
+        serialization_ms = 0
+        timings_ms: dict[str, int] = {
+            "route_decision_ms": route_decision_ms,
+            "bootstrap_ms": bootstrap_ms,
+            "orchestrator_ms": orchestrator_ms,
+            "llm_request_ms": llm_request_ms,
+            "serialization_ms": serialization_ms,
+        }
 
-        if not self._skip_bootstrap_for_chat_route(route_decision):
+        if not social_turn_kind and not self._skip_bootstrap_for_chat_route(route_decision):
+            bootstrap_started = time.monotonic()
             _ = self._auto_bootstrap_local_chat_model()
+            bootstrap_ms = int(max(0.0, time.monotonic() - bootstrap_started) * 1000)
+            timings_ms["bootstrap_ms"] = bootstrap_ms
         user_id = self._chat_user_id(payload)
         thread_id = self._chat_thread_id(payload, user_id=user_id)
         chat_context = {
@@ -9320,12 +9372,30 @@ class AgentRuntime:
             thread_id=thread_id,
             user_id=user_id,
         )
-        try:
-            orchestrator_response = self.orchestrator().handle_message(
-                last_user_text,
-                user_id=user_id,
-                chat_context=chat_context,
+        if social_turn_kind:
+            social_turn_text = build_trivial_social_turn_message(last_user_text) or "Got it. What should I do next?"
+            social_turn_started = time.monotonic()
+            orchestrator_response = OrchestratorResponse(
+                social_turn_text,
+                {
+                    "ok": True,
+                    "route": "generic_chat",
+                    "used_runtime_state": False,
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_tools": [],
+                    "provider": None,
+                    "model": None,
+                    "assistant_turn_type": "social_turn",
+                    "assistant_turn_kind": social_turn_kind,
+                    "chat_timing_ms": {
+                        **timings_ms,
+                        "orchestrator_ms": 0,
+                        "llm_request_ms": 0,
+                    },
+                },
             )
+            serialize_started = time.monotonic()
             serialized = serialize_orchestrator_chat_response(
                 orchestrator_response,
                 source_surface=source_surface,
@@ -9333,25 +9403,127 @@ class AgentRuntime:
                 thread_id=thread_id,
                 autopilot_meta=self._chat_autopilot_meta(request_started_epoch),
             )
+            serialization_ms = int(max(0.0, time.monotonic() - serialize_started) * 1000)
+            total_ms = int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000)
+            chat_timing_ms = {
+                **timings_ms,
+                "bootstrap_ms": bootstrap_ms,
+                "orchestrator_ms": 0,
+                "llm_request_ms": 0,
+                "serialization_ms": serialization_ms,
+                "social_turn_ms": int(max(0.0, time.monotonic() - social_turn_started) * 1000),
+                "total_ms": total_ms,
+            }
+            meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
+            meta = dict(meta)
+            meta["chat_timing_ms"] = chat_timing_ms
+            serialized.body["meta"] = meta
+            self._runtime_events.log_chat_request_end(
+                request_id,
+                total_ms,
+                "ok" if bool(serialized.ok) else "error",
+                trace_id=trace_id,
+                source=source_surface,
+                route=serialized.route,
+                model_selected=None,
+                provider=None,
+                assistant_turn_type="social_turn",
+                assistant_turn_kind=social_turn_kind,
+                orchestrator_ms=0,
+                serialization_ms=serialization_ms,
+                chat_timing_ms=chat_timing_ms,
+            )
+            self._log_chat_route_decision(
+                trace_id=trace_id,
+                source_surface=source_surface,
+                route=serialized.route,
+                route_reason=serialized.route_reason,
+                generic_fallback_allowed=serialized.generic_fallback_allowed,
+                generic_fallback_reason=serialized.generic_fallback_reason,
+            )
+            return bool(serialized.ok), serialized.body
+        try:
+            orchestrator_started = time.monotonic()
+            orchestrator_response = self.orchestrator().handle_message(
+                last_user_text,
+                user_id=user_id,
+                chat_context=chat_context,
+            )
+            orchestrator_ms = int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+            response_data = dict(orchestrator_response.data or {})
+            llm_request_ms = int(response_data.get("duration_ms") or 0) if isinstance(response_data.get("duration_ms"), int) else int(response_data.get("duration_ms") or 0)
+            timings_ms.update(
+                {
+                    "bootstrap_ms": bootstrap_ms,
+                    "orchestrator_ms": orchestrator_ms,
+                    "llm_request_ms": llm_request_ms,
+                }
+            )
+            response_data["chat_timing_ms"] = dict(timings_ms)
+            orchestrator_response = OrchestratorResponse(orchestrator_response.text, response_data)
+            serialize_started = time.monotonic()
+            serialized = serialize_orchestrator_chat_response(
+                orchestrator_response,
+                source_surface=source_surface,
+                user_id=user_id,
+                thread_id=thread_id,
+                autopilot_meta=self._chat_autopilot_meta(request_started_epoch),
+            )
+            serialization_ms = int(max(0.0, time.monotonic() - serialize_started) * 1000)
+            total_ms = int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000)
+            chat_timing_ms = {
+                **timings_ms,
+                "bootstrap_ms": bootstrap_ms,
+                "orchestrator_ms": orchestrator_ms,
+                "llm_request_ms": llm_request_ms,
+                "serialization_ms": serialization_ms,
+                "total_ms": total_ms,
+            }
         except Exception:
             self._runtime_events.log_chat_request_end(
                 request_id,
-                int(max(0.0, time.monotonic() - chat_started) * 1000),
+                int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000),
                 "error",
                 trace_id=trace_id,
                 source=source_surface,
+                route="generic_chat",
+                model_selected=None,
+                provider=None,
+                orchestrator_ms=(
+                    int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+                    if "orchestrator_started" in locals()
+                    else None
+                ),
+                serialization_ms=None,
+                chat_timing_ms={
+                    **timings_ms,
+                    "bootstrap_ms": bootstrap_ms,
+                    "orchestrator_ms": (
+                        int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+                        if "orchestrator_started" in locals()
+                        else None
+                    ),
+                    "serialization_ms": None,
+                    "total_ms": int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000),
+                },
             )
             raise
         meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
+        meta = dict(meta)
+        meta["chat_timing_ms"] = chat_timing_ms
+        serialized.body["meta"] = meta
         self._runtime_events.log_chat_request_end(
             request_id,
-            int(max(0.0, time.monotonic() - chat_started) * 1000),
+            total_ms,
             "ok" if bool(serialized.ok) else "error",
             trace_id=trace_id,
             source=source_surface,
             route=serialized.route,
             model_selected=str(meta.get("model") or "").strip() or None,
             provider=str(meta.get("provider") or "").strip().lower() or None,
+            orchestrator_ms=locals().get("orchestrator_ms"),
+            serialization_ms=locals().get("serialization_ms"),
+            chat_timing_ms=chat_timing_ms,
         )
 
         self._log_chat_route_decision(
@@ -10089,6 +10261,7 @@ class AgentRuntime:
             "retry_attempts": self._router.policy.retry_attempts,
             "timeout_seconds": self._router.policy.default_timeout_seconds,
             "secret_storage": self.secret_store.backend_name,
+            "runtime_instance": self.runtime_instance,
         }
 
     def update_config(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
@@ -20146,7 +20319,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
     ) -> dict[str, Any]:
         question = (
             str(assessment.next_question or "").strip()
-            or "I can do that. Which of these is your goal: chat, ask, or model check/switch?"
+            or "I can help with that. What would you like me to focus on?"
         )
         envelope = validate_envelope(
             {
@@ -20166,7 +20339,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
         envelope_payload["clarification"] = {
             "reason": "intent_ambiguity",
             "hints": [
-                "Tell me whether you want chat, ask, or model check/switch.",
+                "Tell me a bit more about what you want help with.",
             ],
             "suggested_intents": [],
         }
@@ -20345,6 +20518,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     limit = 20
                 self._send_json(200, self.runtime.runtime_event_history(limit=limit))
+                return
+            if path == "/runtime/fallbacks":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                limit_raw = query.get("limit", [10])[0]
+                try:
+                    limit = int(limit_raw)
+                except (TypeError, ValueError):
+                    limit = 10
+                self._send_json(200, self.runtime.diagnostics_fallback_summary(limit=limit))
                 return
             if path == "/health":
                 self._send_json(200, self.runtime.health())
@@ -21124,7 +21306,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         },
                     )
                     if is_no_llm_error_kind(error_kind):
-                        base_message = build_no_llm_public_message()
+                        ready_payload = self.ready_status()
+                        base_message = build_no_llm_public_message(
+                            runtime_ready=bool(ready_payload.get("chat_usable", ready_payload.get("ready", False)))
+                        )
                     else:
                         base_message = assistant_text or "I couldn't complete that request."
                     friendly_message = friendly_error_message(
@@ -21197,7 +21382,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if not assistant_text:
                     assistant_text = str(envelope.get("message") or "").strip() or "I couldn't complete that request."
                     body["assistant"] = {"role": "assistant", "content": assistant_text}
-                if ok and original_path == "/chat":
+                body_meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                assistant_turn_type = str(body_meta.get("assistant_turn_type") or "").strip().lower() or None
+                if ok and original_path == "/chat" and assistant_turn_type != "social_turn":
                     greeting = self.runtime.consume_bootstrap_greeting_if_needed()
                     if greeting:
                         combined = greeting if not assistant_text else f"{greeting}\n\n{assistant_text}"

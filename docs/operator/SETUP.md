@@ -10,14 +10,20 @@ Canonical first-run command:
 
 Canonical install/runtime path:
 
-- repo checkout: `~/personal-agent`
-- mutable state: `~/.local/share/personal-agent`
-- operator config/policy: `~/.config/personal-agent`
-- user service symlink: `~/.config/systemd/user/personal-agent-api.service`
-- supported service-management story: `systemctl --user ...`
-- optional desktop launcher install target:
+- stable runtime install root: `~/.local/share/personal-agent/runtime`
+- stable mutable state: `~/.local/share/personal-agent`
+- stable operator config/policy: `~/.config/personal-agent`
+- stable user service: `personal-agent-api.service`
+- supported stable service-management story: `systemctl --user ...`
+- stable desktop launcher:
   - `~/.local/share/applications/personal-agent.desktop`
   - `~/.local/bin/personal-agent-webui`
+
+Developer checkout path:
+
+- repo checkout: `~/personal-agent`
+- dev user service: `personal-agent-api-dev.service`
+- dev desktop launcher, if installed: `Personal Agent (Dev)`
 
 Distributed-install runtime root:
 
@@ -29,26 +35,50 @@ Distributed-install runtime root:
 
 Recommended install path for a new user:
 
-- `bash scripts/install_local.sh --desktop-launcher`
+- run the bundled `install.sh` from the release bundle or packaged release
 
 That one command:
+
+- installs the stable runtime under `~/.local/share/personal-agent/runtime`
+- wires the stable `personal-agent-api.service`
+- installs the stable desktop launcher
+- keeps the checkout independent from the running app
+
+If you are developing in the checkout, use:
+
+- `bash scripts/install_local.sh --desktop-launcher`
+
+That checkout install:
 
 - checks Python, systemd user support, and desktop-launcher prerequisites
 - creates or reuses `.venv`
 - installs the package in editable mode
 - runs `python -m agent doctor --fix`
-- installs or refreshes the user service
-- optionally installs the desktop launcher
+- installs or refreshes the dev user service
+- optionally installs the dev desktop launcher
 
-If you do not want the desktop launcher, omit `--desktop-launcher`.
+If you do not want the dev desktop launcher, omit `--desktop-launcher`.
 If you only want to validate web UI build dependencies, add `--check-webui-build`.
 
 If you downloaded a release bundle, use the bundled installer instead:
 
 - extract the bundle
-- run `bash install.sh`
+- run the bundled `install.sh`
 - the bundled installer uses the stable runtime root under
   `~/.local/share/personal-agent/runtime`
+
+If you are the maintainer on the local checkout and want to create the real
+stable runtime now, use:
+
+- `bash scripts/promote_local_stable.sh`
+
+That helper:
+
+- builds a release bundle from the checkout
+- installs that bundle into `~/.local/share/personal-agent/runtime/releases/<version>`
+- creates `~/.local/share/personal-agent/runtime/current`
+- installs the stable launcher and `personal-agent-api.service`
+- keeps the checkout separate from the runtime
 
 If you installed the Debian package instead:
 
@@ -67,8 +97,8 @@ Debian package lifecycle:
 - remove package and user state: run `personal-agent-uninstall --remove-state`
   first if you want a full local reset
 
-Legacy `install.sh`, `uninstall.sh`, and `doctor.sh` are retired and fail
-closed on purpose. Do not use the old root/system-service path.
+Legacy root-level `install.sh`, `uninstall.sh`, and `doctor.sh` are retired and
+fail closed on purpose. Do not use the old root/system-service path.
 
 Canonical packaging/build path:
 
@@ -88,62 +118,68 @@ Canonical packaging/build path:
 ## Install
 
 1. Place the repo at `~/personal-agent`.
-2. Run the recommended install:
+2. If you want the stable daily-driver, run:
+   - run the bundled `install.sh` from the release bundle or packaged release
+3. If you want the editable checkout install for development, run:
    - `bash scripts/install_local.sh --desktop-launcher`
-3. Open the UI from the desktop menu or browse to `http://127.0.0.1:8765/`.
-4. If you are validating the install or preparing a release:
+4. Open the UI from the desktop menu or browse to `http://127.0.0.1:8765/`.
+5. Confirm the active copy:
+   - `python -m agent split_status`
+6. If you are validating the install or preparing a release:
    - `python scripts/release_gate.py`
 
 Manual fallback if you need to inspect the pieces individually:
 
-- create the virtualenv and install the package:
+- create the virtualenv and install the checkout package:
   - `cd ~/personal-agent`
   - `python3 -m venv .venv`
   - `. .venv/bin/activate`
   - `pip install -e .`
-- install the user service:
+- install the dev user service:
   - `mkdir -p ~/.config/systemd/user`
-  - `ln -sf ~/personal-agent/systemd/personal-agent-api.service ~/.config/systemd/user/personal-agent-api.service`
+  - `ln -sf ~/personal-agent/systemd/personal-agent-api-dev.service ~/.config/systemd/user/personal-agent-api-dev.service`
   - `systemctl --user daemon-reload`
 - enable reboot-safe user services:
   - `loginctl enable-linger "$USER"`
-- start the runtime:
-  - `systemctl --user enable --now personal-agent-api.service`
+- start the dev runtime:
+  - `systemctl --user enable --now personal-agent-api-dev.service`
 - complete first run:
   - `python -m agent setup`
   - `python -m agent doctor`
 
 Bundle update / uninstall basics:
 
-- reinstall the same bundle version: rerun `bash install.sh`
-- upgrade: extract the newer bundle and rerun `bash install.sh`
+- reinstall the same bundle version: rerun the bundled `install.sh`
+- upgrade: extract the newer bundle and rerun the bundled `install.sh`
+- live split smoke: `python scripts/split_smoke.py`
 - uninstall while preserving state:
-  - `bash uninstall.sh`
+  - run the bundled `uninstall.sh`
 - uninstall and remove local state:
-  - `bash uninstall.sh --remove-state`
+  - run the bundled `uninstall.sh --remove-state`
 
 ## Optional Desktop Launcher
 
-If you want a normal desktop app entry, install the user-local launcher:
+If you want a normal desktop app entry for the checkout/dev install, install
+the user-local launcher:
 
 - `bash scripts/install_desktop_launcher.sh`
 
 That installs:
 
-- a desktop menu entry at `~/.local/share/applications/personal-agent.desktop`
-- a launcher command at `~/.local/bin/personal-agent-webui`
+- a desktop menu entry at `~/.local/share/applications/personal-agent-dev.desktop`
+- a launcher command at `~/.local/bin/personal-agent-webui-dev`
 - a user-local icon at `~/.local/share/icons/hicolor/scalable/apps/personal-agent.svg`
 
 What it does when clicked:
 
-- registers, starts, or wakes `personal-agent-api.service` if needed
+- registers, starts, or wakes `personal-agent-api-dev.service` if needed
 - waits briefly for `GET /ready`
 - opens the local web UI in your default browser
 
 If it fails, use:
 
-- `http://127.0.0.1:8765/`
-- `systemctl --user status personal-agent-api.service`
+- `http://127.0.0.1:18765/`
+- `systemctl --user status personal-agent-api-dev.service`
 
 ## First Run
 
@@ -206,14 +242,14 @@ Setup is complete when onboarding state is `READY` and:
 4. `pip install -e .`
 5. `python -m agent doctor --fix`
 6. `systemctl --user daemon-reload`
-7. `systemctl --user restart personal-agent-api.service`
+7. `systemctl --user restart personal-agent-api-dev.service`
 8. `python -m agent status`
 9. If this upgrade is a release candidate or a risky recovery, run:
    - `python scripts/release_gate.py`
 
 `python -m agent doctor --fix` is the canonical safe upgrade helper. It creates
-missing local directories and copies legacy repo-local runtime storage into the
-canonical state directory when needed.
+missing local directories and migrates legacy repo-local runtime storage into
+the canonical state directory when needed.
 
 ## Recovery / Reset
 
@@ -225,6 +261,7 @@ canonical state directory when needed.
    runtime storage need repair.
 5. Restart the runtime:
    - `systemctl --user restart personal-agent-api.service`
+   - or `systemctl --user restart personal-agent-api-dev.service` if you are on the checkout install
 6. Verify:
    - `python -m agent status`
 7. If this is a release-candidate validation path, run:
@@ -240,6 +277,7 @@ Manual restore/import is supported by restoring those paths, then running:
 
 - `python -m agent doctor --fix`
 - `systemctl --user restart personal-agent-api.service`
+- `systemctl --user restart personal-agent-api-dev.service`
 - `python -m agent status`
 
 Failed-upgrade or corrupt-state recovery:
@@ -258,9 +296,11 @@ explicitly.
 Uninstall:
 
 1. `systemctl --user disable --now personal-agent-api.service`
-2. `rm -f ~/.config/systemd/user/personal-agent-api.service`
-3. `systemctl --user daemon-reload`
-4. Optional cleanup:
+2. `systemctl --user disable --now personal-agent-api-dev.service`
+3. `rm -f ~/.config/systemd/user/personal-agent-api.service`
+4. `rm -f ~/.config/systemd/user/personal-agent-api-dev.service`
+5. `systemctl --user daemon-reload`
+6. Optional cleanup:
    - `rm -rf ~/.config/personal-agent`
    - `rm -rf ~/.local/share/personal-agent`
    - leave them in place if you want to preserve local state/secrets for a

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Mapping
 
 from agent.llm.control_contract import normalize_task_request
@@ -8,6 +9,7 @@ from agent.llm.install_planner import build_install_plan
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_selector import select_model_for_task
 from agent.llm.task_classifier import classify_task_request
+from agent.logging_utils import log_event
 from agent.public_chat import build_no_llm_public_message
 
 
@@ -46,6 +48,11 @@ def _metadata_channel(metadata: dict[str, Any] | None) -> str | None:
     if value in {"telegram", "api", "cli"}:
         return value
     return None
+
+
+def _log_path_for_client(llm_client: Any) -> str | None:
+    config = getattr(llm_client, "config", None)
+    return str(getattr(config, "log_path", "") or "").strip() or None
 
 
 def _normalized_error_result(
@@ -169,10 +176,12 @@ class InferenceRouter:
     ) -> dict[str, Any]:
         normalized_purpose = _normalize_text(purpose) or "chat"
         normalized_trace_id = _normalize_text(trace_id) or None
+        runtime_ready = bool(metadata.get("runtime_ready")) if isinstance(metadata, dict) else False
+        log_path = _log_path_for_client(self.llm_client)
         if not _is_llm_client_available(self.llm_client):
             return _normalized_error_result(
                 error_kind="llm_unavailable",
-                text=build_no_llm_public_message(),
+                text=build_no_llm_public_message(runtime_ready=runtime_ready),
                 task_type=task_type or "chat",
                 selection_reason="llm_unavailable",
                 trace_id=normalized_trace_id,
@@ -190,6 +199,7 @@ class InferenceRouter:
         selection_fallbacks: list[str] = []
         allow_remote_fallback = self._allow_remote_fallback(local_only=local_only)
         route_data: dict[str, Any] = {"task_request": normalized_task}
+        selection_started = time.monotonic()
 
         if normalized_purpose == "chat" and selected_model is None:
             control_result = self._resolve_chat_selection(
@@ -213,6 +223,26 @@ class InferenceRouter:
                         if _normalize_text(item)
                     ]
                 if selected_model is None:
+                    selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
+                    if log_path:
+                        log_event(
+                            log_path,
+                            "llm_routing_selection",
+                            {
+                                "trace_id": normalized_trace_id,
+                                "purpose": normalized_purpose,
+                                "task_type": str(normalized_task.get("task_type") or "chat"),
+                                "channel": _metadata_channel(metadata),
+                                "latency_fallback": bool((metadata or {}).get("latency_fallback")),
+                                "selected_provider": None,
+                                "selected_model": None,
+                                "selection_reason": selection_reason,
+                                "fallback_used": bool(selection_fallbacks),
+                                "selection_ms": selection_ms,
+                                "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                                "error": "no_suitable_model",
+                            },
+                        )
                     plan = control_result.get("plan")
                     if isinstance(plan, dict):
                         route_data["plan"] = plan
@@ -220,12 +250,31 @@ class InferenceRouter:
                     error_kind = _normalize_text((selection or {}).get("reason")) or "no_suitable_model"
                     return _normalized_error_result(
                         error_kind=error_kind,
-                        text=build_no_llm_public_message(),
+                        text=build_no_llm_public_message(runtime_ready=runtime_ready),
                         task_type=str(normalized_task.get("task_type") or "chat"),
                         selection_reason=selection_reason,
                         trace_id=normalized_trace_id,
                         next_action=next_action,
                         data=route_data,
+                    )
+                selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
+                if log_path:
+                    log_event(
+                        log_path,
+                        "llm_routing_selection",
+                        {
+                            "trace_id": normalized_trace_id,
+                            "purpose": normalized_purpose,
+                            "task_type": str(normalized_task.get("task_type") or "chat"),
+                            "channel": _metadata_channel(metadata),
+                            "latency_fallback": bool((metadata or {}).get("latency_fallback")),
+                            "selected_provider": selected_provider,
+                            "selected_model": selected_model,
+                            "selection_reason": selection_reason,
+                            "fallback_used": bool(selection_fallbacks),
+                            "selection_ms": selection_ms,
+                            "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                        },
                     )
 
         chat_kwargs = self._chat_kwargs(
@@ -241,7 +290,49 @@ class InferenceRouter:
             min_context_tokens=min_context_tokens,
             timeout_seconds=timeout_seconds,
         )
-        raw_result = self._call_chat(messages, chat_kwargs)
+        provider_started = time.monotonic()
+        if log_path:
+            log_event(
+                log_path,
+                "llm_provider_request_start",
+                {
+                    "trace_id": normalized_trace_id,
+                    "purpose": normalized_purpose,
+                    "task_type": str(normalized_task.get("task_type") or "chat"),
+                    "provider": selected_provider,
+                    "model": selected_model,
+                    "selection_reason": selection_reason,
+                    "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                    "channel": _metadata_channel(metadata),
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+        provider_error: Exception | None = None
+        try:
+            raw_result = self._call_chat(messages, chat_kwargs)
+        except Exception as exc:
+            provider_error = exc
+            raise
+        finally:
+            if log_path and provider_started is not None:
+                provider_ms = int(max(0.0, time.monotonic() - provider_started) * 1000)
+                log_event(
+                    log_path,
+                    "llm_provider_request_end",
+                    {
+                        "trace_id": normalized_trace_id,
+                        "purpose": normalized_purpose,
+                        "task_type": str(normalized_task.get("task_type") or "chat"),
+                        "provider": selected_provider,
+                        "model": selected_model,
+                        "selection_reason": selection_reason,
+                        "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                        "channel": _metadata_channel(metadata),
+                        "duration_ms": provider_ms,
+                        "ok": provider_error is None,
+                        "error_kind": provider_error.__class__.__name__ if provider_error is not None else None,
+                    },
+                )
         return _normalize_router_result(
             raw_result=raw_result,
             provider=selected_provider,

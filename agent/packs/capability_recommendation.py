@@ -69,6 +69,11 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
             "speak out loud",
             "read aloud",
             "read this aloud",
+            "read this page back to me",
+            "read this page",
+            "read this back to me",
+            "read it back to me",
+            "read to me",
             "say it aloud",
             "voice output",
             "speech output",
@@ -130,6 +135,101 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
     },
 }
 
+_CAPABILITY_HELPER_NAMES = {
+    "dev_tools": "coding helper",
+    "system_tools": "system helper",
+    "creative_tools": "writing helper",
+    "voice_output": "voice helper",
+    "voice_input": "speech input helper",
+    "avatar_visual": "visual avatar helper",
+    "camera_feed": "camera helper",
+}
+
+_CAPABILITY_PROPOSAL_SUMMARIES = {
+    "dev_tools": "helps with coding and terminal work",
+    "system_tools": "helps with system tasks and troubleshooting",
+    "creative_tools": "helps with drafting, brainstorming, and editing",
+    "voice_output": "reads text aloud",
+    "voice_input": "listens and transcribes speech",
+    "avatar_visual": "shows a visual avatar",
+    "camera_feed": "looks through a camera feed",
+}
+
+_PARTIAL_HELP_CUES = (
+    "help me",
+    "can you help",
+    "could you help",
+    "show me how",
+    "walk me through",
+    "what is the best way",
+    "what's the best way",
+    "what is the easiest way",
+    "what's the easiest way",
+    "recommend",
+    "suggest",
+    "plan",
+    "sketch",
+    "guide me",
+    "build me",
+    "make me",
+    "set up",
+)
+
+_CAPABILITY_ACTION_CUES = (
+    "read aloud",
+    "read this to me",
+    "read my screen",
+    "say it out loud",
+    "speak to me",
+    "talk to me",
+    "narrate",
+    "listen",
+    "hear me",
+    "dictate",
+    "transcribe",
+    "camera",
+    "webcam",
+    "watch",
+    "look at",
+    "scan",
+    "avatar",
+    "voice",
+    "audio",
+    "code",
+    "script",
+    "debug",
+    "terminal",
+    "install",
+    "configure",
+    "set up",
+    "troubleshoot",
+    "monitor",
+    "track",
+    "alert",
+    "notify",
+)
+
+_KNOWLEDGE_QUESTION_PREFIXES = (
+    "what is ",
+    "what are ",
+    "what does ",
+    "what do ",
+    "what's ",
+    "whats ",
+    "who is ",
+    "who are ",
+    "how does ",
+    "how do ",
+    "why is ",
+    "why does ",
+    "why do ",
+    "tell me about ",
+    "explain ",
+    "define ",
+    "describe ",
+    "what happened ",
+)
+
 _STOPWORDS = {
     "a",
     "an",
@@ -179,9 +279,24 @@ def _matches_rule(normalized: str, rule: dict[str, Any]) -> bool:
         return True
     if label == "camera feed" and "camera" in normalized and any(token in normalized for token in ("feed", "stream", "robot", "vision")):
         return True
-    if label == "voice output" and "voice" in normalized and any(token in normalized for token in ("out loud", "speak", "talk", "aloud", "speech", "audio", "tts", "read")):
+    if label == "voice output" and (
+        any(token in normalized for token in ("out loud", "speak", "talk", "aloud", "audio", "tts"))
+        or any(
+            phrase in normalized
+            for phrase in (
+                "read aloud",
+                "read this to me",
+                "read this page back to me",
+                "read this page",
+                "read this back to me",
+                "read it back to me",
+                "read to me",
+                "read my screen",
+            )
+        )
+    ):
         return True
-    if label == "voice input" and any(token in normalized for token in ("listen", "dictation", "transcribe", "speech", "input")):
+    if label == "voice input" and any(token in normalized for token in ("listen", "dictation", "transcribe", "speech input", "speech to text")):
         return True
     if label == "visual avatar" and "avatar" in normalized:
         return True
@@ -191,6 +306,8 @@ def _matches_rule(normalized: str, rule: dict[str, Any]) -> bool:
 def detect_pack_capability_need(text: str | None) -> dict[str, Any] | None:
     normalized = _normalize_text(text)
     if not normalized:
+        return None
+    if _classify_request_kind(normalized) == "knowledge":
         return None
     for capability, rule in _CAPABILITY_RULES.items():
         if _matches_rule(normalized, rule):
@@ -202,6 +319,328 @@ def detect_pack_capability_need(text: str | None) -> dict[str, Any] | None:
                 "fallback": "text_only",
             }
     return None
+
+
+def _helper_name_for_capability(capability: str | None, label: str | None = None) -> str:
+    capability_key = str(capability or "").strip().lower()
+    if capability_key in _CAPABILITY_HELPER_NAMES:
+        return _CAPABILITY_HELPER_NAMES[capability_key]
+    label_text = str(label or "").strip().lower()
+    if "voice" in label_text:
+        return "voice helper"
+    if "camera" in label_text:
+        return "camera helper"
+    if "avatar" in label_text:
+        return "visual avatar helper"
+    if "code" in label_text or "dev" in label_text:
+        return "coding helper"
+    if "system" in label_text or "pc" in label_text:
+        return "system helper"
+    if "writing" in label_text or "creative" in label_text:
+        return "writing helper"
+    return "small helper"
+
+
+def _proposal_summary_for_capability(capability: str | None, label: str | None = None) -> str:
+    capability_key = str(capability or "").strip().lower()
+    if capability_key in _CAPABILITY_PROPOSAL_SUMMARIES:
+        return _CAPABILITY_PROPOSAL_SUMMARIES[capability_key]
+    label_text = str(label or "").strip().lower()
+    if "voice" in label_text:
+        return "reads text aloud"
+    if "camera" in label_text:
+        return "looks through a camera feed"
+    if "avatar" in label_text:
+        return "shows a visual avatar"
+    if "code" in label_text or "dev" in label_text:
+        return "helps with coding and terminal work"
+    if "system" in label_text or "pc" in label_text:
+        return "helps with system tasks and troubleshooting"
+    if "writing" in label_text or "creative" in label_text:
+        return "helps with drafting, brainstorming, and editing"
+    return "handles this task"
+
+
+def _compact_request_summary(text: str | None) -> str:
+    cleaned = _normalize_text(text)
+    if not cleaned:
+        return "handles this task"
+    prefixes = (
+        "can you ",
+        "could you ",
+        "would you ",
+        "please ",
+        "help me ",
+        "help me to ",
+        "help me with ",
+        "i need ",
+        "i want ",
+        "i'd like ",
+        "i would like ",
+        "build me ",
+        "make me ",
+        "set up ",
+        "set me up to ",
+        "create ",
+        "add ",
+    )
+    for prefix in prefixes:
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):]
+            break
+    lead_ins = (
+        "an assistant that ",
+        "a assistant that ",
+        "assistant that ",
+        "an assistant to ",
+        "assistant to ",
+        "a helper that ",
+        "helper that ",
+        "a helper to ",
+        "helper to ",
+        "a tool that ",
+        "tool that ",
+        "a thing that ",
+        "thing that ",
+    )
+    for lead_in in lead_ins:
+        if cleaned.startswith(lead_in):
+            cleaned = cleaned[len(lead_in):]
+            break
+    cleaned = cleaned.strip(" ?.!;:")
+    return cleaned or "handles this task"
+
+
+def _has_partial_help_cues(normalized: str) -> bool:
+    return any(cue in normalized for cue in _PARTIAL_HELP_CUES)
+
+
+def _classify_request_kind(normalized: str) -> str:
+    if not normalized:
+        return "action"
+    if any(normalized.startswith(prefix) for prefix in _KNOWLEDGE_QUESTION_PREFIXES):
+        return "knowledge"
+    if normalized.endswith("?") and any(
+        re.search(rf"\b{token}\b", normalized) for token in ("what", "who", "why", "how", "when", "where")
+    ):
+        return "knowledge"
+    if any(
+        cue in normalized
+        for cue in (
+            "help me",
+            "can you",
+            "could you",
+            "would you",
+            "please ",
+            "build me",
+            "make me",
+            "set up",
+            "install",
+            "configure",
+            "troubleshoot",
+            "debug",
+            "run ",
+            "check ",
+            "inspect",
+            "monitor",
+            "kill ",
+            "terminate",
+            "stop ",
+            "close ",
+            "quit ",
+            "end ",
+        )
+    ):
+        return "action"
+    return "action"
+
+
+def _behavioral_capability_match(normalized: str) -> dict[str, Any] | None:
+    if not normalized:
+        return None
+    if any(phrase in normalized for phrase in ("read aloud", "read this to me", "read my screen", "say it out loud", "speak to me", "talk to me", "narrate", "voice output", "speech output", "text to speech", "tts")):
+        return {
+            "capability": "voice_output",
+            "label": "voice output",
+            "confidence": 0.82,
+        }
+    if any(phrase in normalized for phrase in ("read this page back to me", "read this page", "read this back to me", "read it back to me", "read to me")):
+        return {
+            "capability": "voice_output",
+            "label": "voice output",
+            "confidence": 0.82,
+        }
+    if any(phrase in normalized for phrase in ("listen to me", "hear me", "dictate", "transcribe", "speech to text", "voice input", "speech input", "voice transcription")):
+        return {
+            "capability": "voice_input",
+            "label": "voice input",
+            "confidence": 0.82,
+        }
+    if any(phrase in normalized for phrase in ("camera feed", "camera stream", "webcam", "keep an eye on", "look at the camera", "watch the camera", "see what", "look at what", "video feed", "live feed")):
+        return {
+            "capability": "camera_feed",
+            "label": "camera feed",
+            "confidence": 0.8,
+        }
+    if any(phrase in normalized for phrase in ("avatar", "visual avatar", "visual persona", "animated avatar", "robot avatar")):
+        return {
+            "capability": "avatar_visual",
+            "label": "visual avatar",
+            "confidence": 0.8,
+        }
+    if any(phrase in normalized for phrase in ("write code", "write a script", "code this", "debug this", "terminal", "git ", "run tests", "programming", "developer tools", "coding")):
+        return {
+            "capability": "dev_tools",
+            "label": "coding tools",
+            "confidence": 0.8,
+        }
+    if any(phrase in normalized for phrase in ("install", "configure", "set up", "set up", "troubleshoot", "repair", "fix my pc", "manage files", "monitor the system", "watch my machine", "keep an eye on", "alert me when", "notify me when")):
+        return {
+            "capability": "system_tools",
+            "label": "system tools",
+            "confidence": 0.78,
+        }
+    return None
+
+
+def _custom_capability_match(normalized: str) -> dict[str, Any] | None:
+    if not normalized:
+        return None
+    request_cues = any(cue in normalized for cue in _PARTIAL_HELP_CUES) or any(
+        cue in normalized
+        for cue in (
+            "can you ",
+            "could you ",
+            "would you ",
+            "please ",
+            "i need ",
+            "i want ",
+            "i'd like ",
+            "i would like ",
+            "make a ",
+            "make an ",
+            "make me ",
+            "build a ",
+            "build an ",
+            "build me ",
+            "create a ",
+            "create an ",
+            "add a ",
+            "add an ",
+            "need a ",
+            "want a ",
+            "want an ",
+            "assistant that ",
+            "helper that ",
+        )
+    )
+    if not request_cues:
+        return None
+    task_cues = any(
+        cue in normalized
+        for cue in (
+            "assistant",
+            "helper",
+            "tool",
+            "something that",
+            "something to",
+            "thing that",
+            "thing to",
+            "ability to",
+            "coordinate",
+            "orchestrate",
+            "manage",
+            "monitor",
+            "track",
+            "automate",
+            "sync",
+            "control",
+            "alert",
+            "notify",
+            "watch",
+            "handle",
+        )
+    )
+    if not task_cues:
+        return None
+    summary = _compact_request_summary(normalized)
+    if not summary or summary == "handles this task":
+        return None
+    return {
+        "capability": None,
+        "label": "helper",
+        "confidence": 0.7,
+        "proposal_summary": summary,
+        "helper_name": "helper",
+    }
+
+
+def classify_capability_gap_request(text: str | None) -> dict[str, Any]:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return {
+            "classification": "can_answer_locally",
+            "request_kind": "action",
+            "capability": None,
+            "label": None,
+            "detected_from": str(text or "").strip() or None,
+            "confidence": 0.0,
+            "reason": "empty",
+        }
+
+    request_kind = _classify_request_kind(normalized)
+    if request_kind == "knowledge":
+        return {
+            "classification": "can_answer_locally",
+            "request_kind": request_kind,
+            "capability": None,
+            "label": None,
+            "detected_from": str(text or "").strip() or None,
+            "confidence": 0.0,
+            "reason": "knowledge_question",
+        }
+
+    exact_need = detect_pack_capability_need(text)
+    behavioral_need = _behavioral_capability_match(normalized)
+    need = exact_need or behavioral_need or _custom_capability_match(normalized)
+    if need is None:
+        return {
+            "classification": "can_answer_locally",
+            "request_kind": request_kind,
+            "capability": None,
+            "label": None,
+            "detected_from": str(text or "").strip() or None,
+            "confidence": 0.0,
+            "reason": "no_gap_detected",
+        }
+
+    capability = str(need.get("capability") or "").strip().lower() or None
+    label = str(need.get("label") or capability or "").strip() or None
+    confidence = float(need.get("confidence") or 0.0)
+    help_cues = _has_partial_help_cues(normalized)
+    classification = "can_partially_answer_but_capability_would_help" if help_cues else "cannot_answer_without_new_capability"
+    proposal_summary = str(need.get("proposal_summary") or "").strip() or _proposal_summary_for_capability(capability, label)
+    helper_name = str(need.get("helper_name") or "").strip() or _helper_name_for_capability(capability, label)
+
+    if exact_need is not None:
+        reason = "exact_capability_phrase"
+    elif behavioral_need is not None:
+        reason = "behavioral_capability_match"
+    else:
+        reason = "custom_capability_gap"
+
+    return {
+        "classification": classification,
+        "request_kind": "capability",
+        "capability": capability,
+        "label": label,
+        "detected_from": str(text or "").strip() or None,
+        "confidence": confidence,
+        "reason": reason,
+        "help_cues": help_cues,
+        "proposal_summary": proposal_summary,
+        "helper_name": helper_name,
+    }
 
 
 def _pack_name(row: dict[str, Any] | None) -> str:
@@ -607,8 +1046,8 @@ def recommend_packs_for_capability(
         fallback = "text_only"
         next_step = "I can still help you set it up or keep this in text."
     else:
-        fallback = "text_only"
-        next_step = "I can keep responding in text."
+        fallback = "propose_new_capability"
+        next_step = f"I can help sketch a small {_helper_name_for_capability(capability_key, label)}."
 
     comparison_mode = "recommended_plus_alternate" if alternate_top is not None and recommendation_pack is not None else "single_recommendation" if recommendation_pack is not None else "installed_only" if installed_pack is not None else "blocked_only" if blocked_pack is not None else "missing"
     alternate_pack = None
@@ -641,6 +1080,8 @@ def recommend_packs_for_capability(
         "comparison_mode": comparison_mode,
         "fallback": fallback,
         "next_step": next_step,
+        "proposal_summary": _proposal_summary_for_capability(capability_key, label) if fallback == "propose_new_capability" else None,
+        "helper_name": _helper_name_for_capability(capability_key, label) if fallback == "propose_new_capability" else None,
         "warnings": list(source_errors),
         "source_errors": list(source_errors),
         "queries": list(search_terms),
@@ -740,6 +1181,134 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
         if blocker:
             lines.append(f"The blocker is {blocker}.")
         lines.append("I can still help you set it up or keep this in text.")
+    elif str(result.get("fallback") or "").strip().lower() == "propose_new_capability":
+        helper_name = str(result.get("helper_name") or _helper_name_for_capability(result.get("capability_required"), label)).strip()
+        proposal_summary = str(result.get("proposal_summary") or "").strip()
+        classification = str(result.get("classification") or "").strip().lower()
+        discovery_failed = bool(result.get("source_errors"))
+        if discovery_failed:
+            lines.append("I couldn't check for an existing match cleanly just now.")
+        if classification == "can_partially_answer_but_capability_would_help":
+            if helper_name:
+                lines.append(f"I can help with the text side, but this would be better as a small {helper_name}.")
+            else:
+                lines.append("I can help with the text side, but this would be better as a small helper.")
+        else:
+            if helper_name:
+                lines.append(f"I couldn't find a ready-made {helper_name} for this yet.")
+            else:
+                lines.append("I couldn't find a ready-made helper for this yet.")
+        if proposal_summary:
+            lines.append(f"The narrowest thing to add would be a small helper that {proposal_summary}.")
+        else:
+            lines.append("The narrowest thing to add would be a small helper for this task.")
+        lines.append("If you want, I can help sketch it.")
     else:
-        lines.append("I can keep responding in text.")
+        fallback = str(result.get("fallback") or "").strip().lower()
+        if fallback == "text_only":
+            lines.append("I can still help you set it up or keep this in text.")
+        else:
+            helper_name = str(result.get("helper_name") or "").strip()
+            if helper_name:
+                lines.append(f"I can help sketch a small {helper_name}.")
+            else:
+                lines.append("I can help sketch a small helper.")
     return normalize_persona_text(" ".join(lines).strip())
+
+
+def build_capability_gap_response(
+    text: str | None,
+    *,
+    pack_store: Any,
+    pack_registry_discovery: Any,
+) -> dict[str, Any] | None:
+    assessment = classify_capability_gap_request(text)
+    classification = str(assessment.get("classification") or "").strip().lower()
+    request_kind = str(assessment.get("request_kind") or "").strip().lower()
+    if classification == "can_answer_locally" or request_kind != "capability":
+        return None
+
+    capability = str(assessment.get("capability") or "").strip().lower() or None
+    label = str(assessment.get("label") or capability or "that task").strip()
+    proposal_summary = str(assessment.get("proposal_summary") or "").strip()
+    helper_name = str(assessment.get("helper_name") or "").strip()
+    source_errors: list[dict[str, Any]] = []
+    recommendation = None
+
+    if capability:
+        recommendation = recommend_packs_for_capability(
+            text,
+            pack_store=pack_store,
+            pack_registry_discovery=pack_registry_discovery,
+            capability=capability,
+        )
+        if isinstance(recommendation, dict):
+            source_errors = [dict(row) for row in recommendation.get("source_errors") if isinstance(row, dict)] if isinstance(recommendation.get("source_errors"), list) else []
+
+    has_existing_option = bool(
+        isinstance(recommendation, dict)
+        and (
+            recommendation.get("installed_pack")
+            or recommendation.get("recommended_pack")
+            or recommendation.get("blocked_pack")
+        )
+    )
+
+    if has_existing_option and isinstance(recommendation, dict):
+        rendered_result = dict(recommendation)
+        rendered_result["classification"] = classification
+        rendered_result["proposal_summary"] = proposal_summary
+        rendered_result["helper_name"] = helper_name or _helper_name_for_capability(capability, label)
+        rendered = render_pack_capability_response(rendered_result)
+        if classification == "can_partially_answer_but_capability_would_help":
+            intro = f"I can help with the text side, but this would be better as a small {rendered_result['helper_name']}."
+            rendered = normalize_persona_text(f"{intro} {rendered}")
+        return {
+            "ok": True,
+            "type": "capability_gap_plan",
+            "summary": rendered,
+            "classification": classification,
+            "capability_required": capability,
+            "capability_label": label,
+            "detected_from": str(assessment.get("detected_from") or "").strip() or None,
+            "confidence": float(assessment.get("confidence") or 0.0),
+            "fallback": str(recommendation.get("fallback") or "install_preview").strip() or "install_preview",
+            "next_step": str(recommendation.get("next_step") or "").strip() or None,
+            "recommendation": recommendation,
+            "source_errors": source_errors,
+            "proposal_summary": proposal_summary,
+            "helper_name": helper_name or _helper_name_for_capability(capability, label),
+        }
+
+    proposal_result = {
+        "ok": True,
+        "capability_required": capability,
+        "capability_label": label,
+        "detected_from": str(assessment.get("detected_from") or "").strip() or None,
+        "confidence": float(assessment.get("confidence") or 0.0),
+        "classification": classification,
+        "fallback": "propose_new_capability",
+        "proposal_summary": proposal_summary or _proposal_summary_for_capability(capability, label),
+        "helper_name": helper_name or _helper_name_for_capability(capability, label),
+        "source_errors": source_errors,
+        "next_step": "If you want, I can help sketch it.",
+        "warnings": source_errors,
+        "queries": [],
+    }
+    rendered = render_pack_capability_response(proposal_result)
+    return {
+        "ok": True,
+        "type": "capability_gap_plan",
+        "summary": rendered,
+        "classification": classification,
+        "capability_required": capability,
+        "capability_label": label,
+        "detected_from": proposal_result["detected_from"],
+        "confidence": proposal_result["confidence"],
+        "fallback": proposal_result["fallback"],
+        "next_step": proposal_result["next_step"],
+        "recommendation": None,
+        "source_errors": source_errors,
+        "proposal_summary": proposal_result["proposal_summary"],
+        "helper_name": proposal_result["helper_name"],
+    }

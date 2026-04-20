@@ -26,6 +26,19 @@ _OBSERVE_MACHINE = re.compile(
     r"\b(gpu|graphics|video card|hardware|pc stats|pc specs|pc info|computer stats|computer specs|computer info|machine stats|machine specs|machine info|system stats|system info|system details)\b",
     re.IGNORECASE,
 )
+_OBSERVE_PERFORMANCE = re.compile(
+    r"\b(slow|slowly|laggy|lagging|sluggish|stutter|stuttering|throttle|throttling|unresponsive|frozen|stuck|dragging)\b",
+    re.IGNORECASE,
+)
+_OBSERVE_PERFORMANCE_CONTEXT = re.compile(
+    r"\b(pc|computer|system|machine|download|downloading|upload|uploading|network|internet|wifi|connection|browser|app|game|disk|storage|drive|file|transfer|latency|ping)\b",
+    re.IGNORECASE,
+)
+_PROCESS_ROLE_QUESTION = re.compile(
+    r"\b(why (?:are|is) there|why do i have|how many|what are these|what is this|which one is the|"
+    r"double check|recheck|check again|look again|confirm it)\b.*\b(ollama|qemu|qemu-system|virtualbox|vmware|browser|chrome|chromium|firefox|instance|instances|process|processes)\b",
+    re.IGNORECASE,
+)
 _OBSERVE_DEEPER = re.compile(
     r"\b(show me more system info|tell me more about (?:this )?(?:machine|computer|system)|"
     r"inspect the system more deeply|inspect the machine more deeply|inspect the computer more deeply|"
@@ -122,6 +135,30 @@ def _machine_broad_requested(text: str) -> bool:
     return _contains_any_phrase(text, _MACHINE_BROAD_PHRASES) or bool(_OBSERVE_DEEPER.search(text))
 
 
+def _process_role_requested(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(
+        _PROCESS_ROLE_QUESTION.search(lowered)
+        or (("ollama" in lowered or "qemu" in lowered or "browser" in lowered) and ("instance" in lowered or "process" in lowered))
+    )
+
+
+def looks_like_system_performance_question(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(_OBSERVE_PERFORMANCE.search(lowered) and _OBSERVE_PERFORMANCE_CONTEXT.search(lowered))
+
+
+def _looks_like_network_observation(text: str) -> bool:
+    lowered = (text or "").lower()
+    return bool(
+        re.search(r"\b(network|dns|gateway|latency|ping|bandwidth|throughput|internet|wifi|connection|connections)\b", lowered)
+        or (
+            re.search(r"\b(download|downloading|upload|uploading)\b", lowered)
+            and bool(_OBSERVE_PERFORMANCE.search(lowered))
+        )
+    )
+
+
 def _append_skill(selected: list[dict[str, str]], skill: str, function: str) -> None:
     entry = {"skill": skill, "function": function}
     if entry not in selected:
@@ -151,21 +188,27 @@ def classify_free_text(text: str) -> str:
         return "MEMORY_INSPECT"
     if _CHITCHAT.search(lowered):
         return "CHITCHAT"
+    if _process_role_requested(lowered):
+        return "EXPLAIN_PREVIOUS"
     if _EXPLAIN.search(lowered) and (
         _OBSERVE_DISK.search(lowered)
         or _OBSERVE_RESOURCE.search(lowered)
         or _OBSERVE_MACHINE.search(lowered)
+        or looks_like_system_performance_question(lowered)
         or _hardware_inventory_requested(lowered)
         or _machine_broad_requested(lowered)
+        or _process_role_requested(lowered)
     ):
         return "EXPLAIN_PREVIOUS"
     if (
         _OBSERVE_DISK.search(lowered)
         or _OBSERVE_RESOURCE.search(lowered)
         or _OBSERVE_MACHINE.search(lowered)
+        or looks_like_system_performance_question(lowered)
         or _OBSERVE_DEEPER.search(lowered)
         or _hardware_inventory_requested(lowered)
         or _machine_broad_requested(lowered)
+        or _process_role_requested(lowered)
         or "my pc" in lowered
         or "my computer" in lowered
     ):
@@ -178,10 +221,13 @@ def select_observe_skills(text: str) -> list[dict[str, str]]:
     selected: list[dict[str, str]] = []
     hardware_requested = _hardware_inventory_requested(lowered)
     machine_broad = _machine_broad_requested(lowered)
+    performance_requested = looks_like_system_performance_question(lowered)
+    process_role_requested = _process_role_requested(lowered)
     machine_requested = bool(
         _OBSERVE_MACHINE.search(lowered)
         or hardware_requested
         or machine_broad
+        or process_role_requested
         or "my pc" in lowered
         or "my computer" in lowered
         or "this machine" in lowered
@@ -198,13 +244,15 @@ def select_observe_skills(text: str) -> list[dict[str, str]]:
     else:
         if machine_requested:
             _append_skill(selected, "hardware_report", "hardware_report")
+        if process_role_requested:
+            _append_skill(selected, "resource_governor", "resource_report")
         if _OBSERVE_DISK.search(lowered):
             _append_skill(selected, "storage_governor", "storage_report")
             if "pressure" in lowered or "largest files" in lowered:
                 selected = [{"skill": "disk_pressure_report", "function": "disk_pressure_report"}]
-        if _OBSERVE_RESOURCE.search(lowered):
+        if _OBSERVE_RESOURCE.search(lowered) or performance_requested:
             _append_skill(selected, "resource_governor", "resource_report")
-    if re.search(r"\bnetwork|dns|gateway|latency|ping\b", lowered):
+    if _looks_like_network_observation(lowered):
         _append_skill(selected, "network_governor", "network_report")
     if re.search(r"\bservice health|service status|agent service|personal-agent service\b", lowered):
         _append_skill(selected, "service_health_report", "service_health_report")
@@ -216,6 +264,8 @@ def select_observe_skills(text: str) -> list[dict[str, str]]:
                 _append_skill(selected, "storage_governor", "storage_report")
             else:
                 _append_skill(selected, "hardware_report", "hardware_report")
+                if process_role_requested:
+                    _append_skill(selected, "resource_governor", "resource_report")
         else:
             _append_skill(selected, "storage_governor", "storage_report")
             _append_skill(selected, "resource_governor", "resource_report")

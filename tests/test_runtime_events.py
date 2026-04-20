@@ -193,7 +193,10 @@ class TestRuntimeEvents(unittest.TestCase):
         self.assertEqual("api", start_event.get("source"))
         self.assertEqual(start_event.get("request_id"), end_event.get("request_id"))
         self.assertEqual("ok", end_event.get("result"))
-        self.assertEqual("ollama:qwen2.5:7b-instruct", end_event.get("model_selected"))
+        self.assertIsInstance(end_event.get("orchestrator_ms"), int)
+        self.assertIsInstance(end_event.get("serialization_ms"), int)
+        self.assertGreaterEqual(int(end_event.get("orchestrator_ms") or 0), 0)
+        self.assertGreaterEqual(int(end_event.get("serialization_ms") or 0), 0)
 
     def test_runtime_history_endpoint_returns_recent_events(self) -> None:
         runtime = self._runtime()
@@ -204,6 +207,41 @@ class TestRuntimeEvents(unittest.TestCase):
         self.assertEqual(200, handler.status_code)
         self.assertTrue(bool(payload["ok"]))
         self.assertEqual("custom_event", payload["events"][-1]["event"])
+
+    def test_runtime_fallback_summary_endpoint_groups_recent_fallback_events(self) -> None:
+        runtime = self._runtime()
+        runtime._runtime_events.log_runtime_event(
+            "diagnostics_fallback",
+            route="diagnostics_fallback",
+            intent_label="diagnostics_capture_generic_device_fallback_request",
+            text_prefix="My webcam is not detected after sleep",
+            trace_id="trace-a",
+        )
+        runtime._runtime_events.log_runtime_event(
+            "diagnostics_fallback",
+            route="diagnostics_fallback",
+            intent_label="diagnostics_capture_generic_device_fallback_request",
+            text_prefix="The camera disappears after suspend",
+            trace_id="trace-b",
+        )
+        runtime._runtime_events.log_runtime_event(
+            "diagnostics_fallback",
+            route="diagnostics_fallback",
+            intent_label="diagnostics_capture_printer_cups_request",
+            text_prefix="Printer is offline",
+            trace_id="trace-c",
+        )
+        handler = _HandlerForTest(runtime, "/runtime/fallbacks?limit=2")
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(bool(payload["ok"]))
+        self.assertEqual(3, payload["total"])
+        self.assertEqual(2, payload["limit"])
+        self.assertEqual("diagnostics_capture_generic_device_fallback_request", payload["categories"][0]["category"])
+        self.assertEqual(2, payload["categories"][0]["count"])
+        self.assertEqual("diagnostics_capture_printer_cups_request", payload["categories"][1]["category"])
+        self.assertEqual(1, payload["categories"][1]["count"])
 
     def test_runtime_event_history_caps_at_max_entries(self) -> None:
         runtime = self._runtime()

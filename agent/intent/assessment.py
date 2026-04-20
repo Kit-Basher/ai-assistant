@@ -66,15 +66,10 @@ def _contains_any(text: str, phrases: tuple[str, ...]) -> bool:
 def _decision_from_candidates(candidates: list[IntentCandidate]) -> tuple[str, float, str | None]:
     ordered = sorted(candidates, key=lambda row: (-float(row.score), row.intent))
     top = float(ordered[0].score) if ordered else 0.0
-    second = float(ordered[1].score) if len(ordered) > 1 else 0.0
-    margin = top - second
-    if top >= 0.75 and margin >= 0.10:
-        return "proceed", _round_score(top), None
-    return (
-        "clarify",
-        _round_score(top),
-        "I can do that. Which of these is your goal: chat, ask, or model check/switch?",
-    )
+    # Default to the conversational route instead of surfacing internal router
+    # choices. The API layer can still ask a natural follow-up for other
+    # clarification cases, but intent ambiguity here should not block the user.
+    return "proceed", _round_score(top), None
 
 
 def _candidate_dict(candidates: list[IntentCandidate]) -> list[IntentCandidate]:

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 import re
 
-from agent.packs.capability_recommendation import detect_pack_capability_need
+from agent.packs.capability_recommendation import classify_capability_gap_request
 from agent.nl_router import classify_free_text
 
 
@@ -73,6 +73,11 @@ _LOCAL_MODEL_INVENTORY_PHRASES = (
     "which local models do we have",
     "what local models are available",
     "which local models are available",
+    "what local models u got",
+    "wut local models u got",
+    "what local models do you got",
+    "what models u got",
+    "which models u got",
     "show me local models",
     "list local models",
     "show downloaded models",
@@ -138,6 +143,8 @@ _RUNTIME_STATUS_PHRASES = (
     "is the agent healthy",
     "are you healthy right now",
     "are you healthy",
+    "r u healthy right now",
+    "r u healthy",
     "is personal agent ready",
     "what is the runtime status",
     "runtime status",
@@ -193,8 +200,17 @@ _TELEGRAM_STATUS_PHRASES = (
 _CURRENT_MODEL_PHRASES = (
     "what model are you using",
     "which model are you using",
+    "what model are you on",
+    "what model u on",
+    "what model are you on right now",
+    "what model u using",
+    "wut model u on",
+    "wut model are you using",
     "what provider are you using",
     "which provider are you using",
+    "what provider are you on",
+    "what provider u on",
+    "and provider",
     "what model are we using",
     "which model are we using",
     "current model",
@@ -1639,13 +1655,25 @@ def classify_runtime_chat_route(
             "generic_allowed": False,
             "fallback_reason": "assistant_capabilities",
         }
-    capability_need = detect_pack_capability_need(normalized)
-    if capability_need is not None:
+    capability_gap = classify_capability_gap_request(normalized)
+    if str(capability_gap.get("request_kind") or "").strip().lower() == "capability" and str(
+        capability_gap.get("classification") or ""
+    ).strip().lower() != "can_answer_locally":
+        capability_key = str(capability_gap.get("capability") or "").strip().lower() or None
+        if capability_key is not None:
+            return {
+                "route": "action_tool",
+                "kind": "pack_capability_recommendation",
+                "capability": capability_key,
+                "capability_label": capability_gap.get("label"),
+                "generic_allowed": False,
+                "fallback_reason": "action_tool",
+            }
         return {
             "route": "action_tool",
-            "kind": "pack_capability_recommendation",
-            "capability": capability_need.get("capability"),
-            "capability_label": capability_need.get("label"),
+            "kind": "capability_gap_plan",
+            "capability_label": capability_gap.get("label"),
+            "capability_classification": capability_gap.get("classification"),
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }

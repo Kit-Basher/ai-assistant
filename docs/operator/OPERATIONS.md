@@ -3,6 +3,17 @@
 This is the lightweight post-release operating guide for Personal Agent.
 If another note disagrees, trust the live state surfaces plus `python -m agent doctor`.
 
+Daily-driver service:
+
+- `personal-agent-api.service`
+
+Checkout/dev service:
+
+- `personal-agent-api-dev.service`
+
+The stable service is the default local desktop app. The dev service is only
+for repo work and must not compete with the stable launcher.
+
 ## Quick Health Cadence
 
 ### After startup or deploy
@@ -18,6 +29,7 @@ Confirm:
 - the runtime phase matches expectation
 - `state_label`, `reason`, `next_step`, and `recovery` are present when the system is not healthy
 - installed packs match what you expect to be present on that machine
+- `/version` reports the expected runtime instance
 
 ### During normal operation
 
@@ -25,6 +37,7 @@ Confirm:
 - check `GET /state` when the assistant sounds contradictory or stale
 - check `GET /packs/state` when pack behavior seems wrong
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
+- run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 ### After any issue
 
@@ -85,7 +98,7 @@ Follow the surfaced `next_step` first.
 Typical actions:
 
 - wait for startup to finish
-- restart the user service
+- restart the stable or dev user service you are actually using
 - run `python -m agent doctor --fix`
 - back up state before risky recovery
 - roll back if a release regression is confirmed
@@ -116,6 +129,14 @@ For any bug report or support request, collect:
 
 The doctor bundle is the canonical redacted support artifact. It is enough for
 normal diagnosis without asking for logs first.
+
+To check which copy is active:
+
+- `curl -sS http://127.0.0.1:8765/version`
+- `curl -sS http://127.0.0.1:18765/version`
+- `systemctl --user status personal-agent-api.service`
+- `systemctl --user status personal-agent-api-dev.service`
+- `python -m agent doctor`
 
 ## Bug Triage Loop
 
@@ -152,6 +173,8 @@ promote:
 
 - `python scripts/webui_smoke.py`
 - `python scripts/reference_pack_workflow_smoke.py`
+- `bash scripts/promote_local_stable.sh`
+- `python scripts/split_smoke.py`
 
 Promotion criteria:
 

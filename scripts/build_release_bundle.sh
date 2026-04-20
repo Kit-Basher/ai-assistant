@@ -89,6 +89,10 @@ required = [
     repo_root / "build_backend.py",
     repo_root / "pyproject.toml",
     repo_root / "VERSION",
+    repo_root / "README.md",
+    repo_root / "personal_agent_bootstrap.py",
+    repo_root / "personal_agent_bootstrap.pth",
+    repo_root / "sitecustomize.py",
     repo_root / "agent" / "webui" / "dist" / "index.html",
     repo_root / "assets" / "icons" / "personal-agent.svg",
     repo_root / "scripts" / "launch_webui.sh",
@@ -122,6 +126,10 @@ shutil.copy2(repo_root / "build_backend.py", payload_dir / "build_backend.py")
 shutil.copy2(repo_root / "pyproject.toml", payload_dir / "pyproject.toml")
 shutil.copy2(repo_root / "requirements.txt", payload_dir / "requirements.txt")
 shutil.copy2(repo_root / "VERSION", payload_dir / "VERSION")
+shutil.copy2(repo_root / "README.md", payload_dir / "README.md")
+shutil.copy2(repo_root / "personal_agent_bootstrap.py", payload_dir / "personal_agent_bootstrap.py")
+shutil.copy2(repo_root / "personal_agent_bootstrap.pth", payload_dir / "personal_agent_bootstrap.pth")
+shutil.copy2(repo_root / "sitecustomize.py", payload_dir / "sitecustomize.py")
 shutil.copy2(repo_root / "assets" / "icons" / "personal-agent.svg", payload_dir / "assets" / "icons" / "personal-agent.svg")
 shutil.copy2(repo_root / "scripts" / "launch_webui.sh", payload_dir / "bin" / "personal-agent-webui")
 os.chmod(payload_dir / "bin" / "personal-agent-webui", 0o755)
@@ -141,6 +149,10 @@ manifest = {
         "pyproject.toml",
         "requirements.txt",
         "VERSION",
+        "README.md",
+        "personal_agent_bootstrap.py",
+        "personal_agent_bootstrap.pth",
+        "sitecustomize.py",
     ],
 }
 (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
