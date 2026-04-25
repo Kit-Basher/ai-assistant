@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -18,7 +19,15 @@ class SerializedChatResponse:
 
 
 def _response_data(response: OrchestratorResponse) -> dict[str, Any]:
-    return dict(response.data) if isinstance(response.data, dict) else {}
+    payload = response.data
+    if isinstance(payload, dict):
+        return dict(payload)
+    if isinstance(payload, Mapping):
+        try:
+            return dict(payload)
+        except Exception:
+            return {}
+    return {}
 
 
 def _runtime_payload(response_data: dict[str, Any]) -> dict[str, Any] | None:

@@ -3,9 +3,11 @@ import subprocess
 import tempfile
 import unittest
 import json
+import time
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.llm.chat_preflight import PreparedChatRequest
 from agent.filesystem_skill import FileSystemSkill
 from agent.knowledge_cache import facts_hash
 from agent.onboarding_flow import onboarding_completed_key
@@ -69,6 +71,42 @@ class _FrontdoorRuntimeAdapter:
 
     def _safe_mode_enabled(self) -> bool:
         return True
+
+    def assistant_chat_available(self) -> bool:
+        return True
+
+
+class _RuntimeChatAvailableAdapter:
+    def _safe_mode_enabled(self) -> bool:
+        return False
+
+
+class _PreparedChatAdapter:
+    def _safe_mode_enabled(self) -> bool:
+        return False
+
+    def prepare_orchestrator_chat_request(self, request):  # type: ignore[no-untyped-def]
+        payload = dict(request.get("payload") or {})
+        messages = list(request.get("messages") or [])
+        return {
+            "prepared": PreparedChatRequest(
+                messages=messages,
+                last_user_text=str(((messages or [{}])[-1] or {}).get("content") or ""),
+                provider_override="ollama",
+                model_override="ollama:qwen2.5:7b-instruct",
+                require_tools=False,
+                selection_reason="default_target_pin",
+                escalation_reasons=(),
+                premium_selected_model=None,
+            ),
+            "defaults": {
+                "default_provider": "ollama",
+                "default_model": "ollama:qwen2.5:7b-instruct",
+                "chat_model": "ollama:qwen2.5:7b-instruct",
+                "allow_remote_fallback": False,
+                "source_surface": payload.get("source_surface"),
+            },
+        }
 
     def assistant_chat_available(self) -> bool:
         return True
@@ -1723,6 +1761,195 @@ class TestOrchestrator(unittest.TestCase):
         system_text = str((messages or [{}])[0].get("content") if messages else "")
         self.assertIn("Always identify as the local Personal Agent", system_text)
 
+    def test_generic_chat_reports_no_prior_memory_diagnostics(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="forest reply")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator._llm_chat(
+            "user1",
+            "Tell me about forests.",
+            chat_context={"messages": [{"role": "user", "content": "Tell me about forests."}]},
+        )
+
+        diagnostics = response.data.get("memory_diagnostics")
+        self.assertIsInstance(diagnostics, dict)
+        self.assertFalse(bool(diagnostics.get("used")))
+        self.assertEqual("no_prior_memory", diagnostics.get("reason"))
+        self.assertEqual(0, diagnostics.get("context_chars"))
+        self.assertFalse(bool(response.data.get("used_memory")))
+        self.assertNotIn("Tell me about forests", json.dumps(diagnostics))
+
+    def test_generic_chat_reports_prior_working_memory_diagnostics(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="continue reply")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        state = WorkingMemoryState()
+        append_turn(state, role="user", text="We were refactoring the alerts workflow.")
+        self.assertTrue(orchestrator._memory_runtime.save_working_memory_state("user1", state))
+
+        response = orchestrator._llm_chat(
+            "user1",
+            "Tell me how to proceed.",
+            chat_context={"messages": [{"role": "user", "content": "Tell me how to proceed."}]},
+        )
+
+        diagnostics = response.data.get("memory_diagnostics")
+        self.assertIsInstance(diagnostics, dict)
+        self.assertTrue(bool(diagnostics.get("used")))
+        self.assertEqual("hot_thread_history", diagnostics.get("reason"))
+        self.assertTrue(bool(response.data.get("used_memory")))
+        sources = diagnostics.get("sources") if isinstance(diagnostics.get("sources"), dict) else {}
+        self.assertTrue(bool(sources.get("working_memory")))
+        working_memory = diagnostics.get("working_memory") if isinstance(diagnostics.get("working_memory"), dict) else {}
+        self.assertTrue(bool(working_memory.get("had_prior_state")))
+        self.assertGreaterEqual(int(working_memory.get("hot_turn_count") or 0), 2)
+        self.assertNotIn("refactoring the alerts workflow", json.dumps(diagnostics))
+
+    def test_handle_message_preserves_runtime_prepared_chat_overrides(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="blue and white")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_PreparedChatAdapter(),
+        )
+
+        response = orchestrator.handle_message(
+            "What colour is a bluejay?",
+            "user1",
+            chat_context={
+                "trace_id": "trace-bluejay",
+                "source_surface": "webui",
+                "payload": {"source_surface": "webui"},
+                "messages": [{"role": "user", "content": "What colour is a bluejay?"}],
+            },
+        )
+
+        self.assertEqual("blue and white", response.text)
+        self.assertEqual(1, len(llm.chat_calls))
+        kwargs = llm.chat_calls[0].get("kwargs") if isinstance(llm.chat_calls[0], dict) else {}
+        self.assertEqual("ollama", (kwargs or {}).get("provider_override"))
+        self.assertEqual("ollama:qwen2.5:7b-instruct", (kwargs or {}).get("model_override"))
+
+    def test_telegram_latency_fallback_drops_default_target_pin_overrides(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=None,
+            chat_runtime_adapter=_PreparedChatAdapter(),
+        )
+        route_calls: list[dict[str, object]] = []
+
+        def _fake_route_inference(**kwargs: object) -> dict[str, object]:
+            route_calls.append(dict(kwargs))
+            metadata = kwargs.get("metadata") if isinstance(kwargs.get("metadata"), dict) else {}
+            if not bool(metadata.get("latency_fallback")):
+                return {
+                    "ok": False,
+                    "text": "",
+                    "provider": "ollama",
+                    "model": "ollama:qwen2.5:7b-instruct",
+                    "task_type": "chat",
+                    "selection_reason": "timeout",
+                    "fallback_used": False,
+                    "error_kind": "timeout",
+                    "error_class": "timeout",
+                    "duration_ms": 5000,
+                    "attempts": [],
+                    "data": {"selection": {"selected_model": "ollama:qwen2.5:7b-instruct", "provider": "ollama"}},
+                }
+            return {
+                "ok": True,
+                "text": "Fallback reply",
+                "provider": "ollama",
+                "model": "ollama:qwen3.5:4b",
+                "task_type": "chat",
+                "selection_reason": "healthy",
+                "fallback_used": False,
+                "error_kind": None,
+                "duration_ms": 700,
+                "attempts": [],
+                "data": {"selection": {"selected_model": "ollama:qwen3.5:4b", "provider": "ollama"}},
+            }
+
+        with patch("agent.orchestrator.route_inference", side_effect=_fake_route_inference):
+            response = orchestrator._llm_chat(
+                "user1",
+                "Tell me a joke",
+                chat_context={
+                    "payload": {"source_surface": "telegram"},
+                    "messages": [{"role": "user", "content": "Tell me a joke"}],
+                    "source_surface": "telegram",
+                    "channel": "telegram",
+                },
+            )
+
+        self.assertEqual("Fallback reply", response.text)
+        self.assertEqual(2, len(route_calls))
+        self.assertEqual("ollama:qwen2.5:7b-instruct", route_calls[0].get("model_override"))
+        self.assertEqual("ollama", route_calls[0].get("provider_override"))
+        self.assertIsNone(route_calls[1].get("model_override"))
+        self.assertIsNone(route_calls[1].get("provider_override"))
+        fallback_meta = route_calls[1].get("metadata") if isinstance(route_calls[1].get("metadata"), dict) else {}
+        self.assertTrue(bool(fallback_meta.get("latency_fallback")))
+
+    def test_generic_chat_router_failure_uses_deterministic_conversation_fallback(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="unused")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={
+                "ok": False,
+                "text": "",
+                "provider": None,
+                "model": None,
+                "task_type": "chat",
+                "selection_reason": "no_suitable_model",
+                "fallback_used": True,
+                "error_kind": "no_suitable_model",
+                "next_action": None,
+                "trace_id": "orch-test",
+                "data": {"selection": {"selected_model": None, "provider": None, "reason": "no_suitable_model"}},
+            },
+        ):
+            response = orchestrator._llm_chat(
+                "user1",
+                "I'm testing whether you can stay coherent through a long chat.",
+                chat_context={
+                    "payload": {"source_surface": "telegram"},
+                    "messages": [{"role": "user", "content": "I'm testing whether you can stay coherent through a long chat."}],
+                    "source_surface": "telegram",
+                    "channel": "telegram",
+                },
+            )
+
+        self.assertIn("ask your next question", response.text.lower())
+        self.assertIn("keep the thread consistent", response.text.lower())
+        self.assertTrue(bool(response.data.get("ok")))
+        self.assertFalse(bool(response.data.get("used_llm")))
+
     def test_runtime_ready_allows_normal_chat_despite_stale_onboarding_state(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="hi from llm")
         runtime_truth = _FakeRuntimeTruthService()
@@ -1954,6 +2181,29 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("providers", response.data.get("runtime_payload", {}))
         self.assertEqual(0, len(llm.chat_calls))
 
+    def test_natural_providers_setup_query_uses_runtime_truth_without_llm(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("What providers are set up right now?", "user1")
+
+        self.assertEqual("provider_status", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertTrue(response.data["used_runtime_state"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertIn("providers", payload)
+        self.assertIn(("providers_status", None), runtime_truth.calls)
+
     def test_runtime_status_unavailable_still_explains_live_ollama_instances(self) -> None:
         orchestrator = Orchestrator(
             db=self.db,
@@ -2062,6 +2312,84 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(response.data.get("skip_post_response_hooks", False))
         timing = response.data.get("orchestrator_timing_ms") if isinstance(response.data.get("orchestrator_timing_ms"), dict) else {}
         self.assertEqual(0, int(timing.get("assistant_response_guard_ms", -1)))
+
+    def test_assistant_capabilities_brief_prompt_uses_concise_summary(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "say what you do in one sentence, but keep it natural",
+                "user1",
+            )
+        self.assertEqual("assistant_capabilities", response.data["route"])
+        self.assertNotIn("- System inspection:", response.text)
+        self.assertIn("I can help inspect this system", response.text)
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertTrue(bool(payload.get("brief_prompt")))
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_assistant_capabilities_guided_thinking_prompt_uses_short_natural_reply(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "I need help thinking through something messy, but keep it simple.",
+                "user1",
+            )
+        self.assertEqual("assistant_capabilities", response.data["route"])
+        self.assertEqual(
+            "Yes. Tell me the goal, the messy part, and any constraint, and I’ll help break it down simply.",
+            response.text,
+        )
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertTrue(bool(payload.get("guided_thinking_prompt")))
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_assistant_layer_question_explains_assistant_agent_boundary_without_llm(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "what are you and what is the agent layer supposed to do?",
+                "user1",
+            )
+        self.assertEqual("assistant_capabilities", response.data["route"])
+        self.assertIn("You interact with me, the assistant.", response.text)
+        self.assertIn("agent layer", response.text)
+        self.assertIn("should not talk to you directly", response.text)
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertTrue(bool(payload.get("agent_layer_prompt")))
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(0, len(llm.chat_calls))
 
     def test_filesystem_queries_use_native_skill_without_llm_fallback(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -4188,8 +4516,43 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("voice_output", payload.get("capability_required"))
         self.assertEqual("install_preview", payload.get("fallback"))
         self.assertIn("Voice output isn't installed.", response.text)
-        self.assertIn("best fit for this machine", response.text)
-        self.assertIn("Say yes and I'll show the install preview.", response.text)
+        self.assertIn("most practical option here", response.text)
+        self.assertIn("install details", response.text)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_pack_capability_prompt_short_circuits_before_llm_without_frontdoor(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("hey can you read something to me?", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertIn("voice helper", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_pack_capability_recommendation_compares_two_good_options_without_auto_install(self) -> None:
@@ -4257,10 +4620,10 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("recommended_plus_alternate", payload.get("comparison_mode"))
         self.assertEqual("pack_capability_recommendation", payload.get("type"))
         self.assertIn("I found 2 packs that fit this machine.", response.text)
-        self.assertIn("Local Voice looks lighter.", response.text)
+        self.assertIn("Local Voice looks like the lighter option.", response.text)
         self.assertIn("Studio Voice may need more resources.", response.text)
         self.assertIn("I'd start with Local Voice.", response.text)
-        self.assertIn("install preview for Local Voice", response.text)
+        self.assertIn("install details for Local Voice", response.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_installed_but_disabled_pack_is_explained_without_auto_install(self) -> None:
@@ -4318,6 +4681,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("voice_output", payload.get("capability_required"))
         self.assertIn("installed, but it is disabled", response.text)
         self.assertIn("not enabled as a live capability", response.text)
+        self.assertIn("Enable it before using it.", response.text)
         self.assertIn("keep this in text", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
@@ -4377,6 +4741,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("installed and healthy", response.text)
         self.assertIn("can't confirm it's usable for this task yet", response.text)
         self.assertIn("task compatibility not confirmed", response.text)
+        self.assertIn("Open the pack preview before relying on it.", response.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_paraphrased_voice_request_routes_to_existing_pack_flow(self) -> None:
@@ -4432,7 +4797,8 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
         self.assertIn("Voice output isn't installed.", response.text)
         self.assertIn("Local Voice", response.text)
-        self.assertIn("install preview", response.text.lower())
+        self.assertIn("install details", response.text.lower())
+        self.assertNotIn("best fit for this machine", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_partial_custom_gap_proposes_a_small_helper(self) -> None:
@@ -4468,9 +4834,11 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
-        self.assertIn("I can help with the text side", response.text)
+        self.assertIn("I can help in text", response.text)
         self.assertIn("small helper", response.text.lower())
-        self.assertIn("narrowest thing to add", response.text.lower())
+        self.assertIn("simplest way to add it", response.text.lower())
+        self.assertIn("sketch that with you", response.text.lower())
+        self.assertNotIn("helper isn't installed", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_direct_custom_gap_proposes_a_narrow_new_helper(self) -> None:
@@ -4508,8 +4876,50 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
         self.assertNotIn("I can help with the text side", response.text)
         self.assertIn("couldn't find a ready-made helper", response.text.lower())
-        self.assertIn("narrowest thing to add", response.text.lower())
+        self.assertIn("simplest way to add it", response.text.lower())
+        self.assertIn("sketch that with you", response.text.lower())
+        self.assertNotIn("make an assistant that", response.text.lower())
         self.assertNotIn("install preview", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_capability_gap_yes_followup_advances_sketch_flow(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _EmptyDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _EmptyDiscovery()  # type: ignore[assignment]
+
+        first = orchestrator.handle_message("Make an assistant that coordinates my studio light cues with my music cues during live shows.", "user1")
+        self.assertEqual("action_tool", first.data["route"])
+        self.assertEqual(["capability_gap_planning"], first.data["used_tools"])
+        self.assertIn("small helper", first.text.lower())
+
+        second = orchestrator.handle_message("yes please", "user1")
+        self.assertEqual("action_tool", second.data["route"])
+        self.assertEqual(["capability_gap_planning"], second.data["used_tools"])
+        self.assertIn("sketch a small", second.text.lower())
+        self.assertIn("what should it read from first", second.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_discovery_unavailable_still_proposes_a_narrow_helper(self) -> None:
@@ -4841,9 +5251,11 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
+        self.assertIn("I can help in text", response.text)
         self.assertIn("Coding tools isn't installed.", response.text)
         self.assertIn("coding helper", response.text.lower())
         self.assertIn("small helper that helps with coding and terminal work", response.text.lower())
+        self.assertEqual(1, response.text.lower().count("coding helper"))
         self.assertNotIn("Best coding option:", response.text)
         self.assertNotIn("No change has been made.", response.text)
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
@@ -6671,6 +7083,71 @@ class TestOrchestrator(unittest.TestCase):
         self.assertNotIn("0.0%", summary)
         self.assertIn("memory delta", " ".join(followups).lower())
 
+    def test_simple_ram_question_is_concise_and_skips_deep_process_breakdown(self) -> None:
+        orchestrator = self._orchestrator()
+        live = {
+            "taken_at": "2026-04-21T15:03:00-06:00",
+            "hostname": "host-a",
+            "loadavg": (1.23, 0.99, 0.75),
+            "mem": {
+                "total": int(67.4 * 1024**3),
+                "used": int(21.3 * 1024**3),
+                "available": int(46.1 * 1024**3),
+                "free": int(12.4 * 1024**3),
+                "buffers": int(512 * 1024**2),
+                "cached": int(8 * 1024**3),
+                "shared": int(256 * 1024**2),
+                "used_pct": 31.6,
+            },
+            "swap": {"total": 0, "used": 0},
+            "top_cpu": [{"pid": 11, "name": "python", "cpu_ticks": 42, "rss_bytes": int(2.8 * 1024**3)}],
+            "top_rss": [
+                {"pid": 22, "name": "chrome", "cpu_ticks": 18, "rss_bytes": int(4.2 * 1024**3)},
+                {"pid": 11, "name": "python", "cpu_ticks": 42, "rss_bytes": int(2.8 * 1024**3)},
+            ],
+            "proc_stats": {"procs_scanned": 128, "errors_skipped": 2},
+        }
+
+        with patch.object(collector, "collect_live_snapshot", return_value=live):
+            response = orchestrator.handle_message("how much RAM am I using right now?", "tester")
+
+        self.assertIn("You’re using", response.text)
+        self.assertIn("21.3 GiB of RAM", response.text)
+        self.assertNotIn("Likely cause:", response.text)
+        self.assertNotIn("Top CPU processes", response.text)
+
+    def test_ram_diagnostic_question_keeps_full_explanation(self) -> None:
+        orchestrator = self._orchestrator()
+        live = {
+            "taken_at": "2026-04-21T15:03:00-06:00",
+            "hostname": "host-a",
+            "loadavg": (1.23, 0.99, 0.75),
+            "mem": {
+                "total": int(67.4 * 1024**3),
+                "used": int(21.3 * 1024**3),
+                "available": int(46.1 * 1024**3),
+                "free": int(12.4 * 1024**3),
+                "buffers": int(512 * 1024**2),
+                "cached": int(8 * 1024**3),
+                "shared": int(256 * 1024**2),
+                "used_pct": 31.6,
+            },
+            "swap": {"total": 0, "used": 0},
+            "top_cpu": [{"pid": 11, "name": "python", "cpu_ticks": 42, "rss_bytes": int(2.8 * 1024**3)}],
+            "top_rss": [
+                {"pid": 22, "name": "chrome", "cpu_ticks": 18, "rss_bytes": int(4.2 * 1024**3)},
+                {"pid": 11, "name": "python", "cpu_ticks": 42, "rss_bytes": int(2.8 * 1024**3)},
+            ],
+            "proc_stats": {"procs_scanned": 128, "errors_skipped": 2},
+        }
+
+        with patch.object(collector, "collect_live_snapshot", return_value=live):
+            response = orchestrator.handle_message("what is using my RAM?", "tester")
+
+        self.assertIn("Likely cause:", response.text)
+        self.assertIn("Top CPU processes", response.text)
+        self.assertNotIn("You’re using", response.text)
+
     def test_runtime_configure_ollama_routes_to_setup_flow_without_llm(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
@@ -6784,6 +7261,38 @@ class TestOrchestrator(unittest.TestCase):
         response = orchestrator.handle_message("hello", "user1")
         self.assertIn("I’m not ready to chat yet", response.text)
         self.assertIn("Open Setup", response.text)
+        self.assertEqual([], llm.chat_calls)
+
+    def test_llm_chat_uses_runtime_adapter_chat_availability_when_client_disabled(self) -> None:
+        llm = _FakeChatLLM(enabled=False, text="unused")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={
+                "ok": True,
+                "text": "hi from llm",
+                "provider": "ollama",
+                "model": "llama3",
+                "task_type": "chat",
+                "selection_reason": "healthy",
+                "fallback_used": False,
+                "error_kind": None,
+                "next_action": None,
+                "trace_id": "orch-test",
+                "data": {"selection": {"selected_model": "llama3", "provider": "ollama", "reason": "healthy"}},
+            },
+        ) as route_mock:
+            response = orchestrator._llm_chat("user1", "what can you help with?")
+
+        self.assertEqual("hi from llm", response.text)
+        route_mock.assert_called_once()
         self.assertEqual([], llm.chat_calls)
 
     def test_llm_chat_run_directive_executes_internal_brief(self) -> None:
@@ -7295,12 +7804,27 @@ class TestOrchestrator(unittest.TestCase):
             llm_client=llm,
             chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
         )
-        response = orchestrator.handle_message("tell me a joke", "user1")
+        response = orchestrator.handle_message("please summarize the current task", "user1")
         self.assertIn("I’m not ready to chat yet", response.text)
         self.assertNotIn("Something went wrong while answering that", response.text)
         self.assertNotIn("Chat LLM is unavailable.", response.text)
         self.assertNotIn("python -m agent setup", response.text)
         self.assertEqual(1, llm.chat_calls)
+
+    def test_handle_message_short_joke_prompt_short_circuits_before_llm(self) -> None:
+        llm = _RaisingChatLLM(enabled=True)
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+        response = orchestrator.handle_message("actually, give me a one-line joke", "user1")
+        self.assertIn("good backlog", response.text)
+        self.assertEqual("joke", response.data.get("route"))
+        self.assertTrue(bool(response.data.get("ok", False)))
+        self.assertEqual(0, llm.chat_calls)
 
     def test_assistant_frontdoor_translates_structured_internal_tool_error(self) -> None:
         llm = _FakeChatLLM(
@@ -7407,6 +7931,177 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("Memory summary (thread thread-a):", response.text)
         self.assertIn("Pending items: 1", response.text)
         self.assertIn("Resumable: yes", response.text)
+
+    def test_plan_day_seeded_topic_can_be_resumed_with_working_context_prompt(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+
+        first = orchestrator.handle_message("help me plan my day", "user1")
+        second = orchestrator.handle_message("what are we doing?", "user1")
+
+        self.assertIn("Today priorities", first.text)
+        self.assertEqual("plan_day", first.data.get("route"))
+        self.assertFalse(bool(first.data.get("generic_fallback_used")))
+        self.assertFalse(bool(first.data.get("generic_fallback_allowed")))
+        self.assertIn("We were working on today plan.", second.text)
+        self.assertIn("I can pick up today plan from there.", second.text)
+
+    def test_viability_gate_probe_seeds_working_context_for_resume_prompts(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+
+        first = orchestrator.handle_message("we are testing the assistant viability gate", "user1")
+        second = orchestrator.handle_message("what are we doing?", "user1")
+
+        self.assertIn("assistant_viability_gate", first.text)
+        self.assertIn("We were working on assistant viability gate.", second.text)
+
+    def test_long_chat_coherence_probe_uses_deterministic_assistant_reply(self) -> None:
+        orchestrator = self._orchestrator()
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "I'm testing whether you can stay coherent through a long chat.",
+                "user1",
+            )
+
+        self.assertIn("ask your next question", response.text.lower())
+        self.assertIn("keep the thread consistent", response.text.lower())
+        self.assertEqual("generic_chat", response.data.get("route"))
+        self.assertFalse(bool(response.data.get("used_llm")))
+
+    def test_generic_testing_statement_seeds_working_context_with_fast_ack(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+
+        first = orchestrator.handle_message("we are testing the barrage hardening task", "user1")
+        second = orchestrator.handle_message("what are we doing?", "user1")
+
+        self.assertEqual("agent_memory", first.data.get("route"))
+        self.assertIn("Got it. We're working on the barrage hardening task.", first.text)
+        self.assertIn("We were working on the barrage hardening task.", second.text)
+        self.assertIn("I can pick up the barrage hardening task from there.", second.text)
+
+    def test_selective_chat_memory_context_uses_rewind_prompts(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="assistant viability gate")
+
+        context = orchestrator._selective_chat_memory_context(  # noqa: SLF001
+            "user1",
+            "No, go back and explain the larger task.",
+        )
+
+        self.assertIn("Current topic: assistant viability gate", context)
+        self.assertIn("assistant viability gate", context)
+
+    def test_memory_overview_uses_rewind_prompts_for_working_context(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="assistant viability gate")
+
+        response = orchestrator._assistant_memory_overview_response(  # noqa: SLF001
+            "user1",
+            query_text="No, go back and explain the larger task.",
+        )
+
+        self.assertIn("We were working on assistant viability gate.", response.text)
+        self.assertIn("I can pick up assistant viability gate from there.", response.text)
+
+    def test_correction_response_uses_current_topic_when_available(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="assistant viability gate")
+        orchestrator._last_interpretable_result["user1"] = {  # noqa: SLF001
+            "created_ts": int(time.time()),
+            "route": "generic_chat",
+            "kind": "generic_chat",
+            "summary": "keep the answer short",
+            "payload": {"summary": "keep the answer short"},
+        }
+
+        response = orchestrator._assistant_correction_response(  # noqa: SLF001
+            user_id="user1",
+            used_memory=True,
+            reason="correction_turn",
+        )
+
+        self.assertIn("We were working on assistant viability gate.", response.text)
+        self.assertIn("If you want, I can pick it back up from there.", response.text)
+
+    def test_correction_prompt_includes_rewind_phrases(self) -> None:
+        self.assertTrue(Orchestrator._looks_like_correction_prompt("No, go back and explain the larger task."))
+        self.assertTrue(Orchestrator._looks_like_correction_prompt("If you had to continue from here, what would you do next?"))
+
+    def test_working_context_rewind_prompt_detector_matches_long_session_turns(self) -> None:
+        self.assertTrue(
+            Orchestrator._looks_like_working_context_rewind_prompt("No, go back and explain the larger task.")
+        )
+        self.assertTrue(
+            Orchestrator._looks_like_working_context_rewind_prompt("If you had to continue from here, what would you do next?")
+        )
+        self.assertTrue(
+            Orchestrator._looks_like_working_context_rewind_prompt("What should we do next?")
+        )
+        self.assertTrue(
+            Orchestrator._looks_like_working_context_rewind_prompt("Summarize where we left this in one sentence.")
+        )
+
+    def test_memory_overview_uses_actionable_next_step_for_working_context(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="today_plan")
+
+        response = orchestrator._assistant_memory_overview_response(  # noqa: SLF001
+            "user1",
+            query_text="What should we do next?",
+        )
+
+        self.assertIn("We were working on today plan.", response.text)
+        self.assertIn("Best next step: continue with today plan.", response.text)
+
+    def test_memory_overview_uses_natural_last_request_phrase(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="today_plan")
+        orchestrator._memory_runtime.record_user_request("user1", "what are we doing?")
+
+        response = orchestrator._assistant_memory_overview_response(  # noqa: SLF001
+            "user1",
+            query_text="what are we doing?",
+        )
+
+        self.assertIn("Last thing you asked me to do: what are we doing?.", response.text)
+        self.assertNotIn("Your last concrete request was:", response.text)
+
+    def test_summarize_the_work_prefers_working_context_over_correction(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._set_active_thread_id_for_user("user1", "thread-a")
+        orchestrator._memory_runtime.set_current_topic("user1", topic="assistant viability gate")
+        orchestrator._last_interpretable_result["user1"] = {  # noqa: SLF001
+            "created_ts": int(time.time()),
+            "route": "runtime_status",
+            "kind": "runtime_status",
+            "summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct.",
+            "payload": {"summary": "Ready. Using ollama / ollama:qwen2.5:7b-instruct."},
+        }
+
+        response = orchestrator._assistant_unmatched_input_response(
+            "user1",
+            "Okay, now summarize the work in one sentence.",
+        )
+
+        assert response is not None
+        self.assertEqual("agent_memory", response.data.get("route"))
+        self.assertIn("We were working on assistant viability gate.", response.text)
+        self.assertNotIn("You’re right, I should reassess that.", response.text)
+
+    def test_context_refusal_detector_matches_generic_dead_end_replies(self) -> None:
+        self.assertTrue(
+            Orchestrator._looks_like_context_refusal_reply(
+                "I do not have access to information outside of our current conversation, and am unable to provide that."
+            )
+        )
 
     def test_memory_command_does_not_overwrite_last_meaningful_action(self) -> None:
         orchestrator = self._orchestrator()

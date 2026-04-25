@@ -13,6 +13,7 @@ XDG_OPEN_BIN="${AGENT_LAUNCHER_XDG_OPEN:-xdg-open}"
 WINDOW_TITLE="${AGENT_LAUNCHER_WINDOW_TITLE:-Personal Agent Web UI}"
 DISPLAY_URL="${WEBUI_URL%/}"
 OPEN_URL="${DISPLAY_URL}/"
+OPEN_BROWSER="${AGENT_LAUNCHER_OPEN_BROWSER:-1}"
 BROWSER_CANDIDATES=(
     "${AGENT_LAUNCHER_BROWSER_BIN:-}"
     firefox
@@ -71,21 +72,18 @@ _browser_window_visible() {
             return 0
         fi
     fi
-    local browser_bin=""
-    local candidate
-    for candidate in "${BROWSER_CANDIDATES[@]}"; do
-        if [ -n "$candidate" ] && command -v "$candidate" >/dev/null 2>&1; then
-            browser_bin="$candidate"
-            break
-        fi
-    done
-    if [ -z "$browser_bin" ]; then
-        return 1
-    fi
-    if pgrep -af "$browser_bin" >/dev/null 2>&1; then
-        return 0
-    fi
     return 1
+}
+
+_should_open_browser() {
+    case "${OPEN_BROWSER,,}" in
+        0|false|no|off|disabled)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 }
 
 _launch_browser_fallback() {
@@ -145,16 +143,17 @@ while :; do
 done
 
 log "Opening Personal Agent UI at $DISPLAY_URL"
+if ! _should_open_browser; then
+    log "Personal Agent launcher: browser auto-open disabled; open $DISPLAY_URL manually when ready."
+    exit 0
+fi
+
 opened_with_xdg=0
 if command -v "$XDG_OPEN_BIN" >/dev/null 2>&1; then
     if "$XDG_OPEN_BIN" "$OPEN_URL" >/dev/null 2>&1; then
         opened_with_xdg=1
-        sleep "$WINDOW_CHECK_SECONDS"
-        if _browser_window_visible "$WINDOW_TITLE"; then
-            log "Personal Agent launcher: browser window detected."
-            exit 0
-        fi
-        log "Personal Agent launcher: xdg-open did not surface a visible window; trying browser fallback."
+        log "Personal Agent launcher: handed off to xdg-open."
+        exit 0
     else
         log "Personal Agent launcher: xdg-open could not open the UI; trying browser fallback."
     fi
@@ -163,7 +162,16 @@ else
 fi
 
 if _launch_browser_fallback; then
-    sleep "$WINDOW_CHECK_SECONDS"
+    if [ "$opened_with_xdg" -eq 1 ]; then
+        sleep 0.2
+        log "Personal Agent launcher: browser fallback launched."
+        exit 0
+    fi
+    fallback_check_seconds="$WINDOW_CHECK_SECONDS"
+    if [ "$fallback_check_seconds" -lt 1 ]; then
+        fallback_check_seconds=1
+    fi
+    sleep "$fallback_check_seconds"
     if _browser_window_visible "$WINDOW_TITLE"; then
         log "Personal Agent launcher: browser fallback launched."
         exit 0

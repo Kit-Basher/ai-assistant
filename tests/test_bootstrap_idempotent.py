@@ -107,6 +107,20 @@ class TestBootstrapIdempotent(unittest.TestCase):
         self.assertEqual(len(first_semantic), len(second_semantic))
         self.assertTrue(runtime._memory_v2_bootstrap_completed())
 
+    def test_auto_bootstrap_preserves_persisted_chat_model_choice(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_default_chat_model("ollama:llama3")
+
+        with patch.object(
+            runtime,
+            "runtime_truth_service",
+            side_effect=AssertionError("bootstrap chooser should not be queried for an explicit saved model"),
+        ):
+            result = runtime._auto_bootstrap_local_chat_model()
+
+        self.assertIsNone(result)
+        self.assertEqual("ollama:llama3", runtime.get_defaults()["chat_model"])
+
 
 if __name__ == "__main__":
     unittest.main()

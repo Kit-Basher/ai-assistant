@@ -342,6 +342,41 @@ def main(argv: list[str] | None = None) -> int:
             warnings=preview_warnings,
         )
 
+        trust_probe_result = _request_json(
+            str(args.base_url),
+            "POST",
+            "/packs/install",
+            {"source": "https://example.com/skill-pack.zip", "source_kind": "generic_archive_url"},
+            timeout=8.0,
+        )
+        trust_probe_body = trust_probe_result.get("payload") if isinstance(trust_probe_result.get("payload"), dict) else {}
+        trust_probe_text = str(
+            trust_probe_body.get("message")
+            or trust_probe_body.get("why")
+            or trust_probe_result.get("error")
+            or ""
+        )
+        trust_probe_warnings: list[str] = []
+        lowered_trust_probe = trust_probe_text.lower()
+        if trust_probe_result.get("status") != 400:
+            trust_probe_warnings.append(f"unexpected trust rejection status: {_status_text(trust_probe_result)}")
+            exit_code = 1
+        if str(trust_probe_body.get("error") or "").strip() != "source_trust_required":
+            trust_probe_warnings.append("unexpected trust rejection error")
+            exit_code = 1
+        if "trusted source" not in lowered_trust_probe:
+            trust_probe_warnings.append("trust rejection wording missing")
+            exit_code = 1
+        if _is_dead_end(trust_probe_text):
+            trust_probe_warnings.append("trust rejection dead-end wording")
+            exit_code = 1
+        _step_result(
+            "/packs/install (untrusted generic)",
+            trust_probe_result,
+            trust_probe_text,
+            warnings=trust_probe_warnings,
+        )
+
         install_target = str((preview.get("install_handoff") or {}).get("source") or pack_dir).strip()
         install_payload = {"path": install_target}
         install_result = _request_json(str(args.base_url), "POST", "/packs/install", install_payload, timeout=20.0)
@@ -375,6 +410,59 @@ def main(argv: list[str] | None = None) -> int:
             install_warnings.append("install dead-end wording")
             exit_code = 1
         _step_result("/packs/install", install_result, install_text, warnings=install_warnings)
+
+        canonical_id = str((install_body.get("pack") or {}).get("canonical_id") or "").strip()
+        normalized_path = Path(str((install_body.get("pack") or {}).get("normalized_path") or "").strip())
+        quarantine_path = Path(str((install_body.get("pack") or {}).get("quarantine_path") or "").strip())
+        removal_result = {"ok": False, "status": 0, "payload": {}, "error": "skipped"}
+        removal_text = ""
+        removal_warnings: list[str] = []
+        if canonical_id:
+            removal_result = _request_json(
+                str(args.base_url),
+                "DELETE",
+                f"/packs/{urllib.parse.quote(canonical_id)}",
+                timeout=8.0,
+            )
+            removal_body = removal_result.get("payload") if isinstance(removal_result.get("payload"), dict) else {}
+            removal_text = str(
+                removal_body.get("message")
+                or removal_body.get("why")
+                or removal_body.get("summary")
+                or removal_result.get("error")
+                or ""
+            )
+            if not removal_result.get("ok"):
+                removal_warnings.append("remove failed")
+                exit_code = 1
+        else:
+            removal_warnings.append("no canonical pack id to remove")
+            exit_code = 1
+        _step_result(f"DELETE /packs/{canonical_id or 'unknown'}", removal_result, removal_text, warnings=removal_warnings)
+
+        removed_pack_check = _request_json(str(args.base_url), "GET", "/packs", timeout=8.0)
+        removed_pack_body = removed_pack_check.get("payload") if isinstance(removed_pack_check.get("payload"), dict) else {}
+        removed_pack_rows = removed_pack_body.get("packs") if isinstance(removed_pack_body.get("packs"), list) else []
+        still_visible = any(
+            isinstance(row, dict) and str(row.get("pack_id") or row.get("canonical_id") or "").strip() == canonical_id
+            for row in removed_pack_rows
+        )
+        removal_cleanup_warnings: list[str] = []
+        if still_visible:
+            removal_cleanup_warnings.append("removed pack still visible in /packs")
+            exit_code = 1
+        if canonical_id and normalized_path and normalized_path.exists():
+            removal_cleanup_warnings.append("normalized path still exists after remove")
+            exit_code = 1
+        if canonical_id and quarantine_path and quarantine_path.exists():
+            removal_cleanup_warnings.append("quarantine path still exists after remove")
+            exit_code = 1
+        _step_result(
+            "GET /packs (post-remove)",
+            removed_pack_check,
+            "removed pack should no longer be visible",
+            warnings=removal_cleanup_warnings,
+        )
 
         native_install_result = _request_json(
             str(args.base_url),

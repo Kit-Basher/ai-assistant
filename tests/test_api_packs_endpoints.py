@@ -259,6 +259,22 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["source"]["archive_sha256"])
         self.assertTrue(install_payload["pack"]["quarantine_path"])
 
+    def test_remote_install_blocks_generic_urls_without_trusted_source(self) -> None:
+        with mock.patch("agent.api_server.ExternalPackIngestor", side_effect=AssertionError("ingestor should not be constructed")):
+            install_handler = _HandlerForTest(
+                self.runtime,
+                "/packs/install",
+                {"source": "https://example.com/skill-pack.zip", "source_kind": "generic_archive_url"},
+            )
+            install_handler.do_POST()
+            install_payload = json.loads(install_handler.body.decode("utf-8"))
+
+        self.assertEqual(400, install_handler.status_code)
+        self.assertFalse(install_payload["ok"])
+        self.assertEqual("source_trust_required", install_payload["error"])
+        self.assertIn("trusted source", str(install_payload["message"] or "").lower())
+        self.assertIn("/pack_sources", str(install_payload["next_question"] or ""))
+
     def test_pack_state_endpoint_reports_installed_available_and_blocked_packs(self) -> None:
         def _seed_pack(*, pack_id: str, name: str, status: str, content_hash: str, source_key: str, capabilities: list[str], enabled: bool = False) -> None:
             normalized_path = Path(self.tmpdir.name) / f"{pack_id}.normalized"

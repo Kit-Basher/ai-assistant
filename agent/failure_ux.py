@@ -296,6 +296,16 @@ _FAILURE_TEMPLATES: dict[str, dict[str, Any]] = {
         "retryable": False,
         "recoverability": "user_or_operator_fixable",
     },
+    "internal_error": {
+        "category": "runtime",
+        "status": "unknown",
+        "state_label": "Needs attention",
+        "summary": "Something went wrong, but I’m still running.",
+        "reason": "The request hit an unexpected problem.",
+        "next_step": "Try again in a moment or check /health.",
+        "retryable": True,
+        "recoverability": "retryable",
+    },
     "file_missing_after_state": {
         "category": "persistence",
         "status": "blocked",

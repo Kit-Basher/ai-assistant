@@ -316,11 +316,13 @@ export default function App() {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatPlaceholderVisible, setChatPlaceholderVisible] = useState(false);
   const [chatSessionId] = useState(() => loadStoredChatId(CHAT_SESSION_STORAGE_KEY, "chat-session"));
   const [chatThreadId, setChatThreadId] = useState(() => loadStoredChatId(CHAT_THREAD_STORAGE_KEY, "chat-thread"));
 
   const [logs, setLogs] = useState([]);
   const autopilotLastHashRef = useRef("");
+  const chatRequestPendingRef = useRef(false);
 
   const appendLog = (entry) => {
     setLogs((prev) => [
@@ -965,13 +967,34 @@ export default function App() {
 
   const sendMessage = async (overrideText) => {
     const content = String(typeof overrideText === "string" ? overrideText : draft).trim();
-    if (!content || chatBusy) return;
+    if (!content || chatBusy || chatRequestPendingRef.current) return;
 
+    const nowMs = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
+    const scheduleVisibleRender =
+      typeof requestAnimationFrame === "function"
+        ? requestAnimationFrame.bind(window)
+        : (callback) => setTimeout(callback, 0);
+    const requestStartedAt = nowMs();
+    const graceMs = 160;
+    let placeholderShown = false;
+    let placeholderTimerId = null;
+
+    chatRequestPendingRef.current = true;
     const nextUserMessage = { role: "user", content };
     const nextMessages = [...messages, nextUserMessage];
     setMessages(nextMessages);
     setDraft("");
     setChatBusy(true);
+    setChatPlaceholderVisible(false);
+    appendLog({ endpoint: "chat/ui.request_start", ok: true, detail: `grace_ms=${graceMs}` });
+    placeholderTimerId = setTimeout(() => {
+      if (!chatRequestPendingRef.current) {
+        return;
+      }
+      placeholderShown = true;
+      setChatPlaceholderVisible(true);
+      appendLog({ endpoint: "chat/ui.placeholder_shown", ok: true, detail: `grace_ms=${graceMs}` });
+    }, graceMs);
 
     try {
       const result = await request("POST", "/chat", {
@@ -982,6 +1005,9 @@ export default function App() {
         purpose: "chat",
         task_type: "chat"
       }, { allowError: true });
+      const responseReceivedAt = nowMs();
+      const localApiRequestMs = Math.max(0, Math.round(responseReceivedAt - requestStartedAt));
+      appendLog({ endpoint: "chat/ui.response_received", ok: result.ok === true, detail: `local_api_request_ms=${localApiRequestMs}` });
 
       const assistantMessage = buildAssistantMessage(result);
       setMessages((prev) => [...prev, assistantMessage]);
@@ -992,6 +1018,25 @@ export default function App() {
           result.ok === true
             ? "Conversation updated"
             : result.error_kind || result.error || "needs_attention"
+      });
+      if (!placeholderShown) {
+        appendLog({ endpoint: "chat/ui.placeholder_skipped", ok: true, detail: `grace_ms=${graceMs}` });
+      }
+      const responseRoute = String(result?.meta?.route || "generic_chat").trim() || "generic_chat";
+      scheduleVisibleRender(() => {
+        const visibleAt = nowMs();
+        const visibleTotalMs = Math.max(0, Math.round(visibleAt - requestStartedAt));
+        const renderLagMs = Math.max(0, Math.round(visibleAt - responseReceivedAt));
+        appendLog({
+          endpoint: "chat/ui.visible_render",
+          ok: true,
+          detail: `route=${responseRoute} placeholder=${placeholderShown ? "shown" : "skipped"} local_api_request_ms=${localApiRequestMs} response_to_visible_ms=${renderLagMs} visible_total_ms=${visibleTotalMs} grace_ms=${graceMs}`
+        });
+        appendLog({
+          endpoint: "chat/ui.latency_summary",
+          ok: true,
+          detail: `route=${responseRoute} placeholder=${placeholderShown ? "shown" : "skipped"} local_api_request_ms=${localApiRequestMs} visible_total_ms=${visibleTotalMs} grace_ms=${graceMs}`
+        });
       });
     } catch (error) {
       const detail = asErrorText(error);
@@ -1005,8 +1050,16 @@ export default function App() {
         }
       ]);
       appendLog({ endpoint: "/chat", ok: false, detail });
+      if (!placeholderShown) {
+        appendLog({ endpoint: "chat/ui.placeholder_skipped", ok: true, detail: `grace_ms=${graceMs}` });
+      }
     } finally {
+      if (placeholderTimerId !== null) {
+        clearTimeout(placeholderTimerId);
+      }
+      chatRequestPendingRef.current = false;
       setChatBusy(false);
+      setChatPlaceholderVisible(false);
       void refreshReadyState();
     }
   };
@@ -1830,6 +1883,7 @@ export default function App() {
     <>
       <ChatExperience
         chatBusy={chatBusy}
+        chatPlaceholderVisible={chatPlaceholderVisible}
         composerPlaceholder={composerPlaceholder}
         draft={draft}
         messages={messages}

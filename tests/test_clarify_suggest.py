@@ -13,11 +13,16 @@ class TestClarifySuggest(unittest.TestCase):
     def test_short_ambiguous_message_detected(self) -> None:
         verdict = classify_ambiguity("fix it")
         self.assertTrue(verdict.ambiguous)
-        self.assertIn(verdict.reason, {"known_vague_phrase", "short_message"})
+        self.assertEqual("known_vague_phrase", verdict.reason)
 
     def test_known_smalltalk_not_marked_ambiguous(self) -> None:
         verdict = classify_ambiguity("hello")
         self.assertFalse(verdict.ambiguous)
+
+    def test_short_chat_request_not_marked_ambiguous(self) -> None:
+        verdict = classify_ambiguity("say hi")
+        self.assertFalse(verdict.ambiguous)
+        self.assertEqual("short_chat_turn", verdict.reason)
 
     def test_clarify_message_has_one_question_and_ab_examples(self) -> None:
         message = build_clarify_message("help")

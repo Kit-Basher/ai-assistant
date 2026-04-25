@@ -13,6 +13,8 @@ class TestSetupChatFlow(unittest.TestCase):
             ("what is the agent status?", "runtime_status", "runtime_status"),
             ("openrouter health", "provider_status", "provider_status"),
             ("is ollama working?", "provider_status", "provider_status"),
+            ("what providers are set up right now?", "provider_status", "providers_status"),
+            ("which chat providers are configured?", "provider_status", "providers_status"),
         )
         for text, expected_route, expected_kind in cases:
             with self.subTest(text=text):
@@ -45,14 +47,60 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertEqual(expected_kind, decision.get("kind"))
                 self.assertFalse(bool(decision.get("generic_allowed")))
 
+    def test_working_context_followups_route_to_agent_memory(self) -> None:
+        cases = (
+            ("what are we doing?", "agent_memory", "agent_memory_inspect"),
+            ("what are we doing right now?", "agent_memory", "agent_memory_inspect"),
+            ("what were we doing before?", "agent_memory", "agent_memory_inspect"),
+            ("No, go back and explain the larger task.", "agent_memory", "agent_memory_inspect"),
+            ("If you had to continue from here, what would you do next?", "agent_memory", "agent_memory_inspect"),
+        )
+        for text, expected_route, expected_kind in cases:
+            with self.subTest(text=text):
+                decision = classify_runtime_chat_route(text)
+                self.assertEqual(expected_route, decision.get("route"))
+                self.assertEqual(expected_kind, decision.get("kind"))
+                self.assertFalse(bool(decision.get("generic_allowed")))
+
+    def test_day_planning_prompts_route_off_generic_chat(self) -> None:
+        cases = (
+            "help me plan my day",
+            "today plan",
+            "show top 3 priorities",
+            "show quick wins",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                decision = classify_runtime_chat_route(text)
+                self.assertEqual("plan_day", decision.get("route"))
+                self.assertEqual("plan_day", decision.get("kind"))
+                self.assertFalse(bool(decision.get("generic_allowed")))
+
+    def test_natural_filesystem_phrases_route_deterministically(self) -> None:
+        cases = (
+            ("list the files in this repo", "action_tool", "filesystem_list_directory"),
+            ("list the files under /tmp", "action_tool", "filesystem_list_directory"),
+            ("inspect this file", "action_tool", "filesystem_read_text_file"),
+            ("read the file", "action_tool", "filesystem_read_text_file"),
+        )
+        for text, expected_route, expected_kind in cases:
+            with self.subTest(text=text):
+                decision = classify_runtime_chat_route(text)
+                self.assertEqual(expected_route, decision.get("route"))
+                self.assertEqual(expected_kind, decision.get("kind"))
+                self.assertFalse(bool(decision.get("generic_allowed")))
+
     def test_agent_health_stays_runtime_status_while_machine_stats_stay_operational(self) -> None:
         agent_health = classify_runtime_chat_route("agent health")
         machine_stats = classify_runtime_chat_route("what are my pc specs?")
+        more_stats = classify_runtime_chat_route("what are my specs?")
 
         self.assertEqual("runtime_status", agent_health.get("route"))
         self.assertEqual("runtime_status", agent_health.get("kind"))
         self.assertEqual("operational_status", machine_stats.get("route"))
         self.assertEqual("operational_observe", machine_stats.get("kind"))
+        self.assertEqual("operational_status", more_stats.get("route"))
+        self.assertEqual("operational_observe", more_stats.get("kind"))
 
     def test_broad_runtime_report_phrases_route_to_runtime_status(self) -> None:
         cases = (
@@ -179,6 +227,7 @@ class TestSetupChatFlow(unittest.TestCase):
     def test_pack_capability_prompts_route_to_pack_recommendation(self) -> None:
         cases = (
             ("Talk to me out loud", "voice_output"),
+            ("read something to me", "voice_output"),
             ("Use the avatar", "avatar_visual"),
             ("Open the robot camera feed", "camera_feed"),
             ("What pack do I need for voice output?", "voice_output"),
@@ -189,6 +238,25 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertEqual("action_tool", decision.get("route"))
                 self.assertEqual("pack_capability_recommendation", decision.get("kind"))
                 self.assertEqual(capability, decision.get("capability"))
+                self.assertFalse(bool(decision.get("generic_allowed")))
+
+    def test_skill_pack_capability_questions_route_to_assistant_capabilities(self) -> None:
+        cases = (
+            "what skill packs can you use for extra abilities?",
+            "what skill packs do you have?",
+            "what packs can you use right now?",
+            "say what you do in one sentence, but keep it natural",
+            "before we start, give me a one-sentence overview of how you can help",
+            "can you help me think through something messy without overcomplicating it?",
+            "i need help thinking through something messy, but keep it simple",
+            "what are you and what is the agent layer supposed to do?",
+            "what does the agent layer do?",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                decision = classify_runtime_chat_route(text)
+                self.assertEqual("assistant_capabilities", decision.get("route"))
+                self.assertEqual("assistant_capabilities", decision.get("kind"))
                 self.assertFalse(bool(decision.get("generic_allowed")))
 
     def test_paraphrased_and_custom_capability_requests_route_off_generic_chat(self) -> None:

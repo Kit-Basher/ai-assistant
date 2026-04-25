@@ -98,7 +98,7 @@ class TestNLRouterCards(unittest.TestCase):
             ],
         )
         self.assertEqual(ram_vram["skills"][0], {"skill": "hardware_report", "function": "hardware_report"})
-        self.assertIn({"skill": "resource_governor", "function": "resource_report"}, ram_vram["skills"])
+        self.assertNotIn({"skill": "resource_governor", "function": "resource_report"}, ram_vram["skills"])
         self.assertEqual(
             hardware["skills"],
             [

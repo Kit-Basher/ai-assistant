@@ -318,7 +318,16 @@ def detect_pack_capability_need(text: str | None) -> dict[str, Any] | None:
                 "confidence": 0.9,
                 "fallback": "text_only",
             }
-    return None
+    behavioral_need = _behavioral_capability_match(normalized)
+    if behavioral_need is None:
+        return None
+    return {
+        "capability": str(behavioral_need.get("capability") or "").strip() or None,
+        "label": str(behavioral_need.get("label") or "").strip() or None,
+        "detected_from": str(text or "").strip(),
+        "confidence": float(behavioral_need.get("confidence") or 0.8),
+        "fallback": "text_only",
+    }
 
 
 def _helper_name_for_capability(capability: str | None, label: str | None = None) -> str:
@@ -366,6 +375,7 @@ def _compact_request_summary(text: str | None) -> str:
     if not cleaned:
         return "handles this task"
     prefixes = (
+        "help me sketch ",
         "can you ",
         "could you ",
         "would you ",
@@ -377,7 +387,10 @@ def _compact_request_summary(text: str | None) -> str:
         "i want ",
         "i'd like ",
         "i would like ",
+        "sketch ",
+        "make ",
         "build me ",
+        "build ",
         "make me ",
         "set up ",
         "set me up to ",
@@ -464,7 +477,7 @@ def _behavioral_capability_match(normalized: str) -> dict[str, Any] | None:
             "label": "voice output",
             "confidence": 0.82,
         }
-    if any(phrase in normalized for phrase in ("read this page back to me", "read this page", "read this back to me", "read it back to me", "read to me")):
+    if any(phrase in normalized for phrase in ("read this page back to me", "read this page", "read this back to me", "read it back to me", "read it to me", "read something to me", "read something aloud", "read to me")):
         return {
             "capability": "voice_output",
             "label": "voice output",
@@ -1038,7 +1051,7 @@ def recommend_packs_for_capability(
 
     if recommendation_pack is not None:
         fallback = "install_preview"
-        next_step = "Say yes and I'll show the install preview."
+        next_step = "If you want, say yes and I'll show the install details."
     elif installed_pack is not None and str((installed_pack.get("normalized_state") or {}).get("state_key") or "").startswith("installed"):
         fallback = "text_only"
         next_step = "I can keep responding in text, or I can show what would need to change."
@@ -1092,6 +1105,7 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
     if not isinstance(result, dict):
         return normalize_persona_text("I can keep responding in text.")
     label = str(result.get("capability_label") or result.get("capability_required") or "That capability").strip()
+    classification = str(result.get("classification") or "").strip().lower()
     installed_pack = result.get("installed_pack") if isinstance(result.get("installed_pack"), dict) else None
     recommended_pack = result.get("recommended_pack") if isinstance(result.get("recommended_pack"), dict) else None
     alternate_pack = result.get("alternate_pack") if isinstance(result.get("alternate_pack"), dict) else None
@@ -1103,7 +1117,7 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
         if not cleaned:
             return None
         if cleaned == "lighter":
-            return f"{name} looks lighter."
+            return f"{name} looks like the lighter option."
         if cleaned == "may need more resources":
             return f"{name} may need more resources."
         if cleaned == "broader capability set":
@@ -1112,7 +1126,19 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
             return f"{name} is a narrower fit."
         return f"{name} looks like a relevant option."
 
+    def _append_next_action(lines: list[str], next_action: str | None) -> None:
+        cleaned = str(next_action or "").strip()
+        if cleaned:
+            lines.append(cleaned)
+
     lines: list[str] = []
+    if classification == "can_partially_answer_but_capability_would_help":
+        helper_name = str(result.get("helper_name") or _helper_name_for_capability(result.get("capability_required"), label)).strip()
+        if helper_name:
+            lines.append(f"I can help in text, but this would work better with a small {helper_name}.")
+        else:
+            lines.append("I can help in text, but this would work better with a small helper.")
+
     if installed_pack is not None:
         normalized_state = installed_pack.get("normalized_state") if isinstance(installed_pack.get("normalized_state"), dict) else {}
         state_key = str(normalized_state.get("state_key") or installed_pack.get("state") or "").strip().lower()
@@ -1121,35 +1147,44 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
             blocker = str(normalized_state.get("blocker") or installed_pack.get("blocker") or "").strip()
             if blocker:
                 lines.append(f"The blocker is {blocker}.")
+            _append_next_action(lines, normalized_state.get("next_action") or installed_pack.get("next_action"))
         elif state_key == "installed_healthy":
             lines.append(f"{label.capitalize()} is installed and healthy, but I can't confirm it's usable for this task yet.")
             blocker = str(normalized_state.get("blocker") or installed_pack.get("blocker") or "").strip()
             if blocker:
                 lines.append(f"The blocker is {blocker}.")
+            _append_next_action(lines, normalized_state.get("next_action") or installed_pack.get("next_action"))
         elif state_key == "installed_limited":
             lines.append(f"{label.capitalize()} is installed, but compatibility is not fully confirmed yet.")
             blocker = str(normalized_state.get("blocker") or installed_pack.get("blocker") or "").strip()
             if blocker:
                 lines.append(f"The blocker is {blocker}.")
+            _append_next_action(lines, normalized_state.get("next_action") or installed_pack.get("next_action"))
         elif state_key == "installed_blocked":
             lines.append(f"{label.capitalize()} is installed, but it was blocked during import.")
             blocker = str(normalized_state.get("blocker") or installed_pack.get("blocker") or "").strip()
             if blocker:
                 lines.append(f"The blocker is {blocker}.")
+            _append_next_action(lines, normalized_state.get("next_action") or installed_pack.get("next_action"))
         else:
             lines.append(f"{label.capitalize()} is installed, but I can't confirm it's usable for this task yet.")
             blocker = str(normalized_state.get("blocker") or installed_pack.get("blocker") or "").strip()
             if blocker:
                 lines.append(f"The blocker is {blocker}.")
+            _append_next_action(lines, normalized_state.get("next_action") or installed_pack.get("next_action"))
     else:
-        lines.append(f"{label.capitalize()} isn't installed.")
+        fallback = str(result.get("fallback") or "").strip().lower()
+        if fallback == "propose_new_capability" and label.strip().lower() == "helper":
+            pass
+        else:
+            lines.append(f"{label.capitalize()} isn't installed.")
 
     if recommended_pack is not None:
         pack_name = str(recommended_pack.get("name") or "That pack").strip()
         if alternate_pack is not None and comparison_mode == "recommended_plus_alternate":
             lines.append("I found 2 packs that fit this machine.")
         elif str(recommended_pack.get("reason") or "").strip() == "best_fit_for_machine":
-            lines.append(f"I found {pack_name}, which looks like the best fit for this machine.")
+            lines.append(f"I found {pack_name}, and it looks like the most practical option here.")
         else:
             lines.append(f"I found {pack_name}, which looks like a relevant match.")
         normalized_state = recommended_pack.get("normalized_state") if isinstance(recommended_pack.get("normalized_state"), dict) else {}
@@ -1163,15 +1198,16 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
                 if alternate_tradeoff:
                     lines.append(alternate_tradeoff)
                 lines.append(f"I'd start with {pack_name}.")
-                lines.append(f"Say yes and I'll show the install preview for {pack_name}.")
+                lines.append(f"If you want, say yes and I'll show the install details for {pack_name}.")
             else:
                 tradeoff = _render_tradeoff(pack_name, recommended_pack.get("tradeoff_note"))
                 if tradeoff:
                     lines.append(tradeoff)
                 lines.append("It is installable, but I can't confirm it is usable until I fetch and inspect it.")
-                lines.append("Say yes and I'll show the install preview.")
+                lines.append("If you want, say yes and I'll show the install details.")
         else:
             lines.append("I can't confirm it will work here yet.")
+            _append_next_action(lines, normalized_state.get("next_action") or recommended_pack.get("next_action"))
             lines.append("I can still help you set it up or keep this in text.")
     elif blocked_pack is not None:
         pack_name = str(blocked_pack.get("name") or "That pack").strip()
@@ -1180,29 +1216,24 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
         blocker = str(blocked_pack.get("blocker") or "").strip()
         if blocker:
             lines.append(f"The blocker is {blocker}.")
+        _append_next_action(lines, normalized_state.get("next_action") or blocked_pack.get("next_action"))
         lines.append("I can still help you set it up or keep this in text.")
     elif str(result.get("fallback") or "").strip().lower() == "propose_new_capability":
         helper_name = str(result.get("helper_name") or _helper_name_for_capability(result.get("capability_required"), label)).strip()
         proposal_summary = str(result.get("proposal_summary") or "").strip()
-        classification = str(result.get("classification") or "").strip().lower()
         discovery_failed = bool(result.get("source_errors"))
         if discovery_failed:
             lines.append("I couldn't check for an existing match cleanly just now.")
-        if classification == "can_partially_answer_but_capability_would_help":
+        if classification != "can_partially_answer_but_capability_would_help":
             if helper_name:
-                lines.append(f"I can help with the text side, but this would be better as a small {helper_name}.")
+                lines.append(f"I couldn't find a ready-made {helper_name} for this.")
             else:
-                lines.append("I can help with the text side, but this would be better as a small helper.")
-        else:
-            if helper_name:
-                lines.append(f"I couldn't find a ready-made {helper_name} for this yet.")
-            else:
-                lines.append("I couldn't find a ready-made helper for this yet.")
+                lines.append("I couldn't find a ready-made helper for this.")
         if proposal_summary:
-            lines.append(f"The narrowest thing to add would be a small helper that {proposal_summary}.")
+            lines.append(f"The simplest way to add it would be a small helper that {proposal_summary}.")
         else:
-            lines.append("The narrowest thing to add would be a small helper for this task.")
-        lines.append("If you want, I can help sketch it.")
+            lines.append("The simplest way to add it would be a small helper for this task.")
+        lines.append("If you want, I can sketch that with you.")
     else:
         fallback = str(result.get("fallback") or "").strip().lower()
         if fallback == "text_only":
@@ -1260,9 +1291,6 @@ def build_capability_gap_response(
         rendered_result["proposal_summary"] = proposal_summary
         rendered_result["helper_name"] = helper_name or _helper_name_for_capability(capability, label)
         rendered = render_pack_capability_response(rendered_result)
-        if classification == "can_partially_answer_but_capability_would_help":
-            intro = f"I can help with the text side, but this would be better as a small {rendered_result['helper_name']}."
-            rendered = normalize_persona_text(f"{intro} {rendered}")
         return {
             "ok": True,
             "type": "capability_gap_plan",

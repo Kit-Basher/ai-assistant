@@ -8,6 +8,11 @@ from agent.cards import normalize_card
 _INTENTS = {
     "OBSERVE_PC",
     "EXPLAIN_PREVIOUS",
+    "DIAGNOSTICS_CAPTURE_REQUEST",
+    "DIAGNOSTICS_CAPTURE_GENERIC_DEVICE_FALLBACK_REQUEST",
+    "DIAGNOSTICS_CAPTURE_BLUETOOTH_AUDIO_REQUEST",
+    "DIAGNOSTICS_CAPTURE_STORAGE_DISK_REQUEST",
+    "DIAGNOSTICS_CAPTURE_PRINTER_CUPS_REQUEST",
     "MEMORY_WRITE_REQUEST",
     "PLAN_DAY",
     "SHOW_PREFERENCES",
@@ -34,6 +39,44 @@ _OBSERVE_PERFORMANCE_CONTEXT = re.compile(
     r"\b(pc|computer|system|machine|download|downloading|upload|uploading|network|internet|wifi|connection|browser|app|game|disk|storage|drive|file|transfer|latency|ping)\b",
     re.IGNORECASE,
 )
+_DIAGNOSTICS_CONTEXT = re.compile(
+    r"\b(linux|laptop|computer|pc|system|machine|wifi|wi-fi|network|driver|kernel|suspend|resume|sleep|wake|bluetooth|audio|display|gpu|graphics)\b",
+    re.IGNORECASE,
+)
+_DIAGNOSTICS_ISSUE = re.compile(
+    r"\b(problem|issue|bug|broken|not working|won't|can't|fails?|error|crash(?:es|ed)?|freeze(?:s|d)?|stuck|disconnect(?:s|ed)?|drop(?:s|ping)?|intermittent|after suspend|after sleep)\b",
+    re.IGNORECASE,
+)
+_DIAGNOSTICS_HELP = re.compile(r"\b(help me debug|debug|diagnose|troubleshoot|fix this|figure out why)\b", re.IGNORECASE)
+_BLUETOOTH_AUDIO_CONTEXT = re.compile(
+    r"\b(bluetooth|headphones?|headset|earbuds?|earbud|buds?|speaker(?:s)?|audio|sound|microphone|mic)\b",
+    re.IGNORECASE,
+)
+_BLUETOOTH_AUDIO_ISSUE = re.compile(
+    r"\b(problem|issue|bug|broken|not working|won't|can't|fails?|error|crash(?:es|ed)?|freeze(?:s|d)?|stuck|"
+    r"disconnect(?:s|ed)?|drop(?:s|ping)?|intermittent|after suspend|after sleep|no sound|sound stops|audio stops|"
+    r"won't pair|won't connect|cuts out)\b",
+    re.IGNORECASE,
+)
+_STORAGE_DISK_CONTEXT = re.compile(r"\b(disk|storage|filesystem|filesystems|space|drive|volume|partition)\b", re.IGNORECASE)
+_STORAGE_DISK_ISSUE = re.compile(
+    r"\b(full|out of space|almost full|no space left on device|can't save|cannot save|can't write|cannot write|write failed|save failed|read-only file system)\b",
+    re.IGNORECASE,
+)
+_PRINTER_CUPS_CONTEXT = re.compile(r"\b(printer|printers|cups|print queue|print job|print jobs|print spooler)\b", re.IGNORECASE)
+_PRINTER_CUPS_ISSUE = re.compile(
+    r"\b(not printing|offline|stuck|stalled|queue stuck|can't print|cannot print|won't print|failed to print|print(?:ing)? fails?)\b",
+    re.IGNORECASE,
+)
+_GENERIC_DEVICE_CONTEXT = re.compile(
+    r"\b(camera|webcam|usb|hardware|device|peripheral|display|monitor|screen|keyboard|mouse|touchpad|trackpad|scanner|microphone|mic|dock|adapter|sensor|controller|laptop|desktop|pc)\b",
+    re.IGNORECASE,
+)
+_GENERIC_DEVICE_ISSUE = re.compile(
+    r"\b(not detected|not recognized|not working|broken|fails?|error|crash(?:es|ed)?|freeze(?:s|d)?|stuck|disconnect(?:s|ed)?|drop(?:s|ping)?|intermittent|after suspend|after sleep|won't turn on|won't start|no response|not found|stopped working|can't use|cannot use)\b",
+    re.IGNORECASE,
+)
+_GENERIC_DEVICE_HELP = re.compile(r"\b(help me debug|debug|diagnose|troubleshoot|fix this|figure out why|what's wrong|what is wrong)\b", re.IGNORECASE)
 _PROCESS_ROLE_QUESTION = re.compile(
     r"\b(why (?:are|is) there|why do i have|how many|what are these|what is this|which one is the|"
     r"double check|recheck|check again|look again|confirm it)\b.*\b(ollama|qemu|qemu-system|virtualbox|vmware|browser|chrome|chromium|firefox|instance|instances|process|processes)\b",
@@ -135,12 +178,71 @@ def _machine_broad_requested(text: str) -> bool:
     return _contains_any_phrase(text, _MACHINE_BROAD_PHRASES) or bool(_OBSERVE_DEEPER.search(text))
 
 
+def _diagnostics_capture_requested(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return bool(
+        (
+            _DIAGNOSTICS_HELP.search(lowered)
+            and (_DIAGNOSTICS_CONTEXT.search(lowered) or _DIAGNOSTICS_ISSUE.search(lowered))
+        )
+        or (_DIAGNOSTICS_ISSUE.search(lowered) and _DIAGNOSTICS_CONTEXT.search(lowered))
+    )
+
+
+def _bluetooth_audio_diagnostics_requested(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return bool(
+        (_DIAGNOSTICS_HELP.search(lowered) and _BLUETOOTH_AUDIO_CONTEXT.search(lowered))
+        or (_BLUETOOTH_AUDIO_CONTEXT.search(lowered) and _BLUETOOTH_AUDIO_ISSUE.search(lowered))
+    )
+
+
+def _storage_disk_diagnostics_requested(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return bool(_STORAGE_DISK_CONTEXT.search(lowered) and _STORAGE_DISK_ISSUE.search(lowered))
+
+
+def _printer_cups_diagnostics_requested(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return bool(
+        (_DIAGNOSTICS_HELP.search(lowered) and _PRINTER_CUPS_CONTEXT.search(lowered))
+        or (_PRINTER_CUPS_CONTEXT.search(lowered) and _PRINTER_CUPS_ISSUE.search(lowered))
+    )
+
+
+def _generic_device_fallback_diagnostics_requested(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    return bool(
+        (_GENERIC_DEVICE_HELP.search(lowered) and _GENERIC_DEVICE_CONTEXT.search(lowered))
+        or (_GENERIC_DEVICE_CONTEXT.search(lowered) and _GENERIC_DEVICE_ISSUE.search(lowered))
+    )
+
+
 def _process_role_requested(text: str) -> bool:
     lowered = (text or "").lower()
     return bool(
         _PROCESS_ROLE_QUESTION.search(lowered)
         or (("ollama" in lowered or "qemu" in lowered or "browser" in lowered) and ("instance" in lowered or "process" in lowered))
     )
+
+
+def _looks_like_coding_request(text: str) -> bool:
+    lowered = (text or "").lower()
+    if not lowered:
+        return False
+    if not any(token in lowered for token in ("code", "coding", "script", "program", "function", "refactor", "implement", "debug", "review")):
+        return False
+    return any(token in lowered for token in ("write", "build", "create", "make", "help me", "can you", "could you", "convert", "rewrite"))
 
 
 def looks_like_system_performance_question(text: str) -> bool:
@@ -178,6 +280,16 @@ def classify_free_text(text: str) -> str:
         return "OPEN_LOOPS_LIST"
     if _DAILY_BRIEF_STATUS.search(lowered):
         return "DAILY_BRIEF_STATUS"
+    if _printer_cups_diagnostics_requested(lowered):
+        return "DIAGNOSTICS_CAPTURE_PRINTER_CUPS_REQUEST"
+    if _storage_disk_diagnostics_requested(lowered):
+        return "DIAGNOSTICS_CAPTURE_STORAGE_DISK_REQUEST"
+    if _bluetooth_audio_diagnostics_requested(lowered):
+        return "DIAGNOSTICS_CAPTURE_BLUETOOTH_AUDIO_REQUEST"
+    if _generic_device_fallback_diagnostics_requested(lowered):
+        return "DIAGNOSTICS_CAPTURE_GENERIC_DEVICE_FALLBACK_REQUEST"
+    if _diagnostics_capture_requested(lowered):
+        return "DIAGNOSTICS_CAPTURE_REQUEST"
     if _MEMORY_WRITE.search(lowered):
         return "MEMORY_WRITE_REQUEST"
     if _PLAN_DAY.search(lowered):
@@ -190,6 +302,8 @@ def classify_free_text(text: str) -> str:
         return "CHITCHAT"
     if _process_role_requested(lowered):
         return "EXPLAIN_PREVIOUS"
+    if _looks_like_coding_request(lowered):
+        return "UNKNOWN"
     if _EXPLAIN.search(lowered) and (
         _OBSERVE_DISK.search(lowered)
         or _OBSERVE_RESOURCE.search(lowered)
@@ -239,7 +353,10 @@ def select_observe_skills(text: str) -> list[dict[str, str]]:
         _append_skill(selected, "storage_governor", "storage_report")
     elif hardware_requested:
         _append_skill(selected, "hardware_report", "hardware_report")
-        if bool(_OBSERVE_RESOURCE.search(lowered)):
+        # A direct RAM/VRAM inventory question should stay on the lightweight
+        # hardware path; broader memory/performance wording still gets the
+        # heavier resource summary below.
+        if bool(_OBSERVE_RESOURCE.search(lowered)) and not _RAM_VRAM_REQUEST_RE.search(lowered):
             _append_skill(selected, "resource_governor", "resource_report")
     else:
         if machine_requested:

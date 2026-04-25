@@ -45,7 +45,7 @@ _INTERNAL_JSON_KEYS = {
 }
 _JSON_OBJECT_RE = re.compile(r"^\s*[\[{].*[\]}]\s*$", re.DOTALL)
 _NO_LLM_PUBLIC_MESSAGE = "I’m not ready to chat yet. Open Setup to finish getting me ready."
-_READY_LLM_PUBLIC_MESSAGE = "The runtime is ready, but I can’t reach chat right now. Try again in a moment or ask for status or setup help."
+_READY_LLM_PUBLIC_MESSAGE = "The runtime is ready. Chat is temporarily busy, so try again in a moment or ask for status or setup help."
 _NO_LLM_ERROR_KINDS = {
     "llm_unavailable",
     "no_chat_model",
@@ -55,13 +55,25 @@ _NO_LLM_ERROR_KINDS = {
 }
 _TRIVIAL_SOCIAL_TURNS = {
     "hello": "greeting",
+    "hello there": "greeting",
+    "herllo": "greeting",
     "hi": "greeting",
+    "hi there": "greeting",
     "hey": "greeting",
+    "hey there": "greeting",
     "thanks": "thanks",
     "ok": "ack",
     "okay": "ack",
     "good morning": "morning",
     "good evening": "evening",
+    "are you there": "presence_check",
+    "are you really there": "presence_check",
+    "you there": "presence_check",
+    "keep the answer short": "style_short",
+    "actually keep the answer short": "style_short",
+    "keep it short": "style_short",
+    "be brief": "style_short",
+    "be concise": "style_short",
 }
 _TRIVIAL_SOCIAL_TURN_REPLIES = {
     "greeting": "Hi — I’m here and ready to help. What can I do for you?",
@@ -69,7 +81,10 @@ _TRIVIAL_SOCIAL_TURN_REPLIES = {
     "ack": "Got it. What should I do next?",
     "morning": "Good morning. What can I help with?",
     "evening": "Good evening. What can I help with?",
+    "presence_check": "Yes — I’m here and ready to help. What can I do for you?",
+    "style_short": "Okay. I’ll keep it short.",
 }
+_SOCIAL_GREET_REQUESTS = {"say hi", "say hello", "say hey"}
 
 
 def _normalize_social_turn_text(text: str | None) -> str:
@@ -136,6 +151,23 @@ def classify_trivial_social_turn(text: str | None) -> str | None:
     normalized = _normalize_social_turn_text(text)
     if not normalized:
         return None
+    if normalized in _SOCIAL_GREET_REQUESTS:
+        return "greeting"
+    if any(
+        phrase in normalized
+        for phrase in (
+            "are you there",
+            "are you really there",
+            "are you working",
+            "are you running",
+            "are you online",
+            "are you alive",
+            "you there",
+            "you working",
+            "you online",
+        )
+    ):
+        return "presence_check"
     return _TRIVIAL_SOCIAL_TURNS.get(normalized)
 
 
@@ -171,22 +203,28 @@ def build_public_chat_meta(
         if str(item).strip()
     ]
     route = str(response_data.get("route") or "generic_chat").strip().lower() or "generic_chat"
+    assistant_turn_type = str(response_data.get("assistant_turn_type") or "").strip().lower() or None
+    social_turn = assistant_turn_type == "social_turn"
     meta: dict[str, Any] = {
         "route": route,
         "provider": provider,
         "model": model,
         "fallback_used": bool(response_data.get("fallback_used", False)),
-        "generic_fallback_used": bool(response_data.get("generic_fallback_used", False)) or route == "generic_chat",
-        "generic_fallback_allowed": bool(response_data.get("generic_fallback_allowed", False)) or route == "generic_chat",
+        "generic_fallback_used": bool(response_data.get("generic_fallback_used", False))
+        or (route == "generic_chat" and not social_turn),
+        "generic_fallback_allowed": bool(response_data.get("generic_fallback_allowed", False))
+        or (route == "generic_chat" and not social_turn),
         "used_runtime_state": bool(response_data.get("used_runtime_state", False)),
         "used_llm": bool(response_data.get("used_llm", False)),
         "used_memory": bool(response_data.get("used_memory", False)),
         "used_tools": used_tools,
-        "assistant_turn_type": str(response_data.get("assistant_turn_type") or "").strip().lower() or None,
+        "assistant_turn_type": assistant_turn_type,
         "assistant_turn_kind": str(response_data.get("assistant_turn_kind") or "").strip().lower() or None,
     }
     if "skip_post_response_hooks" in response_data:
         meta["skip_post_response_hooks"] = bool(response_data.get("skip_post_response_hooks", False))
+    if isinstance(response_data.get("memory_diagnostics"), dict):
+        meta["memory_diagnostics"] = dict(response_data.get("memory_diagnostics") or {})
     if include_debug:
         meta["route_reason"] = str(response_data.get("route_reason") or "").strip().lower() or None
         meta["source_surface"] = str(source_surface or response_data.get("source_surface") or "").strip().lower() or None

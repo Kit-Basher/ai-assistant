@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Mapping
 
 from agent.llm.control_contract import normalize_task_request
@@ -8,6 +9,8 @@ from agent.llm.install_planner import build_install_plan
 from agent.llm.model_inventory import build_model_inventory
 from agent.llm.model_selector import select_model_for_task
 from agent.llm.task_classifier import classify_task_request
+from agent.llm.value_policy import normalize_optimization_profile
+from agent.logging_utils import log_event
 from agent.public_chat import build_no_llm_public_message
 
 
@@ -46,6 +49,11 @@ def _metadata_channel(metadata: dict[str, Any] | None) -> str | None:
     if value in {"telegram", "api", "cli"}:
         return value
     return None
+
+
+def _log_path_for_client(llm_client: Any) -> str | None:
+    config = getattr(llm_client, "config", None)
+    return str(getattr(config, "log_path", "") or "").strip() or None
 
 
 def _normalized_error_result(
@@ -105,6 +113,9 @@ def _normalize_router_result(
             payload["error_kind"] = error_kind
         if usage is not None:
             payload["usage"] = dict(usage)
+        adapter_downgrade = raw_result.get("adapter_downgrade")
+        if isinstance(adapter_downgrade, Mapping):
+            payload["adapter_downgrade"] = dict(adapter_downgrade)
         normalized = {
             "ok": ok,
             "text": text,
@@ -170,6 +181,7 @@ class InferenceRouter:
         normalized_purpose = _normalize_text(purpose) or "chat"
         normalized_trace_id = _normalize_text(trace_id) or None
         runtime_ready = bool(metadata.get("runtime_ready")) if isinstance(metadata, dict) else False
+        log_path = _log_path_for_client(self.llm_client)
         if not _is_llm_client_available(self.llm_client):
             return _normalized_error_result(
                 error_kind="llm_unavailable",
@@ -191,6 +203,7 @@ class InferenceRouter:
         selection_fallbacks: list[str] = []
         allow_remote_fallback = self._allow_remote_fallback(local_only=local_only)
         route_data: dict[str, Any] = {"task_request": normalized_task}
+        selection_started = time.monotonic()
 
         if normalized_purpose == "chat" and selected_model is None:
             control_result = self._resolve_chat_selection(
@@ -214,6 +227,26 @@ class InferenceRouter:
                         if _normalize_text(item)
                     ]
                 if selected_model is None:
+                    selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
+                    if log_path:
+                        log_event(
+                            log_path,
+                            "llm_routing_selection",
+                            {
+                                "trace_id": normalized_trace_id,
+                                "purpose": normalized_purpose,
+                                "task_type": str(normalized_task.get("task_type") or "chat"),
+                                "channel": _metadata_channel(metadata),
+                                "latency_fallback": bool((metadata or {}).get("latency_fallback")),
+                                "selected_provider": None,
+                                "selected_model": None,
+                                "selection_reason": selection_reason,
+                                "fallback_used": bool(selection_fallbacks),
+                                "selection_ms": selection_ms,
+                                "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                                "error": "no_suitable_model",
+                            },
+                        )
                     plan = control_result.get("plan")
                     if isinstance(plan, dict):
                         route_data["plan"] = plan
@@ -227,6 +260,25 @@ class InferenceRouter:
                         trace_id=normalized_trace_id,
                         next_action=next_action,
                         data=route_data,
+                    )
+                selection_ms = int(max(0.0, time.monotonic() - selection_started) * 1000)
+                if log_path:
+                    log_event(
+                        log_path,
+                        "llm_routing_selection",
+                        {
+                            "trace_id": normalized_trace_id,
+                            "purpose": normalized_purpose,
+                            "task_type": str(normalized_task.get("task_type") or "chat"),
+                            "channel": _metadata_channel(metadata),
+                            "latency_fallback": bool((metadata or {}).get("latency_fallback")),
+                            "selected_provider": selected_provider,
+                            "selected_model": selected_model,
+                            "selection_reason": selection_reason,
+                            "fallback_used": bool(selection_fallbacks),
+                            "selection_ms": selection_ms,
+                            "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                        },
                     )
 
         chat_kwargs = self._chat_kwargs(
@@ -242,7 +294,49 @@ class InferenceRouter:
             min_context_tokens=min_context_tokens,
             timeout_seconds=timeout_seconds,
         )
-        raw_result = self._call_chat(messages, chat_kwargs)
+        provider_started = time.monotonic()
+        if log_path:
+            log_event(
+                log_path,
+                "llm_provider_request_start",
+                {
+                    "trace_id": normalized_trace_id,
+                    "purpose": normalized_purpose,
+                    "task_type": str(normalized_task.get("task_type") or "chat"),
+                    "provider": selected_provider,
+                    "model": selected_model,
+                    "selection_reason": selection_reason,
+                    "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                    "channel": _metadata_channel(metadata),
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+        provider_error: Exception | None = None
+        try:
+            raw_result = self._call_chat(messages, chat_kwargs)
+        except Exception as exc:
+            provider_error = exc
+            raise
+        finally:
+            if log_path and provider_started is not None:
+                provider_ms = int(max(0.0, time.monotonic() - provider_started) * 1000)
+                log_event(
+                    log_path,
+                    "llm_provider_request_end",
+                    {
+                        "trace_id": normalized_trace_id,
+                        "purpose": normalized_purpose,
+                        "task_type": str(normalized_task.get("task_type") or "chat"),
+                        "provider": selected_provider,
+                        "model": selected_model,
+                        "selection_reason": selection_reason,
+                        "routing_mode": getattr(self.llm_client.config, "llm_routing_mode", None),
+                        "channel": _metadata_channel(metadata),
+                        "duration_ms": provider_ms,
+                        "ok": provider_error is None,
+                        "error_kind": provider_error.__class__.__name__ if provider_error is not None else None,
+                    },
+                )
         return _normalize_router_result(
             raw_result=raw_result,
             provider=selected_provider,
@@ -331,6 +425,10 @@ class InferenceRouter:
             trace_id=trace_id,
             policy_name="default",
             policy=getattr(llm_config, "default_policy", None),
+            optimization_profile=self._optimization_profile(
+                llm_config=llm_config,
+                allow_remote_fallback=allow_remote_fallback,
+            ),
         )
         if selection.get("selected_model"):
             return {"inventory": inventory, "selection": selection}
@@ -347,6 +445,17 @@ class InferenceRouter:
             "selection": selection,
             "plan": plan,
         }
+
+    @staticmethod
+    def _optimization_profile(*, llm_config: Any, allow_remote_fallback: bool) -> str:
+        if not allow_remote_fallback:
+            return "local_only"
+        routing_mode = str(getattr(llm_config, "llm_routing_mode", "") or "").strip().lower()
+        if routing_mode == "prefer_best":
+            return "best_quality"
+        if routing_mode == "prefer_cheap":
+            return "min_cost"
+        return normalize_optimization_profile(None, default="balanced")
 
     @staticmethod
     def _chat_kwargs(
@@ -416,8 +525,6 @@ class InferenceRouter:
                 for key, value in kwargs.items()
                 if key in {"purpose", "provider_override", "model_override", "timeout_seconds"}
             },
-            {key: value for key, value in kwargs.items() if key in {"purpose"}},
-            {},
         ):
             fingerprint = tuple(sorted((str(key), type(value).__name__) for key, value in candidate.items()))
             if fingerprint in seen:
@@ -426,9 +533,18 @@ class InferenceRouter:
             attempt_kwargs.append(candidate)
 
         last_type_error: TypeError | None = None
-        for candidate in attempt_kwargs:
+        for index, candidate in enumerate(attempt_kwargs):
             try:
-                return chat_fn(messages, **candidate)
+                result = chat_fn(messages, **candidate)
+                if index > 0 and isinstance(result, Mapping):
+                    dropped_keys = sorted(set(kwargs.keys()) - set(candidate.keys()))
+                    result_payload = dict(result)
+                    result_payload["adapter_downgrade"] = {
+                        "attempt_index": index,
+                        "dropped_keys": dropped_keys,
+                    }
+                    return result_payload
+                return result
             except TypeError as exc:
                 last_type_error = exc
                 continue

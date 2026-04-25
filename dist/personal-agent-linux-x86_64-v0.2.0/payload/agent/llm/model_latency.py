@@ -9,8 +9,8 @@ _KNOWN_SPEED_CLASSES: dict[str, str] = {
     "qwen3.5:4b": "fast",
     "ollama:qwen2.5:3b-instruct": "fast",
     "qwen2.5:3b-instruct": "fast",
-    "ollama:qwen2.5:7b-instruct": "medium",
-    "qwen2.5:7b-instruct": "medium",
+    "ollama:qwen2.5:7b-instruct": "fast",
+    "qwen2.5:7b-instruct": "fast",
     "ollama:deepseek-r1:7b": "slow",
     "deepseek-r1:7b": "slow",
 }
@@ -20,6 +20,8 @@ _TELEGRAM_FAST_ALLOWLIST = frozenset(
         "qwen3.5:4b",
         "ollama:qwen2.5:3b-instruct",
         "qwen2.5:3b-instruct",
+        "ollama:qwen2.5:7b-instruct",
+        "qwen2.5:7b-instruct",
     }
 )
 _PARAMS_RE = re.compile(r"(?<!\d)(\d+(?:\.\d+)?)\s*b(?:[^a-z0-9]|$)", re.IGNORECASE)

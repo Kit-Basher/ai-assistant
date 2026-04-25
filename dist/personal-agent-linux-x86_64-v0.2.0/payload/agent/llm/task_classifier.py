@@ -36,32 +36,40 @@ def classify_task_request(text: str) -> dict[str, Any]:
     task_type = "chat"
     requirements: list[str] = ["chat"]
     preferred_local = True
+    confidence = 0.45
 
     if any(re.search(pattern, normalized) for pattern in _HEALTH_PATTERNS):
         task_type = "health"
+        confidence = 0.9
     elif any(re.search(pattern, normalized) for pattern in _VISION_PATTERNS):
         task_type = "vision"
         requirements = ["chat", "vision"]
+        confidence = 0.85
     elif any(re.search(pattern, normalized) for pattern in _CODING_PATTERNS):
         task_type = "coding"
         # v1 coding assistance is conversational and local-first. Structured JSON is optional, not required.
         requirements = ["chat"]
+        confidence = 0.85
     elif any(re.search(pattern, normalized) for pattern in _TOOL_USE_PATTERNS):
         task_type = "tool_use"
+        confidence = 0.8
     elif any(re.search(pattern, normalized) for pattern in _REASONING_PATTERNS):
         task_type = "reasoning"
         requirements = ["chat", "long_context"]
+        confidence = 0.75
 
     if any(re.search(pattern, normalized) for pattern in _REMOTE_PREFERENCE_PATTERNS):
         preferred_local = False
 
-    return normalize_task_request(
+    request = normalize_task_request(
         {
             "task_type": task_type,
             "requirements": requirements,
             "preferred_local": preferred_local,
         }
     )
+    request["confidence"] = round(float(confidence), 2)
+    return request
 
 
 __all__ = ["classify_task_request"]

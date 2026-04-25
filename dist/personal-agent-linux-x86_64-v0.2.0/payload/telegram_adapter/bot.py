@@ -74,6 +74,7 @@ from agent.telegram_bridge import (
     classify_telegram_text_command,
     handle_telegram_command,
 )
+from agent.public_chat import build_trivial_social_turn_message, classify_trivial_social_turn
 from agent.permissions import PermissionStore
 from agent.ux.llm_fixit_wizard import (
     LLMFixitWizardStore,
@@ -99,8 +100,17 @@ _LOCAL_API_READY_TIMEOUT_SECONDS = 1.0
 _LOCAL_API_CHAT_TIMEOUT_SECONDS = 10.0
 _LOCAL_API_SETUP_CHAT_TIMEOUT_SECONDS = 15.0
 _LOCAL_API_SETUP_EXECUTION_CHAT_TIMEOUT_SECONDS = 30.0
+_TELEGRAM_DETERMINISTIC_PLACEHOLDER_GRACE_SECONDS = 0.2
 _NO_ACTIVE_CHOICE_TEXT = "No active choice right now. Say status, setup, or check models."
 _DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
+_DETERMINISTIC_RUNTIME_TRUTH_ROUTES = {
+    "model_policy_status",
+    "model_status",
+    "operational_status",
+    "provider_status",
+    "runtime_status",
+    "governance_status",
+}
 
 
 @dataclass(frozen=True)
@@ -226,6 +236,34 @@ def _normalize_user_text(text: str | None) -> str:
 
 def _contains_any(normalized_text: str, phrases: tuple[str, ...]) -> bool:
     return any(phrase in normalized_text for phrase in phrases)
+
+
+def _telegram_message_age_ms(message: Any | None, *, received_at: datetime | None = None) -> int | None:
+    message_date = getattr(message, "date", None)
+    if not isinstance(message_date, datetime):
+        return None
+    observed_at = received_at or datetime.now(timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=timezone.utc)
+    if message_date.tzinfo is None:
+        message_date = message_date.replace(tzinfo=timezone.utc)
+    try:
+        elapsed = observed_at.astimezone(timezone.utc) - message_date.astimezone(timezone.utc)
+    except Exception:
+        return None
+    return int(max(0.0, elapsed.total_seconds() * 1000))
+
+
+def _should_defer_telegram_placeholder(route: str | None) -> bool:
+    normalized_route = str(route or "").strip().lower() or "chat"
+    return normalized_route in _DETERMINISTIC_RUNTIME_TRUTH_ROUTES
+
+
+def _monotonic_offset_ms(started_at: float | None, current: float | None = None) -> int | None:
+    if not isinstance(started_at, (int, float)):
+        return None
+    end = pytime.monotonic() if current is None else current
+    return int(max(0.0, float(end) - float(started_at)) * 1000)
 
 
 def _truncate_telegram_text(text: str, *, max_len: int = 3900) -> tuple[str, bool]:
@@ -400,10 +438,24 @@ async def _send_placeholder_message(
     *,
     trace_id: str | None = None,
     chat_id: str | None = None,
+    log_path: str | None = None,
+    route: str | None = None,
 ) -> Any | None:
     primary_text, _ = _truncate_telegram_text(text)
+    started = pytime.monotonic()
+    log_event(
+        log_path,
+        "telegram.placeholder_send.start",
+        {
+            "trace_id": str(trace_id or "").strip() or None,
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "route": str(route or "").strip().lower() or None,
+            "msg_len": len(primary_text),
+        },
+    )
     try:
-        return await message.reply_text(primary_text)
+        sent = await message.reply_text(primary_text)
+        return sent
     except Exception as exc:
         if not _is_bad_request_error(exc):
             raise
@@ -423,9 +475,23 @@ async def _send_placeholder_message(
         )
         retry_text, _ = _truncate_telegram_text(_plain_text_retry_variant(primary_text))
         try:
-            return await message.reply_text(retry_text, parse_mode=None, disable_web_page_preview=True)
+            sent = await message.reply_text(retry_text, parse_mode=None, disable_web_page_preview=True)
+            return sent
         except TypeError:
-            return await message.reply_text(retry_text, parse_mode=None)
+            sent = await message.reply_text(retry_text, parse_mode=None)
+            return sent
+    finally:
+        log_event(
+            log_path,
+            "telegram.placeholder_send.finish",
+            {
+                "trace_id": str(trace_id or "").strip() or None,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "route": str(route or "").strip().lower() or None,
+                "msg_len": len(primary_text),
+                "elapsed_ms": int(max(0.0, pytime.monotonic() - started) * 1000),
+            },
+        )
 
 
 async def _edit_reply(
@@ -546,15 +612,26 @@ async def _deliver_telegram_text_result(
     route: str,
     text: str,
     trace_id: str,
+    cards_payload: dict[str, Any] | None = None,
 ) -> None:
+    parse_mode = None
+    delivered_text = text
+    if isinstance(cards_payload, dict) and cards_payload:
+        ok, _error = validate_cards_payload(cards_payload)
+        if ok:
+            rendered_cards = render_cards_markdown(cards_payload)
+            if rendered_cards.strip():
+                delivered_text = rendered_cards
+                parse_mode = "Markdown"
     if placeholder_message is not None and callable(getattr(placeholder_message, "edit_text", None)):
         await _edit_reply(
             message=placeholder_message,
             log_path=log_path,
             chat_id=chat_id,
             route=route,
-            text=text,
+            text=delivered_text,
             trace_id=trace_id,
+            parse_mode=parse_mode,
         )
         return
     await _send_reply(
@@ -562,8 +639,9 @@ async def _deliver_telegram_text_result(
         log_path=log_path,
         chat_id=chat_id,
         route=route,
-        text=text,
+        text=delivered_text,
         trace_id=trace_id,
+        parse_mode=parse_mode,
     )
 
 
@@ -1022,6 +1100,150 @@ def _telegram_chat_proxy_state(bot_data: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def _telegram_chat_queue_state(bot_data: dict[str, Any]) -> dict[str, Any]:
+    state = _telegram_chat_proxy_state(bot_data)
+    active_by_chat = state.get("active_by_chat")
+    if not isinstance(active_by_chat, dict):
+        active_by_chat = {}
+        state["active_by_chat"] = active_by_chat
+    pending_by_chat = state.get("pending_by_chat")
+    if not isinstance(pending_by_chat, dict):
+        pending_by_chat = {}
+        state["pending_by_chat"] = pending_by_chat
+    return state
+
+
+def _build_telegram_chat_request_record(
+    *,
+    update: Any,
+    chat_id: str,
+    text: str,
+    trace_id: str,
+    placeholder_message: Any | None,
+) -> dict[str, Any]:
+    return {
+        "chat_id": str(chat_id or "").strip() or "unknown",
+        "text": str(text or ""),
+        "trace_id": str(trace_id or ""),
+        "update": update,
+        "placeholder_message": placeholder_message,
+        "request_id": uuid.uuid4().hex,
+    }
+
+
+def _telegram_chat_admit_or_queue_request(
+    *,
+    bot_data: dict[str, Any],
+    chat_id: str,
+    update: Any,
+    text: str,
+    trace_id: str,
+    placeholder_message: Any | None,
+    log_path: str | None,
+) -> tuple[bool, dict[str, Any]]:
+    state = _telegram_chat_queue_state(bot_data)
+    chat_key = str(chat_id or "").strip() or "unknown"
+    request = _build_telegram_chat_request_record(
+        update=update,
+        chat_id=chat_key,
+        text=text,
+        trace_id=trace_id,
+        placeholder_message=placeholder_message,
+    )
+    active_by_chat = state["active_by_chat"] if isinstance(state.get("active_by_chat"), dict) else {}
+    pending_by_chat = state["pending_by_chat"] if isinstance(state.get("pending_by_chat"), dict) else {}
+    if chat_key in active_by_chat:
+        replaced = chat_key in pending_by_chat
+        previous_request = pending_by_chat.get(chat_key) if replaced else None
+        pending_by_chat[chat_key] = request
+        log_event(
+            log_path,
+            "telegram.local_api_chat.queued",
+            {
+                "trace_id": trace_id,
+                "request_id": request["request_id"],
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "execution_mode": "async_http",
+                "queue_mode": "latest_message_wins",
+                "queued": True,
+                "replaced_pending": replaced,
+                "active_request_id": str((active_by_chat.get(chat_key) or {}).get("request_id") or ""),
+                "pending_request_id": request["request_id"],
+            },
+        )
+        if replaced:
+            log_event(
+                log_path,
+                "telegram.local_api_chat.pending_overwritten",
+                {
+                    "chat_id_redacted": _redact_chat_id(chat_id),
+                    "trace_id": trace_id,
+                    "replaced_pending": True,
+                    "previous_request_id": str((previous_request or {}).get("request_id") or ""),
+                    "pending_request_id": request["request_id"],
+                    "text_prefix": _text_prefix(str((previous_request or {}).get("text") or "")),
+                    "queue_mode": "latest_message_wins",
+                },
+            )
+        return False, request
+
+    active_by_chat[chat_key] = request
+    state["in_flight_total"] = int(state.get("in_flight_total") or 0) + 1
+    state["in_flight_by_chat"][chat_key] = int(state["in_flight_by_chat"].get(chat_key) or 0) + 1
+    return True, request
+
+
+def _telegram_chat_take_pending_request(
+    *,
+    bot_data: dict[str, Any],
+    chat_id: str,
+) -> dict[str, Any] | None:
+    state = _telegram_chat_proxy_state(bot_data)
+    chat_key = str(chat_id or "").strip() or "unknown"
+    pending_by_chat = state.get("pending_by_chat") if isinstance(state.get("pending_by_chat"), dict) else {}
+    pending = pending_by_chat.pop(chat_key, None)
+    return pending if isinstance(pending, dict) else None
+
+
+def _telegram_chat_log_pending_promotion(
+    *,
+    log_path: str | None,
+    chat_id: str,
+    active_trace_id: str,
+    next_request: dict[str, Any],
+) -> None:
+    log_event(
+        log_path,
+        "telegram.local_api_chat.pending_promoted",
+        {
+            "chat_id_redacted": _redact_chat_id(chat_id),
+            "trace_id": active_trace_id,
+            "pending_trace_id": str(next_request.get("trace_id") or ""),
+            "pending_request_id": str(next_request.get("request_id") or ""),
+            "text_prefix": _text_prefix(str(next_request.get("text") or "")),
+            "queue_mode": "latest_message_wins",
+            "promoted": True,
+        },
+    )
+
+
+def _telegram_chat_release_active_request(
+    *,
+    bot_data: dict[str, Any],
+    chat_id: str,
+) -> None:
+    state = _telegram_chat_proxy_state(bot_data)
+    chat_key = str(chat_id or "").strip() or "unknown"
+    active_by_chat = state.get("active_by_chat") if isinstance(state.get("active_by_chat"), dict) else {}
+    active_by_chat.pop(chat_key, None)
+    state["in_flight_total"] = max(0, int(state.get("in_flight_total") or 0) - 1)
+    current_chat_in_flight = max(0, int(state["in_flight_by_chat"].get(chat_key) or 0) - 1)
+    if current_chat_in_flight:
+        state["in_flight_by_chat"][chat_key] = current_chat_in_flight
+    else:
+        state["in_flight_by_chat"].pop(chat_key, None)
+
+
 def _normalize_setup_state_hint(value: Any) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         return None
@@ -1095,6 +1317,7 @@ async def _handle_telegram_text_via_local_api(
     _ = runtime_version
     _ = runtime_git_commit
     _ = runtime_started_ts
+    request_id = uuid.uuid4().hex
     command = classify_telegram_text_command(text)
     if command is not None:
         return handle_telegram_command(
@@ -1108,6 +1331,56 @@ async def _handle_telegram_text_via_local_api(
             runtime_started_ts=bot_data.get("runtime_started_ts"),
             fetch_local_api_json=_fetch_local_api_json,
         )
+    social_turn_kind = classify_trivial_social_turn(text)
+    if social_turn_kind is not None:
+        started = pytime.monotonic()
+        social_turn_text = build_trivial_social_turn_message(text) or "Got it. What should I do next?"
+        result = {
+            "ok": True,
+            "handled": True,
+            "text": social_turn_text,
+            "route": "generic_chat",
+            "trace_id": trace_id,
+            "next_action": None,
+            "selected_route": "generic_chat",
+            "handler_name": "telegram_social_turn",
+            "used_llm": False,
+            "used_memory": False,
+            "used_runtime_state": False,
+            "used_tools": [],
+            "legacy_compatibility": False,
+            "generic_fallback_used": False,
+            "generic_fallback_reason": None,
+            "chat_meta": {
+                "assistant_turn_type": "social_turn",
+                "assistant_turn_kind": social_turn_kind,
+                "fast_path": True,
+                "proxy_execution_mode": "telegram_social_turn",
+                "proxy_total_elapsed_ms": int(max(0.0, pytime.monotonic() - started) * 1000),
+            },
+        }
+        _safe_append_telegram_message_audit(
+            audit_log=bot_data.get("audit_log") if isinstance(bot_data.get("audit_log"), AuditLog) else None,
+            action="telegram.message.handled",
+            chat_id=chat_id,
+            message_kind="text",
+            route="generic_chat",
+            outcome="handled",
+            generic_fallback_used=False,
+            generic_fallback_reason=None,
+        )
+        log_event(
+            log_path,
+            "telegram.social_turn.fast_path",
+            {
+                "trace_id": trace_id,
+                "request_id": request_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "social_turn_kind": social_turn_kind,
+                "elapsed_ms": int(max(0.0, pytime.monotonic() - started) * 1000),
+            },
+        )
+        return result
     chat_proxy_fetch = (
         bot_data.get("fetch_local_api_chat_json")
         if callable(bot_data.get("fetch_local_api_chat_json"))
@@ -1115,7 +1388,6 @@ async def _handle_telegram_text_via_local_api(
     )
     state = _telegram_chat_proxy_state(bot_data)
     chat_key = str(chat_id or "").strip() or "unknown"
-    request_id = uuid.uuid4().hex
     in_flight_by_chat = (
         state.get("in_flight_by_chat") if isinstance(state.get("in_flight_by_chat"), dict) else {}
     )
@@ -1123,58 +1395,6 @@ async def _handle_telegram_text_via_local_api(
         state.get("setup_hint_by_chat") if isinstance(state.get("setup_hint_by_chat"), dict) else {}
     )
     setup_state_hint = _normalize_setup_state_hint(setup_hint_by_chat.get(chat_key))
-    if int(in_flight_by_chat.get(chat_key) or 0) > 0:
-        message = "I'm still working on your last request. Please wait for that reply or try again in a moment."
-        log_event(
-            log_path,
-            "telegram.local_api_chat.rejected",
-            {
-                "trace_id": trace_id,
-                "request_id": request_id,
-                "chat_id_redacted": _redact_chat_id(chat_id),
-                "selected_route_hint": "chat_busy",
-                "execution_mode": "async_http",
-                "overlap_policy": "reject_same_chat_in_flight",
-                "overlap_rejected": True,
-                "failure_kind": "same_chat_in_flight",
-                "in_flight_count": int(in_flight_by_chat.get(chat_key) or 0),
-                "in_flight_total": int(state.get("in_flight_total") or 0),
-                "elapsed_ms": 0,
-                "timeout_used": None,
-            },
-        )
-        return {
-            "ok": False,
-            "handled": True,
-            "text": message,
-            "route": "chat_busy",
-            "trace_id": trace_id,
-            "request_id": request_id,
-            "next_action": None,
-            "selected_route": "chat_busy",
-            "handler_name": "api_chat_proxy_busy",
-            "used_llm": False,
-            "used_memory": False,
-            "used_runtime_state": False,
-            "used_tools": [],
-            "legacy_compatibility": False,
-            "generic_fallback_used": False,
-            "generic_fallback_reason": "same_chat_in_flight",
-            "chat_meta": {
-                "proxy_execution_mode": "async_http",
-                "proxy_failure_kind": "same_chat_in_flight",
-                "proxy_elapsed_ms": 0,
-                "proxy_in_flight_count": int(in_flight_by_chat.get(chat_key) or 0),
-                "proxy_in_flight_total": int(state.get("in_flight_total") or 0),
-                "proxy_overlap_rejected": True,
-                "proxy_timeout_used": None,
-                "runtime_state_failure_reason": "same_chat_in_flight",
-            },
-        }
-
-    state["in_flight_total"] = int(state.get("in_flight_total") or 0) + 1
-    in_flight_by_chat[chat_key] = int(in_flight_by_chat.get(chat_key) or 0) + 1
-    in_flight_total = int(state.get("in_flight_total") or 0)
     route_hint = classify_runtime_chat_route(
         text,
         awaiting_secret=bool((setup_state_hint or {}).get("awaiting_secret")),
@@ -1182,24 +1402,25 @@ async def _handle_telegram_text_via_local_api(
     )
     selected_route_hint = str(route_hint.get("route") or "generic_chat").strip().lower() or "generic_chat"
     call_started = pytime.monotonic()
-    log_event(
-        log_path,
-        "telegram.local_api_chat.start",
+    result: dict[str, Any] | None = None
+    try:
+        in_flight_total = int(state.get("in_flight_total") or 0)
+        log_event(
+            log_path,
+            "telegram.local_api_chat.start",
             {
                 "trace_id": trace_id,
                 "request_id": request_id,
                 "chat_id_redacted": _redact_chat_id(chat_id),
                 "selected_route_hint": selected_route_hint,
                 "execution_mode": "async_http",
-                "overlap_policy": "reject_same_chat_in_flight",
+                "overlap_policy": "latest_message_wins",
                 "overlap_rejected": False,
                 "in_flight_total": in_flight_total,
                 "in_flight_chat": int(in_flight_by_chat.get(chat_key) or 0),
                 "setup_state_hint": dict(setup_state_hint) if isinstance(setup_state_hint, dict) else None,
             },
         )
-    result: dict[str, Any] | None = None
-    try:
         payload = build_telegram_chat_api_payload(
             text=text,
             chat_id=chat_id,
@@ -1256,18 +1477,13 @@ async def _handle_telegram_text_via_local_api(
                     else None
                 ),
                 "proxy_total_elapsed_ms": int(max(0.0, pytime.monotonic() - call_started) * 1000),
-                "proxy_overlap_policy": "reject_same_chat_in_flight",
+                "proxy_overlap_policy": "latest_message_wins",
             }
             result["chat_meta"] = chat_meta
         return result if isinstance(result, dict) else {}
     finally:
         elapsed_ms = int(max(0.0, pytime.monotonic() - call_started) * 1000)
-        state["in_flight_total"] = max(0, int(state.get("in_flight_total") or 0) - 1)
-        current_chat_in_flight = max(0, int(in_flight_by_chat.get(chat_key) or 0) - 1)
-        if current_chat_in_flight:
-            in_flight_by_chat[chat_key] = current_chat_in_flight
-        else:
-            in_flight_by_chat.pop(chat_key, None)
+        current_chat_in_flight = int(in_flight_by_chat.get(chat_key) or 0)
         log_event(
             log_path,
             "telegram.local_api_chat.finish",
@@ -1283,7 +1499,7 @@ async def _handle_telegram_text_via_local_api(
                     ),
                     "execution_mode": "async_http",
                     "elapsed_ms": elapsed_ms,
-                    "overlap_policy": "reject_same_chat_in_flight",
+                    "overlap_policy": "latest_message_wins",
                     "overlap_rejected": False,
                     "failure_kind": (
                         str(((result or {}).get("chat_meta") or {}).get("proxy_failure_kind") or "").strip() or None
@@ -1311,10 +1527,21 @@ async def _run_async_telegram_chat(
     log_path: str,
     orchestrator: Orchestrator,
     audit_log: AuditLog | None,
-    placeholder_message: Any | None,
+    turn_started_at: float,
+    telegram_message_age_ms: int | None,
+    selected_route_hint: str | None,
+    placeholder_policy: str,
+    placeholder_grace_seconds: float,
 ) -> None:
     result: dict[str, Any] | None = None
-    started = pytime.monotonic()
+    started = float(turn_started_at)
+    api_started_at = pytime.monotonic()
+    placeholder_started_at: float | None = None
+    placeholder_elapsed_ms: int | None = None
+    response_started_at: float | None = None
+    response_elapsed_ms: int | None = None
+    placeholder_message: Any | None = None
+    placeholder_used = False
     _emit_telegram_runtime_event(
         bot_data=bot_data,
         log_path=log_path,
@@ -1323,8 +1550,8 @@ async def _run_async_telegram_chat(
         chat_id_redacted=_redact_chat_id(chat_id),
         source="telegram",
     )
-    try:
-        result = await _handle_telegram_text_via_local_api(
+    api_task = asyncio.create_task(
+        _handle_telegram_text_via_local_api(
             text=text,
             chat_id=chat_id,
             trace_id=trace_id,
@@ -1336,7 +1563,47 @@ async def _run_async_telegram_chat(
             runtime_git_commit=str(bot_data.get("runtime_git_commit") or "").strip() or None,
             runtime_started_ts=bot_data.get("runtime_started_ts"),
         )
-        route = str(result.get("selected_route") or result.get("route") or "chat").strip().lower() or "chat"
+    )
+    try:
+        if str(placeholder_policy or "").strip().lower() == "deferred" and float(placeholder_grace_seconds or 0.0) > 0:
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.shield(api_task),
+                    timeout=float(placeholder_grace_seconds),
+                )
+            except asyncio.TimeoutError:
+                placeholder_started_at = pytime.monotonic()
+                try:
+                    placeholder_message = await _send_placeholder_message(
+                        update.effective_message,
+                        "Thinking…",
+                        trace_id=trace_id,
+                        chat_id=chat_id,
+                        log_path=log_path,
+                        route=selected_route_hint or "chat",
+                    )
+                except Exception:
+                    placeholder_message = None
+                placeholder_used = placeholder_message is not None
+                placeholder_elapsed_ms = int(max(0.0, pytime.monotonic() - placeholder_started_at) * 1000)
+                result = await api_task
+        else:
+            placeholder_started_at = pytime.monotonic()
+            try:
+                placeholder_message = await _send_placeholder_message(
+                    update.effective_message,
+                    "Thinking…",
+                    trace_id=trace_id,
+                    chat_id=chat_id,
+                    log_path=log_path,
+                    route=selected_route_hint or "chat",
+                )
+            except Exception:
+                placeholder_message = None
+            placeholder_used = placeholder_message is not None
+            placeholder_elapsed_ms = int(max(0.0, pytime.monotonic() - placeholder_started_at) * 1000)
+            result = await api_task
+        route = str(result.get("selected_route") or result.get("route") or selected_route_hint or "chat").strip().lower() or "chat"
         diagnosis = result.get("diagnosis") if isinstance(result.get("diagnosis"), dict) else {}
         chat_meta = result.get("chat_meta") if isinstance(result.get("chat_meta"), dict) else {}
         runtime_state_failure_reason = (
@@ -1413,6 +1680,18 @@ async def _run_async_telegram_chat(
         )
         generic_fallback_used = bool(result.get("generic_fallback_used", False))
         generic_fallback_reason = str(result.get("generic_fallback_reason") or "").strip() or None
+        response_started_at = pytime.monotonic()
+        delivery_mode = "edit" if placeholder_message is not None and callable(getattr(placeholder_message, "edit_text", None)) else "reply"
+        log_event(
+            log_path,
+            "telegram.response_delivery.start",
+            {
+                "trace_id": trace_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "route": route,
+                "delivery_mode": delivery_mode,
+            },
+        )
         await _deliver_telegram_text_result(
             placeholder_message=placeholder_message,
             original_message=update.effective_message,
@@ -1421,6 +1700,21 @@ async def _run_async_telegram_chat(
             route=route,
             text=str(result.get("text") or ""),
             trace_id=trace_id,
+            cards_payload=(
+                result.get("cards_payload") if isinstance(result.get("cards_payload"), dict) else None
+            ),
+        )
+        response_elapsed_ms = int(max(0.0, pytime.monotonic() - response_started_at) * 1000)
+        log_event(
+            log_path,
+            "telegram.response_delivery.finish",
+            {
+                "trace_id": trace_id,
+                "chat_id_redacted": _redact_chat_id(chat_id),
+                "route": route,
+                "delivery_mode": delivery_mode,
+                "elapsed_ms": response_elapsed_ms,
+            },
         )
         _safe_append_telegram_message_audit(
             audit_log=audit_log,
@@ -1463,6 +1757,28 @@ async def _run_async_telegram_chat(
             proxy_overlap_rejected=proxy_overlap_rejected,
             proxy_total_elapsed_ms=proxy_total_elapsed_ms,
             diagnosis=diagnosis,
+        )
+        _log_telegram_latency_summary(
+            log_path=log_path,
+            trace_id=trace_id,
+            chat_id=chat_id,
+            route=route,
+            selected_route=str(result.get("selected_route") or route),
+            turn_started_at=started,
+            telegram_message_age_ms=telegram_message_age_ms,
+            api_started_at=api_started_at,
+            api_elapsed_ms=proxy_total_elapsed_ms,
+            placeholder_started_at=placeholder_started_at,
+            placeholder_elapsed_ms=placeholder_elapsed_ms,
+            response_started_at=response_started_at,
+            response_elapsed_ms=response_elapsed_ms,
+            placeholder_policy=str(placeholder_policy or "").strip().lower() or "immediate",
+            placeholder_used=placeholder_used,
+            placeholder_grace_seconds=placeholder_grace_seconds,
+            delivery_mode=delivery_mode,
+            used_llm=bool(result.get("used_llm", False)),
+            used_runtime_state=bool(result.get("used_runtime_state", False)),
+            ok=bool(result.get("ok", False)),
         )
         _emit_telegram_runtime_event(
             bot_data=bot_data,
@@ -1521,6 +1837,76 @@ async def _run_async_telegram_chat(
             )
         except Exception:
             return
+        _log_telegram_latency_summary(
+            log_path=log_path,
+            trace_id=trace_id,
+            chat_id=chat_id,
+            route="chat",
+            selected_route=selected_route_hint,
+            turn_started_at=started,
+            telegram_message_age_ms=telegram_message_age_ms,
+            api_started_at=api_started_at,
+            api_elapsed_ms=None,
+            placeholder_started_at=placeholder_started_at,
+            placeholder_elapsed_ms=placeholder_elapsed_ms,
+            response_started_at=response_started_at,
+            response_elapsed_ms=response_elapsed_ms,
+            placeholder_policy=str(placeholder_policy or "").strip().lower() or "immediate",
+            placeholder_used=placeholder_used,
+            placeholder_grace_seconds=placeholder_grace_seconds,
+            delivery_mode="edit" if placeholder_message is not None and callable(getattr(placeholder_message, "edit_text", None)) else "reply",
+            used_llm=False,
+            used_runtime_state=False,
+            ok=False,
+        )
+    finally:
+        _telegram_chat_release_active_request(bot_data=bot_data, chat_id=chat_id)
+        next_request = _telegram_chat_take_pending_request(bot_data=bot_data, chat_id=chat_id)
+        if next_request is not None:
+            _telegram_chat_log_pending_promotion(
+                log_path=log_path,
+                chat_id=chat_id,
+                active_trace_id=trace_id,
+                next_request=next_request,
+            )
+            admitted, _ = _telegram_chat_admit_or_queue_request(
+                bot_data=bot_data,
+                chat_id=str(next_request.get("chat_id") or chat_id),
+                update=next_request.get("update"),
+                text=str(next_request.get("text") or ""),
+                trace_id=str(next_request.get("trace_id") or ""),
+                placeholder_message=next_request.get("placeholder_message"),
+                log_path=log_path,
+            )
+            if admitted:
+                background_task = asyncio.create_task(
+                    _run_async_telegram_chat(
+                        update=next_request.get("update"),
+                        chat_id=str(next_request.get("chat_id") or chat_id),
+                        text=str(next_request.get("text") or ""),
+                        trace_id=str(next_request.get("trace_id") or ""),
+                        bot_data=bot_data,
+                        log_path=log_path,
+                        orchestrator=orchestrator,
+                        audit_log=audit_log,
+                        turn_started_at=float(next_request.get("turn_started_at") or pytime.monotonic()),
+                        telegram_message_age_ms=(
+                            int(next_request.get("telegram_message_age_ms"))
+                            if isinstance(next_request.get("telegram_message_age_ms"), int)
+                            else None
+                        ),
+                        selected_route_hint=str(next_request.get("selected_route_hint") or "") or None,
+                        placeholder_policy=str(next_request.get("placeholder_policy") or "immediate"),
+                        placeholder_grace_seconds=(
+                            float(next_request.get("placeholder_grace_seconds"))
+                            if isinstance(next_request.get("placeholder_grace_seconds"), (int, float))
+                            else _TELEGRAM_DETERMINISTIC_PLACEHOLDER_GRACE_SECONDS
+                        ),
+                    )
+                )
+                tasks = _telegram_background_tasks(bot_data)
+                tasks.add(background_task)
+                background_task.add_done_callback(lambda task: tasks.discard(task))
 
 
 def _runtime_status_text(bot_data: dict[str, Any]) -> str:
@@ -1636,6 +2022,72 @@ def _log_telegram_text_handled(
             "diagnosis_mapped_state": str(diagnosis.get("mapped_state") or "").strip() or None,
         },
     )
+
+
+def _log_telegram_latency_summary(
+    *,
+    log_path: str | None,
+    trace_id: str,
+    chat_id: str,
+    route: str,
+    selected_route: str | None,
+    turn_started_at: float | None,
+    telegram_message_age_ms: int | None,
+    api_started_at: float | None,
+    api_elapsed_ms: int | None,
+    placeholder_started_at: float | None,
+    placeholder_elapsed_ms: int | None,
+    response_started_at: float | None,
+    response_elapsed_ms: int | None,
+    placeholder_policy: str,
+    placeholder_used: bool,
+    placeholder_grace_seconds: float | None,
+    delivery_mode: str | None,
+    used_llm: bool,
+    used_runtime_state: bool,
+    ok: bool,
+) -> None:
+    payload: dict[str, Any] = {
+        "trace_id": trace_id,
+        "chat_id_redacted": _redact_chat_id(chat_id),
+        "route": str(route or "").strip().lower() or "chat",
+        "selected_route": str(selected_route or route).strip().lower() or str(route or "").strip().lower() or "chat",
+        "telegram_message_age_ms": int(telegram_message_age_ms) if telegram_message_age_ms is not None else None,
+        "placeholder_policy": str(placeholder_policy or "").strip().lower() or "immediate",
+        "placeholder_used": bool(placeholder_used),
+        "placeholder_grace_ms": int(max(0.0, float(placeholder_grace_seconds or 0.0) * 1000))
+        if placeholder_grace_seconds is not None
+        else None,
+        "delivery_mode": str(delivery_mode or "").strip().lower() or None,
+        "used_llm": bool(used_llm),
+        "used_runtime_state": bool(used_runtime_state),
+        "ok": bool(ok),
+        "turn_total_ms": _monotonic_offset_ms(turn_started_at),
+    }
+    if api_started_at is not None:
+        payload["api_start_ms"] = _monotonic_offset_ms(turn_started_at, api_started_at)
+    if api_elapsed_ms is not None:
+        payload["api_end_ms"] = (
+            int(payload["api_start_ms"]) + int(api_elapsed_ms)
+            if isinstance(payload.get("api_start_ms"), int)
+            else None
+        )
+        payload["local_api_request_ms"] = int(api_elapsed_ms)
+    if placeholder_started_at is not None:
+        payload["placeholder_start_ms"] = _monotonic_offset_ms(turn_started_at, placeholder_started_at)
+    if placeholder_elapsed_ms is not None:
+        payload["placeholder_send_ms"] = int(placeholder_elapsed_ms)
+        if isinstance(payload.get("placeholder_start_ms"), int):
+            payload["placeholder_end_ms"] = int(payload["placeholder_start_ms"]) + int(placeholder_elapsed_ms)
+    if response_started_at is not None:
+        payload["response_start_ms"] = _monotonic_offset_ms(turn_started_at, response_started_at)
+    if response_elapsed_ms is not None:
+        payload["response_delivery_ms"] = int(response_elapsed_ms)
+        if isinstance(payload.get("response_start_ms"), int):
+            payload["response_end_ms"] = int(payload["response_start_ms"]) + int(response_elapsed_ms)
+    if payload.get("turn_total_ms") is not None:
+        payload["visible_total_ms"] = payload["turn_total_ms"]
+    log_event(log_path, "telegram.latency_summary", payload)
 
 
 def _model_status_report(*, runtime: Any | None) -> str:
@@ -2246,6 +2698,9 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     log_path: str = context.application.bot_data["log_path"]
     bot_data = context.application.bot_data
     trace_id = _trace_id_from_update(update)
+    turn_started_at = pytime.monotonic()
+    received_at = datetime.now(timezone.utc)
+    telegram_message_age_ms = _telegram_message_age_ms(update.effective_message, received_at=received_at)
     operator_recovery_fn = bot_data.get("operator_recovery_fn")
     if not callable(operator_recovery_fn):
         operator_recovery_fn = bot_data.get("llm_fixit_fn")
@@ -2259,6 +2714,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 "trace_id": trace_id,
                 "user_id": chat_id,
                 "text_prefix": _text_prefix(text),
+                "telegram_message_age_ms": telegram_message_age_ms,
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -2271,6 +2727,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "user_id": chat_id,
             "text_prefix": _text_prefix(text),
             "trace_id": trace_id,
+            "telegram_message_age_ms": telegram_message_age_ms,
         },
     )
     log_event(
@@ -2280,6 +2737,7 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "user_id": chat_id,
             "text_prefix": _text_prefix(text),
             "trace_id": trace_id,
+            "telegram_message_age_ms": telegram_message_age_ms,
         },
     )
     _safe_append_telegram_message_audit(
@@ -2306,6 +2764,10 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         db.set_preference("telegram_chat_id", chat_id)
 
         normalized_text = _normalize_user_text(text)
+        setup_state_hint: dict[str, Any] = {}
+        selected_route_hint = "generic_chat"
+        placeholder_policy = "immediate"
+        placeholder_grace_seconds = 0.0
 
         fixit_reply, fixit_route = _maybe_handle_operator_recovery_reply_with_route(
             operator_recovery_fn=operator_recovery_fn if callable(operator_recovery_fn) else None,
@@ -2393,12 +2855,41 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             )
             return
 
-        placeholder_message = await _send_placeholder_message(
-            update.effective_message,
-            "Thinking…",
-            trace_id=trace_id,
-            chat_id=chat_id,
+        setup_hint_by_chat = (
+            bot_data.get("_telegram_setup_hint_by_chat")
+            if isinstance(bot_data.get("_telegram_setup_hint_by_chat"), dict)
+            else {}
         )
+        setup_state_hint = _normalize_setup_state_hint(setup_hint_by_chat.get(chat_id))
+        route_hint = classify_runtime_chat_route(
+            text,
+            awaiting_secret=bool((setup_state_hint or {}).get("awaiting_secret")),
+            awaiting_confirmation=bool((setup_state_hint or {}).get("awaiting_confirmation")),
+        )
+        selected_route_hint = str(route_hint.get("route") or "generic_chat").strip().lower() or "generic_chat"
+        placeholder_policy = "deferred" if _should_defer_telegram_placeholder(selected_route_hint) else "immediate"
+        placeholder_grace_seconds = (
+            float(_TELEGRAM_DETERMINISTIC_PLACEHOLDER_GRACE_SECONDS)
+            if placeholder_policy == "deferred"
+            else 0.0
+        )
+
+        admitted, request_record = _telegram_chat_admit_or_queue_request(
+            bot_data=bot_data,
+            chat_id=chat_id,
+            update=update,
+            text=text,
+            trace_id=trace_id,
+            placeholder_message=None,
+            log_path=log_path,
+        )
+        request_record["turn_started_at"] = turn_started_at
+        request_record["telegram_message_age_ms"] = telegram_message_age_ms
+        request_record["selected_route_hint"] = selected_route_hint
+        request_record["placeholder_policy"] = placeholder_policy
+        request_record["placeholder_grace_seconds"] = placeholder_grace_seconds
+        if not admitted:
+            return
         background_task = asyncio.create_task(
             _run_async_telegram_chat(
                 update=update,
@@ -2409,13 +2900,17 @@ async def _handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                 log_path=log_path,
                 orchestrator=orchestrator,
                 audit_log=audit_log,
-                placeholder_message=placeholder_message,
+                turn_started_at=turn_started_at,
+                telegram_message_age_ms=telegram_message_age_ms,
+                selected_route_hint=selected_route_hint,
+                placeholder_policy=placeholder_policy,
+                placeholder_grace_seconds=placeholder_grace_seconds,
             )
         )
         tasks = _telegram_background_tasks(bot_data)
         tasks.add(background_task)
         background_task.add_done_callback(lambda task: tasks.discard(task))
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.01)
         return
     except Exception as exc:
         _safe_append_telegram_message_audit(

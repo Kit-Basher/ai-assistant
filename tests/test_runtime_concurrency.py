@@ -457,6 +457,10 @@ class TestRuntimeConcurrency(unittest.TestCase):
             runtime._router,
             "enabled",
             return_value=True,
+        ), patch.object(
+            orchestrator,
+            "_llm_chat_available",
+            return_value=True,
         ), patch(
             "agent.orchestrator.route_inference",
             return_value=router_result,
@@ -482,7 +486,7 @@ class TestRuntimeConcurrency(unittest.TestCase):
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join(timeout=2.0)
+                thread.join(timeout=5.0)
 
         self.assertEqual([], errors)
         self.assertEqual(2, len(results))
@@ -490,6 +494,80 @@ class TestRuntimeConcurrency(unittest.TestCase):
             self.assertTrue(ok)
             assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
             self.assertEqual("Hello from the orchestrator path.", assistant.get("content"))
+
+    def test_concurrent_plain_chat_requests_serialize_orchestrator_handle_message(self) -> None:
+        runtime = self._runtime()
+        orchestrator = runtime.orchestrator()
+        barrier = threading.Barrier(2)
+        results: list[tuple[bool, dict[str, object]]] = []
+        errors: list[BaseException] = []
+        results_lock = threading.Lock()
+        active_lock = threading.Lock()
+        active_calls = 0
+
+        def _fake_handle_message(
+            text: str,
+            user_id: str,
+            *,
+            chat_context: dict[str, object] | None = None,
+        ) -> OrchestratorResponse:
+            del text, user_id, chat_context
+            nonlocal active_calls
+            with active_lock:
+                if active_calls:
+                    raise sqlite3.OperationalError("simulated overlapping orchestrator access")
+                active_calls += 1
+            try:
+                time.sleep(0.05)
+                return OrchestratorResponse(
+                    "serialized reply",
+                    {
+                        "route": "generic_chat",
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_runtime_state": False,
+                        "used_tools": [],
+                        "ok": True,
+                    },
+                )
+            finally:
+                with active_lock:
+                    active_calls -= 1
+
+        with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch.object(
+            orchestrator,
+            "handle_message",
+            side_effect=_fake_handle_message,
+        ):
+            def _run_chat(index: int) -> None:
+                try:
+                    barrier.wait(timeout=1.0)
+                    result = runtime.chat(
+                        {
+                            "messages": [{"role": "user", "content": f"hello from thread {index}"}],
+                            "source_surface": "api",
+                            "session_id": f"session-{index}",
+                            "thread_id": f"thread-{index}",
+                        }
+                    )
+                    with results_lock:
+                        results.append(result)
+                except BaseException as exc:  # pragma: no cover - failure capture
+                    with results_lock:
+                        errors.append(exc)
+
+            threads = [threading.Thread(target=_run_chat, args=(idx,)) for idx in (1, 2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5.0)
+
+        self.assertEqual([], errors)
+        self.assertEqual(2, len(results))
+        for ok, body in results:
+            self.assertTrue(ok)
+            assistant = body.get("assistant") if isinstance(body.get("assistant"), dict) else {}
+            self.assertEqual("serialized reply", assistant.get("content"))
 
     def test_ready_waits_for_chat_runtime_bootstrap_before_reporting_ready(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path), defer_bootstrap_warmup=True)

@@ -145,7 +145,7 @@ class TestOnboardingFlow(unittest.TestCase):
             "alternate_pack": None,
             "comparison_mode": "single_recommendation",
             "fallback": "install_preview",
-            "next_step": "Say yes and I'll show the install preview.",
+            "next_step": "If you want, say yes and I'll show the install details.",
             "warnings": [],
             "source_errors": [],
             "queries": [],
@@ -156,7 +156,7 @@ class TestOnboardingFlow(unittest.TestCase):
         mock_recommend.assert_called_once()
         self.assertEqual("coding", mock_recommend.call_args.args[0])
         self.assertIn("I can add capabilities for coding.", response.text)
-        self.assertIn("Say yes and I'll show the install preview.", response.text)
+        self.assertIn("say yes and I'll show the install details", response.text)
         self.assertEqual("true", str(self.db.get_user_pref(onboarding_completed_key("user1")) or "").strip().lower())
         self.assertEqual([], llm.chat_calls)
 

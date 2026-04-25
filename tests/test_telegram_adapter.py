@@ -158,7 +158,7 @@ class TestTelegramAdapter(unittest.TestCase):
                     side_effect=AssertionError("social turns must not call the local API"),
                 ):
                     return await _handle_telegram_text_via_local_api(
-                        text="hello",
+                        text="hello are you working?",
                         chat_id="42",
                         trace_id="trace-1",
                         bot_data={},
@@ -176,7 +176,7 @@ class TestTelegramAdapter(unittest.TestCase):
             self.assertEqual("telegram_social_turn", result.get("handler_name"))
             chat_meta = result.get("chat_meta") if isinstance(result.get("chat_meta"), dict) else {}
             self.assertEqual("social_turn", chat_meta.get("assistant_turn_type"))
-            self.assertEqual("greeting", chat_meta.get("assistant_turn_kind"))
+            self.assertEqual("presence_check", chat_meta.get("assistant_turn_kind"))
             self.assertTrue(bool(chat_meta.get("fast_path")))
 
             event_types = [str(row.get("type") or "") for row in _read_log_rows(log_path)]

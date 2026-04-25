@@ -203,7 +203,7 @@ class _FakeChatApiBackend:
             route = "runtime_status"
             used_llm = False
             used_runtime_state = True
-        elif text == "what model are you using?":
+        elif text in {"what model are you using?", "what model are you uding?"}:
             reply_text = "I’m using ollama / ollama:qwen3.5:4b."
             route = "model_status"
             used_llm = False
@@ -260,6 +260,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             ("hello, is the openrouter setup?", "provider_status", "OpenRouter is configured and ready to use."),
             ("is the agent healthy right now?", "runtime_status", "The agent is healthy and ready right now."),
             ("what model are you using?", "model_status", "I’m using ollama / ollama:qwen3.5:4b."),
+            ("what model are you uding?", "model_status", "I’m using ollama / ollama:qwen3.5:4b."),
             ("check what model is currently enabled please", "model_status", "The current chat model is ollama:qwen3.5:4b on Ollama."),
             ("is the agent healthy?", "runtime_status", "The agent is healthy and ready right now."),
             ("is openrouter configured?", "provider_status", "Yes. OpenRouter is configured."),
@@ -301,7 +302,7 @@ class TestTelegramModelProviderRouter(unittest.TestCase):
             self.assertEqual(len(phrases), len(telegram_rows))
             selected_routes = [str(row.get("selected_route") or "") for row in telegram_rows]
             self.assertEqual(
-                ["provider_status", "runtime_status", "model_status", "model_status", "runtime_status", "provider_status"],
+                ["provider_status", "runtime_status", "model_status", "model_status", "model_status", "runtime_status", "provider_status"],
                 selected_routes,
             )
             for row in telegram_rows:

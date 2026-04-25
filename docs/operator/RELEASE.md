@@ -49,6 +49,11 @@ into a temporary install root, launches the installed web UI through the
 shipped launcher, exercises a no-LLM two-turn chat, relaunches, and verifies
 the uninstall/remove-state policy.
 
+When a stable service is already installed and active on the host, the
+extended release validation also runs `python scripts/split_smoke.py` to prove
+the stable desktop install survives dev checkout process death without losing
+the shipped runtime.
+
 For day-to-day operations, incidents, support bundles, and release-note
 discipline, use `docs/operator/OPERATIONS.md`.
 

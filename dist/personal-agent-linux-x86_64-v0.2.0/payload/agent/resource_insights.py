@@ -154,7 +154,7 @@ def classify_memory_pressure(
             "is_pressure": False,
             "reason": "unavailable",
         }
-    if available_pct >= 0.25 and swap_used == 0:
+    if available_pct >= 0.25:
         return {
             "state": "normal",
             "available_pct": available_pct,
@@ -162,7 +162,7 @@ def classify_memory_pressure(
             "is_pressure": False,
             "reason": "plenty_available",
         }
-    if available_pct <= 0.15 or swap_used > 0:
+    if available_pct <= 0.15:
         return {
             "state": "pressure",
             "available_pct": available_pct,
@@ -501,11 +501,11 @@ def summarize_resource_report(payload: dict[str, Any], text: str = "") -> dict[s
             normality = "This looks busy, but not necessarily broken; one process appears to be doing most of the work."
         else:
             normality = "This looks busy, but the probe does not show a clear crash or runaway service."
-    elif bool(memory_pressure.get("is_normal")) and float(memory_pressure.get("available_pct") or 0.0) >= 0.25 and swap_used == 0:
+    elif bool(memory_pressure.get("is_normal")) and float(memory_pressure.get("available_pct") or 0.0) >= 0.25:
         if used_pct >= 70.0:
-            normality = "This still looks normal rather than concerning because plenty of RAM is available and Linux can keep cache in memory."
+            normality = "This still looks normal and not under pressure because plenty of RAM is available and Linux can keep cache in memory."
         else:
-            normality = "This looks normal rather than concerning because you still have plenty of available memory."
+            normality = "This looks normal and not under pressure because you still have plenty of available memory."
         if memory_note:
             normality += " Some of the used RAM is reclaimable cache/buffers/shared memory."
     elif bool(memory_pressure.get("is_pressure")):

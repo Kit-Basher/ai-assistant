@@ -99,10 +99,12 @@ Canonical support/debug path:
   - live hardware/discovery smoke: `python scripts/hardware_discovery_smoke.py`
   - live discovery-quality smoke: `python scripts/discovery_quality_smoke.py`
   - live pack-route smoke: `python scripts/pack_route_smoke.py`
+  - live restart-safe memory/model churn smoke: `python scripts/restart_memory_smoke.py --cycles 3`
+  - live provider matrix smoke: `python scripts/provider_matrix_smoke.py`
   - live reference pack workflow smoke: `python scripts/reference_pack_workflow_smoke.py`
   - live web UI smoke: `python scripts/webui_smoke.py`
   - brief transcript check: `python scripts/brief_smoke.py`
-- optional live hardware/discovery follow-up after release smoke: `python scripts/release_validation_extended.py --with-live-smokes`
+- optional live smoke follow-up after release smoke, including restart-safe churn and provider matrix checks: `python scripts/release_validation_extended.py --with-live-smokes`
 
 Release and support handoff:
 - `docs/operator/RELEASE.md`

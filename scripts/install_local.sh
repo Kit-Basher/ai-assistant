@@ -6,6 +6,7 @@ python_bin="${AGENT_INSTALL_PYTHON:-python3}"
 systemctl_bin="${AGENT_INSTALL_SYSTEMCTL:-systemctl}"
 node_bin="${AGENT_INSTALL_NODE:-node}"
 npm_bin="${AGENT_INSTALL_NPM:-npm}"
+xdg_open_bin="${AGENT_INSTALL_XDG_OPEN:-xdg-open}"
 install_launcher=0
 check_webui_build=0
 
@@ -57,6 +58,9 @@ if [ "$check_webui_build" -eq 1 ]; then
     need_command "$node_bin" "node is required to rebuild the web UI. Install Node.js, then rerun."
     need_command "$npm_bin" "npm is required to rebuild the web UI. Install npm, then rerun."
 fi
+if [ "$install_launcher" -eq 1 ]; then
+    need_command "$xdg_open_bin" "xdg-open is required for the desktop launcher. Install xdg-utils, then rerun."
+fi
 
 cd "$repo_root"
 
@@ -67,6 +71,9 @@ fi
 ".venv/bin/python" -m pip install -e .
 PERSONAL_AGENT_INSTANCE=dev ".venv/bin/python" -m agent doctor --fix
 AGENT_USER_SERVICE_NAME=personal-agent-api-dev.service bash "$repo_root/scripts/install_user_service.sh"
+
+# Start the service immediately for first-run experience (best-effort)
+"$systemctl_bin" --user start personal-agent-api-dev.service 2>/dev/null || true
 
 if [ "$install_launcher" -eq 1 ]; then
     AGENT_LAUNCHER_NAME=personal-agent-webui-dev \

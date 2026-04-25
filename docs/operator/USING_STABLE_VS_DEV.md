@@ -55,6 +55,9 @@ checkout process death:
 
 - `python scripts/split_smoke.py`
 
+The extended release validation runs this smoke automatically when the stable
+`personal-agent-api.service` is already active on the host.
+
 What it checks:
 
 - stable service is active

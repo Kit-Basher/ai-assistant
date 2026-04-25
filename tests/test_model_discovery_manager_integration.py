@@ -49,6 +49,12 @@ class _FakeRuntime:
         )
 
 
+class _RegistrylessRuntime(_FakeRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.registry_document = None
+
+
 class TestModelDiscoveryManagerIntegration(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -121,6 +127,32 @@ class TestModelDiscoveryManagerIntegration(unittest.TestCase):
         self.assertEqual({"sources": ["ollama"]}, query_mock.call_args_list[1].args[1])
         self.assertEqual(["model_discovery_manager"], discovery_response.data["used_tools"])
         self.assertEqual(["model_discovery_manager"], ollama_response.data["used_tools"])
+
+    def test_missing_runtime_registry_document_bootstraps_default_registry(self) -> None:
+        manager = ModelDiscoveryManager(runtime=_RegistrylessRuntime())
+
+        with patch.object(
+            manager,
+            "_query_openrouter",
+            return_value=(
+                [],
+                {
+                    "source": "openrouter",
+                    "enabled": True,
+                    "queried": True,
+                    "ok": True,
+                    "count": 0,
+                    "error_kind": None,
+                    "error": None,
+                },
+            ),
+        ) as openrouter_mock:
+            result = manager.query(None, {"sources": ["openrouter"]})
+
+        self.assertTrue(result["ok"])
+        registry_document = openrouter_mock.call_args.kwargs["registry_document"]
+        self.assertEqual("prefer_local_lowest_cost_capable", registry_document["defaults"]["routing_mode"])
+        self.assertIn("openrouter", registry_document["providers"])
 
     def test_partial_source_failure_keeps_other_discovery_sources(self) -> None:
         manager = self._manager()

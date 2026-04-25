@@ -17,9 +17,13 @@ desktop/src-tauri/target/
 coverage.xml
 htmlcov/
 *.egg-info/
+assistant-barrage-*/
+fs-test/
 # local runtime state
 llm_registry.json
 agent/webui/dist/
+control/.control.lock
+control/agent_events.jsonl
 
 # editor/temp cruft
 .#*
@@ -28,4 +32,3 @@ agent/webui/dist/
 *.db
 *.sqlite
 *.sqlite3
-

@@ -121,6 +121,7 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
                 "OPEN_LOG": str(open_log),
                 "AGENT_LAUNCHER_WAIT_SECONDS": "3",
                 "AGENT_LAUNCHER_POLL_SECONDS": "0",
+                "AGENT_LAUNCHER_OPEN_BROWSER": "0",
             }
         )
         if extra_env:
@@ -130,8 +131,8 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
     def test_fresh_launch_surfaces_onboarding_and_then_suppresses_it(self) -> None:
         proc = self._run_launcher()
         self.assertEqual(0, proc.returncode, proc.stderr)
-        self.assertTrue((self.state_dir / "open.log").is_file())
-        self.assertIn("http://127.0.0.1:8765/", (self.state_dir / "open.log").read_text(encoding="utf-8"))
+        self.assertIn("browser auto-open disabled", proc.stderr)
+        self.assertFalse((self.state_dir / "open.log").exists())
 
         orch, llm = self._orchestrator()
         first = orch.handle_message("hello", "user1", chat_context={"source_surface": "webui"})
@@ -144,7 +145,8 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
 
         second_proc = self._run_launcher()
         self.assertEqual(0, second_proc.returncode, second_proc.stderr)
-        self.assertIn("http://127.0.0.1:8765/", (self.state_dir / "open.log").read_text(encoding="utf-8"))
+        self.assertIn("browser auto-open disabled", second_proc.stderr)
+        self.assertFalse((self.state_dir / "open.log").exists())
 
         with patch.object(orch, "_interpret_previous_result_followup", return_value=None), patch.object(
             orch, "_deep_system_followup_response", return_value=None
@@ -162,7 +164,8 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
     def test_intent_path_uses_existing_recommendation_helper_and_stays_preview_first(self) -> None:
         proc = self._run_launcher()
         self.assertEqual(0, proc.returncode, proc.stderr)
-        self.assertTrue((self.state_dir / "open.log").is_file())
+        self.assertIn("browser auto-open disabled", proc.stderr)
+        self.assertFalse((self.state_dir / "open.log").exists())
 
         orch, llm = self._orchestrator()
         orch.handle_message("hello", "user1", chat_context={"source_surface": "webui"})
@@ -185,7 +188,7 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
             "alternate_pack": None,
             "comparison_mode": "single_recommendation",
             "fallback": "install_preview",
-            "next_step": "Say yes and I'll show the install preview.",
+            "next_step": "If you want, say yes and I'll show the install details.",
             "warnings": [],
             "source_errors": [],
             "queries": [],
@@ -196,7 +199,7 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
         mock_recommend.assert_called_once()
         self.assertEqual("coding", mock_recommend.call_args.args[0])
         self.assertIn("I can add capabilities for coding.", response.text)
-        self.assertIn("Say yes and I'll show the install preview.", response.text)
+        self.assertIn("say yes and I'll show the install details", response.text)
         self.assertEqual("true", str(self.db.get_user_pref(onboarding_completed_key("user1")) or "").strip().lower())
         self.assertEqual([], llm.chat_calls)
 
@@ -216,7 +219,8 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
     def test_abandon_and_api_surface_behave_conservatively(self) -> None:
         proc = self._run_launcher()
         self.assertEqual(0, proc.returncode, proc.stderr)
-        self.assertTrue((self.state_dir / "open.log").is_file())
+        self.assertIn("browser auto-open disabled", proc.stderr)
+        self.assertFalse((self.state_dir / "open.log").exists())
 
         orch, llm = self._orchestrator()
         prompt = orch.handle_message("hello", "user1", chat_context={"source_surface": "webui"})
@@ -266,7 +270,8 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
         self.db.set_user_pref(onboarding_completed_key("user1"), "true")
         proc = self._run_launcher()
         self.assertEqual(0, proc.returncode, proc.stderr)
-        self.assertTrue((self.state_dir / "open.log").is_file())
+        self.assertIn("browser auto-open disabled", proc.stderr)
+        self.assertFalse((self.state_dir / "open.log").exists())
 
         orch, llm = self._orchestrator()
         response = orch.handle_message("hello", "user1", chat_context={"source_surface": "webui"})

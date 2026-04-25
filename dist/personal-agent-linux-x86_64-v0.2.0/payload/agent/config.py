@@ -119,6 +119,34 @@ def resolved_default_log_path() -> str:
     return str(canonical_log_path())
 
 
+def default_control_dir_path() -> Path:
+    env_value = os.getenv("AGENT_CONTROL_DIR", "").strip()
+    if env_value:
+        return Path(env_value).expanduser().resolve()
+    return code_root_path() / "control"
+
+
+def default_control_master_plan_path() -> str:
+    env_value = os.getenv("AGENT_CONTROL_MASTER_PLAN_PATH", "").strip()
+    if env_value:
+        return str(Path(env_value).expanduser().resolve())
+    return str(default_control_dir_path() / "master_plan.md")
+
+
+def default_control_tasks_path() -> str:
+    env_value = os.getenv("AGENT_CONTROL_TASKS_PATH", "").strip()
+    if env_value:
+        return str(Path(env_value).expanduser().resolve())
+    return str(default_control_dir_path() / "DEVELOPMENT_TASKS.md")
+
+
+def default_control_events_path() -> str:
+    env_value = os.getenv("AGENT_CONTROL_EVENTS_PATH", "").strip()
+    if env_value:
+        return str(Path(env_value).expanduser().resolve())
+    return str(default_control_dir_path() / "agent_events.jsonl")
+
+
 @dataclass(frozen=True)
 class Config:
     telegram_bot_token: str
@@ -270,6 +298,10 @@ class Config:
     safe_mode_chat_model: str | None = None
     assistant_name: str | None = None
     user_name: str | None = None
+    control_dir: str | None = None
+    control_master_plan_path: str | None = None
+    control_tasks_path: str | None = None
+    control_events_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -775,6 +807,14 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
     safe_mode_chat_model = os.getenv("AGENT_SAFE_MODE_CHAT_MODEL", "").strip() or None
     assistant_name = os.getenv("AGENT_ASSISTANT_NAME", "").strip() or None
     user_name = os.getenv("AGENT_USER_NAME", "").strip() or None
+    control_dir = os.getenv("AGENT_CONTROL_DIR", "").strip() or None
+    control_master_plan_path = os.getenv("AGENT_CONTROL_MASTER_PLAN_PATH", "").strip() or None
+    control_tasks_path = os.getenv("AGENT_CONTROL_TASKS_PATH", "").strip() or None
+    control_events_path = os.getenv("AGENT_CONTROL_EVENTS_PATH", "").strip() or None
+    control_dir_path = Path(control_dir).expanduser().resolve() if control_dir else default_control_dir_path()
+    control_master_plan_path = control_master_plan_path or str(control_dir_path / "master_plan.md")
+    control_tasks_path = control_tasks_path or str(control_dir_path / "DEVELOPMENT_TASKS.md")
+    control_events_path = control_events_path or str(control_dir_path / "agent_events.jsonl")
     if safe_mode_enabled and not safe_mode_chat_model and ollama_model:
         safe_mode_chat_model = f"ollama:{ollama_model}"
     if safe_mode_enabled:
@@ -1006,4 +1046,8 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         safe_mode_chat_model=safe_mode_chat_model,
         assistant_name=assistant_name,
         user_name=user_name,
+        control_dir=str(control_dir_path),
+        control_master_plan_path=control_master_plan_path,
+        control_tasks_path=control_tasks_path,
+        control_events_path=control_events_path,
     )

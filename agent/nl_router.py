@@ -353,7 +353,10 @@ def select_observe_skills(text: str) -> list[dict[str, str]]:
         _append_skill(selected, "storage_governor", "storage_report")
     elif hardware_requested:
         _append_skill(selected, "hardware_report", "hardware_report")
-        if bool(_OBSERVE_RESOURCE.search(lowered)):
+        # A direct RAM/VRAM inventory question should stay on the lightweight
+        # hardware path; broader memory/performance wording still gets the
+        # heavier resource summary below.
+        if bool(_OBSERVE_RESOURCE.search(lowered)) and not _RAM_VRAM_REQUEST_RE.search(lowered):
             _append_skill(selected, "resource_governor", "resource_report")
     else:
         if machine_requested:

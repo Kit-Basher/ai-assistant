@@ -6,6 +6,7 @@ Source of truth is the code, not older handoff notes. The most relevant code
 paths are:
 
 - `agent/api_server.py`
+- `agent/control_plane.py`
 - `agent/orchestrator.py`
 - `agent/runtime_truth_service.py`
 - `agent/setup_chat_flow.py`

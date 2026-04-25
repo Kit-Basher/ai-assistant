@@ -87,6 +87,11 @@ class RuntimeTruthService:
         cache[key] = {"created_at": time.monotonic(), "value": deepcopy(value)}
         return deepcopy(value), elapsed_ms
 
+    def _invalidate_snapshot_cache(self) -> None:
+        cache = getattr(self, "_snapshot_cache_store", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
     def _filesystem_allowed_roots(self) -> list[str]:
         config = getattr(self.runtime, "config", None)
         configured = list(getattr(config, "perception_roots", ()) or [])
@@ -4671,7 +4676,10 @@ class RuntimeTruthService:
         return self.runtime.configure_openrouter(normalized_key, payload)
 
     def set_default_chat_model(self, model_id: str) -> tuple[bool, dict[str, Any]]:
-        return self.runtime.set_default_chat_model(model_id)
+        ok, body = self.runtime.set_default_chat_model(model_id)
+        if ok:
+            self._invalidate_snapshot_cache()
+        return ok, body
 
     def set_confirmed_chat_model_target(
         self,
@@ -4681,8 +4689,12 @@ class RuntimeTruthService:
     ) -> tuple[bool, dict[str, Any]]:
         setter = getattr(self.runtime, "set_confirmed_chat_model_target", None)
         if callable(setter):
-            return setter(model_id, provider_id=provider_id)
-        return self.runtime.set_default_chat_model(model_id)
+            ok, body = setter(model_id, provider_id=provider_id)
+        else:
+            ok, body = self.runtime.set_default_chat_model(model_id)
+        if ok:
+            self._invalidate_snapshot_cache()
+        return ok, body
 
     def set_temporary_chat_model_target(
         self,
@@ -4692,8 +4704,12 @@ class RuntimeTruthService:
     ) -> tuple[bool, dict[str, Any]]:
         setter = getattr(self.runtime, "set_temporary_chat_model_target", None)
         if callable(setter):
-            return setter(model_id, provider_id=provider_id)
-        return self.set_confirmed_chat_model_target(model_id, provider_id=provider_id)
+            ok, body = setter(model_id, provider_id=provider_id)
+        else:
+            ok, body = self.set_confirmed_chat_model_target(model_id, provider_id=provider_id)
+        if ok:
+            self._invalidate_snapshot_cache()
+        return ok, body
 
     def restore_temporary_chat_model_target(
         self,
@@ -4703,5 +4719,9 @@ class RuntimeTruthService:
     ) -> tuple[bool, dict[str, Any]]:
         restorer = getattr(self.runtime, "restore_temporary_chat_model_target", None)
         if callable(restorer):
-            return restorer(model_id, provider_id=provider_id)
-        return self.set_confirmed_chat_model_target(model_id, provider_id=provider_id)
+            ok, body = restorer(model_id, provider_id=provider_id)
+        else:
+            ok, body = self.set_confirmed_chat_model_target(model_id, provider_id=provider_id)
+        if ok:
+            self._invalidate_snapshot_cache()
+        return ok, body

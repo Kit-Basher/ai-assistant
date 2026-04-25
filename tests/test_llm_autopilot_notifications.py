@@ -410,6 +410,34 @@ class TestLLMAutopilotNotifications(unittest.TestCase):
         rows = runtime.llm_notifications(limit=5)["notifications"]
         self.assertEqual("local", rows[0]["delivered_to"])
 
+    def test_low_signal_notification_stays_local_when_telegram_is_configured(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                llm_notifications_allow_send=None,
+                autopilot_notify_rate_limit_seconds=0,
+                autopilot_notify_dedupe_window_seconds=0,
+            )
+        )
+        runtime.set_listening("127.0.0.1", 8765)
+        with patch.object(runtime, "_resolve_telegram_target", return_value=("token", "123456789")), patch.object(
+            runtime,
+            "_send_telegram_message",
+            side_effect=AssertionError("low-signal notifications should not reach telegram"),
+        ):
+            result = runtime._deliver_autopilot_notification(  # type: ignore[attr-defined]
+                message=(
+                    "LLM Autopilot updated configuration\n"
+                    '- Model openrouter: health.status -> "unknown" (was "ok")\n'
+                    "Reason: catalog_refresh"
+                ),
+                allow_remote=True,
+            )
+        self.assertTrue(result.ok)
+        self.assertEqual("sent_local", result.reason)
+        self.assertEqual("local", result.delivered_to)
+
     def test_notification_includes_catalog_and_cleanup_extra_changes_deterministically(self) -> None:
         runtime = AgentRuntime(
             _config(

@@ -142,6 +142,40 @@ class TestTelegramBridge(unittest.TestCase):
         self.assertEqual("help", result.get("route"))
         self.assertIn("Available commands:", str(result.get("text") or ""))
 
+    def test_help_api_probe_failure_still_returns_command_list(self) -> None:
+        result = handle_telegram_text(
+            text="/help",
+            chat_id="1",
+            trace_id="tg-help-probe-failure",
+            runtime=None,
+            orchestrator=_FakeOrchestrator(),
+            fetch_local_api_json=lambda _path: {},
+        )
+
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("help", result.get("route"))
+        text = str(result.get("text") or "")
+        self.assertIn("Available commands:", text)
+        self.assertNotIn("Setup state: degraded", text)
+        self.assertNotIn("API may be restarting", text)
+
+    def test_presence_probe_uses_fast_path_without_chat_proxy(self) -> None:
+        result = handle_telegram_text(
+            text="hello are you working?",
+            chat_id="1",
+            trace_id="tg-presence-fast-path",
+            runtime=None,
+            orchestrator=None,
+            fetch_local_api_chat_json=lambda _payload: (_ for _ in ()).throw(
+                AssertionError("presence checks must not call chat proxy")
+            ),
+        )
+
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("generic_chat", result.get("route"))
+        self.assertFalse(bool(result.get("used_llm")))
+        self.assertIn("I’m here", str(result.get("text") or ""))
+
     def test_setup_not_started_returns_setup_summary(self) -> None:
         result = handle_telegram_text(
             text="setup",
@@ -212,6 +246,25 @@ class TestTelegramBridge(unittest.TestCase):
         text = str(result.get("text") or "")
         self.assertIn("runtime_mode: READY", text)
         self.assertIn("telegram: running", text)
+
+    def test_memory_like_telegram_text_uses_chat_proxy_when_runtime_is_unbound(self) -> None:
+        result = handle_telegram_text(
+            text="continue from here",
+            chat_id="1",
+            trace_id="tg-memory-proxy",
+            runtime=None,
+            orchestrator=None,
+            fetch_local_api_chat_json=lambda _payload: {
+                "ok": True,
+                "assistant": {"role": "assistant", "content": "We were focused on today_plan. Ask me to continue there."},
+                "message": "We were focused on today_plan. Ask me to continue there.",
+                "meta": {"route": "agent_memory", "used_memory": True},
+            },
+        )
+
+        self.assertTrue(bool(result.get("handled")))
+        self.assertEqual("agent_memory", result.get("route"))
+        self.assertIn("today_plan", str(result.get("text") or ""))
 
     def test_health_uses_orchestrator_command(self) -> None:
         orchestrator = _FakeOrchestrator(reply_text="health ok")

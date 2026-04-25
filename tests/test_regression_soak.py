@@ -363,7 +363,7 @@ class TestRegressionSoak(unittest.TestCase):
         self.assertEqual(first["comparison_mode"], removed_result["comparison_mode"])
 
         self.assertTrue(str(first["next_step"] or "").strip())
-        self.assertIn("preview", str(first["next_step"] or "").lower())
+        self.assertIn("install details", str(first["next_step"] or "").lower())
 
     def test_repeated_recommendation_fallback_when_discovery_is_unavailable_is_stable(self) -> None:
         class _BrokenDiscovery:

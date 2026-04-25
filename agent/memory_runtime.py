@@ -33,6 +33,7 @@ from agent.working_memory import (
 _FOLLOWUP_POSITIVE = {
     "yes",
     "y",
+    "yes please",
     "ok",
     "okay",
     "sure",

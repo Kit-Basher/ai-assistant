@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from agent.config import load_config
@@ -355,6 +356,44 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(1800, config.llm_autopilot_churn_window_seconds)
         self.assertEqual(4, config.llm_autopilot_churn_min_applies)
         self.assertEqual(80, config.llm_autopilot_churn_recent_limit)
+
+    def test_control_plane_paths_default_to_repo_control_dir_and_support_env_overrides(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "LLM_PROVIDER": "none",
+            },
+            clear=False,
+        ):
+            os.environ.pop("AGENT_CONTROL_DIR", None)
+            os.environ.pop("AGENT_CONTROL_MASTER_PLAN_PATH", None)
+            os.environ.pop("AGENT_CONTROL_TASKS_PATH", None)
+            os.environ.pop("AGENT_CONTROL_EVENTS_PATH", None)
+            config = load_config()
+        self.assertEqual(str(Path("/home/c/personal-agent/control")), config.control_dir)
+        self.assertEqual(str(Path("/home/c/personal-agent/control/master_plan.md")), config.control_master_plan_path)
+        self.assertEqual(
+            str(Path("/home/c/personal-agent/control/DEVELOPMENT_TASKS.md")),
+            config.control_tasks_path,
+        )
+        self.assertEqual(str(Path("/home/c/personal-agent/control/agent_events.jsonl")), config.control_events_path)
+
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "token",
+                "LLM_PROVIDER": "none",
+                "AGENT_CONTROL_DIR": "/tmp/control-root",
+                "AGENT_CONTROL_TASKS_PATH": "/tmp/custom/tasks.md",
+            },
+            clear=False,
+        ):
+            config = load_config()
+        self.assertEqual(str(Path("/tmp/control-root")), config.control_dir)
+        self.assertEqual(str(Path("/tmp/control-root/master_plan.md")), config.control_master_plan_path)
+        self.assertEqual(str(Path("/tmp/custom/tasks.md")), config.control_tasks_path)
+        self.assertEqual(str(Path("/tmp/control-root/agent_events.jsonl")), config.control_events_path)
 
 
 if __name__ == "__main__":

@@ -98,9 +98,17 @@ _LOCAL_MODEL_RECOMMENDATION_PHRASES = (
 _FILESYSTEM_LIST_PHRASES = (
     "list files in",
     "list files under",
+    "list the files in",
+    "list the files under",
+    "list the files inside",
     "show me what s in",
     "show me whats in",
     "show me what is in",
+    "show the files in",
+    "show the files under",
+    "show files in",
+    "show files under",
+    "what files are in",
     "what s in",
     "whats in",
     "what is in",
@@ -114,6 +122,10 @@ _FILESYSTEM_READ_PHRASES = (
     "open this text file",
     "open this file",
     "read this text file",
+    "inspect this file",
+    "inspect the file",
+    "read the file",
+    "open the file",
 )
 _FILESYSTEM_STAT_PHRASES = (
     "what is this file",
@@ -196,6 +208,16 @@ _TELEGRAM_STATUS_PHRASES = (
     "is telegram configured",
     "is telegram running",
     "how is telegram",
+)
+_PLAN_DAY_PHRASES = (
+    "plan my day",
+    "today plan",
+    "help me plan my day",
+    "help me plan today",
+    "what should i do today",
+    "what should i work on today",
+    "show quick wins",
+    "show top 3 priorities",
 )
 _CURRENT_MODEL_PHRASES = (
     "what model are you using",
@@ -300,6 +322,18 @@ _PROVIDERS_STATUS_PHRASES = (
     "which providers are configured",
     "what providers do we have configured",
     "which providers do we have configured",
+    "what providers are set up",
+    "which providers are set up",
+    "what providers do we have set up",
+    "which providers do we have set up",
+    "what providers are setup",
+    "which providers are setup",
+    "what providers do we have setup",
+    "which providers do we have setup",
+    "what chat providers are configured",
+    "what chat providers are set up",
+    "which chat providers are configured",
+    "which chat providers are set up",
 )
 _PROVIDER_STATUS_KEYWORDS = (
     "configured",
@@ -416,12 +450,48 @@ _OPERATIONAL_STATUS_PHRASES = (
     "service status",
     "service health",
 )
+_OPERATIONAL_OBSERVE_PHRASES = (
+    "what are my specs",
+    "what are my pc specs",
+    "system info",
+    "hardware info",
+    "computer info",
+    "what cpu do i have",
+    "what gpu do i have",
+    "how much ram do i have",
+    "how much disk do i have",
+    "what is my cpu",
+    "what is my gpu",
+    "what is my ram",
+    "what is my disk",
+)
 _ASSISTANT_CAPABILITY_PHRASES = (
     "what can you do",
     "what can you do with the agent",
     "what can you help me with",
+    "how you can help",
+    "how can you help",
+    "say what you do",
+    "what you do in one sentence",
+    "help me think this through",
+    "help me think through something messy",
+    "help me think through a messy task",
+    "help me think through a messy idea",
+    "help me think through a messy problem",
+    "help me think through a problem",
+    "help me think through an idea",
+    "help me think this through without overcomplicating it",
+    "help me think through this without overcomplicating it",
+    "i need help thinking through something messy",
+    "i need help thinking through a messy task",
+    "i need help thinking through a messy idea",
+    "i need help thinking through a messy problem",
     "what skills do you have",
     "what skills do you have access to",
+    "what skill packs can you use",
+    "what skill packs do you have",
+    "what packs can you use",
+    "what packs do you have",
     "what abilities do you have",
     "what abilities do you have access to",
     "what agentic abilities do you have",
@@ -429,6 +499,18 @@ _ASSISTANT_CAPABILITY_PHRASES = (
     "what tools do you have",
     "what are you able to do",
     "what capabilities do you have",
+    "what are you",
+    "who are you",
+    "what is the agent layer",
+    "what does the agent layer do",
+    "what is the assistant layer",
+    "what does the assistant layer do",
+    "what is the agent supposed to do",
+    "what is the assistant supposed to do",
+    "agent layer supposed to do",
+    "assistant layer supposed to do",
+    "how do you use the agent layer",
+    "how do you work with the agent layer",
 )
 _MODEL_AVAILABILITY_PHRASES = (
     "are there others available to switch to easily",
@@ -471,6 +553,19 @@ _AGENT_MEMORY_WORKING_CONTEXT_PHRASES = (
     "what are we working on",
     "what were we working on",
     "what were we doing before",
+    "what are we doing",
+    "what are we doing right now",
+    "go back and explain the larger task",
+    "explain the larger task",
+    "what is the larger task",
+    "continue from here",
+    "what would you do next",
+    "what should we do next",
+    "what should i do next",
+    "go back to the day plan",
+    "return to the day plan",
+    "back to the day plan",
+    "go back to the plan",
     "can you help with the thing we were doing before",
 )
 _AGENT_MEMORY_SYSTEM_CONTEXT_PHRASES = (
@@ -498,6 +593,14 @@ _CRITICAL_INTENT_TYPO_MAP = {
     "modle": "model",
     "modles": "models",
     "stauts": "status",
+    "provder": "provider",
+    "heathy": "healthy",
+    "runtim": "runtime",
+    "doin": "doing",
+    "bak": "back",
+    "shoud": "should",
+    "uding": "using",
+    "useing": "using",
     "olama": "ollama",
     "ollma": "ollama",
 }
@@ -572,6 +675,18 @@ def _looks_like_assistant_capabilities_query(normalized: str) -> bool:
     normalized_space = normalized.replace("/", " ")
     if any(phrase in normalized_space for phrase in _ASSISTANT_CAPABILITY_PHRASES):
         return True
+    if (
+        any(phrase in normalized_space for phrase in ("help me think this through", "help me think through", "thinking through"))
+        and any(phrase in normalized_space for phrase in ("messy", "keep it simple", "without overcomplicating it"))
+        and not any(token in normalized_space for token in ("about ", "whether ", "should i ", "should we ", "for ", "between "))
+    ):
+        return True
+    if "skill pack" in normalized_space or "skill packs" in normalized_space:
+        if any(
+            token in normalized_space
+            for token in ("what", "which", "use", "abilities", "skills", "tools", "capabilities", "access")
+        ):
+            return True
     if (
         "what" in normalized_space
         and "you" in normalized_space
@@ -812,6 +927,13 @@ def _classify_operational_route(text: str | None, normalized: str) -> dict[str, 
         return {
             "route": "operational_status",
             "kind": "operational_doctor",
+            "generic_allowed": False,
+            "fallback_reason": "operational_status",
+        }
+    if any(phrase in normalized for phrase in _OPERATIONAL_OBSERVE_PHRASES):
+        return {
+            "route": "operational_status",
+            "kind": "operational_observe",
             "generic_allowed": False,
             "fallback_reason": "operational_status",
         }
@@ -1647,6 +1769,13 @@ def classify_runtime_chat_route(
             "kind": "telegram_status",
             "generic_allowed": False,
             "fallback_reason": "telegram_status",
+        }
+    if any(phrase in normalized for phrase in _PLAN_DAY_PHRASES):
+        return {
+            "route": "plan_day",
+            "kind": "plan_day",
+            "generic_allowed": False,
+            "fallback_reason": "plan_day",
         }
     if _looks_like_assistant_capabilities_query(normalized):
         return {

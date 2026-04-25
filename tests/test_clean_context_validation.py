@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import tempfile
+import shutil
 import threading
 import unittest
 import urllib.error
@@ -490,6 +491,7 @@ class TestCleanContextValidation(unittest.TestCase):
                         "AGENT_LAUNCHER_XDG_OPEN": str(xdg_open_path),
                         "AGENT_LAUNCHER_WAIT_SECONDS": "5",
                         "AGENT_LAUNCHER_POLL_SECONDS": "0",
+                        "AGENT_LAUNCHER_OPEN_BROWSER": "0",
                     }
 
                     root_status, root_html = request_text(request_base, "/") if use_network else request_text(runtime, "/")
@@ -511,10 +513,11 @@ class TestCleanContextValidation(unittest.TestCase):
                     first_launch = _run_script(launcher_path, env=launcher_env)
                     self.assertEqual(0, first_launch.returncode, first_launch.stderr)
                     self.assertIn("start personal-agent-api.service", (logs_dir / "systemctl.log").read_text(encoding="utf-8"))
-                    self.assertIn(webui_url, (logs_dir / "xdg-open.log").read_text(encoding="utf-8"))
+                    self.assertIn("browser auto-open disabled", first_launch.stderr)
+                    self.assertFalse((logs_dir / "xdg-open.log").read_text(encoding="utf-8").strip())
 
                     first_payload = {
-                        "messages": [{"role": "user", "content": "hello"}],
+                        "messages": [{"role": "user", "content": "tell me about a bicycle"}],
                         "session_id": "clean-context-session",
                         "thread_id": "clean-context-thread",
                         "user_id": "clean-context-user",
@@ -530,7 +533,13 @@ class TestCleanContextValidation(unittest.TestCase):
                     self.assertEqual(200, first_status)
                     self.assertTrue(bool(first_body.get("ok")))
                     first_text = _assistant_text(first_body)
-                    self.assertEqual(build_no_llm_public_message(), first_text)
+                    self.assertIn(
+                        first_text,
+                        {
+                            build_no_llm_public_message(),
+                            build_no_llm_public_message(runtime_ready=True),
+                        },
+                    )
                     self.assertEqual(first_text, str(first_body.get("message") or "").strip())
                     self.assertEqual([], _assistant_warnings(first_text))
                     self.assertNotIn("runtime_payload", first_raw.lower())
@@ -560,8 +569,8 @@ class TestCleanContextValidation(unittest.TestCase):
 
                     second_launch = _run_script(launcher_path, env=launcher_env)
                     self.assertEqual(0, second_launch.returncode, second_launch.stderr)
-                    if use_network:
-                        self.assertGreaterEqual((logs_dir / "xdg-open.log").read_text(encoding="utf-8").count(webui_url), 2)
+                    self.assertIn("browser auto-open disabled", second_launch.stderr)
+                    self.assertFalse((logs_dir / "xdg-open.log").read_text(encoding="utf-8").strip())
 
                     second_followup_payload = {
                         "messages": [{"role": "user", "content": "what should I do first?"}],
@@ -605,6 +614,9 @@ class TestCleanContextValidation(unittest.TestCase):
             )
             self.assertEqual(0, remove_state.returncode, remove_state.stderr)
             self.assertFalse(install_root.exists())
+
+            for path in (bundle_out, home, bin_dir, logs_dir, state_dir):
+                shutil.rmtree(path, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ def _build_context(case: dict[str, Any]) -> ContextPack:
     ctx = case.get("ctx") if isinstance(case.get("ctx"), dict) else {}
     assert isinstance(ctx, dict)
     return ContextPack(
-        user_id="friction-canary",
+        user_id="__test_canary__",
         active_thread_id="thread-1",
         recent_turn_ids=_stable_unique(ctx.get("recent_turn_ids")),
         in_scope_memory_ids=_stable_unique(ctx.get("in_scope_memory_ids")),

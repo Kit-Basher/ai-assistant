@@ -77,6 +77,7 @@ function ThinkingBubble() {
 
 export default function ChatExperience({
   chatBusy,
+  chatPlaceholderVisible,
   composerPlaceholder,
   draft,
   messages,
@@ -131,7 +132,7 @@ export default function ChatExperience({
               {messages.map((message, index) => (
                 <MessageBubble busy={chatBusy} key={`${message.role}-${index}-${message.content.slice(0, 24)}`} message={message} onReply={onSendMessage} />
               ))}
-              {chatBusy ? <ThinkingBubble /> : null}
+              {chatPlaceholderVisible ? <ThinkingBubble /> : null}
               <div ref={transcriptEndRef} />
             </div>
           )}

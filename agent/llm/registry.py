@@ -388,7 +388,8 @@ def _migrate_v1_to_v2(raw: dict[str, Any]) -> dict[str, Any]:
     migrated["providers"].update(providers_out)
     migrated["models"].update(models_out)
     migrated["defaults"] = {
-        "routing_mode": str(routing_v1.get("mode") or "auto").strip().lower() or "auto",
+        "routing_mode": str(routing_v1.get("mode") or "prefer_local_lowest_cost_capable").strip().lower()
+        or "prefer_local_lowest_cost_capable",
         "default_provider": None,
         "chat_model": None,
         "embed_model": None,
@@ -606,7 +607,8 @@ def _parse_registry(data: dict[str, Any], path: str | None) -> Registry:
     embed_model = str(defaults_raw.get("embed_model") or "").strip() or None
     last_chat_model = str(defaults_raw.get("last_chat_model") or "").strip() or None
     defaults = DefaultsConfig(
-        routing_mode=str(defaults_raw.get("routing_mode") or "auto").strip().lower() or "auto",
+        routing_mode=str(defaults_raw.get("routing_mode") or "prefer_local_lowest_cost_capable").strip().lower()
+        or "prefer_local_lowest_cost_capable",
         default_provider=str(defaults_raw.get("default_provider") or "").strip().lower() or None,
         chat_model=chat_model,
         embed_model=embed_model,

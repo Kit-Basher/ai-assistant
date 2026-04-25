@@ -190,6 +190,7 @@ If it fails, use:
 5. Telegram is optional and off by default. Use `python -m agent telegram_status` to inspect it and `python -m agent telegram_enable` to turn it on.
 6. If the web UI offers first-run onboarding, you can answer with short freeform intent words like `programming`, `linux help`, or `writing stories`, or you can skip it immediately.
 7. Once onboarding is completed, skipped, or abandoned, the next web UI launch should not re-prompt unless the onboarding state is reset.
+8. If you want a quick safety snapshot before installing anything, run `python -m agent packs`.
 
 ## Setup Complete
 

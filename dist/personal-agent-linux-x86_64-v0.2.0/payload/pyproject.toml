@@ -17,6 +17,7 @@ dependencies = [
 [project.scripts]
 personal-agent = "agent.cli:main"
 personal-agent-api = "agent.api_server:main"
+personal-agent-control = "agent.control_plane:main"
 personal-agent-telegram = "telegram_adapter.bot:run"
 
 [tool.personal_agent_build]

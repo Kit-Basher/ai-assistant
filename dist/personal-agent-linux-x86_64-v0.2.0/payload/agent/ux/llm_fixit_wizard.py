@@ -1081,6 +1081,9 @@ def confirm_token_for_plan_rows(plan_rows: list[dict[str, Any]]) -> str:
 
 
 
+_GENERIC_NOTIFICATION_SUMMARY = "I updated LLM settings in the background and the service is still running."
+
+
 def parse_choice_answer(answer: str | None, choices: list[WizardChoice]) -> str | None:
     value = str(answer or "").strip()
     if not value:
@@ -1133,6 +1136,8 @@ def summarize_notification_message(raw_message: str) -> str:
                 summary.append(f"Provider {provider} is down.")
             elif after == "ok":
                 summary.append(f"Provider {provider} recovered.")
+            elif after == "unknown":
+                continue
             else:
                 summary.append(f"Provider {provider} health is now {after}.")
         elif lowered.startswith("model ") and "health.status" in lowered and "->" in line:
@@ -1143,11 +1148,17 @@ def summarize_notification_message(raw_message: str) -> str:
                 summary.append(f"Model {model} is down.")
             elif after == "ok":
                 summary.append(f"Model {model} recovered.")
+            elif after == "unknown":
+                continue
             else:
                 summary.append(f"Model {model} health is now {after}.")
     if not summary:
-        return "I updated LLM settings in the background and the service is still running."
+        return _GENERIC_NOTIFICATION_SUMMARY
     return "\n".join(summary[:3])
+
+
+def is_low_signal_notification_summary(text: str | None) -> bool:
+    return str(text or "").strip() == _GENERIC_NOTIFICATION_SUMMARY
 
 
 

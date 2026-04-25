@@ -44,6 +44,7 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         cases = (
             ("Talk to me out loud", "voice_output"),
             ("Can you read this page back to me in speech?", "voice_output"),
+            ("read something to me", "voice_output"),
             ("Use the avatar", "avatar_visual"),
             ("Open the robot camera feed", "camera_feed"),
             ("Help me code", "dev_tools"),
@@ -132,11 +133,42 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
 
         rendered = render_pack_capability_response(result)
         self.assertIn("Voice output isn't installed.", rendered)
-        self.assertIn("best fit for this machine", rendered)
-        self.assertIn("Local Voice looks lighter.", rendered)
-        self.assertIn("Say yes and I'll show the install preview.", rendered)
+        self.assertIn("most practical option here", rendered)
+        self.assertIn("Local Voice looks like the lighter option.", rendered)
+        self.assertIn("If you want, say yes and I'll show the install details.", rendered)
         self.assertEqual("single_recommendation", result["comparison_mode"])
         self.assertIsNone(result["alternate_pack"])
+
+    def test_partial_capability_render_includes_intro_once(self) -> None:
+        rendered = render_pack_capability_response(
+            {
+                "capability_required": "dev_tools",
+                "capability_label": "coding tools",
+                "classification": "can_partially_answer_but_capability_would_help",
+                "fallback": "propose_new_capability",
+                "helper_name": "coding helper",
+                "proposal_summary": "helps with coding and terminal work",
+            }
+        )
+        self.assertIn("I can help in text", rendered)
+        self.assertEqual(1, rendered.lower().count("coding helper"))
+        self.assertIn("simplest way to add it", rendered.lower())
+        self.assertIn("sketch that with you", rendered.lower())
+
+    def test_direct_helper_proposal_uses_natural_wording(self) -> None:
+        rendered = render_pack_capability_response(
+            {
+                "capability_required": "custom_helper",
+                "capability_label": "studio cue helper",
+                "classification": "cannot_answer_without_new_capability",
+                "fallback": "propose_new_capability",
+                "helper_name": "studio cue helper",
+                "proposal_summary": "coordinates studio light cues with music cues during live shows",
+            }
+        )
+        self.assertIn("couldn't find a ready-made studio cue helper for this", rendered.lower())
+        self.assertIn("simplest way to add it", rendered.lower())
+        self.assertIn("sketch that with you", rendered.lower())
 
     def test_recommends_one_primary_plus_one_grounded_alternate(self) -> None:
         store = _FakePackStore([])
@@ -178,10 +210,10 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
 
         rendered = render_pack_capability_response(result)
         self.assertIn("I found 2 packs that fit this machine.", rendered)
-        self.assertIn("Local Voice looks lighter.", rendered)
+        self.assertIn("Local Voice looks like the lighter option.", rendered)
         self.assertIn("Studio Voice may need more resources.", rendered)
         self.assertIn("I'd start with Local Voice.", rendered)
-        self.assertIn("Say yes and I'll show the install preview for Local Voice.", rendered)
+        self.assertIn("If you want, say yes and I'll show the install details for Local Voice.", rendered)
 
     def test_weak_or_blocked_alternate_is_not_forced_into_comparison(self) -> None:
         store = _FakePackStore([])
@@ -257,6 +289,7 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         rendered = render_pack_capability_response(result)
         self.assertIn("Voice output is installed, but it is disabled.", rendered)
         self.assertIn("not enabled as a live capability", rendered)
+        self.assertIn("Enable it before using it.", rendered)
         self.assertIn("text", rendered.lower())
 
     def test_installed_and_healthy_pack_is_task_unconfirmed(self) -> None:
@@ -291,6 +324,7 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         rendered = render_pack_capability_response(result)
         self.assertIn("Voice output is installed and healthy, but I can't confirm it's usable for this task yet.", rendered)
         self.assertIn("task compatibility not confirmed", rendered)
+        self.assertIn("Open the pack preview before relying on it.", rendered)
 
     def test_blocked_pack_remains_unusable_and_truthful(self) -> None:
         store = _FakePackStore([])

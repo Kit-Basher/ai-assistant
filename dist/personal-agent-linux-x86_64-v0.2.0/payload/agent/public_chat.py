@@ -45,7 +45,7 @@ _INTERNAL_JSON_KEYS = {
 }
 _JSON_OBJECT_RE = re.compile(r"^\s*[\[{].*[\]}]\s*$", re.DOTALL)
 _NO_LLM_PUBLIC_MESSAGE = "I’m not ready to chat yet. Open Setup to finish getting me ready."
-_READY_LLM_PUBLIC_MESSAGE = "The runtime is ready, but I can’t reach chat right now. Try again in a moment or ask for status or setup help."
+_READY_LLM_PUBLIC_MESSAGE = "The runtime is ready. Chat is temporarily busy, so try again in a moment or ask for status or setup help."
 _NO_LLM_ERROR_KINDS = {
     "llm_unavailable",
     "no_chat_model",
@@ -53,6 +53,47 @@ _NO_LLM_ERROR_KINDS = {
     "model_unhealthy",
     "router_unavailable",
 }
+_TRIVIAL_SOCIAL_TURNS = {
+    "hello": "greeting",
+    "hello there": "greeting",
+    "herllo": "greeting",
+    "hi": "greeting",
+    "hi there": "greeting",
+    "hey": "greeting",
+    "hey there": "greeting",
+    "thanks": "thanks",
+    "ok": "ack",
+    "okay": "ack",
+    "good morning": "morning",
+    "good evening": "evening",
+    "are you there": "presence_check",
+    "are you really there": "presence_check",
+    "you there": "presence_check",
+    "keep the answer short": "style_short",
+    "actually keep the answer short": "style_short",
+    "keep it short": "style_short",
+    "be brief": "style_short",
+    "be concise": "style_short",
+}
+_TRIVIAL_SOCIAL_TURN_REPLIES = {
+    "greeting": "Hi — I’m here and ready to help. What can I do for you?",
+    "thanks": "You’re welcome. What would you like to do next?",
+    "ack": "Got it. What should I do next?",
+    "morning": "Good morning. What can I help with?",
+    "evening": "Good evening. What can I help with?",
+    "presence_check": "Yes — I’m here and ready to help. What can I do for you?",
+    "style_short": "Okay. I’ll keep it short.",
+}
+_SOCIAL_GREET_REQUESTS = {"say hi", "say hello", "say hey"}
+
+
+def _normalize_social_turn_text(text: str | None) -> str:
+    cleaned = str(text or "").strip().lower()
+    if not cleaned:
+        return ""
+    cleaned = cleaned.replace("’", "'")
+    cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+    return " ".join(cleaned.split())
 
 
 def _looks_like_internal_json(text: str) -> bool:
@@ -106,6 +147,37 @@ def build_no_llm_public_message(*, runtime_ready: bool = False) -> str:
     return _READY_LLM_PUBLIC_MESSAGE if runtime_ready else _NO_LLM_PUBLIC_MESSAGE
 
 
+def classify_trivial_social_turn(text: str | None) -> str | None:
+    normalized = _normalize_social_turn_text(text)
+    if not normalized:
+        return None
+    if normalized in _SOCIAL_GREET_REQUESTS:
+        return "greeting"
+    if any(
+        phrase in normalized
+        for phrase in (
+            "are you there",
+            "are you really there",
+            "are you working",
+            "are you running",
+            "are you online",
+            "are you alive",
+            "you there",
+            "you working",
+            "you online",
+        )
+    ):
+        return "presence_check"
+    return _TRIVIAL_SOCIAL_TURNS.get(normalized)
+
+
+def build_trivial_social_turn_message(text: str | None) -> str | None:
+    turn_kind = classify_trivial_social_turn(text)
+    if not turn_kind:
+        return None
+    return normalize_persona_text(_TRIVIAL_SOCIAL_TURN_REPLIES[turn_kind])
+
+
 def is_no_llm_error_kind(error_kind: str | None) -> bool:
     return str(error_kind or "").strip().lower() in _NO_LLM_ERROR_KINDS
 
@@ -131,18 +203,28 @@ def build_public_chat_meta(
         if str(item).strip()
     ]
     route = str(response_data.get("route") or "generic_chat").strip().lower() or "generic_chat"
+    assistant_turn_type = str(response_data.get("assistant_turn_type") or "").strip().lower() or None
+    social_turn = assistant_turn_type == "social_turn"
     meta: dict[str, Any] = {
         "route": route,
         "provider": provider,
         "model": model,
         "fallback_used": bool(response_data.get("fallback_used", False)),
-        "generic_fallback_used": bool(response_data.get("generic_fallback_used", False)) or route == "generic_chat",
-        "generic_fallback_allowed": bool(response_data.get("generic_fallback_allowed", False)) or route == "generic_chat",
+        "generic_fallback_used": bool(response_data.get("generic_fallback_used", False))
+        or (route == "generic_chat" and not social_turn),
+        "generic_fallback_allowed": bool(response_data.get("generic_fallback_allowed", False))
+        or (route == "generic_chat" and not social_turn),
         "used_runtime_state": bool(response_data.get("used_runtime_state", False)),
         "used_llm": bool(response_data.get("used_llm", False)),
         "used_memory": bool(response_data.get("used_memory", False)),
         "used_tools": used_tools,
+        "assistant_turn_type": assistant_turn_type,
+        "assistant_turn_kind": str(response_data.get("assistant_turn_kind") or "").strip().lower() or None,
     }
+    if "skip_post_response_hooks" in response_data:
+        meta["skip_post_response_hooks"] = bool(response_data.get("skip_post_response_hooks", False))
+    if isinstance(response_data.get("memory_diagnostics"), dict):
+        meta["memory_diagnostics"] = dict(response_data.get("memory_diagnostics") or {})
     if include_debug:
         meta["route_reason"] = str(response_data.get("route_reason") or "").strip().lower() or None
         meta["source_surface"] = str(source_surface or response_data.get("source_surface") or "").strip().lower() or None
@@ -158,6 +240,19 @@ def build_public_chat_meta(
             runtime_payload = dict(response_data.get("runtime_payload"))
             meta["setup_type"] = str(runtime_payload.get("type") or "").strip() or None
             meta["runtime_state_failure_reason"] = str(runtime_payload.get("reason") or "").strip() or None
+    chat_timing_ms = response_data.get("chat_timing_ms")
+    if isinstance(chat_timing_ms, dict) and chat_timing_ms:
+        meta["chat_timing_ms"] = dict(chat_timing_ms)
+    orchestrator_timing_ms = response_data.get("orchestrator_timing_ms")
+    if isinstance(orchestrator_timing_ms, dict) and orchestrator_timing_ms:
+        meta["orchestrator_timing_ms"] = dict(orchestrator_timing_ms)
+    truth_timing_ms = response_data.get("truth_timing_ms")
+    if not isinstance(truth_timing_ms, dict) or not truth_timing_ms:
+        runtime_payload = response_data.get("runtime_payload")
+        if isinstance(runtime_payload, dict):
+            truth_timing_ms = runtime_payload.get("truth_timing_ms")
+    if isinstance(truth_timing_ms, dict) and truth_timing_ms:
+        meta["truth_timing_ms"] = dict(truth_timing_ms)
     return meta
 
 
@@ -165,6 +260,8 @@ __all__ = [
     "build_no_llm_public_message",
     "build_public_chat_meta",
     "build_public_sentence_text",
+    "build_trivial_social_turn_message",
+    "classify_trivial_social_turn",
     "is_no_llm_error_kind",
     "normalize_public_assistant_text",
 ]

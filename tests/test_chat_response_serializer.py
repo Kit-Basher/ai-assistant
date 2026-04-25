@@ -209,6 +209,24 @@ class TestChatResponseSerializer(unittest.TestCase):
         self.assertEqual("provider_status_check", meta["runtime_state_failure_reason"])
         self.assertEqual({"mode": "prefer_local", "reason": "provider_status_check"}, meta["selection_policy"])
 
+    def test_non_mapping_response_data_falls_back_to_empty_metadata(self) -> None:
+        response = OrchestratorResponse("Still helpful.", [("route", "generic_chat")])  # type: ignore[arg-type]
+
+        serialized = serialize_orchestrator_chat_response(
+            response,
+            source_surface="telegram",
+            user_id="telegram:user-1",
+            thread_id="thread-5",
+            autopilot_meta={"status": "off"},
+        )
+
+        self.assertTrue(serialized.ok)
+        self.assertEqual("generic_chat", serialized.route)
+        self.assertEqual("Still helpful.", serialized.body["assistant"]["content"])
+        meta = serialized.body["meta"]
+        self.assertEqual("generic_chat", meta["route"])
+        self.assertFalse(meta["used_llm"])
+
 
 if __name__ == "__main__":
     unittest.main()

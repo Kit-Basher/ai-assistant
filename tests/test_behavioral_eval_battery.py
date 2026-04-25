@@ -596,7 +596,8 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertEqual("", ram_lines[1], msg=str(getattr(ram_response, "text", "")))
         self.assertEqual("*Hardware inventory*", ram_lines[2], msg=str(getattr(ram_response, "text", "")))
         self.assertIn("Follow-ups:", str(getattr(ram_response, "text", "")))
-        self.assertIn("CPU load 1m 0.42; memory 34.4% used (confidence 0.95)", str(getattr(ram_response, "text", "")))
+        self.assertIn("CPU load 1m 0.42; memory 34.4% used", str(getattr(ram_response, "text", "")))
+        self.assertNotIn("confidence 0.95", str(getattr(ram_response, "text", "")).lower())
 
         cpu_prompt = "is anything eating my cpu?"
         self.assertEqual("operational_status", classify_runtime_chat_route(cpu_prompt).get("route"))
@@ -682,7 +683,7 @@ class TestBehavioralEvalBattery(unittest.TestCase):
         self.assertEqual("agent_memory", classify_runtime_chat_route(memory_prompt).get("route"))
         response = self._chat(memory_prompt)
         first_line = _first_line(str(getattr(response, "text", "")))
-        self.assertIn("Here is the useful memory I have right now.", first_line)
+        self.assertIn("Here’s what I remember right now.", first_line)
         self.assertIn("you prefer concise replies", str(getattr(response, "text", "")).lower())
         self.assertIn("open loops i am tracking", str(getattr(response, "text", "")).lower())
 

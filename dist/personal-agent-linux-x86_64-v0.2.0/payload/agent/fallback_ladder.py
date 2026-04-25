@@ -5,10 +5,11 @@ from typing import Any, Callable
 from agent.error_kind import classify_error_kind
 from agent.error_response_ux import friendly_error_message
 from agent.logging_utils import log_event
+from agent.failure_ux import failure_recovery_message
 from agent.response_envelope import ResponseEnvelope, failure, validate_envelope
 
 
-_DEFAULT_FAILURE_MESSAGE = "I hit an internal error, but I’m still running. Try one of these:"
+_DEFAULT_FAILURE_MESSAGE = failure_recovery_message("internal_error")
 
 
 def _suggested_actions(context: dict[str, Any]) -> list[dict[str, str]]:

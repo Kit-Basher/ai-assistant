@@ -333,7 +333,7 @@ class TestStateTruthUnification(unittest.TestCase):
         rendered = render_pack_capability_response(recommendation)
         self.assertIn("Voice output is installed, but it is disabled.", rendered)
         self.assertTrue(
-            "Say yes and I'll show the install preview." in rendered
+            "show the install details" in rendered
             or "I can still help you set it up" in rendered
         )
 

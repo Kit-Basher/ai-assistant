@@ -80,7 +80,10 @@ def _desktop_entry() -> configparser.ConfigParser:
 def _launcher_summary() -> tuple[str, str]:
     launcher_target = str(STABLE_LAUNCHER)
     try:
-        launcher_target = str(STABLE_LAUNCHER.resolve())
+        if STABLE_LAUNCHER.is_symlink():
+            launcher_target = os.readlink(STABLE_LAUNCHER)
+        else:
+            launcher_target = str(STABLE_LAUNCHER.resolve())
     except Exception:
         launcher_target = str(STABLE_LAUNCHER)
     return str(STABLE_LAUNCHER), launcher_target
@@ -102,13 +105,13 @@ def _assert_stable_launcher_points_at_stable_runtime() -> None:
     if str(entry.get("TryExec") or "") != launcher_path:
         raise RuntimeError(f"desktop TryExec does not point at stable launcher: {entry.get('TryExec')}")
     if not str(launcher_target).endswith("/runtime/current/bin/personal-agent-webui"):
-        raise RuntimeError(f"stable launcher does not resolve to runtime/current: {launcher_target}")
+        raise RuntimeError(f"stable launcher does not point at runtime/current: {launcher_target}")
 
-    launcher_text = Path(launcher_target).read_text(encoding="utf-8")
-    if 'AGENT_LAUNCHER_SERVICE_NAME="personal-agent-api.service"' not in launcher_text:
+    launcher_text = Path(launcher_path).resolve().read_text(encoding="utf-8")
+    if 'SERVICE_NAME="${AGENT_LAUNCHER_SERVICE_NAME:-personal-agent-api.service}"' not in launcher_text:
         raise RuntimeError("stable launcher is not wired to the stable service")
-    if 'AGENT_WEBUI_URL="http://127.0.0.1:8765/"' not in launcher_text:
-        raise RuntimeError("stable launcher is not wired to the stable stable URL")
+    if 'WEBUI_URL="${AGENT_WEBUI_URL:-http://127.0.0.1:8765/}"' not in launcher_text:
+        raise RuntimeError("stable launcher is not wired to the stable URL")
 
 
 def _summary() -> list[str]:

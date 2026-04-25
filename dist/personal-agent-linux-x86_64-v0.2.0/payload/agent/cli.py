@@ -54,7 +54,7 @@ from agent.telegram_runtime_state import (
 from agent.version import read_build_info, read_git_commit
 
 
-_DEFAULT_API_BASE_URL = "http://127.0.0.1:8765"
+_DEFAULT_API_BASE_URL = runtime_api_base_url()
 _LOGGER = logging.getLogger(__name__)
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _STATUS_DEBUG_ENV = "AGENT_CLI_STATUS_DEBUG"
@@ -865,6 +865,112 @@ def _cmd_llm_install(args: argparse.Namespace) -> int:
     return 0 if bool(result.get("ok", False)) else 1
 
 
+def _cmd_packs(args: argparse.Namespace) -> int:
+    ok_status, status_payload_or_error = _http_json(
+        base_url=str(args.api_base_url),
+        path="/skill-governance/status",
+        timeout_seconds=2.5,
+    )
+    ok_state, state_payload_or_error = _http_json(
+        base_url=str(args.api_base_url),
+        path="/packs/state",
+        timeout_seconds=2.5,
+    )
+    if not ok_status or not isinstance(status_payload_or_error, dict) or not ok_state or not isinstance(state_payload_or_error, dict):
+        return _print_error(
+            title="Pack visibility unavailable",
+            component="agent.cli.packs",
+            next_action="run `agent doctor`",
+        )
+
+    status_payload = status_payload_or_error
+    state_payload = state_payload_or_error
+    if bool(getattr(args, "json", False)):
+        print(
+            json.dumps(
+                {
+                    "skill_governance": status_payload,
+                    "packs_state": state_payload,
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                indent=2,
+            ),
+            flush=True,
+        )
+        return 0
+
+    skill_rows = status_payload.get("skills") if isinstance(status_payload.get("skills"), list) else []
+    adapter_rows = status_payload.get("managed_adapters") if isinstance(status_payload.get("managed_adapters"), list) else []
+    task_rows = status_payload.get("background_tasks") if isinstance(status_payload.get("background_tasks"), list) else []
+    allowed_skills = [row for row in skill_rows if isinstance(row, dict) and bool(row.get("allowed", False))]
+    pending_skills = [
+        row
+        for row in skill_rows
+        if isinstance(row, dict)
+        and not bool(row.get("allowed", False))
+        and bool(row.get("requires_user_approval", False))
+    ]
+    blocked_skills = [
+        row
+        for row in skill_rows
+        if isinstance(row, dict)
+        and not bool(row.get("allowed", False))
+        and not bool(row.get("requires_user_approval", False))
+    ]
+    summary = state_payload.get("summary") if isinstance(state_payload.get("summary"), dict) else {}
+    packs_rows = state_payload.get("packs") if isinstance(state_payload.get("packs"), list) else []
+    available_rows = state_payload.get("available_packs") if isinstance(state_payload.get("available_packs"), list) else []
+    source_warnings = state_payload.get("source_warnings") if isinstance(state_payload.get("source_warnings"), list) else []
+    blocked_packs = [
+        row
+        for row in [*packs_rows, *available_rows]
+        if isinstance(row, dict) and str(row.get("state") or "").strip().lower() in {"blocked", "installed_blocked"}
+    ]
+    lines = [
+        "Pack and skill safety",
+        f"skills: total={len(skill_rows)} allowed={len(allowed_skills)} pending={len(pending_skills)} blocked={len(blocked_skills)}",
+        f"managed_adapters: total={len(adapter_rows)}",
+        f"background_tasks: total={len(task_rows)}",
+        "packs: installed={installed} available={available} usable={usable} blocked={blocked}".format(
+            installed=int(summary.get("installed", 0) or 0),
+            available=int(summary.get("available", 0) or 0),
+            usable=int(summary.get("usable", 0) or 0),
+            blocked=int(summary.get("blocked", 0) or 0),
+        ),
+        f"source_warnings: {len(source_warnings)}",
+    ]
+    if blocked_skills:
+        lines.append("blocked_skills:")
+        for row in blocked_skills[:5]:
+            lines.append(
+                "- {skill_id} | {reason}".format(
+                    skill_id=str(row.get("skill_id") or "unknown"),
+                    reason=str(row.get("reason") or "unknown"),
+                )
+            )
+    if pending_skills:
+        lines.append("pending_skills:")
+        for row in pending_skills[:5]:
+            lines.append(
+                "- {skill_id} | {reason}".format(
+                    skill_id=str(row.get("skill_id") or "unknown"),
+                    reason=str(row.get("reason") or "unknown"),
+                )
+            )
+    if blocked_packs:
+        lines.append("blocked_packs:")
+        for row in blocked_packs[:5]:
+            lines.append(
+                "- {name} | {state}".format(
+                    name=str(row.get("name") or row.get("pack_id") or "unknown"),
+                    state=str(row.get("state") or "unknown"),
+                )
+            )
+    print("\n".join(lines), flush=True)
+    return 0
+
+
 def _cmd_brief(args: argparse.Namespace) -> int:
     ok, payload_or_error = _http_json(
         base_url=str(args.api_base_url),
@@ -1133,6 +1239,10 @@ def build_parser() -> argparse.ArgumentParser:
     llm_install_parser.add_argument("--approve", action="store_true", help="execute the approved local install")
     llm_install_parser.add_argument("--json", action="store_true", help="emit JSON output")
 
+    packs_parser = sub.add_parser("packs", help="Show installed skill and pack safety status")
+    packs_parser.add_argument("--api-base-url", default=_DEFAULT_API_BASE_URL)
+    packs_parser.add_argument("--json", action="store_true", help="emit JSON output")
+
     logs_parser = sub.add_parser("logs", help="Show recent agent logs")
     logs_parser.add_argument("--lines", type=int, default=50)
     logs_parser.add_argument("--path", default=None)
@@ -1186,6 +1296,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_llm_plan(args)
     if command == "llm_install":
         return _cmd_llm_install(args)
+    if command == "packs":
+        return _cmd_packs(args)
     if command == "logs":
         return _cmd_logs(args)
     if command == "telegram_status":

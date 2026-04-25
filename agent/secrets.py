@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     get_parser = sub.add_parser("get", help="Get a secret value")
     get_parser.add_argument("key", help="Secret key")
-    get_parser.add_argument("--redacted", action="store_true", help="Show redacted value")
+    get_parser.add_argument("--show", action="store_true", help="Show full unredacted value (default is redacted)")
     return parser
 
 
@@ -67,10 +67,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "get":
         key = str(args.key or "").strip()
         value = store.get_secret(key)
-        if args.redacted:
-            print(_redact_secret(value), flush=True)
-        else:
+        if args.show:
             print(str(value or ""), flush=True)
+        else:
+            print(_redact_secret(value), flush=True)
+            print("Use --show to display full value", file=sys.stderr)
         return 0
 
     parser.print_help(sys.stderr)

@@ -1,5 +1,97 @@
 const CONFIRM_TO_PROCEED_RE = /reply\s+["']?(\/?confirm)["']?\s+to proceed/i;
 const CONFIRM_TOKEN_RE = /\b(\/?confirm)\b/i;
+const INTERNAL_TEXT_MARKERS = [
+  "trace_id:",
+  "component:",
+  "failure_code:",
+  "next_action:",
+  "local_observations",
+  "route_reason:",
+  "selection_policy",
+  "runtime_payload",
+  "runtime_state_failure_reason",
+  "setup_type:",
+  "generic_fallback_reason:",
+  "autopilot:",
+  "operator_only:",
+  "thread_id:",
+  "user_id:",
+  "source_surface:"
+];
+const INTERNAL_JSON_KEYS = new Set([
+  "trace_id",
+  "component",
+  "failure_code",
+  "next_action",
+  "local_observations",
+  "route_reason",
+  "selection_policy",
+  "runtime_payload",
+  "runtime_state_failure_reason",
+  "setup_type",
+  "generic_fallback_reason",
+  "autopilot",
+  "operator_only",
+  "thread_id",
+  "user_id",
+  "source_surface"
+]);
+
+function looksLikeInternalJson(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed || !/^[\[{][\s\S]*[\]}]$/.test(trimmed)) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return Object.keys(parsed).some((key) => INTERNAL_JSON_KEYS.has(String(key || "").trim().toLowerCase()));
+    }
+    if (Array.isArray(parsed)) {
+      return parsed.some(
+        (item) => item && typeof item === "object" && !Array.isArray(item)
+          && Object.keys(item).some((key) => INTERNAL_JSON_KEYS.has(String(key || "").trim().toLowerCase()))
+      );
+    }
+  } catch (_error) {
+    return false;
+  }
+  return false;
+}
+
+function looksLikeInternalText(text) {
+  const lowered = String(text || "").trim().toLowerCase();
+  if (!lowered) {
+    return false;
+  }
+  if (looksLikeInternalJson(text)) {
+    return true;
+  }
+  return INTERNAL_TEXT_MARKERS.some((marker) => lowered.includes(marker));
+}
+
+function sanitizeAssistantText(text, fallback = "I couldn't complete that request.") {
+  const cleaned = String(text || "").trim();
+  if (!cleaned) {
+    return fallback;
+  }
+  if (looksLikeInternalText(cleaned)) {
+    return fallback;
+  }
+  return cleaned;
+}
+
+function extractAssistantText(payload) {
+  const assistantContent = String(payload?.assistant?.content || "").trim();
+  if (assistantContent) {
+    return sanitizeAssistantText(assistantContent);
+  }
+  const messageText = String(payload?.message || "").trim();
+  if (messageText) {
+    return sanitizeAssistantText(messageText);
+  }
+  return "I couldn't complete that request.";
+}
 
 export function buildStatusSummary(readyState) {
   const phase = String(readyState?.phase || "").trim().toLowerCase();
@@ -147,7 +239,7 @@ function extractClarificationUi(text, payload) {
 }
 
 export function buildAssistantMessage(payload) {
-  const text = String(payload?.assistant?.content || payload?.message || payload?.error || "").trim();
+  const text = extractAssistantText(payload);
   const setup = payload?.setup && typeof payload.setup === "object" ? payload.setup : null;
   const confirmation =
     setup?.type === "confirm_switch_model" || setup?.type === "confirm_reuse_secret"
@@ -166,7 +258,7 @@ export function buildAssistantMessage(payload) {
 
   return {
     role: "assistant",
-    content: text || "I couldn't complete that request.",
+    content: text,
     tone: (!payload?.ok && errorKind && errorKind !== "needs_clarification") || setupFailed ? "error" : "default",
     ui: {
       confirmation,

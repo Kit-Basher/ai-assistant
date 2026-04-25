@@ -24,6 +24,12 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/persona.py",
     "scripts/release_smoke.py",
     "scripts/release_validation_extended.py",
+    "scripts/assistant_viability_smoke.py",
+    "scripts/restart_memory_smoke.py",
+    "scripts/provider_matrix_smoke.py",
+    "scripts/assistant_real_world_smoke.py",
+    "scripts/assistant_interaction_barrage.py",
+    "scripts/split_smoke.py",
     "scripts/reference_pack_workflow_smoke.py",
     "scripts/webui_smoke.py",
 )

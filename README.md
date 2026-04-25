@@ -55,6 +55,19 @@ explicit confirmation step.
   provider/model policy allows them.
 - Nothing switches or installs automatically here either.
 
+### Local Control Plane
+- A tiny loopback-only file-backed service lives at the repo-local `control/`
+  directory.
+- Canonical files:
+  - `control/master_plan.md`
+  - `control/DEVELOPMENT_TASKS.md`
+  - `control/agent_events.jsonl`
+- ChatGPT writes plan/task markdown through the HTTP control plane.
+- Local agents watch those files locally and append progress/failure events to
+  `agent_events.jsonl`.
+- See `docs/control_plane.md` for the exact endpoints, task workflow, and run
+  commands.
+
 ### Canonical Recommendation Truth
 - `recommendation_roles` is the one canonical advisory contract.
 - `POST /llm/models/check` and `POST /llm/models/recommend` are aligned on that
@@ -245,6 +258,7 @@ Useful local commands:
 - `python -m agent doctor`
 - `python -m agent health`
 - `python -m agent version`
+- `python -m agent packs`
 - `python -m agent llm_inventory`
 - `python -m agent memory`
 
@@ -370,6 +384,8 @@ For live, non-blocking operator smoke checks on a running system, use:
 - `python scripts/hardware_discovery_smoke.py`
 - `python scripts/discovery_quality_smoke.py`
 - `python scripts/pack_route_smoke.py`
+- `python scripts/restart_memory_smoke.py`
+- `python scripts/provider_matrix_smoke.py`
 - `python scripts/reference_pack_workflow_smoke.py`
 - `python scripts/webui_smoke.py`
 
@@ -380,7 +396,7 @@ For a small brief transcript check, use:
 
 `python scripts/pack_route_smoke.py` also supports a remote-download mode when `PACK_ROUTE_SMOKE_REMOTE_URL` is set.
 
-`python scripts/release_validation_extended.py --with-live-smokes` can also run the optional live hardware/discovery follow-up checks after the fast release gate passes.
+`python scripts/release_validation_extended.py --with-live-smokes` can also run the optional live smoke follow-ups, including restart-safe memory churn and provider matrix checks, after the fast release gate passes.
 
 That extended suite adds slower checks such as fresh wheel-install validation
 and extra deferred-startup/restart coverage without bloating the main smoke

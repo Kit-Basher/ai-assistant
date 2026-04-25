@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections import deque
+from collections import Counter, deque
 import copy
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +36,7 @@ from agent.error_response_ux import (
     friendly_error_message,
 )
 from agent.fallback_ladder import run_with_fallback
+from agent.failure_ux import failure_recovery_message
 from agent.identity import get_public_identity
 from agent.startup_checks import run_startup_checks
 from agent.intent.assessment import (
@@ -89,7 +90,12 @@ from agent.runtime_contract import (
     normalize_user_facing_status,
 )
 from agent.persona import normalize_persona_text
-from agent.public_chat import build_no_llm_public_message, is_no_llm_error_kind
+from agent.public_chat import (
+    build_no_llm_public_message,
+    build_trivial_social_turn_message,
+    classify_trivial_social_turn,
+    is_no_llm_error_kind,
+)
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.model_scout import build_model_scout
@@ -193,6 +199,7 @@ from agent.ux.llm_fixit_wizard import (
     decision_to_json as wizard_decision_to_json,
     evaluate_wizard_decision,
     failure_streak_threshold_crossed,
+    is_low_signal_notification_summary,
     parse_choice_answer as wizard_parse_choice_answer,
     provider_or_model_ok_down_transition,
     render_wizard_prompt,
@@ -225,7 +232,7 @@ from agent.recovery_contract import (
     recovery_next_action,
     recovery_summary,
 )
-from agent.orchestrator import Orchestrator, classify_authoritative_domain, has_local_observations_block
+from agent.orchestrator import Orchestrator, OrchestratorResponse, classify_authoritative_domain, has_local_observations_block
 from agent.perception import analyze_snapshot, collect_snapshot, summarize_inventory
 from agent.permissions import PermissionPolicy, PermissionRequest, PermissionStore
 from agent.secret_store import SecretStore
@@ -1936,6 +1943,10 @@ class AgentRuntime:
         source_value = payload.get("source")
         source_text = str(source_value or "").strip() if not isinstance(source_value, dict) else ""
         pack_dir = str(payload.get("path") or "").strip()
+        source_id = str(
+            (source_value.get("source_id") if isinstance(source_value, dict) else payload.get("source_id"))
+            or ""
+        ).strip()
         remote_source = None
         if isinstance(source_value, dict):
             remote_url = str(source_value.get("url") or payload.get("url") or "").strip()
@@ -1959,6 +1970,50 @@ class AgentRuntime:
                     pack_dir = source_text
                 elif source_text in {"path", "local"}:
                     pack_dir = str(payload.get("pack_path") or "").strip()
+        if remote_source is not None:
+            remote_kind = str(remote_source.kind or "").strip().lower()
+            remote_host = urllib.parse.urlparse(str(remote_source.url or "")).netloc.lower()
+            trusted_remote_source = remote_kind in {"github_repo", "github_archive"}
+            if not trusted_remote_source and remote_host in {"github.com", "www.github.com", "codeload.github.com"}:
+                trusted_remote_source = True
+            if not trusted_remote_source and source_id:
+                try:
+                    source_policy_payload = self._pack_registry_discovery().get_source_policy(source_id)
+                except KeyError:
+                    return self._pack_error(
+                        error="pack_source_not_found",
+                        error_kind="bad_request",
+                        message=f"pack source not found: {source_id}",
+                        next_question="Use a source id returned by GET /pack_sources.",
+                    )
+                except Exception as exc:
+                    return self._pack_error(
+                        error="pack_source_lookup_failed",
+                        error_kind="bad_request",
+                        message="I couldn't verify the pack source trust policy.",
+                        why=str(exc),
+                        next_question="Use a GitHub archive/repo source or a trusted pack source id from /pack_sources.",
+                    )
+                effective_policy = (
+                    source_policy_payload.get("effective_policy")
+                    if isinstance(source_policy_payload.get("effective_policy"), dict)
+                    else {}
+                )
+                if not bool(effective_policy.get("allowed_by_policy", False)):
+                    return self._pack_error(
+                        error="pack_source_not_allowed",
+                        error_kind="bad_request",
+                        message=f"pack source {source_id} is not allowed by policy",
+                        next_question="Use a source id from /pack_sources that is allowed by policy, or install from a GitHub archive/repo.",
+                    )
+                trusted_remote_source = True
+            if not trusted_remote_source:
+                return self._pack_error(
+                    error="source_trust_required",
+                    error_kind="bad_request",
+                    message="Generic remote pack installs require a trusted source id or a GitHub archive/repo URL.",
+                    next_question="Use a GitHub archive/repo source or pass a trusted source_id from /pack_sources.",
+                )
         if remote_source is None and not pack_dir:
             return self._pack_error(
                 error="bad_request",
@@ -3577,6 +3632,31 @@ class AgentRuntime:
             "events": self._runtime_events.snapshot(limit=max(1, min(int(limit), 100))),
         }
 
+    def diagnostics_fallback_summary(self, *, limit: int = 10) -> dict[str, Any]:
+        events = [
+            row
+            for row in self._runtime_events.snapshot(limit=100)
+            if str(row.get("event") or "").strip().lower() == "diagnostics_fallback"
+        ]
+        counts: Counter[str] = Counter()
+        for row in events:
+            category = (
+                str(row.get("intent_label") or "").strip()
+                or str(row.get("snapshot_scope") or "").strip()
+                or "unknown"
+            )
+            counts[category] += 1
+        top_rows = [
+            {"category": category, "count": count}
+            for category, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[: max(1, int(limit))]
+        ]
+        return {
+            "ok": True,
+            "limit": max(1, int(limit)),
+            "total": len(events),
+            "categories": top_rows,
+        }
+
     def record_runtime_event(self, event_name: str, **fields: Any) -> dict[str, Any]:
         return self._runtime_events.log_runtime_event(event_name, **fields)
 
@@ -3934,8 +4014,6 @@ class AgentRuntime:
             return False
 
     def assistant_frontdoor_active(self) -> bool:
-        if not self._safe_mode_enabled():
-            return False
         try:
             truth = self.runtime_truth_service()
             if truth is None:
@@ -3993,14 +4071,37 @@ class AgentRuntime:
             return False
         if str(text or "").strip().startswith("/"):
             return False
-        if not self._safe_mode_enabled():
-            return False
         return self.assistant_frontdoor_active()
 
     def assistant_chat_available(self) -> bool:
         if self._safe_mode_enabled():
             return self._safe_mode_chat_target_ready()
-        return self.llm_available()
+        try:
+            status = self.model_status()
+            llm_availability = (
+                status.get("llm_availability") if isinstance(status.get("llm_availability"), dict) else {}
+            )
+            if not bool(llm_availability.get("available", False)):
+                return False
+            current = status.get("current") if isinstance(status.get("current"), dict) else {}
+            provider = (
+                str(current.get("provider") or status.get("default_provider") or "").strip().lower() or None
+            )
+            model = (
+                str(
+                    current.get("model_id")
+                    or current.get("model")
+                    or status.get("resolved_default_model")
+                    or status.get("default_model")
+                    or ""
+                ).strip()
+                or None
+            )
+            if provider:
+                self._record_authoritative_provider_success(provider, model)
+        except Exception:
+            return self.llm_available()
+        return True
 
     def _runtime_snapshot_target_documents(self) -> tuple[dict[str, Any], dict[str, Any], set[str]]:
         router_snapshot = self._canonical_runtime_router_snapshot()
@@ -7408,6 +7509,7 @@ class AgentRuntime:
             if semantic_selection is not None:
                 debug = dict(base_debug)
                 debug["semantic"] = dict(semantic_selection.debug)
+                semantic_context_text = str(semantic_selection.merged_context_text or "").strip()
                 return {
                     "selected_ids": [],
                     "levels": {
@@ -7416,11 +7518,11 @@ class AgentRuntime:
                         MemoryLevel.PROCEDURAL.value: [],
                     },
                     "debug": debug,
-                    "merged_context_text": "",
+                    "merged_context_text": semantic_context_text,
                     "semantic": {
                         "selected_ids": [item.id for item in semantic_selection.candidates],
                         "debug": dict(semantic_selection.debug),
-                        "merged_context_text": semantic_selection.merged_context_text,
+                        "merged_context_text": semantic_context_text,
                     },
                 }
             return {
@@ -9216,6 +9318,11 @@ class AgentRuntime:
             or str(defaults.get("default_model") or "").strip()
             or None
         )
+        # Preserve an explicit persisted model choice across restarts.
+        # Bootstrapping is only for the no-model case, not for replacing a
+        # user-selected default that happens to be warming up or not yet probed.
+        if current_model:
+            return None
         current_provider = (
             str(defaults.get("default_provider") or "").strip().lower()
             or (
@@ -9283,11 +9390,23 @@ class AgentRuntime:
             return True
         return False
 
+    @staticmethod
+    def _coerce_orchestrator_response_data(payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return dict(payload)
+        if isinstance(payload, Mapping):
+            try:
+                return dict(payload)
+            except Exception:
+                return {}
+        return {}
+
     def chat(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         # /chat is now an adapter only. Keep transport/session normalization,
         # bootstrap compatibility, logging, and serializer invocation here;
         # all chat decisions live in the orchestrator.
         request_started_epoch = int(time.time())
+        chat_started_monotonic = time.monotonic()
         trace_id = str(payload.get("trace_id") or "").strip() or f"chat-{request_started_epoch}"
         request_id = str(payload.get("request_id") or "").strip() or uuid.uuid4().hex
         messages = self._normalize_messages(payload)
@@ -9296,10 +9415,27 @@ class AgentRuntime:
 
         source_surface = str(payload.get("source_surface") or "api").strip().lower() or "api"
         last_user_text = str(messages[-1].get("content") or "").strip()
-        route_decision = self.chat_route_decision(payload, last_user_text)
+        route_decision_started = time.monotonic()
+        social_turn_kind = classify_trivial_social_turn(last_user_text)
+        route_decision = self.chat_route_decision(payload, last_user_text) if not social_turn_kind else {"route": "generic_chat"}
+        route_decision_ms = int(max(0.0, time.monotonic() - route_decision_started) * 1000)
+        bootstrap_ms = 0
+        llm_request_ms = 0
+        orchestrator_ms = 0
+        serialization_ms = 0
+        timings_ms: dict[str, int] = {
+            "route_decision_ms": route_decision_ms,
+            "bootstrap_ms": bootstrap_ms,
+            "orchestrator_ms": orchestrator_ms,
+            "llm_request_ms": llm_request_ms,
+            "serialization_ms": serialization_ms,
+        }
 
-        if not self._skip_bootstrap_for_chat_route(route_decision):
+        if not social_turn_kind and not self._skip_bootstrap_for_chat_route(route_decision):
+            bootstrap_started = time.monotonic()
             _ = self._auto_bootstrap_local_chat_model()
+            bootstrap_ms = int(max(0.0, time.monotonic() - bootstrap_started) * 1000)
+            timings_ms["bootstrap_ms"] = bootstrap_ms
         user_id = self._chat_user_id(payload)
         thread_id = self._chat_thread_id(payload, user_id=user_id)
         chat_context = {
@@ -9324,12 +9460,30 @@ class AgentRuntime:
             thread_id=thread_id,
             user_id=user_id,
         )
-        try:
-            orchestrator_response = self.orchestrator().handle_message(
-                last_user_text,
-                user_id=user_id,
-                chat_context=chat_context,
+        if social_turn_kind:
+            social_turn_text = build_trivial_social_turn_message(last_user_text) or "Got it. What should I do next?"
+            social_turn_started = time.monotonic()
+            orchestrator_response = OrchestratorResponse(
+                social_turn_text,
+                {
+                    "ok": True,
+                    "route": "generic_chat",
+                    "used_runtime_state": False,
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_tools": [],
+                    "provider": None,
+                    "model": None,
+                    "assistant_turn_type": "social_turn",
+                    "assistant_turn_kind": social_turn_kind,
+                    "chat_timing_ms": {
+                        **timings_ms,
+                        "orchestrator_ms": 0,
+                        "llm_request_ms": 0,
+                    },
+                },
             )
+            serialize_started = time.monotonic()
             serialized = serialize_orchestrator_chat_response(
                 orchestrator_response,
                 source_surface=source_surface,
@@ -9337,25 +9491,128 @@ class AgentRuntime:
                 thread_id=thread_id,
                 autopilot_meta=self._chat_autopilot_meta(request_started_epoch),
             )
+            serialization_ms = int(max(0.0, time.monotonic() - serialize_started) * 1000)
+            total_ms = int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000)
+            chat_timing_ms = {
+                **timings_ms,
+                "bootstrap_ms": bootstrap_ms,
+                "orchestrator_ms": 0,
+                "llm_request_ms": 0,
+                "serialization_ms": serialization_ms,
+                "social_turn_ms": int(max(0.0, time.monotonic() - social_turn_started) * 1000),
+                "total_ms": total_ms,
+            }
+            meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
+            meta = dict(meta)
+            meta["chat_timing_ms"] = chat_timing_ms
+            serialized.body["meta"] = meta
+            self._runtime_events.log_chat_request_end(
+                request_id,
+                total_ms,
+                "ok" if bool(serialized.ok) else "error",
+                trace_id=trace_id,
+                source=source_surface,
+                route=serialized.route,
+                model_selected=None,
+                provider=None,
+                assistant_turn_type="social_turn",
+                assistant_turn_kind=social_turn_kind,
+                orchestrator_ms=0,
+                serialization_ms=serialization_ms,
+                chat_timing_ms=chat_timing_ms,
+            )
+            self._log_chat_route_decision(
+                trace_id=trace_id,
+                source_surface=source_surface,
+                route=serialized.route,
+                route_reason=serialized.route_reason,
+                generic_fallback_allowed=serialized.generic_fallback_allowed,
+                generic_fallback_reason=serialized.generic_fallback_reason,
+            )
+            return bool(serialized.ok), serialized.body
+        try:
+            with self._orchestrator_lock:
+                orchestrator_started = time.monotonic()
+                orchestrator_response = self.orchestrator().handle_message(
+                    last_user_text,
+                    user_id=user_id,
+                    chat_context=chat_context,
+                )
+                orchestrator_ms = int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+                response_data = self._coerce_orchestrator_response_data(orchestrator_response.data)
+                llm_request_ms = int(response_data.get("duration_ms") or 0) if isinstance(response_data.get("duration_ms"), int) else int(response_data.get("duration_ms") or 0)
+                timings_ms.update(
+                    {
+                        "bootstrap_ms": bootstrap_ms,
+                        "orchestrator_ms": orchestrator_ms,
+                        "llm_request_ms": llm_request_ms,
+                    }
+                )
+                response_data["chat_timing_ms"] = dict(timings_ms)
+                orchestrator_response = OrchestratorResponse(orchestrator_response.text, response_data)
+                serialize_started = time.monotonic()
+                serialized = serialize_orchestrator_chat_response(
+                    orchestrator_response,
+                    source_surface=source_surface,
+                    user_id=user_id,
+                    thread_id=thread_id,
+                    autopilot_meta=self._chat_autopilot_meta(request_started_epoch),
+                )
+                serialization_ms = int(max(0.0, time.monotonic() - serialize_started) * 1000)
+                total_ms = int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000)
+                chat_timing_ms = {
+                    **timings_ms,
+                    "bootstrap_ms": bootstrap_ms,
+                    "orchestrator_ms": orchestrator_ms,
+                    "llm_request_ms": llm_request_ms,
+                    "serialization_ms": serialization_ms,
+                    "total_ms": total_ms,
+                }
         except Exception:
             self._runtime_events.log_chat_request_end(
                 request_id,
-                int(max(0.0, time.monotonic() - chat_started) * 1000),
+                int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000),
                 "error",
                 trace_id=trace_id,
                 source=source_surface,
+                route="generic_chat",
+                model_selected=None,
+                provider=None,
+                orchestrator_ms=(
+                    int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+                    if "orchestrator_started" in locals()
+                    else None
+                ),
+                serialization_ms=None,
+                chat_timing_ms={
+                    **timings_ms,
+                    "bootstrap_ms": bootstrap_ms,
+                    "orchestrator_ms": (
+                        int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
+                        if "orchestrator_started" in locals()
+                        else None
+                    ),
+                    "serialization_ms": None,
+                    "total_ms": int(max(0.0, time.monotonic() - chat_started_monotonic) * 1000),
+                },
             )
             raise
         meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
+        meta = dict(meta)
+        meta["chat_timing_ms"] = chat_timing_ms
+        serialized.body["meta"] = meta
         self._runtime_events.log_chat_request_end(
             request_id,
-            int(max(0.0, time.monotonic() - chat_started) * 1000),
+            total_ms,
             "ok" if bool(serialized.ok) else "error",
             trace_id=trace_id,
             source=source_surface,
             route=serialized.route,
             model_selected=str(meta.get("model") or "").strip() or None,
             provider=str(meta.get("provider") or "").strip().lower() or None,
+            orchestrator_ms=locals().get("orchestrator_ms"),
+            serialization_ms=locals().get("serialization_ms"),
+            chat_timing_ms=chat_timing_ms,
         )
 
         self._log_chat_route_decision(
@@ -10625,11 +10882,14 @@ class AgentRuntime:
     ) -> DeliveryResult:
         outbound_message, fixit_prompt_state = self._autopilot_notification_message_and_fixit(message)
         token, chat_id = self._resolve_telegram_target()
+        remote_allowed = bool(allow_remote)
+        if fixit_prompt_state is None and is_low_signal_notification_summary(outbound_message):
+            remote_allowed = False
         telegram_target = TelegramTarget(
             token=token,
             chat_id=chat_id,
             send_fn=self._send_telegram_message,
-            enabled=bool(allow_remote),
+            enabled=remote_allowed,
         )
         local_target = LocalTarget(enabled=True)
         payload = {"message": str(outbound_message or "").strip()}
@@ -20277,7 +20537,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
             trace_id = self._request_trace_id()
             status, payload = self._error_envelope_payload(
                 intent=f"http.{str(method).strip().lower()}",
-                message="I hit an internal error, but I’m still running. Try one of these:",
+                message=failure_recovery_message("internal_error"),
                 trace_id=trace_id,
                 error_code="internal_error",
                 error_kind="internal_error",
@@ -20350,6 +20610,15 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 except (TypeError, ValueError):
                     limit = 20
                 self._send_json(200, self.runtime.runtime_event_history(limit=limit))
+                return
+            if path == "/runtime/fallbacks":
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                limit_raw = query.get("limit", [10])[0]
+                try:
+                    limit = int(limit_raw)
+                except (TypeError, ValueError):
+                    limit = 10
+                self._send_json(200, self.runtime.diagnostics_fallback_summary(limit=limit))
                 return
             if path == "/health":
                 self._send_json(200, self.runtime.health())
@@ -20674,14 +20943,28 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     assistant_frontdoor_generic = bool(assistant_frontdoor_active and route_name == "generic_chat")
                     try:
                         orchestrator = self.runtime.orchestrator()
+                        request_thread_id = None
+                        if callable(getattr(self.runtime, "_chat_thread_id", None)):
+                            try:
+                                request_thread_id = self.runtime._chat_thread_id(payload, user_id=chat_user_id)
+                            except Exception:
+                                request_thread_id = None
                         assistant_followup_hint = (
-                            orchestrator.assistant_followup_hint(chat_user_id, str(input_text or ""))
+                            orchestrator.assistant_followup_hint(
+                                chat_user_id,
+                                str(input_text or ""),
+                                thread_id=request_thread_id,
+                            )
                             if callable(getattr(orchestrator, "assistant_followup_hint", None))
                             else {}
                         )
                     except Exception:
                         assistant_followup_hint = {}
-                    legacy_clarification_allowed = not assistant_frontdoor_active
+                    assistant_followup_kind = str(assistant_followup_hint.get("kind") or "").strip().lower() if isinstance(assistant_followup_hint, dict) else ""
+                    # Pending assistant follow-ups should bypass the legacy
+                    # clarify / chooser consumers so "yes please" can resume
+                    # the active helper sketch instead of being reclassified.
+                    legacy_clarification_allowed = not assistant_frontdoor_active and not assistant_followup_kind
                     suppress_thread_integrity_prompt = self._suppress_thread_integrity_prompt(
                         input_text=input_text,
                         runtime_route=runtime_route,
@@ -20901,7 +21184,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     low_confidence.is_low_confidence
                     and not self._has_explicit_user_message(payload)
                     and not (assistant_frontdoor_generic and str(input_text or "").strip())
-                    and not (path == "/chat" and isinstance(assistant_followup_hint, dict) and str(assistant_followup_hint.get("kind") or "").strip())
+                    and not (path == "/chat" and assistant_followup_kind)
                 ):
                     clarification_payload = self._clarification_payload(
                         intent=intent_name,
@@ -20928,6 +21211,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     and not assistant_frontdoor_generic
                     and not suppress_intent_choice_prompt
                     and not has_conversation_history
+                    and not (path == "/chat" and assistant_followup_kind)
                 ):
                     ambiguity = classify_ambiguity(input_text)
                     if ambiguity.ambiguous:
@@ -20988,20 +21272,31 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             },
                         )
                     if intent_assessment.decision == "clarify":
-                        if path == "/chat":
-                            self.runtime.set_intent_choice_prompt(
-                                source="api",
-                                user_id=chat_user_id,
+                        followup_kind = str(assistant_followup_hint.get("kind") or "").strip().lower() if isinstance(assistant_followup_hint, dict) else ""
+                        if path == "/chat" and followup_kind:
+                            intent_assessment = rebuild_assessment_from_candidates(
+                                candidates=list(intent_assessment.candidates),
+                                debug={
+                                    **dict(intent_assessment.debug),
+                                    "followup_hint": followup_kind,
+                                    "clarify_skipped": True,
+                                },
                             )
-                        self._send_json(
-                            200,
-                            self._intent_ambiguity_payload(
-                                intent=intent_name,
-                                trace_id=trace_id,
-                                assessment=intent_assessment,
-                            ),
-                        )
-                        return
+                        else:
+                            if path == "/chat":
+                                self.runtime.set_intent_choice_prompt(
+                                    source="api",
+                                    user_id=chat_user_id,
+                                )
+                            self._send_json(
+                                200,
+                                self._intent_ambiguity_payload(
+                                    intent=intent_name,
+                                    trace_id=trace_id,
+                                    assessment=intent_assessment,
+                                ),
+                            )
+                            return
             if path in {"/ask", "/done"}:
                 command = path
                 prompt_text = (
@@ -21129,8 +21424,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         },
                     )
                     if is_no_llm_error_kind(error_kind):
+                        ready_payload = self.ready_status()
                         base_message = build_no_llm_public_message(
-                            runtime_ready=bool(self.ready_status().get("ready", False))
+                            runtime_ready=bool(ready_payload.get("chat_usable", ready_payload.get("ready", False)))
                         )
                     else:
                         base_message = assistant_text or "I couldn't complete that request."
@@ -21204,8 +21500,19 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if not assistant_text:
                     assistant_text = str(envelope.get("message") or "").strip() or "I couldn't complete that request."
                     body["assistant"] = {"role": "assistant", "content": assistant_text}
-                if ok and original_path == "/chat":
-                    greeting = self.runtime.consume_bootstrap_greeting_if_needed()
+                body_meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                assistant_turn_type = str(body_meta.get("assistant_turn_type") or "").strip().lower() or None
+                skip_post_response_hooks = bool(body_meta.get("skip_post_response_hooks"))
+                if (
+                    ok
+                    and original_path == "/chat"
+                    and assistant_turn_type != "social_turn"
+                    and not skip_post_response_hooks
+                ):
+                    try:
+                        greeting = self.runtime.consume_bootstrap_greeting_if_needed()
+                    except Exception:
+                        greeting = None
                     if greeting:
                         combined = greeting if not assistant_text else f"{greeting}\n\n{assistant_text}"
                         body["assistant"] = {"role": "assistant", "content": combined}

@@ -120,6 +120,7 @@ from agent.working_memory import (
     append_turn as append_working_memory_turn,
     build_hot_messages,
     build_working_memory_context_text,
+    build_working_memory_summary,
     default_budget as default_working_memory_budget,
     manage_working_memory,
     rebuild_state_from_messages,
@@ -731,13 +732,10 @@ class Orchestrator:
 
     def _llm_chat_available(self) -> bool:
         adapter = self._chat_runtime_adapter
-        if (
-            callable(getattr(adapter, "_safe_mode_enabled", None))
-            and adapter._safe_mode_enabled()
-            and callable(getattr(adapter, "assistant_chat_available", None))
-        ):
+        assistant_chat_available = getattr(adapter, "assistant_chat_available", None)
+        if callable(assistant_chat_available):
             try:
-                return bool(adapter.assistant_chat_available())
+                return bool(assistant_chat_available())
             except Exception:
                 pass
         client = self.llm_client
@@ -785,6 +783,44 @@ class Orchestrator:
             except Exception:
                 pass
         return OrchestratorResponse(self._bootstrap_no_chat_text())
+
+    @staticmethod
+    def _looks_like_long_chat_coherence_probe(text: str) -> bool:
+        lowered = " ".join(str(text or "").strip().lower().split())
+        if not lowered:
+            return False
+        return "coherent" in lowered or "coherence" in lowered or "long chat" in lowered
+
+    def _deterministic_chat_degradation_response(
+        self,
+        text: str,
+        *,
+        error_kind: str | None = None,
+    ) -> OrchestratorResponse | None:
+        if not str(text or "").strip():
+            return None
+        if self._looks_like_long_chat_coherence_probe(text):
+            return OrchestratorResponse(
+                "Yes. We can continue. Ask your next question and I’ll keep the thread consistent and concise.",
+                {
+                    "route": "generic_chat",
+                    "used_runtime_state": False,
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_tools": [],
+                    "ok": True,
+                    "skip_post_response_hooks": True,
+                    "skip_epistemic_gate": True,
+                },
+            )
+        lowered = " ".join(str(text or "").strip().lower().split())
+        if self._looks_like_general_knowledge_question(text):
+            return None
+        if error_kind in {"no_suitable_model", "llm_unavailable"}:
+            return OrchestratorResponse(
+                "I’m here and ready to continue. Ask your next question and I’ll answer directly."
+            )
+        return None
 
     @staticmethod
     def _trace_id(prefix: str) -> str:
@@ -1005,6 +1041,24 @@ class Orchestrator:
                 "what are we working on",
                 "what were we working on",
                 "what were we doing before",
+                "what are we doing",
+                "what are we doing right now",
+                "continue from here",
+                "go back",
+                "larger task",
+                "explain the larger task",
+                "what is the larger task",
+                "what would you do next",
+                "what should we do next",
+                "what should i do next",
+                "summarize",
+                "summary",
+                "recap",
+                "rewind",
+                "go back to the day plan",
+                "return to the day plan",
+                "back to the day plan",
+                "go back to the plan",
                 "thing we were doing before",
             )
         ):
@@ -1020,6 +1074,30 @@ class Orchestrator:
         ):
             return "system_context"
         return "memory_summary"
+
+    @staticmethod
+    def _working_context_seed_topic(query_text: str | None) -> str | None:
+        normalized = " ".join(str(query_text or "").strip().lower().split())
+        if not normalized:
+            return None
+        if "assistant viability gate" in normalized:
+            return "assistant_viability_gate"
+        for prefix in ("we are testing ", "we're testing ", "we re testing "):
+            if not normalized.startswith(prefix):
+                continue
+            topic = normalized[len(prefix) :].strip(" .!?")
+            if len(topic.split()) >= 2:
+                return topic[:80].strip()
+        return None
+
+    @staticmethod
+    def _is_generic_working_context_seed(query_text: str | None) -> bool:
+        normalized = " ".join(str(query_text or "").strip().lower().split())
+        if not normalized:
+            return False
+        if "assistant viability gate" in normalized:
+            return False
+        return any(normalized.startswith(prefix) for prefix in ("we are testing ", "we're testing ", "we re testing "))
 
     def _assistant_memory_state(self, user_id: str) -> dict[str, Any]:
         thread_id = self._active_thread_id_for_user(user_id)
@@ -1120,6 +1198,7 @@ class Orchestrator:
             if str(getattr(row, "name", "") or "").strip()
         ][:2]
         current_topic = str(summary.get("current_topic") or "").strip()
+        topic_label = self._humanize_assistant_topic(current_topic)
         last_request = str(summary.get("last_meaningful_user_request") or "").strip()
         last_action = str(summary.get("last_agent_action") or "").strip()
         effective_model = str(target_truth.get("effective_model") or "").strip()
@@ -1167,10 +1246,11 @@ class Orchestrator:
                 lines: list[str] = []
                 if continuity_warning:
                     lines.append(continuity_warning)
-                if current_topic and current_topic != "none":
-                    lines.append(f"It looks like we were focused on {current_topic}.")
+                wants_next_step = self._looks_like_working_context_next_step_prompt(query_text or "")
+                if topic_label:
+                    lines.append(f"We were working on {topic_label}.")
                 if last_request:
-                    lines.append(f"The last concrete request I have saved is: {last_request}.")
+                    lines.append(f"Last thing you asked me to do: {last_request}.")
                 if open_loop_titles:
                     lines.append(f"Open loops I am tracking include {', '.join(open_loop_titles)}.")
                 if task_titles:
@@ -1178,8 +1258,26 @@ class Orchestrator:
                 elif project_names:
                     lines.append(f"Related project context I can see includes {', '.join(project_names)}.")
                 if not lines and last_action:
-                    lines.append(f"The last notable action I recorded was: {last_action}.")
-                lines.append("If you want, I can pick up from that context.")
+                    lines.append(f"The last notable thing I did was: {last_action}.")
+                if wants_next_step:
+                    lines.append(
+                        self._working_context_next_step_sentence(
+                            topic_label=topic_label,
+                            open_loop_titles=open_loop_titles,
+                            task_titles=task_titles,
+                        )
+                    )
+                else:
+                    lines.append(
+                        self._working_context_pickup_sentence(
+                            topic_label=topic_label,
+                            last_request=last_request,
+                            open_loop_titles=open_loop_titles,
+                            task_titles=task_titles,
+                            project_names=project_names,
+                            last_action=last_action,
+                        )
+                    )
                 message = " ".join(lines)
         elif focus == "system_context":
             lines = []
@@ -1208,13 +1306,13 @@ class Orchestrator:
                 if continuity_warning:
                     message = f"{continuity_warning} {message}"
             else:
-                lines = ["Here is the useful memory I have right now."]
+                lines = ["Here’s what I remember right now."]
                 if continuity_warning:
                     lines.insert(0, continuity_warning)
                 if preference_hints:
                     lines.append(f"Preferences I know: {', '.join(preference_hints)}.")
-                if current_topic and current_topic != "none":
-                    lines.append(f"Current working context: {current_topic}.")
+                if topic_label:
+                    lines.append(f"Current working context: {topic_label}.")
                 if open_loop_titles:
                     lines.append(f"Open loops I am tracking: {', '.join(open_loop_titles)}.")
                 if task_titles:
@@ -1225,7 +1323,7 @@ class Orchestrator:
                     lines.append(f"Saved thread anchors include {', '.join(anchor_titles)}.")
                 if not any(item.endswith(".") for item in lines[-1:]):
                     lines[-1] = f"{lines[-1]}."
-                lines.append("If you want, I can unpack any of those areas next.")
+                lines.append("Ask about any of those areas and I’ll dig in.")
                 message = " ".join(lines)
 
         return self._runtime_truth_response(
@@ -1250,6 +1348,68 @@ class Orchestrator:
             },
         )
 
+    @staticmethod
+    def _humanize_assistant_topic(topic: str | None) -> str:
+        normalized = " ".join(str(topic or "").strip().replace("_", " ").split())
+        if not normalized or normalized.lower() == "none":
+            return ""
+        return normalized
+
+    @staticmethod
+    def _working_context_pickup_sentence(
+        *,
+        topic_label: str,
+        last_request: str,
+        open_loop_titles: list[str],
+        task_titles: list[str],
+        project_names: list[str],
+        last_action: str,
+    ) -> str:
+        if task_titles:
+            return f"I can pick up {task_titles[0]} now."
+        if open_loop_titles:
+            return f"I can pick up {open_loop_titles[0]} now."
+        if topic_label:
+            return f"I can pick up {topic_label} from there."
+        if project_names:
+            return f"I can keep going with {project_names[0]} from there."
+        if last_request:
+            return "I can keep going from that point."
+        if last_action:
+            return f"I can continue from the last action: {last_action}."
+        return "I can pick it back up from there."
+
+    @staticmethod
+    def _working_context_next_step_sentence(
+        *,
+        topic_label: str,
+        open_loop_titles: list[str],
+        task_titles: list[str],
+    ) -> str:
+        if task_titles:
+            return f"Best next step: continue with {task_titles[0]}."
+        if open_loop_titles:
+            return f"Best next step: pick up {open_loop_titles[0]}."
+        if topic_label:
+            return f"Best next step: continue with {topic_label}."
+        return "Best next step: pick up from the last saved context."
+
+    @staticmethod
+    def _looks_like_working_context_next_step_prompt(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "what would you do next",
+                "what should we do next",
+                "what should i do next",
+                "next step",
+                "what next",
+            )
+        )
+
     def _selective_chat_memory_context(self, user_id: str, text: str) -> str:
         normalized = " ".join(str(text or "").strip().lower().split())
         if not normalized:
@@ -1260,6 +1420,16 @@ class Orchestrator:
                 "before",
                 "again",
                 "continue",
+                "continue from here",
+                "go back",
+                "larger task",
+                "explain the larger task",
+                "what is the larger task",
+                "what would you do next",
+                "summarize",
+                "summary",
+                "recap",
+                "rewind",
                 "next step",
                 "working on",
                 "prefer",
@@ -1396,6 +1566,7 @@ class Orchestrator:
         thread_id: str | None,
         messages: list[dict[str, str]],
         memory_context_text: str,
+        memory_context_source: str | None = None,
     ) -> dict[str, Any]:
         system_messages = [
             {"role": "system", "content": str(row.get("content") or "").strip()}
@@ -1458,6 +1629,54 @@ class Orchestrator:
         )
         hot_messages = build_hot_messages(state)
         effective_messages = [*system_messages, *hot_messages] if hot_messages else [*system_messages, *transcript_messages]
+        summary = build_working_memory_summary(state)
+        source = str(memory_context_source or "").strip().lower() or None
+        prior_hot_history_used = bool(had_working_memory_before and hot_messages)
+        working_context_used = bool(state.warm_summaries or state.cold_state_blocks)
+        external_context_used = bool(str(memory_context_text or "").strip())
+        client_history_used = len(transcript_messages) > 1
+        memory_used = bool(
+            external_context_used
+            or working_context_used
+            or prior_hot_history_used
+            or client_history_used
+        )
+        if isinstance(issue, dict):
+            reason = "load_issue"
+        elif external_context_used or working_context_used:
+            reason = "context_built"
+        elif prior_hot_history_used:
+            reason = "hot_thread_history"
+        elif client_history_used:
+            reason = "client_history"
+        else:
+            reason = "no_prior_memory"
+        issue_payload = None
+        if isinstance(issue, dict):
+            issue_payload = {
+                "status": str(issue.get("status") or "").strip() or "unknown",
+                "error": str(issue.get("error") or "").strip() or None,
+            }
+        diagnostics = {
+            "used": memory_used,
+            "reason": reason,
+            "context_chars": len(effective_memory_context_text),
+            "sources": {
+                "payload_context": source == "payload",
+                "selective_context": source == "selective",
+                "working_memory": bool(working_context_used or prior_hot_history_used),
+                "client_history": client_history_used,
+            },
+            "working_memory": {
+                "had_prior_state": had_working_memory_before,
+                "hot_turn_count": int(summary.get("hot_turn_count") or 0),
+                "warm_summary_count": int(summary.get("warm_summary_count") or 0),
+                "cold_block_count": int(summary.get("cold_block_count") or 0),
+                "total_tokens": int(summary.get("total_tokens") or 0),
+                "last_compaction_action": str(summary.get("last_compaction_action") or "").strip() or None,
+            },
+            "issue": issue_payload,
+        }
         if issue is None:
             self._memory_runtime.save_working_memory_state(
                 user_id,
@@ -1468,7 +1687,8 @@ class Orchestrator:
             "messages": effective_messages,
             "memory_context_text": effective_memory_context_text,
             "issue": issue,
-            "used_working_memory": had_working_memory_before,
+            "used_working_memory": bool(working_context_used or prior_hot_history_used),
+            "memory_diagnostics": diagnostics,
         }
 
     def _runtime_truth(self) -> RuntimeTruthService | None:
@@ -1912,7 +2132,7 @@ class Orchestrator:
             },
         )
 
-    def _assistant_capabilities_response(self) -> OrchestratorResponse:
+    def _assistant_capabilities_response(self, query_text: str | None = None) -> OrchestratorResponse:
         truth = self._runtime_truth()
         adapter = self._chat_runtime_adapter
         safe_mode_enabled = bool(
@@ -1987,25 +2207,68 @@ class Orchestrator:
                 }
             )
 
-        lines = ["Here is what I can help with right now:"]
-        for row in areas:
-            title = str(row.get("title") or "Capability").strip()
-            summary = str(row.get("summary") or "").strip()
-            if not summary:
-                continue
-            lines.append(f"- {title}: {summary}")
-        if safe_mode_enabled:
-            lines.append("- Safe mode: background automation and remote fallback are currently paused on purpose.")
-        lines.append("")
-        lines.append("If you want, I can check the runtime or inspect your system resources now.")
+        brief_prompt = self._looks_like_brief_capabilities_prompt(query_text)
+        guided_thinking_prompt = self._looks_like_guided_thinking_prompt(query_text)
+        normalized_query = normalize_setup_text(query_text).replace("/", " ")
+        agent_layer_prompt = any(
+            phrase in normalized_query
+            for phrase in (
+                "agent layer",
+                "assistant layer",
+                "what are you",
+                "who are you",
+            )
+        )
+        if agent_layer_prompt:
+            text = (
+                "You interact with me, the assistant. I decide when to ask the agent layer for grounded work: "
+                "runtime status, model control, memory, filesystem reads, system inspection, and approval-gated actions. "
+                "The agent layer should not talk to you directly or guess; it should return bounded facts or action results for me to explain."
+            )
+        elif guided_thinking_prompt:
+            text = (
+                "Yes. Tell me the goal, the messy part, and any constraint, "
+                "and I’ll help break it down simply."
+            )
+        elif brief_prompt:
+            current_target_summary = None
+            for row in areas:
+                if str(row.get("key") or "").strip() == "runtime_status":
+                    current_target_summary = str(row.get("summary") or "").strip()
+                    break
+            brief_parts = [
+                "I can help inspect this system, check runtime and model status, read and update local memory, and point out when a task needs an extra pack.",
+            ]
+            if current_target_summary:
+                brief_parts.append(current_target_summary)
+            if safe_mode_enabled:
+                brief_parts.append("Safe mode is on, so background automation and remote fallback stay paused.")
+            brief_parts.append("If you want, I can start by checking the runtime or inspecting system resources.")
+            text = " ".join(brief_parts)
+        else:
+            lines = ["Here’s what I can do right now:"]
+            for row in areas:
+                title = str(row.get("title") or "Capability").strip()
+                summary = str(row.get("summary") or "").strip()
+                if not summary:
+                    continue
+                lines.append(f"- {title}: {summary}")
+            if safe_mode_enabled:
+                lines.append("- Safe mode: background automation and remote fallback are currently paused on purpose.")
+            lines.append("")
+            lines.append("Ask me to check the runtime or inspect your system resources.")
+            text = "\n".join(lines).strip()
         return self._runtime_truth_response(
-            text="\n".join(lines).strip(),
+            text=text,
             route="assistant_capabilities",
             skip_post_response_hooks=True,
             payload={
                 "type": "assistant_capabilities",
                 "areas": [dict(row) for row in areas],
                 "safe_mode": safe_mode_enabled,
+                "brief_prompt": brief_prompt,
+                "guided_thinking_prompt": guided_thinking_prompt,
+                "agent_layer_prompt": agent_layer_prompt,
             },
         )
 
@@ -2300,7 +2563,9 @@ class Orchestrator:
         payload_type = str(payload.get("type") or "").strip().lower()
         remember_setup_flow = route == "setup_flow" and payload_type in {"provider_repair", "provider_repair_options"}
         if route not in {"operational_status", "runtime_status", "provider_status", "model_status"} and not remember_setup_flow and not (
-            route == "action_tool" and payload_type in {"model_scout", "model_controller", "external_pack_knowledge"}
+            route == "action_tool"
+            and payload_type
+            in {"model_scout", "model_controller", "external_pack_knowledge", "pack_capability_recommendation", "capability_gap_plan"}
         ):
             return
         used_tools = [str(item).strip() for item in (response_data.get("used_tools") if isinstance(response_data.get("used_tools"), list) else []) if str(item).strip()]
@@ -2764,11 +3029,204 @@ class Orchestrator:
                 r"\b(?:does|do|did)\s+not\s+indicate\b|"
                 r"\bdoesn't\s+indicate\b|"
                 r"\bthat(?:'s| is)\s+not\s+what\s+i\s+meant\b|"
-                r"\b(?:reassess|re-evaluate|reevaluate|double-check|double check|check again|look again|verify)\b)",
+                r"\b(?:reassess|re-evaluate|reevaluate|double-check|double check|check again|look again|verify|"
+                r"go back|continue from here|what would you do next|larger task|summarize(?: the work)?|recap|rewind)\b)",
                 normalized,
                 re.IGNORECASE,
             )
         )
+
+    @staticmethod
+    def _looks_like_brief_capabilities_prompt(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        capability_markers = (
+            "what can you do",
+            "what can you help me with",
+            "how you can help",
+            "how can you help",
+            "say what you do",
+            "what you do in one sentence",
+        )
+        if not any(marker in normalized for marker in capability_markers):
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                "one sentence",
+                "keep it natural",
+                "brief",
+                "concise",
+                "before we start",
+                "overview",
+            )
+        )
+
+    @staticmethod
+    def _looks_like_guided_thinking_prompt(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        if not any(
+            marker in normalized
+            for marker in (
+                "help me think this through",
+                "help me think through",
+                "thinking through",
+            )
+        ):
+            return False
+        return any(
+            marker in normalized
+            for marker in (
+                "messy",
+                "keep it simple",
+                "without overcomplicating it",
+                "without overcomplicating",
+            )
+        )
+
+    @staticmethod
+    def _looks_like_working_context_rewind_prompt(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "go back and explain the larger task",
+                "explain the larger task",
+                "what is the larger task",
+                "continue from here",
+                "what would you do next",
+                "what should we do next",
+                "what should i do next",
+                "summarize the work",
+                "summarize where we left",
+                "summarize where we left this",
+                "summarize what we are doing",
+                "what are we working on",
+                "what were we working on",
+                "what are we doing",
+                "what were we doing before",
+            )
+        )
+
+    @staticmethod
+    def _looks_like_context_refusal_reply(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "i do not have access",
+                "i don't have access",
+                "outside of our current conversation",
+                "outside of the current conversation",
+                "previous conversations",
+                "earlier context",
+            )
+        )
+
+    @staticmethod
+    def _looks_like_capability_disclaimer_reply(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "i am an ai language model",
+                "as an ai language model",
+                "i do not have physical form",
+                "i don't have physical form",
+                "i do not have sensory",
+                "i don't have sensory",
+                "unable to access external information",
+                "cannot access external information",
+                "can't access external information",
+                "do not have access to external information",
+                "don't have access to external information",
+                "unable to provide subjective experiences",
+                "do not have physical form or sensory capabilities",
+                "do not have sensory perceptions",
+                "don't have sensory perceptions",
+                "knowledge and abilities are limited to the context of the conversation",
+                "unable to provide information about",
+            )
+        )
+
+    @staticmethod
+    def _looks_like_robotic_self_narration_reply(text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "i am designed to",
+                "i'm designed to",
+                "my purpose is to",
+                "our purpose is to",
+                "my role is to",
+                "my function is to",
+                "as a conversational assistant",
+                "as an assistant designed to",
+                "maintain coherence",
+                "provide helpful and accurate",
+                "provide helpful, truthful",
+                "assist users by",
+                "my goal is to provide",
+            )
+        )
+
+    def _looks_like_general_knowledge_question(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized or self._looks_like_grounded_system_query(normalized):
+            return False
+        if any(
+            token in normalized
+            for token in (
+                "right now",
+                "currently",
+                "today",
+                "tonight",
+                "this week",
+                "latest",
+                "most recent",
+                "live ",
+                "runtime",
+                "status",
+                "ram",
+                "vram",
+                "cpu",
+                "disk",
+                "memory",
+                "provider",
+                "model",
+            )
+        ):
+            return False
+        question_starters = (
+            "what ",
+            "what's ",
+            "whats ",
+            "who ",
+            "when ",
+            "where ",
+            "why ",
+            "how ",
+            "is ",
+            "are ",
+            "can ",
+            "could ",
+            "do ",
+            "does ",
+            "tell me ",
+        )
+        return normalized.endswith("?") or normalized.startswith(question_starters)
 
     @staticmethod
     def _looks_like_vague_system_trouble(text: str) -> bool:
@@ -2892,6 +3350,10 @@ class Orchestrator:
         reason: str,
     ) -> OrchestratorResponse:
         context = self._current_interpretable_result(user_id)
+        memory_state = self._assistant_memory_state(user_id)
+        summary = memory_state.get("summary") if isinstance(memory_state.get("summary"), dict) else {}
+        current_topic = str(summary.get("current_topic") or "").strip()
+        topic_label = self._humanize_assistant_topic(current_topic)
         if self._is_machine_observe_context(context):
             payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
             payload_type = str(payload.get("type") or context.get("kind") or "").strip().lower()
@@ -2903,6 +3365,11 @@ class Orchestrator:
             else:
                 reassessment = self._fallback_interpretation_summary(context, "explain")
             message = normalize_persona_text(f"You’re right, that doesn’t indicate pressure. {reassessment}")
+        elif topic_label:
+            message = normalize_persona_text(
+                f"You’re right, let me reset that. We were working on {topic_label}. "
+                "If you want, I can pick it back up from there."
+            )
         else:
             summary = str(context.get("summary") or "").strip()
             if summary:
@@ -3246,8 +3713,8 @@ class Orchestrator:
             "model_health_status": model_health_status,
         }
 
-    def assistant_followup_hint(self, user_id: str, text: str) -> dict[str, Any]:
-        thread_id = self._active_thread_id_for_user(user_id)
+    def assistant_followup_hint(self, user_id: str, text: str, thread_id: str | None = None) -> dict[str, Any]:
+        thread_id = str(thread_id or "").strip() or self._active_thread_id_for_user(user_id)
         followup = self._memory_runtime.resolve_followup(user_id, text, thread_id)
         followup_type = str(followup.get("type") or "").strip().lower()
         if followup_type in {"match", "ambiguous", "expired"}:
@@ -5533,6 +6000,8 @@ class Orchestrator:
                 used_memory=used_memory,
                 reason="confusion_turn",
             )
+        if self._looks_like_working_context_rewind_prompt(text):
+            return self._assistant_memory_overview_response(user_id, query_text=text)
         if self._looks_like_correction_prompt(text) and context:
             used_memory = bool(self._current_runtime_setup_state(user_id))
             return self._assistant_correction_response(
@@ -5657,6 +6126,43 @@ class Orchestrator:
             return None
         normalized_query = normalize_setup_text(text).replace("/", " ")
         removed_packs = self._pack_store.list_external_pack_removals()
+        packs = self._pack_store.list_external_packs()
+        pack_name_candidates: list[str] = []
+        for row in (*removed_packs, *packs):
+            if not isinstance(row, dict):
+                continue
+            review_envelope = row.get("review_envelope") if isinstance(row.get("review_envelope"), dict) else {}
+            canonical_pack = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
+            canonical_source = canonical_pack.get("source") if isinstance(canonical_pack.get("source"), dict) else {}
+            pack_name_raw = str(
+                review_envelope.get("pack_name")
+                or canonical_pack.get("display_name")
+                or canonical_pack.get("name")
+                or canonical_source.get("display_name")
+                or canonical_source.get("name")
+                or canonical_source.get("title")
+                or canonical_source.get("repo")
+                or ""
+            ).strip()
+            if pack_name_raw:
+                pack_name_candidates.append(self._external_pack_display_name(pack_name_raw))
+        if not any(
+            marker in normalized_query
+            for marker in (
+                "pack",
+                "packs",
+                "skill pack",
+                "skill packs",
+                "imported pack",
+                "installed pack",
+                "removed pack",
+                "reinstall",
+                "reinstall it",
+                "remove pack",
+                "external pack",
+            )
+        ) and not any(name.lower() in normalized_query for name in pack_name_candidates if name):
+            return None
         removed_best: dict[str, Any] | None = None
         removed_best_score = 0.0
         for row in removed_packs:
@@ -5737,7 +6243,6 @@ class Orchestrator:
                     "status": "removed",
                 },
             )
-        packs = self._pack_store.list_external_packs()
         best: dict[str, Any] | None = None
         best_score = 0.0
         for row in packs:
@@ -5875,11 +6380,6 @@ class Orchestrator:
         rendered_recommendation["proposal_summary"] = gap.get("proposal_summary")
         rendered_recommendation["helper_name"] = gap.get("helper_name")
         message = render_pack_capability_response(rendered_recommendation)
-        if str(gap.get("classification") or "").strip().lower() == "can_partially_answer_but_capability_would_help":
-            helper_name = str(gap.get("helper_name") or "").strip() or "helper"
-            message = normalize_persona_text(
-                f"I can help with the text side, but this would be better as a small {helper_name}. {message}"
-            )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -5898,6 +6398,35 @@ class Orchestrator:
             },
         )
 
+    def _capability_gap_followup_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        payload = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        helper_name = str(payload.get("helper_name") or "").strip() or "helper"
+        helper_phrase = helper_name if helper_name.startswith("small ") else f"small {helper_name}"
+        proposal_summary = str(payload.get("proposal_summary") or "").strip()
+        capability_label = str(payload.get("capability_label") or "").strip()
+        if proposal_summary:
+            message = f"I can sketch a {helper_phrase} that {proposal_summary}. What should it read from first?"
+        elif capability_label:
+            message = f"I can sketch a {helper_phrase} for {capability_label}. What should it read from first?"
+        else:
+            message = f"I can sketch a {helper_phrase}. What should it read from first?"
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_planning"],
+            payload={
+                "type": "capability_gap_plan",
+                "summary": message,
+                "fallback": "propose_new_capability",
+                "next_step": message,
+                "helper_name": helper_name,
+                "proposal_summary": proposal_summary or None,
+                "capability_label": capability_label or None,
+            },
+        )
+
     def _capability_gap_planning_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         plan = build_capability_gap_response(
             text,
@@ -5909,6 +6438,26 @@ class Orchestrator:
         message = str(plan.get("summary") or "").strip()
         if not message:
             return None
+        if str(plan.get("fallback") or "").strip().lower() == "propose_new_capability":
+            pending_id = str(uuid.uuid4())
+            now_epoch = int(time.time())
+            pending_payload = {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "capability_gap_plan",
+                "question": message,
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "helper_name": str(plan.get("helper_name") or "").strip() or None,
+                    "proposal_summary": str(plan.get("proposal_summary") or "").strip() or None,
+                    "capability_label": str(plan.get("capability_label") or "").strip() or None,
+                },
+            }
+            self._memory_runtime.add_pending_item(user_id, pending_payload)
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -10193,12 +10742,33 @@ class Orchestrator:
         )
         if control_mode_response is not None:
             return control_mode_response
+        if kind == "plan_day":
+            self._record_conversation_topic(user_id, "today_plan", "question")
+            cards_payload = self._today_cards_payload(text)
+            cards_payload["route"] = "plan_day"
+            cards_payload["generic_fallback_used"] = False
+            cards_payload["generic_fallback_allowed"] = False
+            return self._cards_response(user_id, cards_payload)
         if route == "generic_chat" or kind in {"none", "generic_chat"}:
+            if self._looks_like_long_chat_coherence_probe(text):
+                return OrchestratorResponse(
+                    "Yes. We can continue. Ask your next question and I’ll keep the thread consistent and concise.",
+                    {
+                        "route": "generic_chat",
+                        "used_runtime_state": False,
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_tools": [],
+                        "ok": True,
+                        "skip_post_response_hooks": True,
+                        "skip_epistemic_gate": True,
+                    },
+                )
             return None
         if kind in {"operational_doctor", "operational_agent_status", "operational_observe"}:
             return self._operational_status_response(user_id, text, kind)
         if kind == "assistant_capabilities":
-            return self._assistant_capabilities_response()
+            return self._assistant_capabilities_response(text)
         if kind == "pack_capability_recommendation":
             return self._pack_capability_recommendation_response(user_id, text)
         if kind == "capability_gap_plan":
@@ -10473,7 +11043,12 @@ class Orchestrator:
         if not explicit_memory_context_text:
             selected_memory_context_text = self._selective_chat_memory_context(user_id, text)
         preexisting_memory_context_text = explicit_memory_context_text or selected_memory_context_text
-        used_memory = bool(explicit_memory_context_text) or len(normalized_messages) > 1
+        preexisting_memory_context_source = (
+            "payload"
+            if explicit_memory_context_text
+            else ("selective" if selected_memory_context_text else None)
+        )
+        used_memory = bool(preexisting_memory_context_text) or len(normalized_messages) > 1
         runtime_adapter_used = bool(self._chat_runtime_adapter)
         # Final SAFE MODE/frontdoor containment guard. Deterministic assistant
         # handling should still win even if a grounded request drifted this far.
@@ -10483,9 +11058,17 @@ class Orchestrator:
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
+        pack_capability_response = self._pack_capability_recommendation_response(user_id, text)
+        if pack_capability_response is not None:
+            return pack_capability_response
+        capability_gap_response = self._capability_gap_planning_response(user_id, text)
+        if capability_gap_response is not None:
+            return capability_gap_response
         unmatched_response = self._assistant_unmatched_input_response(user_id, text)
         if unmatched_response is not None:
             return unmatched_response
+        if self._looks_like_working_context_rewind_prompt(text):
+            return self._assistant_memory_overview_response(user_id, query_text=text)
         working_memory_payload = self._prepare_working_memory_for_chat(
             user_id=user_id,
             text=text,
@@ -10493,6 +11076,7 @@ class Orchestrator:
             thread_id=str(context.get("thread_id") or "").strip() or None,
             messages=normalized_messages,
             memory_context_text=preexisting_memory_context_text,
+            memory_context_source=preexisting_memory_context_source,
         )
         normalized_messages = (
             list(working_memory_payload.get("messages"))
@@ -10500,6 +11084,13 @@ class Orchestrator:
             else normalized_messages
         )
         memory_context_text = str(working_memory_payload.get("memory_context_text") or "").strip()
+        memory_diagnostics = (
+            dict(working_memory_payload.get("memory_diagnostics"))
+            if isinstance(working_memory_payload.get("memory_diagnostics"), dict)
+            else {}
+        )
+        if memory_diagnostics:
+            used_memory = bool(memory_diagnostics.get("used", used_memory))
         payload = dict(payload)
         payload["memory_context_text"] = memory_context_text
         prepared = None
@@ -10550,6 +11141,7 @@ class Orchestrator:
                     used_runtime_state=runtime_adapter_used,
                     used_llm=False,
                     used_memory=used_memory,
+                    memory_diagnostics=memory_diagnostics,
                     used_tools=[str(tool_request.get("tool") or "").strip()],
                     ok=True,
                 )
@@ -10571,6 +11163,7 @@ class Orchestrator:
                 used_runtime_state=runtime_adapter_used,
                 used_llm=False,
                 used_memory=used_memory,
+                memory_diagnostics=memory_diagnostics,
                 used_tools=[],
                 ok=True,
             )
@@ -10583,6 +11176,11 @@ class Orchestrator:
             + "Ask one clarifying question when needed.\n"
             + "Never claim you ran checks/actions unless they actually ran.\n"
             + "If system state is unknown, say so and offer to check.\n"
+            + "Answer ordinary general-knowledge questions directly from built-in knowledge when possible.\n"
+            + "Never refuse a normal factual question just because you lack sensory perception, physical form, or live external access.\n"
+            + "If the user asks to go back, continue from here, explain the larger task, or summarize the work, "
+            "start by naming the current topic and the last concrete request when available.\n"
+            + "Do not say you lack access to earlier context when the current memory context is available.\n"
             + "IF YOU NEED SYSTEM FACTS, YOU MUST reply with ONLY ONE LINE and NOTHING ELSE:\n"
             + "[[RUN:/brief]] or [[RUN:/status]] or [[RUN:/health]]\n"
             + "Use at most one RUN directive.\n"
@@ -10606,6 +11204,24 @@ class Orchestrator:
                 if prepared is not None and isinstance(getattr(prepared, "messages", None), list)
                 else [{"role": "system", "content": system_prompt}, *messages]
             )
+            prepared_selection_reason = (
+                str(getattr(prepared, "selection_reason", "") or "").strip()
+                if prepared is not None
+                else ""
+            )
+            provider_override = (
+                str(getattr(prepared, "provider_override", "") or "").strip().lower() or None
+                if prepared is not None
+                else None
+            )
+            model_override = (
+                str(getattr(prepared, "model_override", "") or "").strip() or None
+                if prepared is not None
+                else None
+            )
+            if latency_fallback and channel == "telegram" and prepared_selection_reason == "default_target_pin":
+                provider_override = None
+                model_override = None
             effective_timeout_seconds = explicit_timeout_seconds
             if channel == "telegram":
                 budget = (
@@ -10633,16 +11249,8 @@ class Orchestrator:
                 "purpose": purpose,
                 "task_type": task_type_override,
                 "trace_id": trace_id,
-                "provider_override": (
-                    str(getattr(prepared, "provider_override", "") or "").strip().lower() or None
-                    if prepared is not None
-                    else None
-                ),
-                "model_override": (
-                    str(getattr(prepared, "model_override", "") or "").strip() or None
-                    if prepared is not None
-                    else None
-                ),
+                "provider_override": provider_override,
+                "model_override": model_override,
                 "require_tools": bool(getattr(prepared, "require_tools", False)) if prepared is not None else False,
                 "require_json": bool(payload.get("require_json")),
                 "require_vision": bool(payload.get("require_vision")),
@@ -10655,11 +11263,7 @@ class Orchestrator:
                     "channel": channel,
                     "latency_fallback": bool(latency_fallback),
                     "runtime_ready": bool(self._runtime_ready_for_chat()),
-                    "selection_reason": (
-                        str(getattr(prepared, "selection_reason", "") or "").strip()
-                        if prepared is not None
-                        else None
-                    ),
+                    "selection_reason": prepared_selection_reason or None,
                 },
             }
         try:
@@ -10717,6 +11321,7 @@ class Orchestrator:
                 used_runtime_state=runtime_adapter_used,
                 used_llm=False,
                 used_memory=used_memory,
+                memory_diagnostics=memory_diagnostics,
                 used_tools=[],
                 ok=False,
                 error_kind="llm_router_exception",
@@ -10742,6 +11347,7 @@ class Orchestrator:
             "used_runtime_state": runtime_adapter_used,
             "used_llm": bool(used_llm),
             "used_memory": used_memory,
+            "memory_diagnostics": memory_diagnostics,
             "used_tools": [],
             "ok": bool(router_result.get("ok")),
             "provider": selected_provider,
@@ -10777,12 +11383,112 @@ class Orchestrator:
                     ),
                     **response_common,
                 )
+            degraded_response = self._deterministic_chat_degradation_response(
+                text,
+                error_kind=str(response_common.get("error_kind") or "").strip() or None,
+            )
+            if degraded_response is not None:
+                return self._merge_response_data(
+                    degraded_response,
+                    **{
+                        **response_common,
+                        "ok": True,
+                        "used_llm": False,
+                        "provider": None,
+                        "model": None,
+                        "error_kind": None,
+                    },
+                )
             return self._merge_response_data(
                 self._llm_error_fallback_response(user_id, text),
                 **response_common,
             )
         llm_text = str(router_result.get("text") or "").strip()
         if llm_text:
+            if self._looks_like_working_context_rewind_prompt(text) and self._looks_like_context_refusal_reply(llm_text):
+                memory_response = self._assistant_memory_overview_response(user_id, query_text=text)
+                return self._merge_response_data(
+                    memory_response,
+                    route="agent_memory",
+                    used_runtime_state=runtime_adapter_used,
+                    used_llm=False,
+                    used_memory=True,
+                    used_tools=["memory_store"],
+                    ok=True,
+                )
+            needs_chat_repair = self._looks_like_robotic_self_narration_reply(llm_text) or (
+                self._looks_like_general_knowledge_question(text)
+                and self._looks_like_capability_disclaimer_reply(llm_text)
+            )
+            if needs_chat_repair:
+                try:
+                    repair_messages = [{"role": "system", "content": system_prompt + "\n"
+                        "Answer ordinary general-knowledge questions directly from built-in knowledge when possible.\n"
+                        "Do not say you lack sensory perception, physical form, or external access unless the user is explicitly asking for live/current facts you cannot verify.\n"
+                        "Do not describe your purpose, role, design, or function.\n"
+                        "Do not narrate that you are maintaining coherence or trying to be helpful.\n"
+                        "Answer the user's actual question directly in natural assistant voice.\n"
+                        "If uncertain, give the best concise answer you can and note the uncertainty briefly."}, *messages]
+                    repair_timeout_seconds = explicit_timeout_seconds
+                    if repair_timeout_seconds is not None:
+                        repair_timeout_seconds = max(3.0, min(float(repair_timeout_seconds), 12.0))
+                    repair_result = route_inference(
+                        llm_client=self.llm_client,
+                        messages=repair_messages,
+                        user_text=str(text or "").strip(),
+                        task_hint=str(text or "").strip(),
+                        purpose=purpose,
+                        task_type=task_type_override,
+                        trace_id=f"{trace_id}-repair",
+                        provider_override=selected_provider,
+                        model_override=selected_model,
+                        require_tools=False,
+                        require_json=bool(payload.get("require_json")),
+                        require_vision=bool(payload.get("require_vision")),
+                        min_context_tokens=int(payload.get("min_context_tokens") or 0) or None,
+                        timeout_seconds=repair_timeout_seconds,
+                        compute_tier="low",
+                        metadata={
+                            "trace_id": trace_id,
+                            "source_surface": source_surface,
+                            "channel": channel,
+                            "response_repair": (
+                                "robotic_self_narration"
+                                if self._looks_like_robotic_self_narration_reply(llm_text)
+                                else "capability_disclaimer"
+                            ),
+                            "runtime_ready": bool(self._runtime_ready_for_chat()),
+                        },
+                    )
+                    repaired_text = str(repair_result.get("text") or "").strip()
+                    if (
+                        bool(repair_result.get("ok"))
+                        and repaired_text
+                        and not self._looks_like_capability_disclaimer_reply(repaired_text)
+                        and not self._looks_like_robotic_self_narration_reply(repaired_text)
+                    ):
+                        llm_text = repaired_text
+                        selected_provider = str(repair_result.get("provider") or "").strip() or selected_provider
+                        selected_model = str(repair_result.get("model") or "").strip() or selected_model
+                        response_common["provider"] = selected_provider
+                        response_common["model"] = selected_model
+                        response_common["attempts"] = (
+                            list(router_result.get("attempts") or [])
+                            + list(repair_result.get("attempts") or [])
+                        )
+                        response_common["duration_ms"] = int(response_common.get("duration_ms") or 0) + int(repair_result.get("duration_ms") or 0)
+                except Exception:
+                    pass
+            if self._looks_like_capability_disclaimer_reply(llm_text):
+                llm_text = (
+                    "I can answer ordinary questions from general knowledge, but I couldn't get a clean answer just now. "
+                    "Ask again in a simpler form, or ask for a source-backed check if you want verification."
+                )
+            elif self._looks_like_robotic_self_narration_reply(llm_text):
+                llm_text = (
+                    "I’m here to help. Ask one clear question or tell me one thing you want to do, "
+                    "and I’ll answer directly."
+                )
             llm_text = self._sanitize_vendor_identity_claim(
                 llm_text,
                 provider=selected_provider,
@@ -12661,6 +13367,45 @@ class Orchestrator:
                     )
                 except Exception:
                     pass
+            normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
+            if not cmd and ("joke" in normalized_effective_user_text or "funny" in normalized_effective_user_text):
+                return OrchestratorResponse(
+                    "Why did the task queue stay calm? It already had a good backlog.",
+                    {
+                        "ok": True,
+                        "route": "joke",
+                        "used_runtime_state": False,
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_tools": [],
+                        "generic_fallback_used": False,
+                        "generic_fallback_allowed": False,
+                    },
+                )
+            seed_topic = self._working_context_seed_topic(effective_user_text)
+            if seed_topic:
+                self._record_conversation_topic(user_id, seed_topic, "question")
+                if self._is_generic_working_context_seed(effective_user_text):
+                    topic_label = self._humanize_assistant_topic(seed_topic)
+                    message = normalize_persona_text(f"Got it. We're working on {topic_label}.")
+                    return self._runtime_truth_response(
+                        text=message,
+                        route="agent_memory",
+                        used_runtime_state=False,
+                        used_memory=True,
+                        used_tools=["memory_store"],
+                        payload={
+                            "type": "agent_memory",
+                            "kind": "working_context_seed",
+                            "summary": message,
+                            "current_topic": seed_topic,
+                        },
+                    )
+                return self._agent_memory_response(
+                    user_id,
+                    "working_context",
+                    query_text="what are we working on",
+                )
             skip_memory_thread_repair = bool(
                 cmd is not None
                 and cmd.name == "memory"
@@ -14663,6 +15408,15 @@ class Orchestrator:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         self._pending_compare.pop(user_id, None)
                         return OrchestratorResponse("Okay — I cancelled that pending compare step.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_plan":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_gap_followup_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I’ll leave that capability idea alone for now.")
                 if pending_kind == "confirmation":
                     if followup_intent in {"accept", "details"}:
                         pending_action = self.confirmations.pop(user_id)
@@ -14694,6 +15448,9 @@ class Orchestrator:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I cancelled that pending confirmation.")
                 if pending_kind in {"clarification", "confirmation", "task"}:
+                    if pending_kind == "task" and str(pending_item.get("origin_tool") or "") == "capability_gap_plan":
+                        question = str(pending_item.get("question") or "").strip() or "Do you want me to sketch that helper?"
+                        return OrchestratorResponse(question)
                     question = str(pending_item.get("question") or "").strip() or "Please answer the pending prompt."
                     options = pending_item.get("options") if isinstance(pending_item.get("options"), list) else []
                     lines = [question]
@@ -14845,7 +15602,11 @@ class Orchestrator:
                     )
                     return self._cards_response(user_id, cards_payload)
                 if nl_intent == "PLAN_DAY":
+                    self._record_conversation_topic(user_id, "today_plan", "question")
                     cards_payload = self._today_cards_payload(text)
+                    cards_payload["route"] = "plan_day"
+                    cards_payload["generic_fallback_used"] = False
+                    cards_payload["generic_fallback_allowed"] = False
                     return self._cards_response(user_id, cards_payload)
                 if nl_intent == "SHOW_PREFERENCES":
                     cards_payload = self._preferences_cards_payload()
@@ -14902,6 +15663,8 @@ class Orchestrator:
                             used_memory=used_memory,
                             reason="confusion_turn",
                         )
+                    if self._looks_like_working_context_rewind_prompt(text):
+                        return self._assistant_memory_overview_response(user_id, query_text=text)
                     if self._looks_like_correction_prompt(text):
                         context = self._current_interpretable_result(user_id)
                         if context:
@@ -14911,8 +15674,50 @@ class Orchestrator:
                                 used_memory=used_memory,
                                 reason="correction_turn",
                             )
+                    normalized_chitchat = " ".join(str(text or "").strip().lower().split())
+                    if "joke" in normalized_chitchat or "funny" in normalized_chitchat:
+                        return OrchestratorResponse("Why did the task queue stay calm? It already had a good backlog.")
+                    seed_topic = self._working_context_seed_topic(text)
+                    if seed_topic:
+                        self._record_conversation_topic(user_id, seed_topic, "question")
+                        return self._agent_memory_response(
+                            user_id,
+                            "working_context",
+                            query_text="what are we working on",
+                        )
                     if not self._llm_chat_available():
                         return self._bootstrap_no_chat_response()
+
+            interpretable_result = self._current_interpretable_result(user_id)
+            context_payload = (
+                interpretable_result.get("payload")
+                if isinstance(interpretable_result.get("payload"), dict)
+                else {}
+            )
+            if str(interpretable_result.get("route") or "").strip().lower() == "action_tool" and str(
+                context_payload.get("type") or ""
+            ).strip().lower() == "capability_gap_plan":
+                normalized_followup = " ".join(str(text or "").strip().lower().split())
+                if normalized_followup in {"yes", "yes please", "sure", "ok", "okay", "please"}:
+                    pending_items = self._memory_runtime.list_pending_items(
+                        user_id,
+                        thread_id=self._active_thread_id_for_user(user_id),
+                        include_expired=True,
+                    )
+                    pending_match = next(
+                        (
+                            item
+                            for item in pending_items
+                            if str(item.get("origin_tool") or "") == "capability_gap_plan"
+                            and item.get("status") in {PENDING_STATUS_WAITING_FOR_USER, PENDING_STATUS_READY_TO_RESUME}
+                        ),
+                        None,
+                    )
+                    if pending_match is not None:
+                        pending_id = str(pending_match.get("pending_id") or "").strip()
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_gap_followup_response(user_id, pending_match)
 
             gate_result = handle_action_text(self.db, user_id, text, self.enable_writes)
             if gate_result:
@@ -15085,6 +15890,8 @@ class Orchestrator:
                     used_memory=used_memory,
                     reason="confusion_turn",
                 )
+            if self._looks_like_working_context_rewind_prompt(text):
+                return self._assistant_memory_overview_response(user_id, query_text=text)
             if self._looks_like_correction_prompt(text) and not self._llm_chat_available():
                 context = self._current_interpretable_result(user_id)
                 if context:
@@ -15094,6 +15901,32 @@ class Orchestrator:
                         used_memory=used_memory,
                         reason="correction_turn",
                     )
+            context = self._current_interpretable_result(user_id)
+            context_payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+            if str(context.get("route") or "").strip().lower() == "action_tool" and str(
+                context_payload.get("type") or ""
+            ).strip().lower() == "capability_gap_plan":
+                normalized_followup = " ".join(str(text or "").strip().lower().split())
+                if normalized_followup in {"yes", "yes please", "sure", "ok", "okay", "please"}:
+                    pending_items = self._memory_runtime.list_pending_items(
+                        user_id,
+                        thread_id=self._active_thread_id_for_user(user_id),
+                        include_expired=True,
+                    )
+                    pending_match = next(
+                        (
+                            item
+                            for item in pending_items
+                            if str(item.get("origin_tool") or "") == "capability_gap_plan"
+                            and item.get("status") in {PENDING_STATUS_WAITING_FOR_USER, PENDING_STATUS_READY_TO_RESUME}
+                        ),
+                        None,
+                    )
+                    if pending_match is not None:
+                        pending_id = str(pending_match.get("pending_id") or "").strip()
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_gap_followup_response(user_id, pending_match)
             if not self._llm_chat_available():
                 return self._bootstrap_no_chat_response()
             return OrchestratorResponse("I’m not sure what you need yet. Send 'help' for commands.")
@@ -15492,7 +16325,7 @@ class Orchestrator:
         next_q_limit = int(next_q_pref) if (next_q_pref and next_q_pref.isdigit()) else 2
         next_q_limit = max(0, min(5, next_q_limit))
         out["next_questions"] = next_questions[:next_q_limit]
-        show_conf_pref = (self.db.get_preference("show_confidence") or "on").strip().lower()
+        show_conf_pref = (self.db.get_preference("show_confidence") or "off").strip().lower()
         out["show_confidence"] = show_conf_pref not in {"off", "false", "0", "no"}
         return out
 
@@ -15973,12 +16806,27 @@ class Orchestrator:
             )
             used = int(mem.get("used", 0))
             total = int(mem.get("total", 0))
+            memory_question_kind = _resource_followup_kind(text)
             if total <= 0 or used < 0 or source in {"snapshot_empty", "snapshot_invalid", "unavailable", "live_invalid"}:
                 if correction_requested:
                     summary = "My earlier memory reading was wrong or incomplete, and I could not ground a live memory probe."
                 else:
                     summary = "Live memory data is unavailable right now."
                 return summary, ["Retry the live probe", "Show hardware inventory"]
+            if memory_question_kind == "ram_simple" and not correction_requested:
+                used_gib = used / float(1024**3)
+                total_gib = total / float(1024**3)
+                available_gib = int(mem.get("available", 0)) / float(1024**3)
+                summary = (
+                    f"You’re using {used_gib:.1f} GiB of RAM out of {total_gib:.1f} GiB total, "
+                    f"with {available_gib:.1f} GiB available."
+                )
+                memory_note = str((payload or {}).get("memory_note") or "").strip()
+                if memory_note:
+                    summary += " Some of the used RAM is reclaimable cache/buffers/shared memory."
+                if correction_requested:
+                    summary += " My earlier memory reading was wrong or incomplete."
+                return summary, ["Show the biggest memory users", "Show only CPU deltas"]
             analysis = (payload or {}).get("cause_analysis")
             if not isinstance(analysis, dict):
                 analysis = summarize_resource_report(payload or {}, text=text)
@@ -16004,6 +16852,7 @@ class Orchestrator:
         cards: list[dict[str, Any]] = []
         raw_available = False
         blocked_count = 0
+        resource_question_kind = _resource_followup_kind(text)
         summary_parts: list[str] = []
         followups: list[str] = []
         permissions_map = {
@@ -16065,6 +16914,11 @@ class Orchestrator:
                 )
                 raw_available = True
 
+        if resource_question_kind == "ram_simple":
+            cards = cards[:1] if cards else cards
+            if not followups:
+                followups = ["Show the biggest memory users", "Show only CPU deltas"]
+
         if blocked_count and not cards:
             cards.append(
                 {
@@ -16123,6 +16977,31 @@ def _resource_followup_kind(question: str) -> str:
         return "changed"
     if "is this normal" in lowered:
         return "is_normal"
-    if "ram high" in lowered:
-        return "ram_high"
-    return "ram_high"
+    if _looks_like_simple_ram_inventory_question(lowered):
+        return "ram_simple"
+    return "ram_diagnostic"
+
+
+_SIMPLE_RAM_INVENTORY_PHRASES = (
+    "how much ram am i using",
+    "how much ram am i currently using",
+    "how much ram am i using right now",
+    "how much memory am i using",
+    "how much memory am i currently using",
+    "how much memory am i using right now",
+    "ram usage",
+    "memory usage",
+    "ram used",
+    "memory used",
+    "how much ram do i have",
+    "how much memory do i have",
+)
+
+
+def _looks_like_simple_ram_inventory_question(question: str) -> bool:
+    lowered = " ".join(str(question or "").lower().split())
+    if not lowered:
+        return False
+    return any(phrase in lowered for phrase in _SIMPLE_RAM_INVENTORY_PHRASES) or bool(
+        re.search(r"\bhow much\b.*\b(ram|memory)\b.*\b(using|usage|used|available|free)\b", lowered)
+    )

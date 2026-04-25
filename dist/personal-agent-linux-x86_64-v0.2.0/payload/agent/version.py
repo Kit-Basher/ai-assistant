@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 from importlib import resources as importlib_resources
 from pathlib import Path
+import os
 import subprocess
 
 
@@ -62,18 +63,26 @@ def read_version(*, repo_root: Path | None = None) -> tuple[str, str]:
     return _UNKNOWN_VERSION, "unknown"
 
 
-def read_git_commit(*, repo_root: Path | None = None, timeout_seconds: float = 0.3) -> str | None:
+def read_git_commit(*, repo_root: Path | None = None, timeout_seconds: float | None = None) -> str | None:
     root = (repo_root or repo_root_path()).resolve()
     git_marker = root / ".git"
     if not git_marker.exists():
         return None
+    # Allow env override for slow systems; default 1.0s (was 0.3s)
+    effective_timeout = timeout_seconds
+    if effective_timeout is None:
+        env_timeout = os.getenv("AGENT_GIT_TIMEOUT", "").strip()
+        try:
+            effective_timeout = float(env_timeout) if env_timeout else 1.0
+        except ValueError:
+            effective_timeout = 1.0
     try:
         proc = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
             check=False,
             capture_output=True,
             text=True,
-            timeout=max(0.1, float(timeout_seconds)),
+            timeout=max(0.1, float(effective_timeout)),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -81,7 +90,7 @@ def read_git_commit(*, repo_root: Path | None = None, timeout_seconds: float = 0
     return value or None
 
 
-def read_build_info(*, repo_root: Path | None = None, timeout_seconds: float = 0.3) -> BuildInfo:
+def read_build_info(*, repo_root: Path | None = None, timeout_seconds: float | None = None) -> BuildInfo:
     root = repo_root or repo_root_path()
     version, version_source = read_version(repo_root=root)
     git_commit = read_git_commit(repo_root=root, timeout_seconds=timeout_seconds)

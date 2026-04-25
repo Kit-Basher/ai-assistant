@@ -119,7 +119,7 @@ class TestMemoryRuntime(unittest.TestCase):
                 "status": "WAITING_FOR_USER",
             },
         )
-        for text in ("yes do it", "sure go ahead", "please do it"):
+        for text in ("yes please", "yes do it", "sure go ahead", "please do it"):
             result = self.runtime.resolve_followup("u1", text, "thread-a")
             self.assertEqual("match", result["type"], text)
             self.assertEqual("accept", result["intent"], text)

@@ -67,7 +67,11 @@ class TestFlawlessResponseContract(unittest.TestCase):
         self.assertFalse(envelope["did_work"])
         self.assertEqual("test.intent", envelope["intent"])
         self.assertIn("RuntimeError", envelope["errors"])
-        self.assertTrue(envelope["message"].strip())
+        message = str(envelope["message"] or "").strip().lower()
+        self.assertTrue(message)
+        self.assertIn("something went wrong", message)
+        self.assertIn("try again in a moment", message)
+        self.assertNotIn("internal error", message)
 
     def test_fallback_ladder_never_returns_empty_message(self) -> None:
         def _invalid() -> dict[str, object]:
@@ -110,7 +114,11 @@ class TestFlawlessResponseContract(unittest.TestCase):
 
         self.assertEqual(500, handler.status_code)
         self.assertEqual(False, handler.payload.get("ok"))
-        self.assertTrue(str(handler.payload.get("message") or "").strip())
+        message = str(handler.payload.get("message") or "").strip().lower()
+        self.assertTrue(message)
+        self.assertIn("something went wrong", message)
+        self.assertIn("try again in a moment", message)
+        self.assertNotIn("internal error", message)
 
 
 if __name__ == "__main__":

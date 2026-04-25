@@ -21,7 +21,13 @@ from agent.error_response_ux import deterministic_error_message
 from agent.golden_path import bootstrap_needed
 from agent.onboarding_contract import ONBOARDING_READY
 from agent.persona import normalize_persona_text
-from agent.public_chat import build_no_llm_public_message, build_public_sentence_text, is_no_llm_error_kind
+from agent.public_chat import (
+    build_no_llm_public_message,
+    build_public_sentence_text,
+    build_trivial_social_turn_message,
+    classify_trivial_social_turn,
+    is_no_llm_error_kind,
+)
 from agent.runtime_contract import normalize_user_facing_status
 from agent.setup_wizard import (
     SetupWizardResult,
@@ -267,28 +273,24 @@ def build_telegram_help(
     fetch_local_api_json: Callable[[str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     setup_result = _setup_result_from_runtime(runtime, fetch_local_api_json=fetch_local_api_json)
-    if setup_result is None:
-        return {
-            "ok": True,
-            "text": _TELEGRAM_HELP_TEXT,
-            "route": "help",
-            "trace_id": trace_id,
-            "next_action": None,
-        }
-    if str(setup_result.onboarding_state or "").strip().upper() != ONBOARDING_READY:
-        return {
-            "ok": True,
-            "text": render_telegram_setup_text(setup_result),
-            "route": "help",
-            "trace_id": trace_id,
-            "next_action": str(setup_result.next_action or "").strip() or None,
-        }
+    help_text = _TELEGRAM_HELP_TEXT
+    next_action = None
+    if setup_result is not None and str(setup_result.onboarding_state or "").strip().upper() != ONBOARDING_READY:
+        source = str(setup_result.diagnosis_source or "").strip().lower()
+        if source != "api_probe":
+            summary = str(setup_result.summary or setup_result.why or "").strip()
+            next_action = str(setup_result.next_action or "").strip() or None
+            setup_note = build_public_sentence_text(
+                f"Setup note: {summary}" if summary else "Setup note: setup is not complete",
+                f"Next: {next_action}" if next_action else None,
+            )
+            help_text = f"{help_text}\n\n{setup_note}".strip()
     return {
         "ok": True,
-        "text": _TELEGRAM_HELP_TEXT,
+        "text": help_text,
         "route": "help",
         "trace_id": trace_id,
-        "next_action": None,
+        "next_action": next_action,
     }
 
 
@@ -961,6 +963,15 @@ def handle_telegram_text(
 ) -> dict[str, Any]:
     command = classify_telegram_text_command(text)
     if command is not None:
+        if command == "/memory" and orchestrator is None and runtime is None and callable(fetch_local_api_chat_json):
+            return _canonical_chat_result(
+                text=text,
+                chat_id=chat_id,
+                trace_id=trace_id,
+                runtime=runtime,
+                orchestrator=orchestrator,
+                fetch_local_api_chat_json=fetch_local_api_chat_json,
+            )
         result = handle_telegram_command(
             command=command,
             chat_id=chat_id,
@@ -986,6 +997,32 @@ def handle_telegram_text(
         if isinstance(result.get("text"), str):
             result["text"] = normalize_persona_text(str(result.get("text") or ""))
         return result
+    social_turn_kind = classify_trivial_social_turn(text)
+    if social_turn_kind is not None:
+        social_turn_text = build_trivial_social_turn_message(text) or "Got it. What should I do next?"
+        return {
+            "ok": True,
+            "handled": True,
+            "text": normalize_persona_text(social_turn_text),
+            "route": "generic_chat",
+            "trace_id": trace_id,
+            "next_action": None,
+            "selected_route": "generic_chat",
+            "handler_name": "telegram_social_turn",
+            "used_llm": False,
+            "used_memory": False,
+            "used_runtime_state": False,
+            "used_tools": [],
+            "legacy_compatibility": False,
+            "generic_fallback_used": False,
+            "generic_fallback_reason": None,
+            "chat_meta": {
+                "assistant_turn_type": "social_turn",
+                "assistant_turn_kind": social_turn_kind,
+                "fast_path": True,
+                "proxy_execution_mode": "telegram_social_turn",
+            },
+        }
     result = _canonical_chat_result(
         text=text,
         chat_id=chat_id,

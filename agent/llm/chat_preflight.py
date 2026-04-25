@@ -121,6 +121,7 @@ def prepare_chat_request(
     allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
     model_override = str(payload.get("model") or "").strip() or None
     provider_override = str(payload.get("provider") or "").strip().lower() or None
+    source_surface = str(payload.get("source_surface") or "").strip().lower()
     explicit_require_tools = "require_tools" in payload
     require_tools = bool(payload.get("require_tools"))
     memory_prefix_messages = _memory_prefix_messages(str(payload.get("memory_context_text") or ""))
@@ -131,6 +132,16 @@ def prepare_chat_request(
         if explicit_model_override or explicit_provider_override
         else "default_policy"
     )
+    if (
+        not explicit_model_override
+        and not explicit_provider_override
+        and source_surface in {"webui", "telegram"}
+        and default_model
+        and default_provider
+    ):
+        model_override = default_model
+        provider_override = default_provider
+        selection_reason = "default_target_pin"
 
     escalation_reasons = detect_premium_escalation_triggers(user_text=last_user_text, payload=dict(payload))
     premium_selected: dict[str, Any] | None = None

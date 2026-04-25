@@ -139,6 +139,63 @@ class TestDesktopLauncher(unittest.TestCase):
             self.assertTrue(open_log.is_file())
             self.assertIn("http://127.0.0.1:8765/", open_log.read_text(encoding="utf-8"))
 
+    def test_launcher_can_skip_browser_opening_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            bin_dir = root / "bin"
+            state_dir = root / "state"
+            home.mkdir(parents=True, exist_ok=True)
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            state_dir.mkdir(parents=True, exist_ok=True)
+
+            systemctl_log = state_dir / "systemctl.log"
+            open_log = state_dir / "open.log"
+
+            (bin_dir / "systemctl").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >> \"$SYSTEMCTL_LOG\"\n"
+                "if [ \"${1-}\" = \"--user\" ] && [ \"${2-}\" = \"is-active\" ]; then exit 0; fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '{\"ready\": true, \"summary\": \"Ready.\"}'\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "xdg-open").write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "printf '%s\\n' \"$*\" >> \"$OPEN_LOG\"\n",
+                encoding="utf-8",
+            )
+            for item in ("systemctl", "curl", "xdg-open"):
+                path = bin_dir / item
+                path.chmod(0o755)
+
+            env = os.environ.copy()
+            env.update(
+                {
+                    "HOME": str(home),
+                    "PATH": f"{bin_dir}:/bin:/usr/bin",
+                    "SYSTEMCTL_LOG": str(systemctl_log),
+                    "OPEN_LOG": str(open_log),
+                    "AGENT_LAUNCHER_WAIT_SECONDS": "3",
+                    "AGENT_LAUNCHER_POLL_SECONDS": "0",
+                    "AGENT_LAUNCHER_OPEN_BROWSER": "0",
+                }
+            )
+            proc = _run_script(REPO_ROOT / "scripts" / "launch_webui.sh", env=env)
+
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertTrue(systemctl_log.is_file())
+            self.assertFalse(open_log.exists())
+            self.assertIn("browser auto-open disabled", proc.stderr)
+            self.assertIn("open http://127.0.0.1:8765 manually", proc.stderr.lower())
+
     def test_launcher_opens_when_frontdoor_is_live_even_if_ready_lags(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -205,7 +262,7 @@ class TestDesktopLauncher(unittest.TestCase):
             self.assertIn("http://127.0.0.1:8765/", open_log.read_text(encoding="utf-8"))
             self.assertIn("/ready", curl_log.read_text(encoding="utf-8"))
 
-    def test_launcher_falls_back_to_explicit_browser_when_xdg_open_is_not_visible(self) -> None:
+    def test_launcher_exits_after_successful_xdg_open_without_forcing_browser_fallback(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             home = root / "home"
@@ -275,9 +332,8 @@ class TestDesktopLauncher(unittest.TestCase):
             self.assertIn("Opening Personal Agent UI at http://127.0.0.1:8765", proc.stderr)
             self.assertTrue(xdg_log.is_file())
             self.assertIn("http://127.0.0.1:8765/", xdg_log.read_text(encoding="utf-8"))
-            self.assertTrue(browser_log.is_file())
-            self.assertIn("--new-window http://127.0.0.1:8765/", browser_log.read_text(encoding="utf-8"))
-            self.assertIn("xdg-open did not surface a visible window", proc.stderr)
+            self.assertFalse(browser_log.exists())
+            self.assertIn("handed off to xdg-open", proc.stderr)
 
     def test_launcher_starts_service_when_it_is_not_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

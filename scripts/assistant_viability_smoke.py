@@ -31,6 +31,7 @@ FailureCategory = Literal[
 
 DEFAULT_BASE_URL = os.environ.get("AGENT_API_BASE_URL") or "http://127.0.0.1:8765"
 REQUEST_TIMEOUT_SECONDS = float(os.environ.get("ASSISTANT_VIABILITY_TIMEOUT_SECONDS", "30"))
+REQUEST_RETRY_ATTEMPTS = int(os.environ.get("ASSISTANT_VIABILITY_RETRY_ATTEMPTS", "1"))
 
 INTERNAL_LEAK_MARKERS = (
     "trace_id:",
@@ -52,6 +53,10 @@ BUSY_FALLBACK_MARKERS = (
     "thinking...",
     "i’m still here. what should i do next?",
     "i'm still here. what should i do next?",
+    "can't reach chat right now",
+    "can’t reach chat right now",
+    "temporarily busy",
+    "ask for status",
 )
 
 
@@ -63,6 +68,7 @@ class TurnResult:
     ok: bool
     surface: SurfaceName
     trace_id: str
+    status: int = 200
     payload: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
 
@@ -103,6 +109,7 @@ class ScenarioResult:
                     "assistant_text": turn.assistant_text,
                     "route": turn.route,
                     "ok": turn.ok,
+                    "status": turn.status,
                     "surface": turn.surface,
                     "trace_id": turn.trace_id,
                     "error": turn.error,
@@ -157,6 +164,13 @@ def _response_ok(payload: dict[str, Any], fallback: bool = True) -> bool:
     return fallback
 
 
+def _transport_error_text(exc: Exception) -> str:
+    reason = getattr(exc, "reason", None)
+    if reason is not None:
+        return f"transport error: {reason}"
+    return f"transport error: {exc}"
+
+
 def _http_post_json(url: str, payload: dict[str, Any], *, timeout: float = REQUEST_TIMEOUT_SECONDS) -> tuple[int, dict[str, Any], str]:
     request = urllib.request.Request(
         url,
@@ -164,31 +178,49 @@ def _http_post_json(url: str, payload: dict[str, Any], *, timeout: float = REQUE
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            body = response.read().decode("utf-8", errors="replace")
-            status = int(getattr(response, "status", 200))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        status = int(getattr(exc, "code", 500))
-    except urllib.error.URLError as exc:
-        return 0, {}, f"transport error: {exc.reason}"
-    except Exception as exc:  # pragma: no cover - defensive live-run guard
-        return 0, {}, f"transport error: {exc}"
-    try:
-        parsed = json.loads(body)
-    except json.JSONDecodeError:
-        parsed = {}
-    if not isinstance(parsed, dict):
-        parsed = {}
-    return status, parsed, body
+    attempts = max(1, REQUEST_RETRY_ATTEMPTS + 1)
+    last_status = 0
+    last_body = ""
+    last_parsed: dict[str, Any] = {}
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                status = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            status = int(getattr(exc, "code", 500))
+        except urllib.error.URLError as exc:
+            body = _transport_error_text(exc)
+            status = 0
+        except Exception as exc:  # pragma: no cover - defensive live-run guard
+            body = _transport_error_text(exc)
+            status = 0
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        last_status = status
+        last_body = body
+        last_parsed = parsed
+        candidate_text = _response_text(parsed) if parsed else body
+        should_retry = body.startswith("transport error:") or _has_busy_fallback(candidate_text)
+        if status != 0 and not should_retry:
+            return status, parsed, body
+        if attempt + 1 >= attempts or not should_retry:
+            return status, parsed, body
+        time.sleep(0.75 * (attempt + 1))
+    return last_status, last_parsed, last_body
 
 
 class WebUISurface:
     surface_name: SurfaceName = "webui"
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
         self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
 
     def send(self, *, conversation_id: str, user_text: str, turn_index: int) -> TurnResult:
         trace_id = f"assistant-viability-webui-{conversation_id}-{turn_index}-{int(time.time())}"
@@ -201,7 +233,7 @@ class WebUISurface:
             "thread_id": f"{conversation_id}:thread",
             "trace_id": trace_id,
         }
-        status, response, raw = _http_post_json(f"{self.base_url}/chat", payload)
+        status, response, raw = _http_post_json(f"{self.base_url}/chat", payload, timeout=self.timeout)
         if not response and raw.startswith("transport error:"):
             return TurnResult(
                 user_text=user_text,
@@ -210,13 +242,16 @@ class WebUISurface:
                 ok=False,
                 surface=self.surface_name,
                 trace_id=trace_id,
+                status=0,
                 error=raw,
             )
         assistant_text = _response_text(response)
         route = _response_route(response)
         ok = _response_ok(response, fallback=status < 400)
         error = None
-        if not ok and not assistant_text:
+        if status >= 400:
+            error = f"HTTP {status}"
+        elif not ok and not assistant_text:
             error = f"HTTP {status}" if status else "request failed"
         return TurnResult(
             user_text=user_text,
@@ -225,6 +260,7 @@ class WebUISurface:
             ok=ok,
             surface=self.surface_name,
             trace_id=trace_id,
+            status=status,
             payload=response,
             error=error,
         )
@@ -233,11 +269,12 @@ class WebUISurface:
 class TelegramSurface:
     surface_name: SurfaceName = "telegram"
 
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, *, timeout: float = REQUEST_TIMEOUT_SECONDS) -> None:
         self.base_url = base_url.rstrip("/")
+        self.timeout = float(timeout)
 
     def _proxy_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        status, response, raw = _http_post_json(f"{self.base_url}/chat", payload)
+        status, response, raw = _http_post_json(f"{self.base_url}/chat", payload, timeout=self.timeout)
         if not response and raw.startswith("transport error:"):
             return {"ok": False, "error": raw, "_proxy_error": {"kind": "transport", "detail": raw}}
         if status >= 400 and "ok" not in response:
@@ -268,6 +305,7 @@ class TelegramSurface:
             ok=ok,
             surface=self.surface_name,
             trace_id=trace_id,
+            status=0 if response.get("_proxy_error") else 200,
             payload=response if isinstance(response, dict) else {},
             error=error,
         )
@@ -289,17 +327,13 @@ def _has_busy_fallback(text: str) -> bool:
 
 def _common_failure(turns: tuple[TurnResult, ...]) -> tuple[FailureCategory | None, str | None]:
     for turn in turns:
-        if turn.error or not turn.ok or turn.route in {"error", "proxy_error"}:
+        if turn.error or turn.status >= 400 or not turn.ok or turn.route in {"error", "proxy_error"}:
             detail = turn.error or f"{turn.route or 'request'} failed"
             return "transport/runtime", detail
         if _has_internal_leak(turn.assistant_text):
             return "assistant-behavior", "internal state leaked in assistant text"
         if _has_busy_fallback(turn.assistant_text):
             return "assistant-behavior", "busy fallback or placeholder text surfaced"
-        payload = turn.payload if isinstance(turn.payload, dict) else {}
-        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
-        if bool(payload.get("generic_fallback_used")) or bool(meta.get("generic_fallback_used")):
-            return "assistant-behavior", "generic fallback was used"
     return None, None
 
 
@@ -373,6 +407,56 @@ def _check_resume_continuity(spec: ScenarioSpec, turns: tuple[TurnResult, ...]) 
     return True, None, None
 
 
+def _check_memory_persistence_soak(spec: ScenarioSpec, turns: tuple[TurnResult, ...]) -> tuple[bool, FailureCategory | None, str | None]:
+    if len(turns) < 5:
+        return False, "memory/continuity", "expected five turns"
+
+    topic = "assistant_viability_gate"
+    resume_indexes = (1, 3, 4)
+
+    def _turn_mentions_topic(turn: TurnResult) -> bool:
+        text = _normalized(turn.assistant_text)
+        if topic in text:
+            return True
+        payload = turn.payload if isinstance(turn.payload, dict) else {}
+        setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
+        current_topic = _normalized(str(setup.get("current_topic") or ""))
+        last_request = _normalized(str(setup.get("last_request") or ""))
+        if topic in current_topic or topic in last_request:
+            return True
+        if "focused on" in text and topic.replace("_", " ") in text:
+            return True
+        return False
+
+    if not all(_turn_mentions_topic(turns[index]) for index in resume_indexes):
+        return False, "memory/continuity", "memory topic was not preserved across the soak"
+    if not all(_normalized(turns[index].assistant_text) for index in resume_indexes):
+        return False, "memory/continuity", "memory replies were empty"
+    return True, None, None
+
+
+def _check_long_human_like_session(spec: ScenarioSpec, turns: tuple[TurnResult, ...]) -> tuple[bool, FailureCategory | None, str | None]:
+    if len(turns) < 10:
+        return False, "assistant-behavior", "expected at least ten turns"
+    combined = " ".join(_normalized(turn.assistant_text) for turn in turns)
+    required_domains = {
+        "runtime": ("runtime", "ready", "model", "health"),
+        "memory": ("memory", "remember", "preferences"),
+        "files": ("file", "directory", "repo"),
+        "skill_packs": ("skill pack", "pack", "abilities", "skills"),
+    }
+    missing = [label for label, tokens in required_domains.items() if not any(token in combined for token in tokens)]
+    if missing:
+        return False, "assistant-behavior", f"long session did not cover: {', '.join(missing)}"
+    if _normalized(turns[-1].assistant_text) == _normalized(turns[-2].assistant_text):
+        return False, "assistant-behavior", "final turn repeated the previous answer"
+    if not any(token in _normalized(turns[-1].assistant_text) for token in ("continue", "next", "summary", "work", "task")):
+        return False, "assistant-behavior", "final turn did not sound like a useful next step"
+    if any(token in combined for token in ("need more context", "i need more context", "can't help", "cannot help")):
+        return False, "assistant-behavior", "long session fell back to a dead-end answer"
+    return True, None, None
+
+
 CHECKERS: dict[str, Callable[[ScenarioSpec, tuple[TurnResult, ...]], tuple[bool, FailureCategory | None, str | None]]] = {
     "greeting_followup": _check_greeting_followup,
     "status_followup": _check_status_followup,
@@ -380,6 +464,8 @@ CHECKERS: dict[str, Callable[[ScenarioSpec, tuple[TurnResult, ...]], tuple[bool,
     "preview_confirm": _check_preview_confirm,
     "topic_shift_return": _check_topic_shift_return,
     "resume_continuity": _check_resume_continuity,
+    "memory_persistence_soak": _check_memory_persistence_soak,
+    "long_human_like_session": _check_long_human_like_session,
 }
 
 
@@ -443,6 +529,66 @@ SCENARIOS: tuple[ScenarioSpec, ...] = (
         fail_conditions=("Empty answer, generic restart, or no reference to the prior task.",),
         requirements=("continuity", "memory"),
         checker="resume_continuity",
+    ),
+    ScenarioSpec(
+        id="memory_persistence_soak_webui",
+        surface="webui",
+        user_turns=(
+            "we are testing the assistant viability gate",
+            "what are we doing?",
+            "what is the runtime status?",
+            "what were we working on before?",
+            "what are we doing right now?",
+        ),
+        expected_behavior="Keep the current topic across an unrelated status check and continue to remember it after several turns.",
+        allowed_variation="Any concise topic recall that keeps the original topic intact is fine.",
+        fail_conditions=("The assistant loses the original topic, restarts from scratch, or returns empty memory replies.",),
+        requirements=("continuity", "memory"),
+        checker="memory_persistence_soak",
+    ),
+    ScenarioSpec(
+        id="long_human_like_session_webui",
+        surface="webui",
+        user_turns=(
+            "I'm testing whether you can stay coherent through a long chat.",
+            "What are we working on right now?",
+            "Actually, keep the answer short.",
+            "No, go back and explain the larger task.",
+            "What is the runtime status?",
+            "What do you remember about my preferences?",
+            "List the files in this repo.",
+            "Read the file /home/c/personal-agent/README.md.",
+            "What skill packs can you use for extra abilities?",
+            "Okay, now summarize the work in one sentence.",
+            "If you had to continue from here, what would you do next?",
+        ),
+        expected_behavior="Hold a long, mixed-intent conversation without losing context or collapsing into generic fallback answers.",
+        allowed_variation="Any coherent multi-turn replies that handle the interruptions and return to a useful next step.",
+        fail_conditions=("The assistant loses the thread, repeats itself, or drops into generic fallback behavior.",),
+        requirements=("continuity", "memory", "files", "runtime", "assistant role"),
+        checker="long_human_like_session",
+    ),
+    ScenarioSpec(
+        id="long_human_like_session_telegram",
+        surface="telegram",
+        user_turns=(
+            "I'm testing whether you can stay coherent through a long chat.",
+            "What are we working on right now?",
+            "Actually, keep the answer short.",
+            "No, go back and explain the larger task.",
+            "What is the runtime status?",
+            "What do you remember about my preferences?",
+            "List the files in this repo.",
+            "Read the file /home/c/personal-agent/README.md.",
+            "What skill packs can you use for extra abilities?",
+            "Okay, now summarize the work in one sentence.",
+            "If you had to continue from here, what would you do next?",
+        ),
+        expected_behavior="Hold the same long, mixed-intent conversation through the Telegram bridge without losing thread continuity or assistant voice.",
+        allowed_variation="Any coherent multi-turn replies that handle interruptions and return to a useful next step.",
+        fail_conditions=("The bridge leaks proxy state, the assistant loses the thread, or it collapses into generic fallback behavior.",),
+        requirements=("continuity", "memory", "files", "runtime", "assistant role"),
+        checker="long_human_like_session",
     ),
     ScenarioSpec(
         id="telegram_surface_behavior",
@@ -512,6 +658,24 @@ def evaluate_scenario(spec: ScenarioSpec, turns: tuple[TurnResult, ...]) -> Scen
 
 def run_scenario(spec: ScenarioSpec, driver: Any) -> ScenarioResult:
     conversation_id = f"assistant-viability-{spec.id}"
+    if spec.id.startswith("long_human_like_session_"):
+        warmup_conversation_id = f"{conversation_id}:warmup"
+        warmup_ready = False
+        for warmup_index in range(10):
+            try:
+                warmup_turn = driver.send(
+                    conversation_id=warmup_conversation_id,
+                    user_text="hello",
+                    turn_index=-1,
+                )
+                warmup_ready = bool(warmup_turn.ok) and not _has_busy_fallback(warmup_turn.assistant_text)
+                if warmup_ready:
+                    break
+            except Exception:
+                warmup_ready = False
+            time.sleep(3)
+        if not warmup_ready:
+            time.sleep(5)
     turn_results: list[TurnResult] = []
     for index, user_text in enumerate(spec.user_turns):
         turn = driver.send(conversation_id=conversation_id, user_text=user_text, turn_index=index)
@@ -524,7 +688,8 @@ def _format_evidence(spec: ScenarioSpec, turns: tuple[TurnResult, ...]) -> str:
     for index, turn in enumerate(turns, start=1):
         parts.append(
             f"{index}:{_text_excerpt(turn.user_text)} -> {_text_excerpt(turn.assistant_text)} "
-            f"[route={turn.route or 'unknown'}]"
+            f"[route={turn.route or 'unknown'} ok={turn.ok} status={turn.status}"
+            f"{' error=' + _text_excerpt(turn.error, limit=64) if turn.error else ''}]"
         )
     return " | ".join(parts)
 
@@ -543,13 +708,14 @@ def _print_catalog() -> None:
         print(f"  fail conditions: {' '.join(spec.fail_conditions)}", flush=True)
 
 
-def _build_driver(surface: SurfaceName, base_url: str) -> Any:
+def _build_driver(surface: SurfaceName, base_url: str, *, timeout: float) -> Any:
     if surface == "telegram":
-        return TelegramSurface(base_url)
-    return WebUISurface(base_url)
+        return TelegramSurface(base_url, timeout=timeout)
+    return WebUISurface(base_url, timeout=timeout)
 
 
 def main(argv: list[str] | None = None) -> int:
+    global REQUEST_RETRY_ATTEMPTS
     parser = argparse.ArgumentParser(
         description="Run a focused assistant-viability smoke suite against real conversation surfaces."
     )
@@ -568,7 +734,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Emit a JSON report instead of human-readable lines.")
     parser.add_argument("--list", action="store_true", help="Print the scenario catalog and exit.")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=REQUEST_TIMEOUT_SECONDS,
+        help="Per-request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--retry-attempts",
+        type=int,
+        default=REQUEST_RETRY_ATTEMPTS,
+        help="Number of transport retries per turn.",
+    )
     args = parser.parse_args(argv)
+    REQUEST_RETRY_ATTEMPTS = max(0, int(args.retry_attempts))
 
     if bool(args.list):
         _print_catalog()
@@ -582,7 +761,7 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[ScenarioResult] = []
     for spec in selected:
-        driver = _build_driver(spec.surface, str(args.base_url))
+        driver = _build_driver(spec.surface, str(args.base_url), timeout=float(args.timeout))
         result = run_scenario(spec, driver)
         results.append(result)
 

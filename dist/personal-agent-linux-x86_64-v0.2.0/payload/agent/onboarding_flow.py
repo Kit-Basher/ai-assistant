@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from agent.packs.capability_recommendation import recommend_packs_for_capability, render_pack_capability_response
 from agent.persona import normalize_persona_text
@@ -153,7 +156,8 @@ def load_onboarding_state(db: Any, user_id: str) -> dict[str, Any]:
     try:
         completed_raw = db.get_user_pref(completed_key) if callable(getattr(db, "get_user_pref", None)) else None
         intent_hint = db.get_user_pref(intent_key) if callable(getattr(db, "get_user_pref", None)) else None
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load onboarding state: %s", exc)
         return {
             "available": False,
             "completed": True,

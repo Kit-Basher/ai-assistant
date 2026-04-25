@@ -59,7 +59,7 @@ def classify_ambiguity(
     if normalized in _AMBIGUOUS_PHRASES:
         return AmbiguityVerdict(level="AMBIGUOUS", reason="known_vague_phrase", normalized_text=normalized, token_count=token_count)
     if token_count <= 2:
-        return AmbiguityVerdict(level="AMBIGUOUS", reason="short_message", normalized_text=normalized, token_count=token_count)
+        return AmbiguityVerdict(level="CLEAR", reason="short_chat_turn", normalized_text=normalized, token_count=token_count)
     return AmbiguityVerdict(level="CLEAR", reason="clear_enough", normalized_text=normalized, token_count=token_count)
 
 

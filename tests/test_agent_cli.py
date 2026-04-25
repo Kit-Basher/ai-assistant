@@ -351,7 +351,7 @@ class TestAgentCLI(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("runtime_mode: READY", text)
         self.assertIn("ollama:qwen2.5:7b-instruct", text)
-        connection_cls.assert_called_once_with("127.0.0.1", port=8765, timeout=6.0)
+        connection_cls.assert_called_once_with("127.0.0.1", port=cli.runtime_port(), timeout=6.0)
 
     def test_telegram_status_command_reports_disabled_optional(self) -> None:
         output = io.StringIO()
@@ -852,6 +852,38 @@ class TestAgentCLI(unittest.TestCase):
         text = output.getvalue()
         self.assertIn("Memory summary", text)
         self.assertIn("Pending items: 0", text)
+
+    def test_packs_subcommand_prints_safety_summary(self) -> None:
+        output = io.StringIO()
+        status_payload = {
+            "ok": True,
+            "skills": [
+                {"skill_id": "native_read", "allowed": True, "requires_user_approval": False, "reason": "ok"},
+                {"skill_id": "external_pack", "allowed": False, "requires_user_approval": True, "reason": "needs_review"},
+                {"skill_id": "blocked_pack", "allowed": False, "requires_user_approval": False, "reason": "forbidden_persistence_pattern"},
+            ],
+            "managed_adapters": [],
+            "background_tasks": [],
+        }
+        state_payload = {
+            "ok": True,
+            "summary": {"installed": 2, "available": 1, "usable": 1, "blocked": 1},
+            "packs": [{"name": "native_read", "state": "installed_healthy"}],
+            "available_packs": [{"name": "blocked_pack", "state": "blocked"}],
+            "source_warnings": [],
+        }
+        with patch("agent.cli._http_json", side_effect=[(True, status_payload), (True, state_payload)]), redirect_stdout(output):
+            code = cli.main(["packs"])
+        self.assertEqual(0, code)
+        text = output.getvalue()
+        self.assertIn("Pack and skill safety", text)
+        self.assertIn("skills: total=3 allowed=1 pending=1 blocked=1", text)
+        self.assertIn("packs: installed=2 available=1 usable=1 blocked=1", text)
+        self.assertIn("blocked_skills:", text)
+        self.assertIn("blocked_packs:", text)
+
+    def test_default_api_base_url_tracks_runtime_split(self) -> None:
+        self.assertEqual(cli._DEFAULT_API_BASE_URL, cli.runtime_api_base_url())
 
     def test_main_uses_sys_argv_for_doctor_when_argv_none(self) -> None:
         with patch.object(sys, "argv", ["python -m agent", "doctor", "--json"]):

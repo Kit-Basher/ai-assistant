@@ -227,7 +227,13 @@ class TestAssistantBehaviorReleaseGate(unittest.TestCase):
         self.assertNotIn("thread_id", meta)
         self.assertNotIn("user_id", meta)
         if no_llm_expected:
-            self.assertEqual(build_no_llm_public_message(), text)
+            self.assertIn(
+                text,
+                {
+                    build_no_llm_public_message(),
+                    build_no_llm_public_message(runtime_ready=True),
+                },
+            )
         else:
             self.assertNotEqual(build_no_llm_public_message(), text)
         return text
@@ -324,14 +330,14 @@ class TestAssistantBehaviorReleaseGate(unittest.TestCase):
                             if use_network
                             else request_json(runtime, "POST", "/chat", payload)
                         )
-                        self.assertEqual(200, status)
+                        self.assertEqual(200, status, raw)
                         text = self._assert_public_assistant_reply(body)
                         self.assertNotIn("trace_id", raw.lower())
                         self.assertGreaterEqual(len(text.split()), 4)
 
                 with mock.patch.object(orchestrator, "_llm_chat_available", return_value=False):
                     no_llm_payload = {
-                        "messages": [{"role": "user", "content": "hello"}],
+                        "messages": [{"role": "user", "content": "tell me about a bicycle"}],
                         "source_surface": "api",
                         "user_id": "gate:no-llm",
                         "thread_id": "gate:no-llm:thread",
@@ -340,16 +346,325 @@ class TestAssistantBehaviorReleaseGate(unittest.TestCase):
                         request_json(request_base, "POST", "/chat", no_llm_payload)
                         if use_network
                         else request_json(runtime, "POST", "/chat", no_llm_payload)
-                    )
+                )
                 self.assertEqual(200, status)
                 text = self._assert_public_assistant_reply(body, no_llm_expected=True)
                 self.assertNotIn("trace_id", raw.lower())
-                self.assertEqual(build_no_llm_public_message(), text)
             finally:
                 if server is not None and thread is not None:
                     server.shutdown()
                     server.server_close()
                     thread.join(timeout=2.0)
+
+    def test_release_gate_repairs_capability_disclaimer_for_general_knowledge(self) -> None:
+        runtime = self._runtime()
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": True,
+            "phase": "ready",
+            "startup_phase": "ready",
+            "runtime_mode": "READY",
+            "summary": "Ready to chat.",
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "What colour is a bluejay?"}],
+            "source_surface": "api",
+            "user_id": "gate:bluejay",
+            "thread_id": "gate:bluejay:thread",
+        }
+        route_results = [
+            {
+                "ok": True,
+                "text": (
+                    "I am unable to access external information or sensory perception, "
+                    "and am unable to provide information about birds or their colors."
+                ),
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+            {
+                "ok": True,
+                "text": "A blue jay is mostly blue with a white face, a dark collar, and black barring.",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+        ]
+
+        with (
+            mock.patch.object(runtime, "ready_status", return_value=ready_payload),
+            mock.patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            mock.patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            mock.patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            mock.patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            mock.patch(
+                "agent.api_server.detect_low_confidence",
+                return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "bluejay"}),
+            ),
+            mock.patch(
+                "agent.api_server.classify_ambiguity",
+                return_value=SimpleNamespace(ambiguous=False, reason="none"),
+            ),
+            mock.patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+            mock.patch("agent.orchestrator.route_inference", side_effect=route_results),
+            mock.patch.object(orchestrator, "_llm_chat_available", return_value=True),
+        ):
+            status, body, raw = self._memory_request_json(runtime, "POST", "/chat", payload)
+
+        self.assertEqual(200, status, raw)
+        text = self._assert_public_assistant_reply(body)
+        self.assertIn("blue", text.lower())
+        self.assertNotIn("ai language model", text.lower())
+        self.assertNotIn("sensory", text.lower())
+
+    def test_release_gate_rewrites_persistent_capability_disclaimer(self) -> None:
+        runtime = self._runtime()
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": True,
+            "phase": "ready",
+            "startup_phase": "ready",
+            "runtime_mode": "READY",
+            "summary": "Ready to chat.",
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "What colour is a bluejay?"}],
+            "source_surface": "api",
+            "user_id": "gate:bluejay-fallback",
+            "thread_id": "gate:bluejay-fallback:thread",
+        }
+        route_results = [
+            {
+                "ok": True,
+                "text": "I am unable to provide information about birds or their colors.",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+            {
+                "ok": True,
+                "text": "I do not have access to external information or sensory perceptions.",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+        ]
+
+        with (
+            mock.patch.object(runtime, "ready_status", return_value=ready_payload),
+            mock.patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            mock.patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            mock.patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            mock.patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            mock.patch(
+                "agent.api_server.detect_low_confidence",
+                return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "bluejay"}),
+            ),
+            mock.patch(
+                "agent.api_server.classify_ambiguity",
+                return_value=SimpleNamespace(ambiguous=False, reason="none"),
+            ),
+            mock.patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+            mock.patch("agent.orchestrator.route_inference", side_effect=route_results),
+            mock.patch.object(orchestrator, "_llm_chat_available", return_value=True),
+        ):
+            status, body, raw = self._memory_request_json(runtime, "POST", "/chat", payload)
+
+        self.assertEqual(200, status, raw)
+        text = self._assert_public_assistant_reply(body)
+        self.assertIn("general knowledge", text.lower())
+        self.assertNotIn("ai language model", text.lower())
+        self.assertNotIn("sensory", text.lower())
+
+    def test_release_gate_repairs_robotic_self_narration_reply(self) -> None:
+        runtime = self._runtime()
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": True,
+            "phase": "ready",
+            "startup_phase": "ready",
+            "runtime_mode": "READY",
+            "summary": "Ready to chat.",
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "hello there"}],
+            "source_surface": "api",
+            "user_id": "gate:robotic-repair",
+            "thread_id": "gate:robotic-repair:thread",
+        }
+        route_results = [
+            {
+                "ok": True,
+                "text": "I am designed to maintain coherence and provide helpful and accurate assistance.",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+            {
+                "ok": True,
+                "text": "Hi. I’m here and ready to help. What do you want to do?",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+        ]
+
+        with (
+            mock.patch.object(runtime, "ready_status", return_value=ready_payload),
+            mock.patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            mock.patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            mock.patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            mock.patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            mock.patch(
+                "agent.api_server.detect_low_confidence",
+                return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "hello there"}),
+            ),
+            mock.patch(
+                "agent.api_server.classify_ambiguity",
+                return_value=SimpleNamespace(ambiguous=False, reason="none"),
+            ),
+            mock.patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+            mock.patch("agent.orchestrator.route_inference", side_effect=route_results),
+            mock.patch.object(orchestrator, "_llm_chat_available", return_value=True),
+        ):
+            status, body, raw = self._memory_request_json(runtime, "POST", "/chat", payload)
+
+        self.assertEqual(200, status, raw)
+        text = self._assert_public_assistant_reply(body)
+        self.assertIn("ready to help", text.lower())
+        self.assertNotIn("designed to", text.lower())
+        self.assertNotIn("maintain coherence", text.lower())
+
+    def test_release_gate_rewrites_persistent_robotic_self_narration(self) -> None:
+        runtime = self._runtime()
+        orchestrator = runtime.orchestrator()
+        ready_payload = {
+            "ok": True,
+            "ready": True,
+            "phase": "ready",
+            "startup_phase": "ready",
+            "runtime_mode": "READY",
+            "summary": "Ready to chat.",
+        }
+        payload = {
+            "messages": [{"role": "user", "content": "hello there"}],
+            "source_surface": "api",
+            "user_id": "gate:robotic-fallback",
+            "thread_id": "gate:robotic-fallback:thread",
+        }
+        route_results = [
+            {
+                "ok": True,
+                "text": "Our purpose is to provide helpful, truthful, and accurate assistance.",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+            {
+                "ok": True,
+                "text": "My role is to assist users by providing helpful and accurate information.",
+                "provider": "ollama",
+                "model": "ollama:qwen2.5:7b-instruct",
+                "duration_ms": 1,
+                "attempts": [],
+                "fallback_used": False,
+            },
+        ]
+
+        with (
+            mock.patch.object(runtime, "ready_status", return_value=ready_payload),
+            mock.patch.object(runtime, "chat_route_decision", return_value={"route": "generic_chat"}),
+            mock.patch.object(runtime, "should_use_assistant_frontdoor", return_value=False),
+            mock.patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None),
+            mock.patch.object(runtime, "consume_clarify_recovery_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_binary_clarification_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_intent_choice", return_value=(False, {})),
+            mock.patch.object(runtime, "consume_thread_integrity_choice", return_value=(False, {})),
+            mock.patch(
+                "agent.api_server.detect_low_confidence",
+                return_value=SimpleNamespace(is_low_confidence=False, reason="none", debug={"norm": "hello there"}),
+            ),
+            mock.patch(
+                "agent.api_server.classify_ambiguity",
+                return_value=SimpleNamespace(ambiguous=False, reason="none"),
+            ),
+            mock.patch(
+                "agent.api_server.assess_intent_deterministic",
+                return_value=IntentAssessment(
+                    decision="proceed",
+                    confidence=1.0,
+                    candidates=[IntentCandidate(intent="chat", score=1.0, reason="smoke", details={})],
+                    next_question=None,
+                    debug={"source": "smoke"},
+                ),
+            ),
+            mock.patch("agent.orchestrator.route_inference", side_effect=route_results),
+            mock.patch.object(orchestrator, "_llm_chat_available", return_value=True),
+        ):
+            status, body, raw = self._memory_request_json(runtime, "POST", "/chat", payload)
+
+        self.assertEqual(200, status, raw)
+        text = self._assert_public_assistant_reply(body)
+        self.assertTrue(
+            "ready to help" in text.lower() or "what can i do for you" in text.lower(),
+            text,
+        )
+        self.assertNotIn("purpose", text.lower())
+        self.assertNotIn("my role", text.lower())
 
 
 if __name__ == "__main__":

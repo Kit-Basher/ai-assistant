@@ -1159,7 +1159,7 @@ class ModelDiscoveryManager:
         registry_path = str(getattr(config, "llm_registry_path", "") or "").strip() or None
         if registry_path:
             return load_registry_document(registry_path)
-        return {}
+        return load_registry_document(None)
 
     def _query_huggingface(self, query: str | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         return _query_huggingface(query, fetch_json=self._fetch_json)

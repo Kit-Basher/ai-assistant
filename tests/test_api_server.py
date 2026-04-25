@@ -29,6 +29,7 @@ from agent.model_watch_catalog import write_snapshot_atomic
 from agent.public_chat import build_no_llm_public_message, build_trivial_social_turn_message
 from agent.modelops.discovery import ModelInfo
 from agent.orchestrator import OrchestratorResponse
+from agent.memory_runtime import MemoryRuntime
 from agent.safe_mode_ux import build_safe_mode_paused_message
 
 
@@ -156,6 +157,49 @@ class TestAPIServerRuntime(unittest.TestCase):
         ):
             self.assertTrue(runtime.assistant_chat_available())
             self.assertTrue(runtime.assistant_frontdoor_active())
+
+    def test_assistant_frontdoor_active_in_controlled_mode_when_runtime_ready(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        truth = runtime.runtime_truth_service()
+
+        with patch.object(runtime, "_safe_mode_enabled", return_value=False), patch.object(
+            truth,
+            "ready_status",
+            return_value={
+                "ok": True,
+                "ready": True,
+                "phase": "ready",
+                "runtime_mode": "READY",
+                "summary": "Ready.",
+            },
+        ):
+            self.assertTrue(runtime.assistant_frontdoor_active())
+            self.assertTrue(
+                runtime.should_use_assistant_frontdoor(
+                    text="what are you and what is the agent layer supposed to do?",
+                    route_decision={"route": "runtime_guard"},
+                    is_user_chat=True,
+                )
+            )
+
+    def test_assistant_chat_available_primes_authoritative_health_for_the_current_target(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        with patch.object(runtime, "_safe_mode_enabled", return_value=False), patch.object(
+            runtime,
+            "model_status",
+            return_value={
+                "llm_availability": {"available": True},
+                "current": {"provider": "ollama", "model_id": "ollama:qwen2.5:7b-instruct"},
+                "default_provider": "ollama",
+                "resolved_default_model": "ollama:qwen2.5:7b-instruct",
+            },
+        ), patch.object(
+            runtime,
+            "_record_authoritative_provider_success",
+        ) as record_success:
+            self.assertTrue(runtime.assistant_chat_available())
+
+        record_success.assert_called_once_with("ollama", "ollama:qwen2.5:7b-instruct")
 
     def test_ready_and_state_expose_chat_usability_when_llm_is_available(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1049,6 +1093,17 @@ class TestAPIServerRuntime(unittest.TestCase):
                         "fallback_used": False,
                         "attempts": [],
                         "duration_ms": 1,
+                        "memory_diagnostics": {
+                            "used": True,
+                            "reason": "context_built",
+                            "context_chars": 13,
+                            "sources": {
+                                "payload_context": True,
+                                "selective_context": False,
+                                "working_memory": False,
+                                "client_history": False,
+                            },
+                        },
                     },
                 )
 
@@ -1087,6 +1142,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(bool(meta.get("used_runtime_state")))
         self.assertTrue(bool(meta.get("used_llm")))
         self.assertTrue(bool(meta.get("used_memory")))
+        memory_diagnostics = meta.get("memory_diagnostics") if isinstance(meta.get("memory_diagnostics"), dict) else {}
+        self.assertEqual("context_built", memory_diagnostics.get("reason"))
+        self.assertEqual(13, memory_diagnostics.get("context_chars"))
         self.assertFalse(hasattr(runtime, "_maybe_handle_setup_chat"))
         self.assertFalse(hasattr(runtime, "_setup_chat_response"))
         self.assertFalse(hasattr(runtime, "_runtime_state_unavailable_response"))
@@ -1276,6 +1334,78 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("api:default:thread", kwargs["thread_id"])
         self.assertIsInstance(kwargs["autopilot_meta"], dict)
 
+    def test_chat_tolerates_non_mapping_orchestrator_response_data(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "qwen3.5:4b",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.set_default_chat_model("ollama:qwen3.5:4b")
+
+        class _FakeOrchestrator:
+            def handle_message(
+                self,
+                text: str,
+                *,
+                user_id: str,
+                chat_context: dict[str, object] | None = None,
+            ) -> OrchestratorResponse:
+                return OrchestratorResponse("Yes. We can continue.", [("route", "generic_chat")])  # type: ignore[arg-type]
+
+        with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch.object(
+            runtime,
+            "orchestrator",
+            return_value=_FakeOrchestrator(),
+        ):
+            ok_chat, body = runtime.chat(
+                {
+                    "messages": [{"role": "user", "content": "I'm testing whether you can stay coherent through a long chat."}],
+                    "source_surface": "telegram",
+                    "user_id": "api:non-mapping",
+                    "thread_id": "api:non-mapping:thread",
+                }
+            )
+
+        self.assertTrue(ok_chat)
+        self.assertEqual("Yes. We can continue.", body.get("message"))
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        self.assertEqual("generic_chat", meta.get("route"))
+
+    def test_chat_plan_day_route_returns_planning_reply_instead_of_runtime_fallback(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "qwen3.5:4b",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.set_default_chat_model("ollama:qwen3.5:4b")
+
+        with patch.object(runtime, "_auto_bootstrap_local_chat_model", return_value=None), patch(
+            "agent.orchestrator.route_inference",
+            side_effect=AssertionError("LLM should not run"),
+        ):
+            ok_chat, body = runtime.chat(
+                {
+                    "messages": [{"role": "user", "content": "help me plan my day"}],
+                    "source_surface": "webui",
+                    "user_id": "api:plan-day",
+                    "thread_id": "api:plan-day:thread",
+                }
+            )
+
+        self.assertTrue(ok_chat)
+        self.assertIn("Today priorities", str(body.get("message") or ""))
+        self.assertNotEqual("runtime_state_unavailable", body.get("error_kind"))
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        self.assertEqual("plan_day", meta.get("route"))
+
     def test_chat_preserves_response_envelope_for_preflight_short_circuit(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         prepared = PreparedChatRequest(
@@ -1401,6 +1531,8 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(bool(meta.get("used_llm")))
         self.assertFalse(bool(meta.get("used_runtime_state")))
         self.assertFalse(bool(meta.get("used_memory")))
+        self.assertFalse(bool(meta.get("generic_fallback_used")))
+        self.assertFalse(bool(meta.get("generic_fallback_allowed")))
         self.assertEqual("social_turn", meta.get("assistant_turn_type"))
         self.assertEqual("greeting", meta.get("assistant_turn_kind"))
         chat_timing_ms = meta.get("chat_timing_ms") if isinstance(meta.get("chat_timing_ms"), dict) else {}
@@ -1421,7 +1553,18 @@ class TestAPIServerRuntime(unittest.TestCase):
             "_auto_bootstrap_local_chat_model",
             side_effect=AssertionError("social turns should not auto-bootstrap"),
         ):
-            for text in ["hi", "hey", "thanks", "ok", "good morning", "good evening"]:
+            for text in [
+                "hi",
+                "hey",
+                "thanks",
+                "ok",
+                "good morning",
+                "good evening",
+                "hello there",
+                "say hi",
+                "are you really there",
+                "herllo",
+            ]:
                 with self.subTest(text=text):
                     ok_chat, body = runtime.chat({"messages": [{"role": "user", "content": text}]})
                     self.assertTrue(ok_chat)
@@ -1430,6 +1573,8 @@ class TestAPIServerRuntime(unittest.TestCase):
                     meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
                     self.assertEqual("social_turn", meta.get("assistant_turn_type"))
                     self.assertFalse(bool(meta.get("used_llm")))
+                    self.assertFalse(bool(meta.get("generic_fallback_used")))
+                    self.assertFalse(bool(meta.get("generic_fallback_allowed")))
                     self.assertIsInstance(meta.get("chat_timing_ms"), dict)
 
     def test_chat_model_status_routes_expose_truth_timing(self) -> None:
@@ -4386,6 +4531,146 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("next message", str(first.response_payload.get("message") or "").lower())
         self.assertEqual({}, runtime._intent_choice_state)
 
+    def test_chat_followup_hint_skips_generic_ambiguity_clarifier(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        memory_runtime = MemoryRuntime(runtime._ensure_memory_db())
+        memory_runtime.add_pending_item(
+            "api:followup",
+            {
+                "kind": "followup",
+                "origin_tool": "capability_gap_plan",
+                "question": "I can sketch a small helper. What should it read from first?",
+                "options": ["yes", "no"],
+                "status": "READY_TO_RESUME",
+                "thread_id": "api:followup:thread",
+                "context": {
+                    "helper_name": "helper",
+                    "proposal_summary": "reads text aloud",
+                    "capability_label": "voice output",
+                },
+            },
+        )
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        payload = {
+            "messages": [{"role": "user", "content": "yes please"}],
+            "source_surface": "api",
+            "user_id": "api:followup",
+            "thread_id": "api:followup:thread",
+        }
+
+        with patch("agent.api_server.classify_ambiguity", return_value=SimpleNamespace(ambiguous=True, reason="short_message")), patch.object(
+            runtime,
+            "consume_clarify_recovery_choice",
+            side_effect=AssertionError("legacy recovery should be bypassed"),
+        ), patch.object(
+            runtime,
+            "consume_binary_clarification_choice",
+            side_effect=AssertionError("legacy binary choice should be bypassed"),
+        ), patch.object(
+            runtime,
+            "consume_intent_choice",
+            side_effect=AssertionError("legacy intent choice should be bypassed"),
+        ), patch.object(
+            runtime,
+            "consume_thread_integrity_choice",
+            return_value=(False, {}),
+        ), patch.object(
+            runtime,
+            "consume_bootstrap_greeting_if_needed",
+            return_value=None,
+        ), patch.object(
+            runtime,
+            "chat",
+            return_value=(
+                True,
+                {
+                    "assistant": {
+                        "role": "assistant",
+                        "content": "I can sketch a small helper that reads text aloud. What should it read from first?",
+                    },
+                    "meta": {"assistant_turn_type": "task"},
+                },
+            ),
+        ) as chat_mock:
+            handler = _HandlerForTest(runtime, payload)
+            handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        self.assertEqual(1, chat_mock.call_count)
+        message = str(handler.response_payload.get("message") or "").lower()
+        self.assertNotIn("what do you want me to do right now", message)
+        self.assertNotIn("do you mean:", message)
+
+    def test_chat_skips_bootstrap_greeting_hook_when_response_requests_no_post_hooks(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        class _HandlerForTest(APIServerHandler):
+            def __init__(self, runtime_obj: AgentRuntime, payload: dict[str, object]) -> None:
+                self.runtime = runtime_obj
+                self.path = "/chat"
+                self.headers = {"Content-Length": "0"}
+                self._payload = dict(payload)
+                self.status_code = 0
+                self.response_payload: dict[str, object] = {}
+
+            def _read_json(self) -> dict[str, object]:  # type: ignore[override]
+                return dict(self._payload)
+
+            def _send_json(self, status: int, payload: dict[str, object]) -> None:  # type: ignore[override]
+                self.status_code = status
+                self.response_payload = json.loads(json.dumps(payload, ensure_ascii=True))
+
+        payload = {
+            "messages": [{"role": "user", "content": "what can you help me with right now?"}],
+            "source_surface": "webui",
+            "user_id": "api:capabilities",
+            "thread_id": "api:capabilities:thread",
+        }
+
+        with patch.object(
+            runtime,
+            "consume_bootstrap_greeting_if_needed",
+            side_effect=AssertionError("bootstrap greeting hook should be skipped"),
+        ), patch.object(
+            runtime,
+            "chat",
+            return_value=(
+                True,
+                {
+                    "assistant": {
+                        "role": "assistant",
+                        "content": "Here’s what I can do right now:\n- Runtime and model status: I can inspect the active provider.",
+                    },
+                    "message": "Here’s what I can do right now:\n- Runtime and model status: I can inspect the active provider.",
+                    "meta": {
+                        "route": "assistant_capabilities",
+                        "skip_post_response_hooks": True,
+                    },
+                },
+            ),
+        ):
+            handler = _HandlerForTest(runtime, payload)
+            handler.do_POST()
+
+        self.assertEqual(200, handler.status_code)
+        self.assertIn("here’s what i can do right now", str(handler.response_payload.get("message") or "").lower())
+
     def test_safe_mode_chat_bypasses_legacy_choice_and_fixit_consumers(self) -> None:
         runtime = AgentRuntime(
             _config(
@@ -4617,10 +4902,17 @@ class TestAPIServerRuntime(unittest.TestCase):
 
         utterances = (
             ("waht model are you using?", "model_status"),
+            ("what model are you uding?", "model_status"),
             ("wat models are availble?", "model_status"),
             ("what model u on right now?", "model_status"),
             ("wut local models u got?", "model_status"),
+            ("what provder are you using?", "model_status"),
             ("r u healthy right now?", "runtime_status"),
+            ("r u heathy right now?", "runtime_status"),
+            ("what runtim status", "runtime_status"),
+            ("what are we doin?", "agent_memory"),
+            ("go bak to the day plan", "agent_memory"),
+            ("what shoud we do next", "agent_memory"),
             ("ollma status", "provider_status"),
         )
 

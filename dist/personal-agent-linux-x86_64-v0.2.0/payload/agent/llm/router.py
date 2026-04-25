@@ -263,11 +263,7 @@ class LLMRouter:
         if not isinstance(row, dict):
             return False
         status = str(row.get("status") or "unknown").strip().lower()
-        cooldown_until = int(row.get("cooldown_until") or 0)
-        now = int(time.time())
-        if status == "down" and cooldown_until and now < cooldown_until:
-            return True
-        if status == "degraded" and cooldown_until and now < cooldown_until:
+        if status == "down":
             return True
         return False
 
@@ -524,6 +520,8 @@ class LLMRouter:
 
         penalty = 0.0
         now = float(self._time_fn())
+        external_provider_status = str((self._external_provider_health(model.provider) or {}).get("status") or "unknown").strip().lower()
+        external_model_status = str((self._external_model_health(model.id) or {}).get("status") or "unknown").strip().lower()
 
         if outcome.cooldown_until is not None and now < outcome.cooldown_until:
             if outcome.cooldown_reason == "rate_limit":
@@ -537,6 +535,10 @@ class LLMRouter:
         if total > 0:
             penalty += (float(outcome.failures) / float(total)) * 100.0
         penalty += float(min(outcome.failures, 20))
+        if external_provider_status == "degraded":
+            penalty += 200.0
+        if external_model_status == "degraded":
+            penalty += 200.0
         return penalty
 
     def _ordered_models(self, request: Request) -> list[ModelConfig]:
@@ -638,6 +640,22 @@ class LLMRouter:
                 )
                 continue
 
+            provider_started = float(self._time_fn())
+            metadata = request.metadata if isinstance(request.metadata, dict) else {}
+            if self._log_path:
+                log_event(
+                    self._log_path,
+                    "llm_provider_request_start",
+                    {
+                        "trace_id": str(metadata.get("trace_id") or "").strip() or None,
+                        "selection_reason": str(metadata.get("selection_reason") or "").strip() or None,
+                        "purpose": purpose,
+                        "task_type": task_type or purpose,
+                        "provider": provider.name,
+                        "model": model.model,
+                        "timeout_seconds": timeout_seconds,
+                    },
+                )
             try:
                 response = self._call_with_retry(provider, model, request)
                 self._record_success(model.id)
@@ -661,7 +679,6 @@ class LLMRouter:
                     "error_class": None,
                 }
                 if self._log_path:
-                    metadata = request.metadata if isinstance(request.metadata, dict) else {}
                     log_event(
                         self._log_path,
                         "llm_routing_decision",
@@ -678,11 +695,46 @@ class LLMRouter:
                             "routing_mode": self.policy.mode,
                         },
                     )
+                    log_event(
+                        self._log_path,
+                        "llm_provider_request_end",
+                        {
+                            "trace_id": str(metadata.get("trace_id") or "").strip() or None,
+                            "selection_reason": str(metadata.get("selection_reason") or "").strip() or None,
+                            "purpose": purpose,
+                            "task_type": task_type or purpose,
+                            "provider": response.provider,
+                            "model": response.model,
+                            "timeout_seconds": timeout_seconds,
+                            "duration_ms": int(max(0.0, float(self._time_fn()) - provider_started) * 1000),
+                            "ok": True,
+                            "error_kind": None,
+                        },
+                    )
                 return payload
             except LLMError as exc:
                 last_error = exc
                 self._record_failure(model.id)
                 self._record_outcome_failure(model.id, exc)
+                if self._log_path:
+                    log_event(
+                        self._log_path,
+                        "llm_provider_request_end",
+                        {
+                            "trace_id": str(metadata.get("trace_id") or "").strip() or None,
+                            "selection_reason": str(metadata.get("selection_reason") or "").strip() or None,
+                            "purpose": purpose,
+                            "task_type": task_type or purpose,
+                            "provider": provider.name,
+                            "model": model.model,
+                            "timeout_seconds": timeout_seconds,
+                            "duration_ms": int(max(0.0, float(self._time_fn()) - provider_started) * 1000),
+                            "ok": False,
+                            "error_kind": exc.kind,
+                            "status_code": exc.status_code,
+                            "retriable": exc.retriable,
+                        },
+                    )
                 attempts.append(
                     {
                         "provider": model.provider,
