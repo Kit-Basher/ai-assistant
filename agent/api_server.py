@@ -50,6 +50,7 @@ from agent.intent.llm_rerank import rerank_intents_with_llm
 from agent.intent.low_confidence import detect_low_confidence
 from agent.intent.thread_integrity import detect_thread_drift, normalize_text as normalize_thread_text
 from agent.logging_utils import log_event
+from agent.memory_authority import MEMORY_AUTHORITY_LABELS, build_memory_injection_diagnostics
 from agent.model_watch import (
     CatalogDelta,
     ModelWatchStore,
@@ -8448,6 +8449,21 @@ class AgentRuntime:
                 "continuity": "Thread state, pending follow-ups, and last meaningful request/action live in user_prefs under memory_runtime:* keys.",
                 "memory_v2": "Optional helper memory_v2 rows live in memory_items, memory_events, and bootstrap_state in the same SQLite DB.",
                 "semantic": "Optional semantic memory rows live in semantic_* tables in the same SQLite DB.",
+            },
+            "diagnostics_contract": {
+                "authority_labels": list(MEMORY_AUTHORITY_LABELS),
+                "cross_key_atomic_snapshot": False,
+                "cross_key_skew_warning": (
+                    "continuity_state_uses_per_key_revisions"
+                    if not bool(continuity.get("healthy", False))
+                    or any(
+                        bool(row.get("persistence", {}).get("active_conflict", False))
+                        for row in continuity_users
+                        if isinstance(row, dict) and isinstance(row.get("persistence"), dict)
+                    )
+                    else None
+                ),
+                "semantic_recall_authoritative": False,
             },
             "continuity": continuity,
             "working_memory": working_memory,
@@ -21812,6 +21828,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                             "levels": dict(levels_raw),
                             "debug": dict(debug_raw),
                         }
+                        memory_debug_payload["memory_injection_diagnostics"] = build_memory_injection_diagnostics(
+                            memory_context_payload,
+                            now_ts=int(time.time()),
+                        )
                         context_text = str(memory_context_payload.get("merged_context_text") or "").strip()
                         if context_text:
                             payload = dict(payload)

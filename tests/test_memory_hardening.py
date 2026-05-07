@@ -166,6 +166,19 @@ class TestMemoryHardening(unittest.TestCase):
         self.assertFalse(bool(memory_v2.get("enabled")))
         semantic = payload.get("semantic") if isinstance(payload.get("semantic"), dict) else {}
         self.assertFalse(bool(semantic.get("enabled")))
+        diagnostics_contract = (
+            payload.get("diagnostics_contract")
+            if isinstance(payload.get("diagnostics_contract"), dict)
+            else {}
+        )
+        authority_labels = (
+            diagnostics_contract.get("authority_labels")
+            if isinstance(diagnostics_contract.get("authority_labels"), list)
+            else []
+        )
+        self.assertIn("current_user_input", authority_labels)
+        self.assertIn("semantic_candidate_evidence", authority_labels)
+        self.assertFalse(bool(diagnostics_contract.get("semantic_recall_authoritative")))
 
     def test_memory_status_includes_working_memory_summary(self) -> None:
         db = self._init_memory_db()

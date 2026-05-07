@@ -117,6 +117,12 @@ from agent.skills.system_health import collect_system_health
 from agent.skills.system_health_summary import render_system_health_summary
 from agent.tool_contract import normalize_tool_request
 from agent.tool_executor import ToolExecutor
+from agent.memory_authority import (
+    AUTHORITY_CONTINUITY_STATE,
+    AUTHORITY_WORKING_MEMORY_HOT,
+    AUTHORITY_WORKING_MEMORY_SUMMARY,
+    MEMORY_AUTHORITY_LABELS,
+)
 from agent.memory_runtime import MemoryRuntime
 from agent.working_memory import (
     append_turn as append_working_memory_turn,
@@ -860,7 +866,7 @@ class Orchestrator:
         normalized = " ".join(str(text or "").strip().lower().split())
         if "bluejay" in normalized or "blue jay" in normalized:
             return OrchestratorResponse(
-                "A blue jay is mostly blue, with a white face and underside, black markings, and blue-and-black barred wings and tail.",
+                "From general knowledge: a blue jay is mostly blue, with a white face and underside, black markings, and blue-and-black barred wings and tail.",
                 {
                     "route": "generic_chat",
                     "used_runtime_state": False,
@@ -1728,6 +1734,56 @@ class Orchestrator:
                 "last_compaction_action": str(summary.get("last_compaction_action") or "").strip() or None,
             },
             "issue": issue_payload,
+        }
+        selected_diagnostics: list[dict[str, Any]] = []
+        if prior_hot_history_used or hot_messages:
+            selected_diagnostics.append(
+                {
+                    "layer": "working_memory",
+                    "source_kind": "chat_turn",
+                    "authority_label": AUTHORITY_WORKING_MEMORY_HOT,
+                    "selected_count": len(hot_messages),
+                    "reason_selected": "recent_hot_turns",
+                }
+            )
+        if state.warm_summaries or state.cold_state_blocks:
+            selected_diagnostics.append(
+                {
+                    "layer": "working_memory",
+                    "source_kind": "summary",
+                    "authority_label": AUTHORITY_WORKING_MEMORY_SUMMARY,
+                    "selected_count": len(state.warm_summaries) + len(state.cold_state_blocks),
+                    "reason_selected": "bounded_context_compaction",
+                }
+            )
+        if external_context_used:
+            selected_diagnostics.append(
+                {
+                    "layer": source or "external_context",
+                    "source_kind": "memory_context_text",
+                    "authority_label": AUTHORITY_CONTINUITY_STATE,
+                    "selected_count": 1,
+                    "reason_selected": "preselected_context",
+                }
+            )
+        diagnostics["memory_injection_diagnostics"] = {
+            "enabled_layers": {
+                "continuity": True,
+                "working_memory": True,
+                "memory_v2": False,
+                "semantic": False,
+                "graph": False,
+            },
+            "selected_layer_counts": {
+                "working_memory": len([row for row in selected_diagnostics if row.get("layer") == "working_memory"]),
+                "external_context": len([row for row in selected_diagnostics if row.get("layer") != "working_memory"]),
+            },
+            "selected": selected_diagnostics,
+            "failure_reasons": [issue_payload] if issue_payload else [],
+            "omitted": not bool(memory_used),
+            "omitted_reason": None if memory_used else "no_prior_memory",
+            "contents_exposed": False,
+            "authority_labels": list(MEMORY_AUTHORITY_LABELS),
         }
         if issue is None:
             self._memory_runtime.save_working_memory_state(

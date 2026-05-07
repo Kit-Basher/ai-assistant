@@ -1226,11 +1226,14 @@ class SemanticMemoryService:
             "selected": [
                 {
                     "id": candidate.id,
+                    "source_id": candidate.source_id,
                     "score": candidate.score,
                     "similarity": candidate.similarity,
                     "source_kind": candidate.source_kind.value,
                     "scope": candidate.scope,
                     "source_ref": candidate.source_ref,
+                    "created_at": candidate.created_at,
+                    "updated_at": candidate.updated_at,
                     "why": {
                         "pin_bonus": candidate.pin_bonus,
                         "scope_bonus": candidate.scope_bonus,

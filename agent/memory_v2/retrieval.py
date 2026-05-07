@@ -191,6 +191,11 @@ def select_memory(query: MemoryQuery, store: MemoryStorage) -> MemorySelection:
                     "id": item.id,
                     "level": level.value,
                     "score": round(float(score), 4),
+                    "source_kind": str(item.source_kind or "unknown"),
+                    "source_ref": str(item.source_ref or ""),
+                    "created_at": int(item.created_at),
+                    "updated_at": int(item.updated_at),
+                    "is_current": bool(item.is_current),
                     "why": score_debug,
                 }
             )

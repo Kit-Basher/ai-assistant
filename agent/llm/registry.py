@@ -16,6 +16,55 @@ from agent.llm.known_model_metadata import known_model_metadata
 _REGISTRY_SCHEMA_VERSION = 2
 
 
+def default_provider_backend_type(provider_id: str, payload: dict[str, Any] | None = None) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    explicit = str(data.get("backend_type") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider_key = str(provider_id or "").strip().lower()
+    provider_type = str(data.get("provider_type") or "").strip().lower()
+    if provider_key == "ollama":
+        return "ollama"
+    if provider_type == "llama_cpp_openai_compatible":
+        return "llama_cpp"
+    return "openai_compat"
+
+
+def default_provider_catalog_strategy(provider_id: str, payload: dict[str, Any] | None = None) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    explicit = str(data.get("catalog_strategy") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider_key = str(provider_id or "").strip().lower()
+    if provider_key == "ollama":
+        return "ollama_tags"
+    if provider_key == "openrouter":
+        return "openrouter_models"
+    return "openai_models"
+
+
+def default_provider_probe_strategy(provider_id: str, payload: dict[str, Any] | None = None) -> str:
+    data = payload if isinstance(payload, dict) else {}
+    explicit = str(data.get("probe_strategy") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider_key = str(provider_id or "").strip().lower()
+    if provider_key == "ollama":
+        return "ollama_chat"
+    return "openai_compat_chat"
+
+
+def default_provider_local_backend(provider_id: str, payload: dict[str, Any] | None = None) -> str | None:
+    data = payload if isinstance(payload, dict) else {}
+    explicit = str(data.get("local_backend") or "").strip().lower()
+    if explicit:
+        return explicit
+    provider_key = str(provider_id or "").strip().lower()
+    if provider_key == "ollama" or bool(data.get("local", False)):
+        return "ollama" if provider_key == "ollama" else provider_key or "local"
+    return None
+
+
 @dataclass(frozen=True)
 class APIKeySource:
     source_type: str
