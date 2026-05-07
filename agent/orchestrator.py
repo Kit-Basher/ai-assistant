@@ -6878,6 +6878,47 @@ class Orchestrator:
         action_terms = ("run", "start", "launch", "install", "import", "enable", "execute")
         return any(term in normalized for term in adapter_terms) and any(term in normalized for term in action_terms)
 
+    @staticmethod
+    def _looks_like_unbounded_install_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        broad_install_phrases = (
+            "install whatever you need",
+            "install whatever is needed",
+            "install anything you need",
+            "install anything needed",
+            "install whatever",
+            "install anything",
+        )
+        return any(phrase in normalized for phrase in broad_install_phrases)
+
+    def _unbounded_install_block_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = text
+        message = (
+            "I can't install arbitrary tools or dependencies from chat. "
+            "Tell me the specific capability you want, and I can look for approved text-only packs or show a preview. "
+            "Nothing was searched, imported, enabled, approved, installed, or executed."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_blocker"],
+            error_kind="unbounded_install_blocked",
+            ok=False,
+            payload={
+                "type": "capability_gap_blocker",
+                "blocked_reason": "unbounded_install_blocked",
+                "source_scope": "none",
+                "searched": False,
+                "preview_required": True,
+                "install_allowed_initially": False,
+                "summary": message,
+            },
+        )
+
     def _managed_adapter_block_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = text
         message = (
@@ -11419,6 +11460,8 @@ class Orchestrator:
             return repair_followup
         if self._looks_like_managed_adapter_execution_request(text):
             return self._managed_adapter_block_response(user_id, text)
+        if self._looks_like_unbounded_install_request(text):
+            return self._unbounded_install_block_response(user_id, text)
         decision = classify_runtime_chat_route(
             text,
             awaiting_secret=str(state.get("step") or "") == "awaiting_openrouter_key",

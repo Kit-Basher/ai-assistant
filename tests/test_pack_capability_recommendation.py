@@ -210,11 +210,103 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
         self.assertTrue(rescue.get("preview_required"))
         self.assertFalse(rescue.get("install_allowed_initially"))
-        self.assertIn("QR", str(rescue.get("search_query") or ""))
+        self.assertIn("qr", str(rescue.get("search_query") or "").lower())
         actions = rescue.get("candidate_actions")
         self.assertIsInstance(actions, list)
         assert isinstance(actions, list)
         self.assertTrue(any(isinstance(row, dict) and row.get("action") == "sketch_helper" for row in actions))
+
+    def test_real_world_starter_prompts_find_safe_text_candidates(self) -> None:
+        store = _FakePackStore([])
+        listings = {
+            "qr": {
+                "remote_id": "qr-code-guidance",
+                "name": "QR Code Creation Guidance",
+                "summary": "Plan QR code content, safety checks, export format, and validation.",
+                "artifact_type_hint": "portable_text_skill",
+                "installable_by_current_policy": True,
+                "source_url": "memory/external_packs/starter_catalog/packs/qr-code-guidance",
+                "tags": ["qr", "qrcode", "barcode", "guidance"],
+            },
+            "pdf": {
+                "remote_id": "document-conversion-guidance",
+                "name": "PDF and Document Conversion Guidance",
+                "summary": "Plan safe document conversion and verification.",
+                "artifact_type_hint": "portable_text_skill",
+                "installable_by_current_policy": True,
+                "source_url": "memory/external_packs/starter_catalog/packs/document-conversion-guidance",
+                "tags": ["pdf", "document", "conversion", "file"],
+            },
+            "browser": {
+                "remote_id": "browser-automation-planning",
+                "name": "Browser Automation Planning Guidance",
+                "summary": "Design browser automation plans without controlling a browser.",
+                "artifact_type_hint": "portable_text_skill",
+                "installable_by_current_policy": True,
+                "source_url": "memory/external_packs/starter_catalog/packs/browser-automation-planning",
+                "tags": ["browser", "automation", "planning", "no_execution"],
+            },
+            "file": {
+                "remote_id": "file-organization-workflow",
+                "name": "File Organization Workflow",
+                "summary": "Plan file organization and dry-run review before mutation.",
+                "artifact_type_hint": "portable_text_skill",
+                "installable_by_current_policy": True,
+                "source_url": "memory/external_packs/starter_catalog/packs/file-organization-workflow",
+                "tags": ["file", "files", "organization", "organizing"],
+            },
+            "linux": {
+                "remote_id": "linux-troubleshooting-workflow",
+                "name": "Linux Troubleshooting Workflow",
+                "summary": "Structure Linux diagnostics and rollback-safe repair plans.",
+                "artifact_type_hint": "portable_text_skill",
+                "installable_by_current_policy": True,
+                "source_url": "memory/external_packs/starter_catalog/packs/linux-troubleshooting-workflow",
+                "tags": ["linux", "troubleshooting", "debugging", "system"],
+            },
+        }
+        discovery = _FakeDiscovery(
+            sources=[
+                {"id": "starter-safe-text", "name": "Starter Safe Text Catalog", "kind": "local_catalog", "enabled": True},
+            ],
+            search_map={
+                ("starter-safe-text", key): [value]
+                for key, value in listings.items()
+            },
+        )
+
+        cases = (
+            ("can you make me a qr code", "qr-code-guidance"),
+            ("make this into a pdf", "document-conversion-guidance"),
+            ("can you automate my browser", "browser-automation-planning"),
+            ("find me a skill for organizing files", "file-organization-workflow"),
+            ("get a skill pack for debugging linux", "linux-troubleshooting-workflow"),
+        )
+        for prompt, expected_remote_id in cases:
+            with self.subTest(prompt=prompt):
+                result = build_capability_gap_response(
+                    prompt,
+                    pack_store=store,
+                    pack_registry_discovery=discovery,
+                )
+                self.assertIsNotNone(result)
+                assert result is not None
+                rescue = result.get("capability_gap_rescue")
+                self.assertIsInstance(rescue, dict)
+                assert isinstance(rescue, dict)
+                self.assertEqual("install_preview", result.get("fallback"))
+                self.assertTrue(rescue.get("preview_required"))
+                self.assertFalse(rescue.get("install_allowed_initially"))
+                candidates = rescue.get("candidate_packs")
+                self.assertIsInstance(candidates, list)
+                assert isinstance(candidates, list)
+                self.assertEqual(expected_remote_id, candidates[0].get("remote_id"))
+                actions = rescue.get("candidate_actions")
+                self.assertIsInstance(actions, list)
+                assert isinstance(actions, list)
+                show_preview = [row for row in actions if isinstance(row, dict) and row.get("action") == "show_preview"]
+                self.assertEqual(1, len(show_preview))
+                self.assertFalse(show_preview[0].get("install_allowed_initially"))
 
     def test_knowledge_question_still_does_not_create_rescue(self) -> None:
         store = _FakePackStore([])

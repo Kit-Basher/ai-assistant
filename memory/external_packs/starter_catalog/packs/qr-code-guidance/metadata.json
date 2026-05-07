@@ -1,0 +1,12 @@
+{
+  "id": "qr-code-guidance",
+  "name": "QR Code Creation Guidance",
+  "version": "1.0.0",
+  "type": "portable_text_skill",
+  "execution": "none",
+  "permissions": [],
+  "dependencies": [],
+  "contains_executable_code": false,
+  "contains_mcp_server": false,
+  "contains_plugin_handler": false
+}

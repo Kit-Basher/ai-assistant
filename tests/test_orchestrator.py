@@ -4885,6 +4885,49 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual([], discovery.search_calls)
         self.assertEqual(0, len(llm.chat_calls))
 
+    def test_unbounded_install_request_is_blocked_without_pack_search(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def __init__(self) -> None:
+                self.search_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [{"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True}]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                self.search_calls.append((source_id, query))
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        discovery = _FakePackDiscovery()
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("install whatever you need", "user1")
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
+        self.assertFalse(response.data["ok"])
+        self.assertEqual("unbounded_install_blocked", response.data["error_kind"])
+        self.assertEqual("capability_gap_blocker", payload.get("type"))
+        self.assertFalse(payload.get("searched"))
+        self.assertEqual([], discovery.search_calls)
+        self.assertEqual(0, len(llm.chat_calls))
+
     def test_yes_after_generic_capability_candidate_previews_not_installs(self) -> None:
         class _FakePackStore:
             def list_external_packs(self) -> list[dict[str, object]]:

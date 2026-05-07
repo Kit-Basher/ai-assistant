@@ -60,6 +60,107 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
         "installed_blocker": "it isn't enabled as a live capability yet",
         "blocked_blocker": "the pack was blocked during import",
     },
+    "qr_code_guidance": {
+        "label": "QR code creation guidance",
+        "phrases": (
+            "qr code",
+            "qrcode",
+            "barcode",
+            "make me a qr code",
+            "make a qr code",
+            "create a qr code",
+            "generate a qr code",
+        ),
+        "search_terms": ("qr", "qrcode", "barcode"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "document_conversion_guidance": {
+        "label": "document conversion guidance",
+        "phrases": (
+            "make this into a pdf",
+            "turn this into a pdf",
+            "convert this to pdf",
+            "convert this into a pdf",
+            "pdf conversion",
+            "document conversion",
+            "convert file",
+            "convert this file",
+            "file conversion",
+        ),
+        "search_terms": ("pdf", "document", "conversion", "file"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "image_editing_guidance": {
+        "label": "image editing workflow guidance",
+        "phrases": (
+            "image editing",
+            "edit image",
+            "edit this image",
+            "photo editing",
+            "modify image",
+            "retouch image",
+        ),
+        "search_terms": ("image", "photo", "editing", "workflow"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "browser_automation_planning": {
+        "label": "browser automation planning",
+        "phrases": (
+            "automate my browser",
+            "browser automation",
+            "automate the browser",
+            "control my browser",
+            "web automation",
+        ),
+        "search_terms": ("browser", "automation", "planning", "web"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "linux_troubleshooting": {
+        "label": "Linux troubleshooting workflow",
+        "phrases": (
+            "debugging linux",
+            "debug linux",
+            "linux troubleshooting",
+            "troubleshoot linux",
+            "linux debugging",
+            "fix linux",
+        ),
+        "search_terms": ("linux", "troubleshooting", "debugging", "system"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "file_organization": {
+        "label": "file organization workflow",
+        "phrases": (
+            "organizing files",
+            "organize files",
+            "file organization",
+            "organizing my files",
+            "organize my files",
+            "manage files",
+        ),
+        "search_terms": ("file", "files", "organization", "organizing"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "project_code_audit": {
+        "label": "project/code audit workflow",
+        "phrases": (
+            "code audit",
+            "project audit",
+            "audit my code",
+            "audit this project",
+            "review this codebase",
+            "repository audit",
+        ),
+        "search_terms": ("code", "project", "audit", "review"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
     "voice_output": {
         "label": "voice output",
         "phrases": (
@@ -139,6 +240,13 @@ _CAPABILITY_HELPER_NAMES = {
     "dev_tools": "coding helper",
     "system_tools": "system helper",
     "creative_tools": "writing helper",
+    "qr_code_guidance": "QR code guidance helper",
+    "document_conversion_guidance": "document conversion helper",
+    "image_editing_guidance": "image editing workflow helper",
+    "browser_automation_planning": "browser automation planning helper",
+    "linux_troubleshooting": "Linux troubleshooting helper",
+    "file_organization": "file organization helper",
+    "project_code_audit": "project audit helper",
     "voice_output": "voice helper",
     "voice_input": "speech input helper",
     "avatar_visual": "visual avatar helper",
@@ -149,11 +257,28 @@ _CAPABILITY_PROPOSAL_SUMMARIES = {
     "dev_tools": "helps with coding and terminal work",
     "system_tools": "helps with system tasks and troubleshooting",
     "creative_tools": "helps with drafting, brainstorming, and editing",
+    "qr_code_guidance": "guides safe QR code creation and validation",
+    "document_conversion_guidance": "guides safe document and PDF conversion planning",
+    "image_editing_guidance": "guides image editing workflows without executing tools",
+    "browser_automation_planning": "plans browser automation safely without controlling a browser",
+    "linux_troubleshooting": "structures Linux troubleshooting without running commands automatically",
+    "file_organization": "plans file organization safely before any file operation",
+    "project_code_audit": "structures project and code audits",
     "voice_output": "reads text aloud",
     "voice_input": "listens and transcribes speech",
     "avatar_visual": "shows a visual avatar",
     "camera_feed": "looks through a camera feed",
 }
+
+_CAPABILITY_DETECTION_PRIORITY = (
+    "qr_code_guidance",
+    "document_conversion_guidance",
+    "image_editing_guidance",
+    "browser_automation_planning",
+    "linux_troubleshooting",
+    "file_organization",
+    "project_code_audit",
+)
 
 _PARTIAL_HELP_CUES = (
     "help me",
@@ -318,11 +443,21 @@ def detect_pack_capability_need(text: str | None) -> dict[str, Any] | None:
     normalized = _normalize_text(text)
     if not normalized:
         return None
-    if "qr code" in normalized or "barcode" in normalized:
-        return None
     if _classify_request_kind(normalized) == "knowledge":
         return None
+    for capability in _CAPABILITY_DETECTION_PRIORITY:
+        rule = _CAPABILITY_RULES.get(capability)
+        if rule is not None and _matches_rule(normalized, rule):
+            return {
+                "capability": capability,
+                "label": str(rule.get("label") or capability).strip(),
+                "detected_from": str(text or "").strip(),
+                "confidence": 0.9,
+                "fallback": "text_only",
+            }
     for capability, rule in _CAPABILITY_RULES.items():
+        if capability in _CAPABILITY_DETECTION_PRIORITY:
+            continue
         if _matches_rule(normalized, rule):
             return {
                 "capability": capability,
