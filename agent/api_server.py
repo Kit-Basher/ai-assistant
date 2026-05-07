@@ -172,7 +172,13 @@ from agent.llm.value_policy import (
     ValuePolicy,
     normalize_policy,
 )
-from agent.llm.registry import RegistryStore
+from agent.llm.registry import (
+    RegistryStore,
+    default_provider_backend_type,
+    default_provider_catalog_strategy,
+    default_provider_local_backend,
+    default_provider_probe_strategy,
+)
 from agent.llm.router import LLMRouter
 from agent.llm.types import LLMError, Message, Request
 from agent.modelops import ModelOpsExecutor, ModelOpsPlanner, SafeRunner
@@ -3061,6 +3067,7 @@ class AgentRuntime:
         provider_row.update(
             {
                 "status": "ok",
+                "evidence_source": "provider_success",
                 "last_error_kind": None,
                 "status_code": None,
                 "last_checked_at": now_epoch,
@@ -3079,6 +3086,7 @@ class AgentRuntime:
                 {
                     "provider_id": provider_key,
                     "status": "ok",
+                    "evidence_source": "authoritative_model_success",
                     "last_error_kind": None,
                     "status_code": None,
                     "last_checked_at": now_epoch,
@@ -3094,6 +3102,9 @@ class AgentRuntime:
         self._health_monitor.state = self._health_monitor.store.save(state)
         if self.router is not None:
             self._router.set_external_health_state(self._health_monitor.state)
+        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
+        if callable(invalidate_truth_cache):
+            invalidate_truth_cache()
         current_statuses = self._provider_health_status_snapshot()
         self._emit_provider_health_transition_events(
             previous_statuses,
@@ -3194,6 +3205,8 @@ class AgentRuntime:
             failure_streak = 0
         return {
             "status": status,
+            "evidence_source": str(payload.get("evidence_source") or "").strip() or None,
+            "probe_mode": str(payload.get("probe_mode") or "").strip() or None,
             "last_checked_at": last_checked_at,
             "last_checked_at_iso": self._health_iso(last_checked_at),
             "last_error_kind": last_error_kind,
@@ -3209,6 +3222,22 @@ class AgentRuntime:
             "last_ts": last_ts,
             "last_ts_iso": self._health_iso(self._health_epoch(last_ts)),
         }
+
+    @staticmethod
+    def _health_has_runtime_evidence(raw: Mapping[str, Any] | None) -> bool:
+        payload = raw if isinstance(raw, Mapping) else {}
+        if str(payload.get("last_error_kind") or "").strip():
+            return True
+        for key in ("status_code", "last_status_code", "last_checked_at", "last_ts", "cooldown_until", "down_since"):
+            if payload.get(key) is not None:
+                return True
+        for key in ("successes", "failures", "failure_streak"):
+            try:
+                if int(payload.get(key) or 0) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
 
     def _normalize_llm_status_rows(
         self,
@@ -3373,14 +3402,6 @@ class AgentRuntime:
                 "status_code": provider_probe.get("status_code"),
                 "message": str(provider_probe.get("detail") or ""),
             }
-        if str(provider_id or "").strip().lower() == "ollama" and bool(provider_probe.get("native_ok", False)):
-            return {
-                "ok": True,
-                "provider": provider_id,
-                "model": model_id,
-                "message": "ollama native probe ok",
-            }
-
         model_probe = self._probe_llm_model(provider_id, model_id, timeout_seconds)
         model_error = str(model_probe.get("error_kind") or "").strip().lower()
         if model_error == "not_applicable":
@@ -3724,6 +3745,10 @@ class AgentRuntime:
         return {
             "id": provider_id,
             "provider_type": payload.get("provider_type"),
+            "backend_type": default_provider_backend_type(provider_id, payload),
+            "catalog_strategy": default_provider_catalog_strategy(provider_id, payload),
+            "probe_strategy": default_provider_probe_strategy(provider_id, payload),
+            "local_backend": default_provider_local_backend(provider_id, payload),
             "base_url": payload.get("base_url"),
             "chat_path": payload.get("chat_path"),
             "enabled": bool(payload.get("enabled", True)),
@@ -3849,6 +3874,36 @@ class AgentRuntime:
         )
         raw_last_error_kind = str(raw_health.get("last_error_kind") or "").strip() or None
         raw_status_code = int(raw_health.get("status_code") or 0) or None
+        selectable_now = bool(readiness_row.get("usable_now", False))
+        structurally_routable = bool(readiness_row.get("structurally_routable", readiness_row.get("routable", False)))
+        requires_probe = bool(readiness_row.get("requires_probe", False))
+        large_or_experimental = bool(
+            bool(readiness_row.get("large_local", registry_payload.get("large_local", False)))
+            or bool(readiness_row.get("experimental", registry_payload.get("experimental", False)))
+            or str(readiness_row.get("architecture_type") or registry_payload.get("architecture_type") or "").strip().lower() == "moe"
+            or str(readiness_row.get("architecture_modality") or registry_payload.get("architecture_modality") or "").strip().lower() == "moe"
+        )
+        evidence_source = str(normalized_health.get("evidence_source") or raw_health.get("evidence_source") or "").strip() or None
+        probe_mode = str(normalized_health.get("probe_mode") or raw_health.get("probe_mode") or "").strip() or None
+        if large_or_experimental and str(normalized_health.get("status") or "").strip().lower() == "ok" and not (evidence_source or probe_mode):
+            normalized_health = {
+                **normalized_health,
+                "status": "unknown",
+                "last_error_kind": None,
+            }
+            selectable_now = False
+            requires_probe = True
+        elif (
+            str(normalized_health.get("status") or "").strip().lower() == "ok"
+            and not evidence_source
+            and not probe_mode
+            and self._health_has_runtime_evidence(raw_health)
+        ):
+            evidence_source = "legacy_health_state"
+            normalized_health = {
+                **normalized_health,
+                "evidence_source": evidence_source,
+            }
         return {
             "id": model_id,
             "provider": str(readiness_row.get("provider_id") or "").strip().lower() or None,
@@ -3856,12 +3911,17 @@ class AgentRuntime:
             "capabilities": list(readiness_row.get("capabilities") or []),
             "enabled": bool(readiness_row.get("enabled", True)),
             "available": bool(readiness_row.get("available", False)),
-            "routable": bool(readiness_row.get("usable_now", False)),
+            "listed_available": bool(readiness_row.get("listed_available", readiness_row.get("available", False))),
+            "routable": selectable_now,
+            "structurally_routable": structurally_routable,
+            "selectable_now": selectable_now,
+            "chat_usable": selectable_now,
+            "requires_probe": requires_probe,
             "local": bool(readiness_row.get("local", False)),
             "active": bool(readiness_row.get("active", False)),
             "installed": bool(readiness_row.get("installed", False)),
             "configured": bool(readiness_row.get("configured", False)),
-            "usable_now": bool(readiness_row.get("usable_now", False)),
+            "usable_now": selectable_now,
             "quality_rank": int(readiness_row.get("quality_rank") or 0),
             "cost_rank": int(readiness_row.get("cost_rank") or 0),
             "context_window": int(readiness_row.get("context_window") or 0) or None,
@@ -3880,6 +3940,8 @@ class AgentRuntime:
             "acquisition_reason": str(readiness_row.get("acquisition_reason") or "").strip() or None,
             "health": {
                 "status": str(normalized_health.get("status") or "unknown").strip().lower() or "unknown",
+                "evidence_source": evidence_source,
+                "probe_mode": probe_mode,
                 "reason": str(raw_reason or readiness_row.get("availability_reason") or "").strip() or None,
                 "last_error_kind": raw_last_error_kind or (str(normalized_health.get("last_error_kind") or "").strip() or None),
                 "status_code": raw_status_code if raw_status_code is not None else (int(normalized_health.get("status_code") or 0) or None),
@@ -3893,6 +3955,75 @@ class AgentRuntime:
                 "next_probe_at": int(raw_health.get("next_probe_at") or 0) or None,
             },
         }
+
+    @staticmethod
+    def _status_model_has_explicit_evidence(model_row: Mapping[str, Any]) -> bool:
+        health = model_row.get("health") if isinstance(model_row.get("health"), Mapping) else {}
+        return bool(
+            str((health or {}).get("evidence_source") or "").strip()
+            or str((health or {}).get("probe_mode") or "").strip()
+        )
+
+    @staticmethod
+    def _status_model_requires_explicit_evidence(model_row: Mapping[str, Any]) -> bool:
+        return bool(
+            bool(model_row.get("large_local", False))
+            or bool(model_row.get("experimental", False))
+            or str(model_row.get("architecture_type") or "").strip().lower() == "moe"
+            or str(model_row.get("architecture_modality") or "").strip().lower() == "moe"
+        )
+
+    def _normalize_status_model_payloads(self, model_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for row in model_rows:
+            if not isinstance(row, dict):
+                continue
+            cloned = dict(row)
+            health = dict(cloned.get("health") if isinstance(cloned.get("health"), dict) else {})
+            health_status = str(health.get("status") or "unknown").strip().lower() or "unknown"
+            capabilities = {
+                str(item).strip().lower()
+                for item in (cloned.get("capabilities") or [])
+                if str(item).strip()
+            }
+            listed_available = bool(cloned.get("listed_available", cloned.get("available", False)))
+            structurally_routable = bool(
+                cloned.get(
+                    "structurally_routable",
+                    bool(cloned.get("enabled", True) and listed_available and "chat" in capabilities),
+                )
+            )
+            requires_explicit_evidence = self._status_model_requires_explicit_evidence(cloned)
+            has_explicit_evidence = self._status_model_has_explicit_evidence({**cloned, "health": health})
+            if health_status == "ok" and requires_explicit_evidence and not has_explicit_evidence:
+                health_status = "unknown"
+                health["status"] = "unknown"
+                health["last_error_kind"] = None
+            elif health_status == "ok" and not has_explicit_evidence and self._health_has_runtime_evidence(health):
+                health["evidence_source"] = "legacy_health_state"
+
+            selectable_now = bool(
+                cloned.get(
+                    "selectable_now",
+                    cloned.get("usable_now", cloned.get("routable", False)),
+                )
+            )
+            if health_status != "ok":
+                selectable_now = False
+
+            cloned["listed_available"] = listed_available
+            cloned["structurally_routable"] = structurally_routable
+            cloned["selectable_now"] = selectable_now
+            cloned["chat_usable"] = selectable_now
+            cloned["routable"] = selectable_now
+            cloned["usable_now"] = selectable_now
+            cloned["requires_probe"] = bool(cloned.get("requires_probe", health_status == "unknown")) or health_status == "unknown"
+            health["status"] = health_status
+            health.setdefault("evidence_source", None)
+            health.setdefault("probe_mode", None)
+            cloned["health"] = health
+            normalized.append(cloned)
+        return normalized
 
     def _ensure_defaults(self, document: dict[str, Any]) -> dict[str, Any]:
         defaults = document.get("defaults") if isinstance(document.get("defaults"), dict) else {}
@@ -4647,6 +4778,30 @@ class AgentRuntime:
         effective = dict(defaults)
         if self._safe_mode_enabled():
             return effective
+        stored_chat_model = str(
+            effective.get("stored_chat_model")
+            or effective.get("chat_model")
+            or effective.get("default_model")
+            or ""
+        ).strip() or None
+        stored_default_model = str(
+            effective.get("stored_default_model")
+            or effective.get("default_model")
+            or effective.get("chat_model")
+            or ""
+        ).strip() or None
+        stored_default_provider = str(
+            effective.get("stored_default_provider")
+            or effective.get("default_provider")
+            or ""
+        ).strip().lower() or None
+        effective.setdefault("stored_chat_model", stored_chat_model)
+        effective.setdefault("stored_default_model", stored_default_model)
+        effective.setdefault("stored_default_provider", stored_default_provider)
+        effective.setdefault("temporary_chat_target", None)
+        effective.setdefault("temporary_effective_model", None)
+        effective.setdefault("temporary_effective_provider", None)
+        effective.setdefault("temporary_override_active", False)
         override = (
             dict(self._temporary_chat_target_override)
             if isinstance(self._temporary_chat_target_override, dict)
@@ -4664,12 +4819,19 @@ class AgentRuntime:
         if not override_ok:
             self._temporary_chat_target_override = None
             return effective
-        effective["default_provider"] = (
+        temporary_provider = (
             str(override_body.get("provider") or override_provider).strip().lower() or override_provider
         )
-        effective["chat_model"] = str(override_body.get("model_id") or override_model).strip() or override_model
-        effective["default_model"] = effective["chat_model"]
-        effective["resolved_default_model"] = effective["chat_model"]
+        temporary_model = str(override_body.get("model_id") or override_model).strip() or override_model
+        effective["default_provider"] = temporary_provider
+        effective["resolved_default_model"] = temporary_model
+        effective["temporary_override_active"] = True
+        effective["temporary_effective_provider"] = temporary_provider
+        effective["temporary_effective_model"] = temporary_model
+        effective["temporary_chat_target"] = {
+            "provider": temporary_provider,
+            "model_id": temporary_model,
+        }
         return effective
 
     @staticmethod
@@ -4999,7 +5161,7 @@ class AgentRuntime:
                 phase="starting",
                 provider=None,
                 model=None,
-                local_providers={"ollama"},
+                local_providers=set(),
             )
             llm_status = {
                 "ok": True,
@@ -5021,7 +5183,7 @@ class AgentRuntime:
                 "runtime_status": runtime_status,
                 "provider": None,
                 "model": None,
-                "local_providers": {"ollama"},
+                "local_providers": set(),
             }
         router_snapshot = self._canonical_runtime_router_snapshot()
         health_summary = self.llm_health_summary(router_snapshot=router_snapshot)
@@ -5040,7 +5202,7 @@ class AgentRuntime:
             str((row or {}).get("id") or "").strip().lower()
             for row in (llm_status.get("providers") if isinstance(llm_status.get("providers"), list) else [])
             if isinstance(row, dict) and bool(row.get("local", False))
-        } or {"ollama"}
+        }
         return {
             "status_payload": llm_status,
             "runtime_status": runtime_status,
@@ -5064,7 +5226,7 @@ class AgentRuntime:
             str(item).strip().lower()
             for item in (llm_context.get("local_providers") if isinstance(llm_context.get("local_providers"), set) else [])
             if str(item).strip()
-        } or {"ollama"}
+        }
         startup_phase = str(self.startup_phase or "starting").strip().lower() or "starting"
         warmup_remaining = self._warmup_remaining_snapshot()
         if startup_phase == "starting" and not self._startup_warmup_started and not warmup_remaining:
@@ -5780,7 +5942,18 @@ class AgentRuntime:
                 for item in (raw.get("task_types") or known_metadata.get("task_types") or [])
                 if str(item).strip()
             ],
-            "architecture_modality": (str(raw.get("architecture_modality") or "").strip().lower() or None),
+            "architecture_type": (
+                str(raw.get("architecture_type") or known_metadata.get("architecture_type") or "").strip().lower()
+                or None
+            ),
+            "architecture_modality": (
+                str(raw.get("architecture_modality") or known_metadata.get("architecture_modality") or "").strip().lower()
+                or None
+            ),
+            "total_params_b": raw.get("total_params_b", known_metadata.get("total_params_b")),
+            "active_params_b": raw.get("active_params_b", known_metadata.get("active_params_b")),
+            "large_local": bool(raw.get("large_local", known_metadata.get("large_local", False))),
+            "experimental": bool(raw.get("experimental", known_metadata.get("experimental", False))),
             "input_modalities": [
                 str(item).strip().lower()
                 for item in (raw.get("input_modalities") or [])
@@ -5810,8 +5983,8 @@ class AgentRuntime:
             return False, {"ok": False, "error": "provider id must match [a-z0-9_-]{2,64}"}
 
         provider_type = str(payload.get("provider_type") or "openai_compat").strip().lower()
-        if provider_type not in {"openai_compat"}:
-            return False, {"ok": False, "error": "provider_type must be openai_compat"}
+        if provider_type not in {"openai_compat", "llama_cpp_openai_compatible"}:
+            return False, {"ok": False, "error": "provider_type must be openai_compat or llama_cpp_openai_compatible"}
 
         base_url = str(payload.get("base_url") or "").strip()
         if not base_url:
@@ -5837,6 +6010,10 @@ class AgentRuntime:
 
         providers[provider_id] = {
             "provider_type": provider_type,
+            "backend_type": default_provider_backend_type(provider_id, {**payload, "provider_type": provider_type}),
+            "catalog_strategy": default_provider_catalog_strategy(provider_id, {**payload, "provider_type": provider_type}),
+            "probe_strategy": default_provider_probe_strategy(provider_id, {**payload, "provider_type": provider_type}),
+            "local_backend": default_provider_local_backend(provider_id, {**payload, "provider_type": provider_type}),
             "base_url": base_url,
             "chat_path": chat_path,
             "api_key_source": api_key_source,
@@ -5896,6 +6073,10 @@ class AgentRuntime:
             current["enabled"] = bool(payload.get("enabled"))
         if "local" in payload:
             current["local"] = bool(payload.get("local"))
+        for strategy_key in ("backend_type", "catalog_strategy", "probe_strategy", "local_backend", "provider_type"):
+            if strategy_key in payload:
+                value = payload.get(strategy_key)
+                current[strategy_key] = (str(value).strip().lower() or None) if value is not None else None
         if isinstance(payload.get("default_headers"), dict):
             current["default_headers"] = payload.get("default_headers")
         if isinstance(payload.get("default_query_params"), dict):
@@ -6204,7 +6385,10 @@ class AgentRuntime:
                 "models": [],
             }
         provider_key = str(provider_id or "").strip().lower()
-        if provider_key == "ollama" or bool(provider_payload.get("local", False)):
+        catalog_strategy = default_provider_catalog_strategy(provider_key, provider_payload)
+        if catalog_strategy == "manual":
+            return {"ok": True, "models": [], "count": 0, "source": "manual", "authoritative": False}
+        if catalog_strategy == "ollama_tags":
             bases = normalize_ollama_base_urls(base_url)
             native_url = str(bases.get("native_base") or "").strip()
             try:
@@ -6221,7 +6405,13 @@ class AgentRuntime:
                         if isinstance(item, dict) and str(item.get("name") or item.get("model") or "").strip()
                     }
                 )
-                return {"ok": True, "models": model_names, "count": len(model_names)}
+                return {
+                    "ok": True,
+                    "models": model_names,
+                    "count": len(model_names),
+                    "source": "ollama_tags",
+                    "authoritative": True,
+                }
             except urllib.error.HTTPError as exc:
                 status_code = int(getattr(exc, "code", 0) or 0) or None
                 kind = self._normalize_provider_test_error(None, status_code)
@@ -6241,7 +6431,7 @@ class AgentRuntime:
                     "models": [],
                 }
         model_list_path = "/v1/models"
-        if provider_key == "openrouter" and base_url.endswith("/api/v1"):
+        if catalog_strategy == "openrouter_models":
             model_list_path = "/models"
         try:
             parsed = self._http_get_json(base_url + model_list_path, timeout_seconds=timeout_seconds, headers=headers)
@@ -6251,7 +6441,13 @@ class AgentRuntime:
                 for item in data
                 if isinstance(item, dict) and str(item.get("id") or "").strip()
             ]
-            return {"ok": True, "models": model_names, "count": len(model_names)}
+            return {
+                "ok": True,
+                "models": model_names,
+                "count": len(model_names),
+                "source": catalog_strategy,
+                "authoritative": True,
+            }
         except urllib.error.HTTPError as exc:
             status_code = int(getattr(exc, "code", 0) or 0) or None
             kind = self._normalize_provider_test_error(None, status_code)
@@ -6282,7 +6478,7 @@ class AgentRuntime:
             return False, {"ok": False, "error": "provider not found"}
 
         timeout_seconds = float(payload.get("timeout_seconds") or 6.0)
-        provider_local = bool(provider_entry.get("local", provider_key == "ollama"))
+        probe_strategy = default_provider_probe_strategy(provider_key, provider_entry)
         key_override = str(payload.get("api_key") or "").strip() or None
         models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
         model_override = self._canonical_model_name(
@@ -6348,7 +6544,7 @@ class AgentRuntime:
         if key_override and hasattr(impl, "set_api_key"):
             getattr(impl, "set_api_key")(key_override)
 
-        if provider_key == "ollama" or provider_local:
+        if probe_strategy in {"ollama_chat", "llama_cpp_openai_compatible"}:
             model_probe_timeout = max(
                 timeout_seconds,
                 float(getattr(self.config, "llm_timeout_seconds", 15.0) or 15.0),
@@ -6663,6 +6859,13 @@ class AgentRuntime:
             "last_chat_model": str(defaults.get("last_chat_model") or "").strip() or None,
             "default_model": raw_chat_model,
             "resolved_default_model": resolved_default_model,
+            "stored_default_provider": defaults.get("default_provider"),
+            "stored_chat_model": raw_chat_model,
+            "stored_default_model": raw_chat_model,
+            "temporary_override_active": False,
+            "temporary_effective_provider": None,
+            "temporary_effective_model": None,
+            "temporary_chat_target": None,
             "allow_remote_fallback": bool(defaults.get("allow_remote_fallback", True)),
         }
         payload = self._temporary_chat_target_effective_defaults(payload)
@@ -8479,6 +8682,7 @@ class AgentRuntime:
                     runtime_truth_service=self._runtime_truth_service,
                     chat_runtime_adapter=self,
                     semantic_memory_service=self._semantic_memory_service,
+                    pack_install_handler=self.packs_install,
                 )
             else:
                 self._orchestrator.llm_client = self._router
@@ -9016,6 +9220,9 @@ class AgentRuntime:
                 "provider": applied_provider,
                 "model": applied_model,
             }
+        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
+        if callable(invalidate_truth_cache):
+            invalidate_truth_cache()
         return True, {
             "ok": True,
             "provider": applied_provider,
@@ -9097,6 +9304,9 @@ class AgentRuntime:
                 "provider": applied_provider,
                 "model": applied_model,
             }
+        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
+        if callable(invalidate_truth_cache):
+            invalidate_truth_cache()
         return True, {
             "ok": True,
             "provider": applied_provider,
@@ -9689,6 +9899,7 @@ class AgentRuntime:
 
             request_headers = self._provider_request_headers(provider_payload)
             is_local = bool(provider_payload.get("local", False))
+            catalog_strategy = default_provider_catalog_strategy(provider_id, provider_payload)
 
             names_from_v1: set[str] = set()
             v1_ok = False
@@ -9696,7 +9907,16 @@ class AgentRuntime:
             names_from_tags: set[str] = set()
             tags_ok = False
 
-            if is_local:
+            if catalog_strategy == "manual":
+                refreshed[provider_id] = []
+                inventory[provider_id] = {
+                    "authoritative": False,
+                    "models": [],
+                    "catalog_strategy": catalog_strategy,
+                }
+                continue
+
+            if catalog_strategy == "ollama_tags":
                 resolved_base_url = base_url
                 if str(provider_id).strip().lower() == "ollama":
                     resolved_base_url = str(
@@ -9717,7 +9937,7 @@ class AgentRuntime:
                     tags_ok = False
             else:
                 model_list_path = "/v1/models"
-                if provider_id == "openrouter" and base_url.endswith("/api/v1"):
+                if catalog_strategy == "openrouter_models":
                     model_list_path = "/models"
                 try:
                     parsed = self._http_get_json(base_url + model_list_path, headers=request_headers)
@@ -9734,18 +9954,19 @@ class AgentRuntime:
                     v1_ok = False
 
             refreshed[provider_id] = []
-            discovered_names = names_from_tags if is_local else names_from_v1
+            discovered_names = names_from_tags if catalog_strategy == "ollama_tags" else names_from_v1
             inventory[provider_id] = {
-                "authoritative": bool(tags_ok if is_local else v1_ok),
+                "authoritative": bool(tags_ok if catalog_strategy == "ollama_tags" else v1_ok),
                 "models": sorted(discovered_names),
+                "catalog_strategy": catalog_strategy,
             }
             for model_name in sorted(discovered_names):
                 model_id = f"{provider_id}:{model_name}"
                 refreshed[provider_id].append(model_id)
                 existing = models.get(model_id) if isinstance(models.get(model_id), dict) else {}
-                if is_local and tags_ok:
+                if catalog_strategy == "ollama_tags" and tags_ok:
                     available = bool(model_name in names_from_tags)
-                elif (not is_local) and v1_ok:
+                elif catalog_strategy != "ollama_tags" and v1_ok:
                     available = bool(model_name in names_from_v1)
                 else:
                     available = bool(existing.get("available", True))
@@ -9771,18 +9992,24 @@ class AgentRuntime:
                 else:
                     capabilities = inferred_capabilities or self._default_refreshed_capabilities(model_name)
 
+                known_metadata = known_model_metadata(provider_id, model_name)
                 next_payload = {
                     **existing,
                     "provider": provider_id,
                     "model": model_name,
                     "capabilities": capabilities,
-                    "task_types": list(existing.get("task_types") or known_model_metadata(provider_id, model_name).get("task_types") or []),
-                    "architecture_modality": existing.get("architecture_modality"),
+                    "task_types": list(existing.get("task_types") or known_metadata.get("task_types") or []),
+                    "architecture_type": existing.get("architecture_type") or known_metadata.get("architecture_type"),
+                    "architecture_modality": existing.get("architecture_modality") or known_metadata.get("architecture_modality"),
+                    "total_params_b": existing.get("total_params_b", known_metadata.get("total_params_b")),
+                    "active_params_b": existing.get("active_params_b", known_metadata.get("active_params_b")),
+                    "large_local": bool(existing.get("large_local", known_metadata.get("large_local", False))),
+                    "experimental": bool(existing.get("experimental", known_metadata.get("experimental", False))),
                     "input_modalities": list(existing.get("input_modalities") or []),
                     "output_modalities": list(existing.get("output_modalities") or []),
-                    "quality_rank": int(existing.get("quality_rank", known_model_metadata(provider_id, model_name).get("quality_rank", 2)) or 2),
-                    "cost_rank": int(existing.get("cost_rank", known_model_metadata(provider_id, model_name).get("cost_rank", 0)) or 0),
-                    "default_for": list(existing.get("default_for") or known_model_metadata(provider_id, model_name).get("default_for") or ["chat"]),
+                    "quality_rank": int(existing.get("quality_rank", known_metadata.get("quality_rank", 2)) or 2),
+                    "cost_rank": int(existing.get("cost_rank", known_metadata.get("cost_rank", 0)) or 0),
+                    "default_for": list(existing.get("default_for") or known_metadata.get("default_for") or ["chat"]),
                     "enabled": bool(existing.get("enabled", True)),
                     "available": available,
                     "pricing": existing.get("pricing")
@@ -9790,7 +10017,7 @@ class AgentRuntime:
                         "input_per_million_tokens": None,
                         "output_per_million_tokens": None,
                     },
-                    "max_context_tokens": existing.get("max_context_tokens", known_model_metadata(provider_id, model_name).get("max_context_tokens")),
+                    "max_context_tokens": existing.get("max_context_tokens", known_metadata.get("max_context_tokens")),
                 }
                 if next_payload != existing:
                     changed = True
@@ -9806,13 +10033,13 @@ class AgentRuntime:
                 model_name = str(model_payload.get("model") or "").strip()
                 if not model_name:
                     continue
-                if is_local and tags_ok and model_name in names_from_tags:
+                if catalog_strategy == "ollama_tags" and tags_ok and model_name in names_from_tags:
                     continue
-                if not is_local and v1_ok and model_name in names_from_v1:
+                if catalog_strategy != "ollama_tags" and v1_ok and model_name in names_from_v1:
                     continue
-                if is_local and not tags_ok:
+                if catalog_strategy == "ollama_tags" and not tags_ok:
                     continue
-                if not is_local and not v1_ok:
+                if catalog_strategy != "ollama_tags" and not v1_ok:
                     continue
                 if not bool(model_payload.get("available", True)):
                     continue
@@ -9949,10 +10176,18 @@ class AgentRuntime:
                     for item in (existing.get("task_types") or row.get("task_types") or known_metadata.get("task_types") or [])
                     if str(item).strip()
                 ],
-                "architecture_modality": (
-                    str(existing.get("architecture_modality") or row.get("architecture_modality") or "").strip().lower()
+                "architecture_type": (
+                    str(existing.get("architecture_type") or row.get("architecture_type") or known_metadata.get("architecture_type") or "").strip().lower()
                     or None
                 ),
+                "architecture_modality": (
+                    str(existing.get("architecture_modality") or row.get("architecture_modality") or known_metadata.get("architecture_modality") or "").strip().lower()
+                    or None
+                ),
+                "total_params_b": existing.get("total_params_b", row.get("total_params_b", known_metadata.get("total_params_b"))),
+                "active_params_b": existing.get("active_params_b", row.get("active_params_b", known_metadata.get("active_params_b"))),
+                "large_local": bool(existing.get("large_local", row.get("large_local", known_metadata.get("large_local", False)))),
+                "experimental": bool(existing.get("experimental", row.get("experimental", known_metadata.get("experimental", False)))),
                 "input_modalities": [
                     str(item).strip().lower()
                     for item in (existing.get("input_modalities") or row.get("input_modalities") or [])
@@ -12450,6 +12685,9 @@ class AgentRuntime:
                 if isinstance(runtime_snapshot.get("models"), list)
                 else []
             )
+        models = self._normalize_status_model_payloads(
+            [dict(row) for row in models if isinstance(row, dict)]
+        )
         allow_remote_fallback = bool(defaults.get("allow_remote_fallback", True))
         local_provider_lookup = {
             str(row.get("id") or "").strip().lower(): bool(row.get("local", False))
@@ -12555,13 +12793,41 @@ class AgentRuntime:
             if callable(getattr(truth, "model_controller_policy_status", None))
             else self._chat_control_policy()
         )
+        stored_default_provider = str(
+            defaults.get("stored_default_provider") or defaults.get("default_provider") or ""
+        ).strip().lower() or None
+        stored_chat_model = str(
+            defaults.get("stored_chat_model") or defaults.get("chat_model") or ""
+        ).strip() or None
+        stored_default_model = str(
+            defaults.get("stored_default_model") or defaults.get("default_model") or stored_chat_model or ""
+        ).strip() or None
+        temporary_chat_target = (
+            dict(defaults.get("temporary_chat_target"))
+            if isinstance(defaults.get("temporary_chat_target"), dict)
+            else None
+        )
+        temporary_override_active = bool(defaults.get("temporary_override_active", False))
+        temporary_effective_provider = (
+            str(defaults.get("temporary_effective_provider") or "").strip().lower() or None
+        )
+        temporary_effective_model = str(defaults.get("temporary_effective_model") or "").strip() or None
         return {
             "ok": True,
             "default_provider": default_provider,
-            "chat_model": str(defaults.get("chat_model") or "").strip() or None,
+            "chat_model": stored_chat_model,
             "embed_model": str(defaults.get("embed_model") or "").strip() or None,
             "last_chat_model": str(defaults.get("last_chat_model") or "").strip() or None,
-            "default_model": defaults.get("default_model"),
+            "default_model": stored_default_model,
+            "stored_default_provider": stored_default_provider,
+            "stored_chat_model": stored_chat_model,
+            "stored_default_model": stored_default_model,
+            "effective_provider": default_provider,
+            "effective_chat_model": resolved_default_model,
+            "temporary_override_active": temporary_override_active,
+            "temporary_effective_provider": temporary_effective_provider,
+            "temporary_effective_model": temporary_effective_model,
+            "temporary_chat_target": temporary_chat_target,
             "resolved_default_model": resolved_default_model,
             "routing_mode": defaults.get("routing_mode"),
             "allow_remote_fallback": allow_remote_fallback,
@@ -15442,6 +15708,11 @@ class AgentRuntime:
                 int(payload.get("provider_failure_streak") or self.config.llm_hygiene_provider_failure_streak),
             ),
             apply_prune=False,
+            now_epoch=int(time.time()),
+            local_catalog_freshness_seconds=max(
+                60,
+                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
+            ),
         )
         modified_ids = self._plan_modified_ids(plan)
         duration_ms = int((time.monotonic() - start) * 1000)
@@ -15487,6 +15758,11 @@ class AgentRuntime:
             disable_failing_provider=disable_failing_provider,
             provider_failure_streak=provider_failure_streak,
             apply_prune=False,
+            now_epoch=int(time.time()),
+            local_catalog_freshness_seconds=max(
+                60,
+                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
+            ),
         )
         preview_plan, _preview_blocked = self._apply_safe_mode_to_plan(action="llm.cleanup.apply", plan=raw_preview_plan)
         modified_ids = self._plan_modified_ids(preview_plan)
@@ -15593,6 +15869,11 @@ class AgentRuntime:
             disable_failing_provider=disable_failing_provider,
             provider_failure_streak=provider_failure_streak,
             apply_prune=True,
+            now_epoch=int(time.time()),
+            local_catalog_freshness_seconds=max(
+                60,
+                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
+            ),
         )
         plan, safe_mode_blocked = self._apply_safe_mode_to_plan(action="llm.cleanup.apply", plan=raw_plan)
         modified_ids = self._plan_modified_ids(plan)
@@ -18911,6 +19192,42 @@ class AgentRuntime:
             "next_action": next_action,
         }
 
+    @staticmethod
+    def _safe_mode_model_mutation_response(model_id: str) -> dict[str, Any]:
+        blocked_model = str(model_id or "").strip() or "that model"
+        why = "SAFE MODE blocks model switch and default mutations, including local targets."
+        next_action = "Switch to Controlled Mode explicitly before retrying a model change."
+        return {
+            "ok": False,
+            "error": "safe_mode_blocked",
+            "error_kind": "safe_mode_blocked",
+            "message": compose_actionable_message(
+                what_happened=f"SAFE MODE is active, so I did not change chat to {blocked_model}",
+                why=why,
+                next_action=next_action,
+            ),
+            "why": why,
+            "next_action": next_action,
+        }
+
+    @staticmethod
+    def _safe_mode_provider_mutation_response(action: str) -> dict[str, Any]:
+        blocked_action = str(action or "provider/model mutation").strip()
+        why = "SAFE MODE blocks provider and model configuration changes."
+        next_action = "Switch to Controlled Mode explicitly before retrying a provider or model change."
+        return {
+            "ok": False,
+            "error": "safe_mode_blocked",
+            "error_kind": "safe_mode_blocked",
+            "message": compose_actionable_message(
+                what_happened=f"SAFE MODE is active, so I did not apply {blocked_action}",
+                why=why,
+                next_action=next_action,
+            ),
+            "why": why,
+            "next_action": next_action,
+        }
+
     def _guard_switch_target_allowed(
         self,
         resolved_body: dict[str, Any] | None,
@@ -18921,7 +19238,8 @@ class AgentRuntime:
         if bool(policy.get("allow_remote_switch", True)):
             return True, None
         if bool((resolved_body or {}).get("local", False)):
-            return True, None
+            blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
+            return False, self._safe_mode_model_mutation_response(blocked_model)
         blocked_model = str((resolved_body or {}).get("model_id") or requested_model).strip()
         return False, self._safe_mode_remote_switch_response(blocked_model)
 
@@ -19778,6 +20096,123 @@ class AgentRuntime:
                     }
                 ],
                 "warnings": [],
+            },
+        }
+
+    def llm_models_switch_temporary(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        trace_id = self._modelops_trace_id("llm_models_switch_temporary", payload if isinstance(payload, dict) else {})
+        provider = str(payload.get("provider") or "").strip().lower()
+        model_id = str(payload.get("model_id") or payload.get("model") or "").strip()
+        purpose = str(payload.get("purpose") or "chat").strip().lower() or "chat"
+        confirm = bool(payload.get("confirm", False))
+        if purpose not in {"chat", "code", "organize", "story"}:
+            purpose = "chat"
+        if not provider and ":" in model_id:
+            provider, model_id = model_id.split(":", 1)
+            provider = provider.strip().lower()
+            model_id = model_id.strip()
+        if not provider or not model_id:
+            return False, {
+                "ok": False,
+                "intent": "modelops_temporary_switch",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": "bad_request",
+                "message": "provider and model_id are required.",
+                "next_question": None,
+                "actions": [],
+                "errors": ["bad_request"],
+                "trace_id": trace_id,
+                "envelope": {},
+            }
+
+        canonical_model = model_id if model_id.startswith(f"{provider}:") else f"{provider}:{model_id}"
+        switch_action = "runtime.set_temporary_chat_model_target"
+        if not confirm:
+            return True, {
+                "ok": True,
+                "intent": "modelops_temporary_switch",
+                "confidence": 1.0,
+                "did_work": False,
+                "error_kind": "needs_clarification",
+                "message": "I can temporarily apply this change. Reply 'confirm' to proceed.",
+                "next_question": "I can temporarily apply this change. Reply 'confirm' to proceed.",
+                "actions": [],
+                "errors": ["needs_clarification"],
+                "trace_id": trace_id,
+                "envelope": {
+                    "purpose": purpose,
+                    "target": {"provider": provider, "model_id": model_id},
+                    "plan_steps": [
+                        {
+                            "id": "set_temporary_chat_model",
+                            "action": switch_action,
+                            "params": {"model_id": canonical_model},
+                        }
+                    ],
+                    "warnings": ["This does not change the stored default chat model."],
+                },
+            }
+
+        ok, body = self.set_temporary_chat_model_target(canonical_model, provider_id=provider)
+        message = str((body if isinstance(body, dict) else {}).get("message") or "Temporary model switch failed.")
+        if not ok:
+            failure_error_kind = str(
+                (body if isinstance(body, dict) else {}).get("error_kind")
+                or (body if isinstance(body, dict) else {}).get("error")
+                or classify_error_kind(payload={"ok": False, "error": message})
+            ).strip() or "temporary_switch_failed"
+            return False, {
+                "ok": False,
+                "intent": "modelops_temporary_switch",
+                "confidence": 0.0,
+                "did_work": False,
+                "error_kind": failure_error_kind,
+                "message": message,
+                "next_question": None,
+                "actions": [],
+                "errors": [failure_error_kind],
+                "trace_id": trace_id,
+                "envelope": {
+                    "purpose": purpose,
+                    "target": {"provider": provider, "model_id": model_id},
+                    "execution": [
+                        {
+                            "id": "set_temporary_chat_model",
+                            "action": switch_action,
+                            "ok": False,
+                            "body": body if isinstance(body, dict) else {},
+                        }
+                    ],
+                },
+            }
+
+        applied_model = str((body if isinstance(body, dict) else {}).get("model_id") or canonical_model).strip() or canonical_model
+        applied_provider = str((body if isinstance(body, dict) else {}).get("provider") or provider).strip().lower() or provider
+        return True, {
+            "ok": True,
+            "intent": "modelops_temporary_switch",
+            "confidence": 1.0,
+            "did_work": True,
+            "error_kind": None,
+            "message": f"Temporarily switched to {applied_model} for {purpose}.",
+            "next_question": None,
+            "actions": [],
+            "errors": [],
+            "trace_id": trace_id,
+            "envelope": {
+                "purpose": purpose,
+                "target": {"provider": provider, "model_id": model_id},
+                "execution": [
+                    {
+                        "id": "set_temporary_chat_model",
+                        "action": switch_action,
+                        "ok": True,
+                        "body": body if isinstance(body, dict) else {},
+                    }
+                ],
+                "applied": {"provider": applied_provider, "model_id": applied_model},
+                "warnings": ["The stored default chat model was not changed."],
             },
         }
 
@@ -21562,6 +21997,16 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
 
             if path == "/providers":
+                if self.runtime._safe_mode_enabled():
+                    self._send_json(400, self.runtime._safe_mode_provider_mutation_response("add provider"))
+                    return
+                if str((self.runtime.llm_control_mode_status().get("mode") if isinstance(self.runtime.llm_control_mode_status(), dict) else "") or "").strip().lower() == "controlled" and payload.get("confirm") is not True:
+                    self._send_json(400, self.runtime._confirm_required_payload(
+                        what_happened="Provider was not added",
+                        why="Controlled Mode requires confirmation before mutating provider configuration.",
+                        next_action='Resend with {"confirm": true} if you want to proceed.',
+                    ))
+                    return
                 ok, body = self.runtime.add_provider(payload)
                 self._send_json(200 if ok else 400, body)
                 return
@@ -21685,14 +22130,20 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/install":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
                 ok, body = self.runtime.packs_install(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/approve":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
                 ok, body = self.runtime.packs_approve(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/packs/enable":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
                 ok, body = self.runtime.packs_enable(payload)
                 self._send_json(200 if ok else 400, body)
                 return
@@ -21842,6 +22293,12 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 ok, body = self.runtime.llm_models_switch(payload)
                 self._send_json(200 if ok else 400, body)
                 return
+            if path == "/llm/models/switch_temporary":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.llm_models_switch_temporary(payload)
+                self._send_json(200 if ok else 400, body)
+                return
             if path == "/llm/fixit":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
@@ -21981,12 +22438,32 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
 
             if len(parts) == 3 and parts[0] == "providers" and parts[2] == "secret":
+                if self.runtime._safe_mode_enabled():
+                    self._send_json(400, self.runtime._safe_mode_provider_mutation_response("set provider secret"))
+                    return
+                if str((self.runtime.llm_control_mode_status().get("mode") if isinstance(self.runtime.llm_control_mode_status(), dict) else "") or "").strip().lower() == "controlled" and payload.get("confirm") is not True:
+                    self._send_json(400, self.runtime._confirm_required_payload(
+                        what_happened="Provider secret was not changed",
+                        why="Controlled Mode requires confirmation before mutating provider configuration.",
+                        next_action='Resend with {"confirm": true} if you want to proceed.',
+                    ))
+                    return
                 provider_id = parts[1]
                 ok, body = self.runtime.set_provider_secret(provider_id, payload)
                 self._send_json(200 if ok else 400, body)
                 return
 
             if len(parts) == 3 and parts[0] == "providers" and parts[2] == "models":
+                if self.runtime._safe_mode_enabled():
+                    self._send_json(400, self.runtime._safe_mode_provider_mutation_response("add provider model"))
+                    return
+                if str((self.runtime.llm_control_mode_status().get("mode") if isinstance(self.runtime.llm_control_mode_status(), dict) else "") or "").strip().lower() == "controlled" and payload.get("confirm") is not True:
+                    self._send_json(400, self.runtime._confirm_required_payload(
+                        what_happened="Provider model was not added",
+                        why="Controlled Mode requires confirmation before mutating model configuration.",
+                        next_action='Resend with {"confirm": true} if you want to proceed.',
+                    ))
+                    return
                 provider_id = parts[1]
                 ok, body = self.runtime.add_provider_model(provider_id, payload)
                 self._send_json(200 if ok else 400, body)
@@ -22071,6 +22548,16 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
 
             if len(parts) == 2 and parts[0] == "providers":
+                if self.runtime._safe_mode_enabled():
+                    self._send_json(400, self.runtime._safe_mode_provider_mutation_response("update provider"))
+                    return
+                if str((self.runtime.llm_control_mode_status().get("mode") if isinstance(self.runtime.llm_control_mode_status(), dict) else "") or "").strip().lower() == "controlled" and payload.get("confirm") is not True:
+                    self._send_json(400, self.runtime._confirm_required_payload(
+                        what_happened="Provider was not updated",
+                        why="Controlled Mode requires confirmation before mutating provider configuration.",
+                        next_action='Resend with {"confirm": true} if you want to proceed.',
+                    ))
+                    return
                 provider_id = parts[1]
                 ok, body = self.runtime.update_provider(provider_id, payload)
                 self._send_json(200 if ok else 400, body)
@@ -22102,6 +22589,16 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 self._send_json(200 if ok else 400, body)
                 return
             if len(parts) == 2 and parts[0] == "providers":
+                if self.runtime._safe_mode_enabled():
+                    self._send_json(400, self.runtime._safe_mode_provider_mutation_response("delete provider"))
+                    return
+                if str((self.runtime.llm_control_mode_status().get("mode") if isinstance(self.runtime.llm_control_mode_status(), dict) else "") or "").strip().lower() == "controlled":
+                    self._send_json(400, self.runtime._confirm_required_payload(
+                        what_happened="Provider was not deleted",
+                        why="Controlled Mode requires confirmation before mutating provider configuration.",
+                        next_action="Use the confirmed provider deletion flow.",
+                    ))
+                    return
                 provider_id = parts[1]
                 ok, body = self.runtime.delete_provider(provider_id)
                 self._send_json(200 if ok else 400, body)

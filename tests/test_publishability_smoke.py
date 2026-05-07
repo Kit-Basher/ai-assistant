@@ -531,6 +531,8 @@ class TestPublishabilitySmoke(unittest.TestCase):
     def test_publishability_mutating_preview_confirm_flows(self) -> None:
         runtime = self._make_runtime(safe_mode_enabled=True)
 
+        # This section is model-control policy, not Capability Rescue. SAFE MODE
+        # may produce a mutating preview, but confirmation must still be blocked.
         switch_preview, _ = self._chat(
             runtime,
             "switch temporarily to ollama:qwen2.5:7b-instruct",
@@ -543,6 +545,38 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual(["model_controller"], switch_preview_meta.get("used_tools"))
         self.assertFalse(bool(switch_preview_meta.get("used_llm")))
         self.assertTrue(bool(switch_preview_setup.get("requires_confirmation")))
+
+        safe_blocked_confirm, _ = self._chat(
+            runtime,
+            "yes",
+            user_id="smoke-mutate",
+            thread_id="smoke-mutate-thread",
+            expected_status=400,
+        )
+        safe_blocked_meta = self._chat_meta(safe_blocked_confirm)
+        self.assertEqual("model_status", safe_blocked_meta.get("route"))
+        self.assertEqual(["model_controller"], safe_blocked_meta.get("used_tools"))
+        self.assertFalse(bool(safe_blocked_meta.get("used_llm")))
+        self.assertEqual("safe_mode_blocked", safe_blocked_confirm.get("error_kind"))
+        safe_blocked_message = str(safe_blocked_confirm.get("message") or "")
+        self.assertIn("SAFE MODE is active", safe_blocked_message)
+        self.assertIn("Switch to Controlled Mode explicitly", safe_blocked_message)
+
+        controlled = self._post(runtime, "/llm/control_mode", {"mode": "controlled", "confirm": True})
+        self.assertEqual("controlled", ((controlled.get("policy") or {}).get("mode")))
+
+        switch_preview_controlled, _ = self._chat(
+            runtime,
+            "switch temporarily to ollama:qwen2.5:7b-instruct",
+            user_id="smoke-mutate",
+            thread_id="smoke-mutate-thread",
+        )
+        switch_preview_controlled_setup = (
+            switch_preview_controlled.get("setup")
+            if isinstance(switch_preview_controlled.get("setup"), dict)
+            else {}
+        )
+        self.assertTrue(bool(switch_preview_controlled_setup.get("requires_confirmation")))
 
         switch_confirm, _ = self._chat(
             runtime,
@@ -602,6 +636,10 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual(["model_controller"], switch_back_meta.get("used_tools"))
         self.assertFalse(bool(switch_back_meta.get("used_llm")))
         self.assertIn("Now using ollama:qwen3.5:4b for chat.", str(switch_back_confirm.get("message") or ""))
+
+        baseline = self._post(runtime, "/llm/control_mode", {"mode": "baseline", "confirm": True})
+        baseline_policy = baseline.get("policy") if isinstance(baseline.get("policy"), dict) else {}
+        self.assertEqual("safe", baseline_policy.get("mode"))
 
     def test_publishability_discovery_and_policy_flows(self) -> None:
         runtime = self._make_runtime(safe_mode_enabled=False)

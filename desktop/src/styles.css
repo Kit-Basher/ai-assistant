@@ -313,6 +313,93 @@ body {
   margin-top: 6px;
 }
 
+.capability-card {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #d8dfef;
+  border-radius: 8px;
+  background: #f8fafc;
+  display: grid;
+  gap: 12px;
+}
+
+.capability-card-header {
+  display: grid;
+  gap: 6px;
+}
+
+.capability-candidates {
+  display: grid;
+  gap: 8px;
+}
+
+.capability-candidate {
+  border: 1px solid #d9d0bf;
+  border-radius: 8px;
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 6px;
+}
+
+.capability-candidate-name {
+  margin: 0;
+  color: var(--text);
+  font-weight: 700;
+}
+
+.capability-candidate-meta,
+.capability-candidate-summary,
+.capability-candidate-warning,
+.capability-warning-list {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.capability-candidate-warning {
+  color: #725b17;
+}
+
+.capability-tag {
+  width: fit-content;
+  border: 1px solid #bfd8dc;
+  border-radius: 999px;
+  background: #f3fcfd;
+  color: #1e4e57;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 2px 8px;
+}
+
+.capability-warning-list {
+  padding-left: 18px;
+}
+
+.capability-preview-grid {
+  display: grid;
+  grid-template-columns: minmax(70px, auto) 1fr;
+  gap: 6px 10px;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
+.capability-preview-grid strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.capability-import-ok {
+  border-color: #bfd8dc;
+  background: #f3fcfd;
+}
+
+.capability-import-blocked {
+  border-color: #edc5c2;
+  background: #fff5f4;
+}
+
 .conversation-tools {
   display: flex;
   gap: 10px;

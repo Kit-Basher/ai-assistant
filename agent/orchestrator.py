@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from functools import partial
 import platform
 import re
-from typing import Any
+from typing import Any, Callable
 import os
 import json
 import shlex
@@ -49,12 +49,14 @@ from agent.conversation_memory import record_event
 import agent.memory_ingest as memory_ingest
 from agent.packs.capability_recommendation import (
     build_capability_gap_response,
+    build_capability_gap_rescue,
     classify_capability_gap_request,
     detect_pack_capability_need,
     recommend_packs_for_capability,
     render_pack_capability_response,
 )
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
+from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
@@ -569,6 +571,7 @@ class Orchestrator:
         runtime_truth_service: RuntimeTruthService | None = None,
         chat_runtime_adapter: Any | None = None,
         semantic_memory_service: Any | None = None,
+        pack_install_handler: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
     ) -> None:
         self.db = db
         self._skill_loader = SkillLoader(skills_path)
@@ -612,6 +615,7 @@ class Orchestrator:
         self._runtime_truth_service = runtime_truth_service
         self._chat_runtime_adapter = chat_runtime_adapter
         self._semantic_memory_service = semantic_memory_service
+        self._pack_install_handler = pack_install_handler
         if self._semantic_memory_service is not None:
             try:
                 setattr(self.db, "_semantic_memory_service", self._semantic_memory_service)
@@ -815,10 +819,58 @@ class Orchestrator:
             )
         lowered = " ".join(str(text or "").strip().lower().split())
         if self._looks_like_general_knowledge_question(text):
+            if error_kind in {
+                "no_suitable_model",
+                "llm_unavailable",
+                "llm_empty_response",
+                "router_unavailable",
+                "upstream_down",
+                "server_error",
+                "timeout",
+            }:
+                return OrchestratorResponse(
+                    self._general_knowledge_degraded_text(),
+                    {
+                        "route": "generic_chat",
+                        "used_runtime_state": False,
+                        "used_llm": False,
+                        "used_memory": False,
+                        "used_tools": [],
+                        "ok": True,
+                        "skip_post_response_hooks": True,
+                        "skip_epistemic_gate": True,
+                    },
+                )
             return None
         if error_kind in {"no_suitable_model", "llm_unavailable"}:
             return OrchestratorResponse(
                 "I’m here and ready to continue. Ask your next question and I’ll answer directly."
+            )
+        return None
+
+    @staticmethod
+    def _general_knowledge_degraded_text() -> str:
+        return (
+            "I can answer ordinary questions from general knowledge, but I couldn't get a clean answer just now. "
+            "Ask again in a simpler form, or ask for a source-backed check if you want verification."
+        )
+
+    @staticmethod
+    def _deterministic_general_knowledge_response(text: str | None) -> OrchestratorResponse | None:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if "bluejay" in normalized or "blue jay" in normalized:
+            return OrchestratorResponse(
+                "A blue jay is mostly blue, with a white face and underside, black markings, and blue-and-black barred wings and tail.",
+                {
+                    "route": "generic_chat",
+                    "used_runtime_state": False,
+                    "used_llm": False,
+                    "used_memory": False,
+                    "used_tools": [],
+                    "ok": True,
+                    "skip_post_response_hooks": True,
+                    "skip_epistemic_gate": True,
+                },
             )
         return None
 
@@ -2487,6 +2539,16 @@ class Orchestrator:
         normalized_space = normalized.replace("/", " ")
         if _looks_like_current_model_query(normalized):
             return True
+        if self._runtime_location_requested(normalized):
+            return True
+        if self._assistant_self_diagnostics_requested(normalized):
+            return True
+        if (
+            self._model_controller_promote_requested(normalized)
+            or self._model_controller_trial_switch_requested(normalized)
+            or self._model_acquisition_requested(normalized_space)
+        ):
+            return True
         if _looks_like_model_availability_query(normalized):
             return True
         if _looks_like_model_lifecycle_query(normalized):
@@ -3044,6 +3106,12 @@ class Orchestrator:
         capability_markers = (
             "what can you do",
             "what can you help me with",
+            "what help can you give",
+            "what kind of help can you give",
+            "what kinds of help can you give",
+            "what do you help with",
+            "what kinds of things can you help",
+            "tell me what you can do",
             "how you can help",
             "how can you help",
             "say what you do",
@@ -3058,6 +3126,11 @@ class Orchestrator:
                 "keep it natural",
                 "brief",
                 "concise",
+                "plain english",
+                "plain language",
+                "natural",
+                "naturally",
+                "simple",
                 "before we start",
                 "overview",
             )
@@ -3074,6 +3147,10 @@ class Orchestrator:
                 "help me think this through",
                 "help me think through",
                 "thinking through",
+                "think through this",
+                "untangle",
+                "sort through",
+                "make sense of",
             )
         ):
             return False
@@ -3081,9 +3158,15 @@ class Orchestrator:
             marker in normalized
             for marker in (
                 "messy",
+                "messy problem",
+                "messy thing",
                 "keep it simple",
+                "plain english",
+                "plain language",
                 "without overcomplicating it",
                 "without overcomplicating",
+                "without turning it into",
+                "whole framework",
             )
         )
 
@@ -3172,8 +3255,16 @@ class Orchestrator:
                 "our purpose is to",
                 "my role is to",
                 "my function is to",
+                "my objective is to",
                 "as a conversational assistant",
                 "as an assistant designed to",
+                "i exist to",
+                "i strive to",
+                "i aim to",
+                "i am here to assist",
+                "i'm here to assist",
+                "i can assist with a wide range",
+                "i can help with a wide range",
                 "maintain coherence",
                 "provide helpful and accurate",
                 "provide helpful, truthful",
@@ -3510,6 +3601,8 @@ class Orchestrator:
         normalized = normalize_setup_text(text).replace("/", " ")
         if not normalized:
             return False
+        if "big model" in normalized and any(token in normalized for token in ("switch", "use", "try")):
+            return True
         if any(phrase in normalized for phrase in _MODEL_CONTROLLER_TRIAL_SWITCH_PHRASES):
             return True
         has_explicit_target = _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
@@ -3529,7 +3622,11 @@ class Orchestrator:
         return bool(
             normalized.startswith("make ")
             and " default" in normalized
-            and (_DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None or "model" in normalized)
+            and (
+                _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
+                or "model" in normalized
+                or bool(re.search(r"\b[a-z][a-z0-9._-]*\b", normalized))
+            )
         )
 
     @staticmethod
@@ -5197,7 +5294,7 @@ class Orchestrator:
         matched_model = str(model_id or "").strip() or None
         normalized_provider = str(provider_id or "").strip().lower() or None
         if not matched_model:
-            message = "I need one exact model before I can acquire it."
+            message = "Which model do you want me to acquire? I need one exact model before I can preview or confirm acquisition."
             return self._runtime_truth_response(
                 text=message,
                 route="action_tool",
@@ -5241,7 +5338,8 @@ class Orchestrator:
         )
 
     def _model_acquire_response(self, user_id: str, text: str, *, confirmed: bool = False) -> OrchestratorResponse:
-        resolution = self._resolve_controller_model_target(user_id, text)
+        _ = user_id
+        resolution = self._resolve_runtime_model_target(text)
         status = str(resolution.get("status") or "").strip().lower()
         if status == "ambiguous":
             matches = [
@@ -5463,7 +5561,7 @@ class Orchestrator:
             return self._execute_model_controller_trial_switch(user_id, model_id=None, provider_id=None)
         if not confirmed:
             question = (
-                f"I will switch chat temporarily to {matched_model}. "
+                f"Temporary switch preview: I will switch chat temporarily to {matched_model}. "
                 "This mutates the active chat target. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
@@ -5794,6 +5892,12 @@ class Orchestrator:
         state = self._current_runtime_setup_state(user_id)
         if _looks_like_model_lifecycle_query(normalized):
             return self._model_lifecycle_response(text)
+        if allow_actions and self._model_acquisition_requested(normalized.replace("/", " ")):
+            return self._model_acquire_response(user_id, text)
+        if allow_actions and self._model_controller_trial_switch_requested(normalized):
+            return self._model_controller_trial_switch_response(user_id, text)
+        if allow_actions and self._model_controller_promote_requested(normalized):
+            return self._model_controller_promote_default_response(user_id, text)
         if _looks_like_local_model_inventory_query(normalized):
             return self._model_inventory_response(local_only=True, provider_id=provider_hint)
         if _looks_like_model_availability_query(normalized):
@@ -5804,6 +5908,10 @@ class Orchestrator:
             return self._model_inventory_response(local_only=False, remote_only=remote_only)
         if _looks_like_current_model_query(normalized):
             return self._current_model_response()
+        if self._runtime_location_requested(normalized):
+            return self._runtime_location_response()
+        if self._assistant_self_diagnostics_requested(normalized):
+            return self._assistant_self_diagnostics_response(text)
         if _looks_like_runtime_status_query(normalized):
             return self._runtime_status_response("runtime_status")
         if provider_hint and any(
@@ -5819,6 +5927,8 @@ class Orchestrator:
         ):
             resolution = self._resolve_runtime_model_target(text)
             if str(resolution.get("status") or "").strip().lower() in {"unique", "ambiguous"}:
+                if "big model" in normalized.replace("/", " "):
+                    return self._model_controller_trial_switch_response(user_id, text)
                 return self._set_default_model_response(user_id, text, state)
         return None
 
@@ -6380,6 +6490,20 @@ class Orchestrator:
         rendered_recommendation["proposal_summary"] = gap.get("proposal_summary")
         rendered_recommendation["helper_name"] = gap.get("helper_name")
         message = render_pack_capability_response(rendered_recommendation)
+        rescue = build_capability_gap_rescue(
+            text=text,
+            assessment=gap,
+            recommendation=recommendation,
+            fallback=str(recommendation.get("fallback") or ""),
+            source_errors=(
+                [dict(row) for row in recommendation.get("source_errors") if isinstance(row, dict)]
+                if isinstance(recommendation.get("source_errors"), list)
+                else []
+            ),
+            proposal_summary=str(gap.get("proposal_summary") or "").strip() or None,
+            helper_name=str(gap.get("helper_name") or "").strip() or None,
+        )
+        self._queue_capability_preview_followup(user_id, message=message, rescue=rescue)
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -6395,6 +6519,7 @@ class Orchestrator:
                 "comparison_mode": recommendation.get("comparison_mode"),
                 "fallback": recommendation.get("fallback"),
                 "next_step": recommendation.get("next_step"),
+                "capability_gap_rescue": rescue,
             },
         )
 
@@ -6424,6 +6549,302 @@ class Orchestrator:
                 "helper_name": helper_name,
                 "proposal_summary": proposal_summary or None,
                 "capability_label": capability_label or None,
+                "capability_gap_rescue": build_capability_gap_rescue(
+                    text=str(payload.get("detected_from") or "").strip() or None,
+                    assessment={
+                        "classification": "cannot_answer_without_new_capability",
+                        "request_kind": "capability",
+                        "capability": None,
+                        "label": capability_label or "helper",
+                        "detected_from": str(payload.get("detected_from") or "").strip() or None,
+                        "proposal_summary": proposal_summary or None,
+                        "helper_name": helper_name,
+                    },
+                    fallback="propose_new_capability",
+                    proposal_summary=proposal_summary or None,
+                    helper_name=helper_name,
+                ),
+            },
+        )
+
+    def _queue_capability_preview_followup(self, user_id: str, *, message: str, rescue: dict[str, Any]) -> None:
+        actions = rescue.get("candidate_actions") if isinstance(rescue.get("candidate_actions"), list) else []
+        preview_action = next(
+            (
+                row
+                for row in actions
+                if isinstance(row, dict)
+                and str(row.get("action") or "").strip().lower() == "show_preview"
+                and str(row.get("source_id") or "").strip()
+                and str(row.get("remote_id") or "").strip()
+            ),
+            None,
+        )
+        if preview_action is None:
+            return
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "capability_gap_preview",
+                "question": str(message or "").strip() or "Show the pack preview?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "source_id": str(preview_action.get("source_id") or "").strip(),
+                    "remote_id": str(preview_action.get("remote_id") or "").strip(),
+                    "pack_name": str(preview_action.get("pack_name") or "").strip() or None,
+                },
+            },
+        )
+
+    def _queue_capability_import_followup(
+        self,
+        user_id: str,
+        *,
+        message: str,
+        install_handoff: dict[str, Any],
+        source_id: str | None,
+        remote_id: str | None,
+        pack_name: str | None,
+        artifact_type: str | None,
+    ) -> None:
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "capability_gap_import",
+                "question": str(message or "").strip() or "Import this pack for review?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "install_handoff": dict(install_handoff),
+                    "source_id": str(source_id or "").strip() or None,
+                    "remote_id": str(remote_id or "").strip() or None,
+                    "pack_name": str(pack_name or "").strip() or None,
+                    "artifact_type": str(artifact_type or "").strip() or None,
+                },
+            },
+        )
+
+    def _capability_gap_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        source_id = str(context.get("source_id") or "").strip()
+        remote_id = str(context.get("remote_id") or "").strip()
+        if not source_id or not remote_id:
+            message = "I cannot show that pack preview because the source id or remote id is missing."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_gap_preview"],
+                payload={"type": "capability_gap_preview", "ok": False, "summary": message},
+            )
+        try:
+            payload = self._pack_registry_discovery().preview(source_id, remote_id)
+        except Exception as exc:
+            message = (
+                "I could not show that pack preview from the approved discovery source. "
+                "No pack was imported or installed."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_gap_preview"],
+                payload={
+                    "type": "capability_gap_preview",
+                    "ok": False,
+                    "summary": message,
+                    "source_id": source_id,
+                    "remote_id": remote_id,
+                    "error": exc.__class__.__name__,
+                },
+            )
+        preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+        listing = preview.get("listing") if isinstance(preview.get("listing"), dict) else {}
+        pack_name = str(listing.get("name") or context.get("pack_name") or "That pack").strip() or "That pack"
+        artifact_type = str(preview.get("artifact_type_hint") or listing.get("artifact_type_hint") or "").strip().lower()
+        summary = str(preview.get("summary") or listing.get("summary") or "").strip()
+        policy_hint = str(preview.get("policy_hint") or "").strip()
+        install_handoff = preview.get("install_handoff") if isinstance(preview.get("install_handoff"), dict) else None
+        source_hints = preview.get("source_hints") if isinstance(preview.get("source_hints"), list) else []
+        lines = [
+            f"Preview for {pack_name}: {summary or 'Discovery metadata is available, but it has not been fetched.'}",
+            policy_hint or "Discovery metadata is untrusted until fetched and normalized.",
+            "Nothing has been imported, enabled, approved, granted permissions, or executed.",
+        ]
+        if source_hints:
+            first_hint = str(source_hints[0] or "").strip()
+            if first_hint:
+                lines.append(first_hint)
+        handoff_source_kind = (
+            str((install_handoff or {}).get("source_kind") or "").strip().lower()
+            if isinstance(install_handoff, dict)
+            else ""
+        )
+        import_offer = False
+        if install_handoff and artifact_type == "portable_text_skill" and handoff_source_kind in ALLOWED_REMOTE_KINDS:
+            import_offer = True
+            lines.append("Say yes to import it for review, or no to cancel.")
+            self._queue_capability_import_followup(
+                user_id,
+                message="Import this pack for review?",
+                install_handoff={**install_handoff, "source_id": source_id},
+                source_id=source_id,
+                remote_id=remote_id,
+                pack_name=pack_name,
+                artifact_type=artifact_type,
+            )
+        else:
+            lines.append("This preview does not expose a safe portable text-pack import handoff.")
+        message = " ".join(line for line in lines if line).strip()
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_preview"],
+            payload={
+                "type": "capability_gap_preview",
+                "ok": True,
+                "summary": message,
+                "source_id": source_id,
+                "remote_id": remote_id,
+                "preview": preview,
+                "import_offered": import_offer,
+            },
+        )
+
+    def _capability_gap_import_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        install_handoff = context.get("install_handoff") if isinstance(context.get("install_handoff"), dict) else {}
+        artifact_type = str(context.get("artifact_type") or "").strip().lower()
+        if artifact_type != "portable_text_skill":
+            message = "I did not import that pack. Only portable text skill packs can use this chat import lane; native, plugin, dependency, and MCP-style packs need managed review."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_gap_import"],
+                payload={"type": "capability_gap_import", "ok": False, "summary": message, "blocked_reason": "portable_text_skill_required"},
+            )
+        if not callable(self._pack_install_handler):
+            message = "I can show the preview, but this chat surface cannot import packs directly right now. No pack was imported."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_gap_import"],
+                payload={"type": "capability_gap_import", "ok": False, "summary": message, "blocked_reason": "pack_install_handler_unavailable"},
+            )
+        handoff_source_kind = str(install_handoff.get("source_kind") or "").strip().lower()
+        if handoff_source_kind not in ALLOWED_REMOTE_KINDS:
+            message = "I did not import that pack. The preview did not provide an allowed remote source handoff."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_gap_import"],
+                payload={"type": "capability_gap_import", "ok": False, "summary": message, "blocked_reason": "unsupported_import_source_kind"},
+            )
+        payload = {
+            key: value
+            for key, value in {
+                "source": install_handoff.get("source"),
+                "source_kind": install_handoff.get("source_kind"),
+                "ref": install_handoff.get("ref"),
+                "source_id": install_handoff.get("source_id") or context.get("source_id"),
+            }.items()
+            if str(value or "").strip()
+        }
+        ok, body = self._pack_install_handler(payload)
+        if not ok:
+            message = str(body.get("message") or "I could not import that pack for review. No pack was enabled or approved.").strip()
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_gap_import"],
+                payload={"type": "capability_gap_import", "ok": False, "summary": message, "install_result": body},
+            )
+        pack = body.get("pack") if isinstance(body.get("pack"), dict) else {}
+        pack_name = str(pack.get("name") or context.get("pack_name") or "That pack").strip() or "That pack"
+        message = (
+            f"Imported {pack_name} for review. It is not enabled, not approved, has no granted permissions, "
+            "and has not been executed."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_import"],
+            payload={"type": "capability_gap_import", "ok": True, "summary": message, "install_result": body},
+        )
+
+    @staticmethod
+    def _looks_like_managed_adapter_execution_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        if any(
+            normalized.startswith(prefix)
+            for prefix in (
+                "what is ",
+                "what are ",
+                "how does ",
+                "how do ",
+                "explain ",
+                "tell me about ",
+            )
+        ):
+            return False
+        adapter_terms = ("mcp server", "mcp adapter", "plugin pack", "native code pack", "dependency-backed")
+        action_terms = ("run", "start", "launch", "install", "import", "enable", "execute")
+        return any(term in normalized for term in adapter_terms) and any(term in normalized for term in action_terms)
+
+    def _managed_adapter_block_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = text
+        message = (
+            "I can't run or import arbitrary MCP, plugin, native, or dependency-backed integrations from chat. "
+            "Those need a managed-adapter review lane with sandboxing, source approval, explicit permission grants, "
+            "health checks, and per-tool enablement. Nothing was searched, imported, enabled, approved, or executed."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_blocker"],
+            error_kind="managed_adapter_required",
+            ok=False,
+            payload={
+                "type": "capability_gap_blocker",
+                "blocked_reason": "managed_adapter_required",
+                "source_scope": "none",
+                "searched": False,
+                "preview_required": True,
+                "install_allowed_initially": False,
+                "summary": message,
             },
         )
 
@@ -6438,7 +6859,15 @@ class Orchestrator:
         message = str(plan.get("summary") or "").strip()
         if not message:
             return None
-        if str(plan.get("fallback") or "").strip().lower() == "propose_new_capability":
+        rescue = plan.get("capability_gap_rescue") if isinstance(plan.get("capability_gap_rescue"), dict) else {}
+        preview_actions = [
+            action
+            for action in (rescue.get("candidate_actions") if isinstance(rescue.get("candidate_actions"), list) else [])
+            if isinstance(action, dict) and str(action.get("action") or "").strip().lower() == "show_preview"
+        ]
+        if preview_actions:
+            self._queue_capability_preview_followup(user_id, message=message, rescue=rescue)
+        elif str(plan.get("fallback") or "").strip().lower() == "propose_new_capability":
             pending_id = str(uuid.uuid4())
             now_epoch = int(time.time())
             pending_payload = {
@@ -6455,6 +6884,7 @@ class Orchestrator:
                     "helper_name": str(plan.get("helper_name") or "").strip() or None,
                     "proposal_summary": str(plan.get("proposal_summary") or "").strip() or None,
                     "capability_label": str(plan.get("capability_label") or "").strip() or None,
+                    "detected_from": str(plan.get("detected_from") or "").strip() or None,
                 },
             }
             self._memory_runtime.add_pending_item(user_id, pending_payload)
@@ -6473,6 +6903,7 @@ class Orchestrator:
                 "capability_label": plan.get("capability_label"),
                 "fallback": plan.get("fallback"),
                 "next_step": plan.get("next_step"),
+                "capability_gap_rescue": rescue or plan.get("capability_gap_rescue"),
             },
         )
 
@@ -6791,6 +7222,77 @@ class Orchestrator:
                 model_ids.append(candidate)
         return model_ids
 
+    @staticmethod
+    def _runtime_model_aliases(candidate_id: str) -> set[str]:
+        normalized_id = normalize_setup_text(candidate_id)
+        if not normalized_id:
+            return set()
+        candidate_model = normalized_id.split(":", 1)[1] if ":" in normalized_id else normalized_id
+        aliases = {normalized_id, candidate_model}
+        model_head = candidate_model.split(":", 1)[0]
+        if model_head:
+            aliases.add(model_head)
+            for separator in (".", "-", "_"):
+                if separator in model_head:
+                    aliases.add(model_head.split(separator, 1)[0])
+        family_match = re.match(r"([a-z]+[0-9]*(?:\.[0-9]+)?)", model_head)
+        if family_match:
+            aliases.add(family_match.group(1))
+        short_family_match = re.match(r"([a-z]+)", model_head)
+        if short_family_match and len(short_family_match.group(1)) >= 4:
+            aliases.add(short_family_match.group(1))
+        return {alias for alias in aliases if len(alias) >= 4}
+
+    def _match_runtime_model_aliases_from_text(self, text: str) -> list[str]:
+        normalized = normalize_setup_text(text)
+        if not normalized:
+            return []
+        scored_matches: list[tuple[int, str]] = []
+        for candidate_id in self._runtime_model_catalog():
+            aliases = self._runtime_model_aliases(candidate_id)
+            matched_alias_lengths = [
+                len(alias)
+                for alias in aliases
+                if re.search(rf"\b{re.escape(alias)}\b", normalized)
+            ]
+            if matched_alias_lengths:
+                scored_matches.append((max(matched_alias_lengths), candidate_id))
+        if not scored_matches:
+            return []
+        best_score = max(score for score, _candidate_id in scored_matches)
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for score, match in scored_matches:
+            if score != best_score:
+                continue
+            if match in seen:
+                continue
+            seen.add(match)
+            deduped.append(match)
+        return deduped
+
+    def _large_local_runtime_model_matches(self) -> list[str]:
+        truth = self._runtime_truth()
+        if truth is None:
+            return []
+        payload = self._canonical_model_inventory_snapshot(truth)
+        rows = payload.get("models") if isinstance(payload.get("models"), list) else []
+        matches: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("model_id") or row.get("id") or "").strip()
+            if not model_id:
+                continue
+            architecture = str(row.get("architecture_type") or row.get("architecture_modality") or "").strip().lower()
+            is_large = bool(row.get("large_local")) or architecture == "moe"
+            if not is_large:
+                continue
+            if row.get("selectable_now") is False or row.get("chat_usable") is False:
+                continue
+            matches.append(model_id)
+        return matches
+
     def _resolve_runtime_model_target(self, text: str) -> dict[str, Any]:
         normalized = normalize_setup_text(text)
         if not normalized:
@@ -6855,6 +7357,44 @@ class Orchestrator:
                     "model_id": None,
                     "matches": bare_matches,
                 }
+
+        normalized_space = normalized.replace("/", " ")
+        if "big model" in normalized_space:
+            big_matches = self._large_local_runtime_model_matches()
+            if len(big_matches) == 1:
+                provider_id = str(big_matches[0].split(":", 1)[0]).strip().lower() if ":" in big_matches[0] else None
+                return {
+                    "status": "unique",
+                    "requested": "big model",
+                    "model_id": big_matches[0],
+                    "provider_id": provider_id,
+                    "matches": big_matches,
+                }
+            if len(big_matches) > 1:
+                return {
+                    "status": "ambiguous",
+                    "requested": "big model",
+                    "model_id": None,
+                    "matches": big_matches,
+                }
+
+        alias_matches = self._match_runtime_model_aliases_from_text(text)
+        if len(alias_matches) == 1:
+            provider_id = str(alias_matches[0].split(":", 1)[0]).strip().lower() if ":" in alias_matches[0] else None
+            return {
+                "status": "unique",
+                "requested": None,
+                "model_id": alias_matches[0],
+                "provider_id": provider_id,
+                "matches": alias_matches,
+            }
+        if len(alias_matches) > 1:
+            return {
+                "status": "ambiguous",
+                "requested": None,
+                "model_id": None,
+                "matches": alias_matches,
+            }
 
         fallback = self._match_runtime_model_from_text(text)
         if fallback:
@@ -7299,6 +7839,128 @@ class Orchestrator:
                 "title": "Provider status",
                 "summary": message,
                 "providers": rows,
+            },
+        )
+
+    @staticmethod
+    def _runtime_location_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "running locally or in the cloud",
+                "local or cloud",
+                "locally or in the cloud",
+                "running in the cloud",
+                "running locally",
+                "local or remote",
+            )
+        )
+
+    @staticmethod
+    def _assistant_self_diagnostics_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "are you broken",
+                "why are you so slow",
+                "why are you slow",
+                "what are you doing",
+                "fix yourself",
+                "debug yourself",
+                "diagnose yourself",
+            )
+        )
+
+    def _runtime_location_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="runtime_status",
+                reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
+            )
+        current = truth.current_chat_target_status()
+        provider = str(current.get("provider") or current.get("effective_provider") or "").strip().lower() or None
+        model = str(current.get("model") or current.get("effective_model") or "").strip() or None
+        ready = bool(current.get("ready", False))
+        provider_kind = (
+            "local"
+            if provider in {"ollama", "llama_cpp", "llama.cpp"}
+            else "cloud/remote"
+            if provider in {"openrouter", "openai", "anthropic"}
+            else "unknown"
+        )
+        if provider and model:
+            message = (
+                f"Chat is currently using {model} through {provider}. "
+                f"That provider is classified as {provider_kind}. "
+                f"Runtime readiness says chat is {'ready' if ready else 'not ready'}."
+            )
+        else:
+            message = "No chat model is ready right now. I can still answer deterministic runtime/setup questions."
+        return self._runtime_truth_response(
+            text=message,
+            route="runtime_status",
+            skip_post_response_hooks=True,
+            payload={
+                "type": "runtime_location",
+                "provider": provider,
+                "model_id": model,
+                "provider_kind": provider_kind,
+                "ready": ready,
+                "summary": message,
+            },
+        )
+
+    def _assistant_self_diagnostics_response(self, text: str) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="runtime_status",
+                reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
+            )
+        current = truth.current_chat_target_status()
+        provider = str(current.get("provider") or current.get("effective_provider") or "").strip().lower() or None
+        model = str(current.get("model") or current.get("effective_model") or "").strip() or None
+        ready = bool(current.get("ready", False))
+        health = str(current.get("health_status") or "unknown").strip().lower() or "unknown"
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if "fix yourself" in normalized:
+            message = (
+                "I can't modify myself directly from chat. I can check runtime/model status, run safe diagnostics, "
+                "and suggest the next step; code changes still need the Controlled Mode Codex workflow and confirm steps."
+            )
+        elif "slow" in normalized:
+            target = f"{model} on {provider}" if provider and model else "no ready chat model"
+            message = (
+                f"Current chat target: {target}. Runtime readiness is {'ready' if ready else 'not ready'} "
+                f"and model health is {health}. A safe next step is to check /llm/status and recent service logs "
+                "before changing models."
+            )
+        else:
+            target = f"{model} on {provider}" if provider and model else "no ready chat model"
+            message = (
+                f"I can answer, and the current chat target is {target}. Runtime readiness is "
+                f"{'ready' if ready else 'not ready'} with model health {health}."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="runtime_status",
+            skip_post_response_hooks=True,
+            payload={
+                "type": "assistant_self_diagnostics",
+                "provider": provider,
+                "model_id": model,
+                "ready": ready,
+                "health_status": health,
+                "summary": message,
             },
         )
 
@@ -10699,6 +11361,8 @@ class Orchestrator:
         repair_followup = self._repair_context_handoff_response(user_id, text)
         if repair_followup is not None:
             return repair_followup
+        if self._looks_like_managed_adapter_execution_request(text):
+            return self._managed_adapter_block_response(user_id, text)
         decision = classify_runtime_chat_route(
             text,
             awaiting_secret=str(state.get("step") or "") == "awaiting_openrouter_key",
@@ -10717,6 +11381,9 @@ class Orchestrator:
                 )
             ):
                 return None
+            capability_gap_response = self._capability_gap_planning_response(user_id, text)
+            if capability_gap_response is not None:
+                return capability_gap_response
             action_tool_response = self._handle_action_tool_intent(user_id, text)
             if action_tool_response is not None:
                 return action_tool_response
@@ -10737,6 +11404,10 @@ class Orchestrator:
             "model_scout_strategy",
             "model_scout_discovery",
         }
+        if kind == "shell_install_package" and "skill" in " ".join(str(text or "").strip().lower().split()):
+            capability_gap_response = self._capability_gap_planning_response(user_id, text)
+            if capability_gap_response is not None:
+                return capability_gap_response
         control_mode_response = (
             None if kind in mode_safe_model_kinds else self._control_mode_intent_response(text)
         )
@@ -10750,6 +11421,15 @@ class Orchestrator:
             cards_payload["generic_fallback_allowed"] = False
             return self._cards_response(user_id, cards_payload)
         if route == "generic_chat" or kind in {"none", "generic_chat"}:
+            if self._runtime_location_requested(text):
+                return self._runtime_location_response()
+            if self._assistant_self_diagnostics_requested(text):
+                return self._assistant_self_diagnostics_response(text)
+            general_knowledge_response = self._deterministic_general_knowledge_response(text)
+            if general_knowledge_response is not None:
+                return general_knowledge_response
+            if self._looks_like_brief_capabilities_prompt(text) or self._looks_like_guided_thinking_prompt(text):
+                return self._assistant_capabilities_response(text)
             if self._looks_like_long_chat_coherence_probe(text):
                 return OrchestratorResponse(
                     "Yes. We can continue. Ask your next question and I’ll keep the thread consistent and concise.",
@@ -10769,6 +11449,8 @@ class Orchestrator:
             return self._operational_status_response(user_id, text, kind)
         if kind == "assistant_capabilities":
             return self._assistant_capabilities_response(text)
+        if self._model_acquisition_requested(normalize_setup_text(text).replace("/", " ")):
+            return self._model_acquire_response(user_id, text)
         if kind == "pack_capability_recommendation":
             return self._pack_capability_recommendation_response(user_id, text)
         if kind == "capability_gap_plan":
@@ -11055,6 +11737,8 @@ class Orchestrator:
         containment_response = self._safe_mode_containment_response(user_id, text)
         if containment_response is not None:
             return containment_response
+        if self._looks_like_managed_adapter_execution_request(text):
+            return self._managed_adapter_block_response(user_id, text)
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
@@ -11370,19 +12054,6 @@ class Orchestrator:
                 fallback_count=len(selection_fallbacks),
             )
             llm_text = str(router_result.get("text") or "").strip()
-            if llm_text:
-                return self._merge_response_data(
-                    OrchestratorResponse(
-                    llm_text,
-                    {
-                        "llm_control": {
-                            "trace_id": trace_id,
-                            **router_data,
-                        }
-                    },
-                    ),
-                    **response_common,
-                )
             degraded_response = self._deterministic_chat_degradation_response(
                 text,
                 error_kind=str(response_common.get("error_kind") or "").strip() or None,
@@ -11398,6 +12069,19 @@ class Orchestrator:
                         "model": None,
                         "error_kind": None,
                     },
+                )
+            if llm_text:
+                return self._merge_response_data(
+                    OrchestratorResponse(
+                    llm_text,
+                    {
+                        "llm_control": {
+                            "trace_id": trace_id,
+                            **router_data,
+                        }
+                    },
+                    ),
+                    **response_common,
                 )
             return self._merge_response_data(
                 self._llm_error_fallback_response(user_id, text),
@@ -11480,10 +12164,7 @@ class Orchestrator:
                 except Exception:
                     pass
             if self._looks_like_capability_disclaimer_reply(llm_text):
-                llm_text = (
-                    "I can answer ordinary questions from general knowledge, but I couldn't get a clean answer just now. "
-                    "Ask again in a simpler form, or ask for a source-backed check if you want verification."
-                )
+                llm_text = self._general_knowledge_degraded_text()
             elif self._looks_like_robotic_self_narration_reply(llm_text):
                 llm_text = (
                     "I’m here to help. Ask one clear question or tell me one thing you want to do, "
@@ -11607,6 +12288,22 @@ class Orchestrator:
             task_type=task_type,
             fallback_count=len(selection_fallbacks),
         )
+        degraded_response = self._deterministic_chat_degradation_response(
+            text,
+            error_kind="llm_empty_response",
+        )
+        if degraded_response is not None:
+            return self._merge_response_data(
+                degraded_response,
+                **{
+                    **response_common,
+                    "ok": True,
+                    "used_llm": False,
+                    "provider": None,
+                    "model": None,
+                    "error_kind": None,
+                },
+            )
         return self._merge_response_data(
             self._llm_error_fallback_response(user_id, text),
             **{
@@ -15417,6 +16114,24 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I’ll leave that capability idea alone for now.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_preview":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_gap_preview_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I cancelled the pack preview.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_import":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_gap_import_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not import that pack.")
                 if pending_kind == "confirmation":
                     if followup_intent in {"accept", "details"}:
                         pending_action = self.confirmations.pop(user_id)

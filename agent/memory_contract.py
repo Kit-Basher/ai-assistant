@@ -188,7 +188,7 @@ def normalize_pending_item(
         thread_id=thread_id,
         status=status,
     )
-    return {
+    result = {
         "pending_id": normalized.pending_id,
         "kind": normalized.kind,
         "origin_tool": normalized.origin_tool,
@@ -199,6 +199,10 @@ def normalize_pending_item(
         "thread_id": normalized.thread_id,
         "status": normalized.status,
     }
+    context = source.get("context") if isinstance(source.get("context"), dict) else {}
+    if context:
+        result["context"] = {str(key): context[key] for key in sorted(context.keys())}
+    return result
 
 
 def build_memory_summary(

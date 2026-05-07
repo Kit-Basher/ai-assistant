@@ -49,6 +49,25 @@ class TestMemoryContract(unittest.TestCase):
         self.assertEqual(PENDING_STATUS_WAITING_FOR_USER, normalized["status"])
         self.assertEqual(["yes", "no"], normalized["options"])
 
+    def test_normalize_pending_item_preserves_context(self) -> None:
+        normalized = normalize_pending_item(
+            {
+                "pending_id": "p1",
+                "kind": "followup",
+                "origin_tool": "capability_gap_preview",
+                "question": "Show preview?",
+                "options": ["yes", "no"],
+                "created_at": 10,
+                "expires_at": 20,
+                "thread_id": "thread-a",
+                "status": "READY_TO_RESUME",
+                "context": {"remote_id": "local-voice", "source_id": "local"},
+            },
+            default_thread_id="thread-a",
+            now_ts=15,
+        )
+        self.assertEqual({"remote_id": "local-voice", "source_id": "local"}, normalized["context"])
+
     def test_build_memory_summary_is_predictable(self) -> None:
         summary = build_memory_summary(
             thread_state={

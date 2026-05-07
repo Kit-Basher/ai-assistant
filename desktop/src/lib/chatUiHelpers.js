@@ -238,10 +238,94 @@ function extractClarificationUi(text, payload) {
   };
 }
 
+function extractCapabilityUi(payload) {
+  const setup = payload?.setup && typeof payload.setup === "object" ? payload.setup : null;
+  if (!setup) return null;
+
+  const rescue =
+    setup?.capability_gap_rescue && typeof setup.capability_gap_rescue === "object"
+      ? setup.capability_gap_rescue
+      : null;
+  if (rescue?.type === "capability_gap_rescue") {
+    const candidates = Array.isArray(rescue.candidate_packs)
+      ? rescue.candidate_packs
+          .filter((candidate) => candidate && typeof candidate === "object")
+          .slice(0, 3)
+          .map((candidate) => ({
+            name: String(candidate.name || "Skill pack").trim() || "Skill pack",
+            source: String(candidate.source_name || candidate.source_id || "Approved source").trim() || "Approved source",
+            sourceId: String(candidate.source_id || "").trim(),
+            remoteId: String(candidate.remote_id || "").trim(),
+            summary: String(candidate.summary || "").trim(),
+            artifactType: String(candidate.artifact_type_hint || "unknown").trim() || "unknown",
+            recommended: candidate.recommended === true,
+            installable: candidate.installable_by_current_policy === true,
+            blocker: String(candidate.blocker || "").trim(),
+            warning: String(candidate.status_note || "Discovery metadata is untrusted until previewed.").trim()
+          }))
+      : [];
+    return {
+      type: "rescue",
+      title: String(rescue.missing_capability || rescue.capability_label || "Missing capability").trim(),
+      goal: String(rescue.user_goal || "").trim(),
+      searchQuery: String(rescue.search_query || "").trim(),
+      sourceScope: String(rescue.source_scope || "approved_pack_sources_only").trim(),
+      previewRequired: rescue.preview_required === true,
+      installAllowedInitially: rescue.install_allowed_initially === true,
+      warnings: Array.isArray(rescue.trust_warnings)
+        ? rescue.trust_warnings.map((warning) => String(warning || "").trim()).filter(Boolean).slice(0, 3)
+        : [],
+      candidates,
+      previewCommand: "yes",
+      cancelCommand: "no"
+    };
+  }
+
+  if (setup.type === "capability_gap_preview") {
+    const preview = setup.preview && typeof setup.preview === "object" ? setup.preview : {};
+    const listing = preview.listing && typeof preview.listing === "object" ? preview.listing : {};
+    return {
+      type: "preview",
+      ok: setup.ok !== false,
+      title: String(listing.name || "Pack preview").trim() || "Pack preview",
+      summary: String(preview.summary || listing.summary || setup.summary || "").trim(),
+      artifactType: String(preview.artifact_type_hint || listing.artifact_type_hint || "unknown").trim() || "unknown",
+      sourceId: String(setup.source_id || "").trim(),
+      remoteId: String(setup.remote_id || listing.remote_id || "").trim(),
+      policyHint: String(preview.policy_hint || "Discovery metadata is untrusted until fetched and normalized.").trim(),
+      importOffered: setup.import_offered === true
+    };
+  }
+
+  if (setup.type === "capability_gap_import") {
+    return {
+      type: "import_result",
+      ok: setup.ok === true,
+      title: setup.ok === true ? "Imported for review" : "Import not completed",
+      summary: String(setup.summary || "").trim(),
+      blockedReason: String(setup.blocked_reason || "").trim()
+    };
+  }
+
+  return null;
+}
+
 export function buildAssistantMessage(payload) {
   const text = extractAssistantText(payload);
   const setup = payload?.setup && typeof payload.setup === "object" ? payload.setup : null;
-  const confirmation =
+  const capability = extractCapabilityUi(payload);
+  const capabilityImportConfirmation =
+    capability?.type === "preview" && capability.importOffered
+      ? {
+          title: "Import for review?",
+          description: "This imports the pack into review only. It will not be enabled, approved, granted permissions, or executed.",
+          approveLabel: "Import for review",
+          approveCommand: "yes",
+          cancelLabel: "Cancel",
+          cancelCommand: "no"
+        }
+      : null;
+  const setupConfirmation =
     setup?.type === "confirm_switch_model" || setup?.type === "confirm_reuse_secret"
       ? {
           title: String(setup.title || "Approve this step?").trim() || "Approve this step?",
@@ -251,7 +335,8 @@ export function buildAssistantMessage(payload) {
           cancelLabel: String(setup.cancel_label || "Cancel").trim() || "Cancel",
           cancelCommand: String(setup.cancel_command || "no").trim() || "no"
         }
-      : extractConfirmationUi(text, payload);
+      : null;
+  const confirmation = capabilityImportConfirmation || setupConfirmation || extractConfirmationUi(text, payload);
   const clarification = confirmation ? null : extractClarificationUi(text, payload);
   const errorKind = String(payload?.error_kind || "").trim();
   const setupFailed = setup?.type === "provider_test_result" && setup?.ok === false;
@@ -262,7 +347,8 @@ export function buildAssistantMessage(payload) {
     tone: (!payload?.ok && errorKind && errorKind !== "needs_clarification") || setupFailed ? "error" : "default",
     ui: {
       confirmation,
-      clarification
+      clarification,
+      capability
     }
   };
 }

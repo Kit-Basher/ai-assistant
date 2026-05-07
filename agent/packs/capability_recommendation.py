@@ -209,6 +209,17 @@ _CAPABILITY_ACTION_CUES = (
     "notify",
 )
 
+_UNSUPPORTED_TOOL_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("qr code", "barcode"), "generate a QR or barcode"),
+    (("generate image", "create image", "make image", "draw image", "image generation"), "generate images"),
+    (("convert file", "convert this file", "file conversion", "convert pdf", "convert image"), "convert files"),
+    (("export file", "export this", "import file", "transcode", "ocr"), "transform files"),
+    (
+        ("integrate with", "connect to", "sync with", "sync this with", "sync my", "post to", "send to slack", "send to notion"),
+        "integrate with an app",
+    ),
+)
+
 _KNOWLEDGE_QUESTION_PREFIXES = (
     "what is ",
     "what are ",
@@ -306,6 +317,8 @@ def _matches_rule(normalized: str, rule: dict[str, Any]) -> bool:
 def detect_pack_capability_need(text: str | None) -> dict[str, Any] | None:
     normalized = _normalize_text(text)
     if not normalized:
+        return None
+    if "qr code" in normalized or "barcode" in normalized:
         return None
     if _classify_request_kind(normalized) == "knowledge":
         return None
@@ -588,6 +601,46 @@ def _custom_capability_match(normalized: str) -> dict[str, Any] | None:
     }
 
 
+def _unsupported_tool_capability_match(normalized: str) -> dict[str, Any] | None:
+    if not normalized:
+        return None
+    if _classify_request_kind(normalized) == "knowledge":
+        return None
+    for patterns, summary in _UNSUPPORTED_TOOL_PATTERNS:
+        if any(pattern in normalized for pattern in patterns):
+            return {
+                "capability": None,
+                "label": "helper",
+                "confidence": 0.68,
+                "proposal_summary": summary,
+                "helper_name": "helper",
+            }
+    if re.search(r"\b(?:generate|create|make|convert|export|import|sync|integrate|automate)\b", normalized) and any(
+        token in normalized
+        for token in (
+            "file",
+            "pdf",
+            "image",
+            "audio",
+            "video",
+            "spreadsheet",
+            "calendar",
+            "email",
+            "app",
+            "service",
+            "api",
+        )
+    ):
+        return {
+            "capability": None,
+            "label": "helper",
+            "confidence": 0.62,
+            "proposal_summary": _compact_request_summary(normalized),
+            "helper_name": "helper",
+        }
+    return None
+
+
 def classify_capability_gap_request(text: str | None) -> dict[str, Any]:
     normalized = _normalize_text(text)
     if not normalized:
@@ -615,7 +668,7 @@ def classify_capability_gap_request(text: str | None) -> dict[str, Any]:
 
     exact_need = detect_pack_capability_need(text)
     behavioral_need = _behavioral_capability_match(normalized)
-    need = exact_need or behavioral_need or _custom_capability_match(normalized)
+    need = exact_need or behavioral_need or _custom_capability_match(normalized) or _unsupported_tool_capability_match(normalized)
     if need is None:
         return {
             "classification": "can_answer_locally",
@@ -923,6 +976,22 @@ def recommend_packs_for_capability(
         if not isinstance(source, dict):
             continue
         if not bool(source.get("enabled", True)):
+            source_errors.append(
+                {
+                    "source_id": str(source.get("id") or "").strip() or "unknown",
+                    "query": "*",
+                    "error": "source_disabled",
+                }
+            )
+            continue
+        if source.get("allowed_by_policy") is False or source.get("queryable") is False:
+            source_errors.append(
+                {
+                    "source_id": str(source.get("id") or "").strip() or "unknown",
+                    "query": "*",
+                    "error": str(source.get("blocked_reason") or "source_blocked_by_policy"),
+                }
+            )
             continue
         source_id = str(source.get("id") or "").strip()
         if not source_id:
@@ -1051,7 +1120,7 @@ def recommend_packs_for_capability(
 
     if recommendation_pack is not None:
         fallback = "install_preview"
-        next_step = "If you want, say yes and I'll show the install details."
+        next_step = "If you want, say yes and I'll show the pack preview."
     elif installed_pack is not None and str((installed_pack.get("normalized_state") or {}).get("state_key") or "").startswith("installed"):
         fallback = "text_only"
         next_step = "I can keep responding in text, or I can show what would need to change."
@@ -1098,6 +1167,145 @@ def recommend_packs_for_capability(
         "warnings": list(source_errors),
         "source_errors": list(source_errors),
         "queries": list(search_terms),
+    }
+
+
+def _candidate_metadata_from_pack(pack: dict[str, Any], *, recommended: bool) -> dict[str, Any] | None:
+    if not isinstance(pack, dict):
+        return None
+    source_id = str(pack.get("source_id") or "").strip()
+    remote_id = str(pack.get("remote_id") or "").strip()
+    name = str(pack.get("name") or "Candidate pack").strip() or "Candidate pack"
+    if not source_id or not remote_id:
+        return None
+    normalized_state = pack.get("normalized_state") if isinstance(pack.get("normalized_state"), dict) else {}
+    return {
+        "name": name,
+        "source_id": source_id,
+        "remote_id": remote_id,
+        "source_name": str(pack.get("source_name") or "").strip() or None,
+        "source_kind": str(pack.get("source_kind") or "").strip() or None,
+        "summary": str(pack.get("summary") or "").strip() or None,
+        "artifact_type_hint": str(pack.get("artifact_type_hint") or "").strip() or None,
+        "latest_ref_hint": str(pack.get("latest_ref_hint") or "").strip() or None,
+        "installable_by_current_policy": bool(pack.get("installable", False)),
+        "preview_required": True,
+        "metadata_trusted": False,
+        "recommended": bool(recommended),
+        "status_note": str(normalized_state.get("status_note") or "").strip() or None,
+        "blocker": str(pack.get("blocker") or normalized_state.get("blocker") or "").strip() or None,
+    }
+
+
+def _candidate_action_from_pack(pack: dict[str, Any], *, recommended: bool) -> dict[str, Any] | None:
+    if not isinstance(pack, dict):
+        return None
+    source_id = str(pack.get("source_id") or "").strip()
+    remote_id = str(pack.get("remote_id") or "").strip()
+    name = str(pack.get("name") or "Candidate pack").strip() or "Candidate pack"
+    if not source_id or not remote_id:
+        return None
+    return {
+        "action": "show_preview",
+        "label": f"Show preview for {name}",
+        "pack_name": name,
+        "source_id": source_id,
+        "remote_id": remote_id,
+        "recommended": bool(recommended),
+        "preview_required": True,
+        "install_allowed_initially": False,
+    }
+
+
+def build_capability_gap_rescue(
+    *,
+    text: str | None,
+    assessment: dict[str, Any] | None = None,
+    recommendation: dict[str, Any] | None = None,
+    fallback: str | None = None,
+    source_errors: list[dict[str, Any]] | None = None,
+    proposal_summary: str | None = None,
+    helper_name: str | None = None,
+) -> dict[str, Any]:
+    assessed = assessment if isinstance(assessment, dict) else classify_capability_gap_request(text)
+    capability = str(
+        assessed.get("capability")
+        or (recommendation or {}).get("capability_required")
+        or ""
+    ).strip().lower() or None
+    label = str(
+        assessed.get("label")
+        or (recommendation or {}).get("capability_label")
+        or capability
+        or "helper"
+    ).strip()
+    user_goal = str(assessed.get("detected_from") or text or "").strip()
+    source_error_rows = [dict(row) for row in (source_errors or []) if isinstance(row, dict)]
+    queries = (
+        recommendation.get("queries")
+        if isinstance(recommendation, dict) and isinstance(recommendation.get("queries"), list)
+        else []
+    )
+    search_query = " ".join(str(item).strip() for item in queries if str(item).strip()).strip()
+    if not search_query:
+        search_query = str(proposal_summary or assessed.get("proposal_summary") or label or user_goal).strip()
+
+    candidate_actions: list[dict[str, Any]] = []
+    candidate_packs: list[dict[str, Any]] = []
+    if isinstance(recommendation, dict):
+        recommended_pack = recommendation.get("recommended_pack") if isinstance(recommendation.get("recommended_pack"), dict) else None
+        alternate_pack = recommendation.get("alternate_pack") if isinstance(recommendation.get("alternate_pack"), dict) else None
+        for pack, recommended in ((recommended_pack, True), (alternate_pack, False)):
+            action = _candidate_action_from_pack(pack or {}, recommended=recommended)
+            if action is not None:
+                candidate_actions.append(action)
+            candidate = _candidate_metadata_from_pack(pack or {}, recommended=recommended)
+            if candidate is not None:
+                candidate_packs.append(candidate)
+    candidate_actions.append(
+        {
+            "action": "keep_text_only",
+            "label": "Keep helping in text",
+            "recommended": not bool(candidate_actions),
+        }
+    )
+    effective_fallback = str(
+        fallback
+        or (recommendation or {}).get("fallback")
+        or assessed.get("fallback")
+        or ""
+    ).strip().lower()
+    if effective_fallback == "propose_new_capability" or not candidate_actions[:-1]:
+        candidate_actions.append(
+            {
+                "action": "sketch_helper",
+                "label": f"Sketch a small {str(helper_name or assessed.get('helper_name') or 'helper').strip() or 'helper'}",
+                "recommended": effective_fallback == "propose_new_capability",
+            }
+        )
+
+    trust_warnings = [
+        "Discovery is limited to approved pack sources.",
+        "Discovery metadata is untrusted until previewed.",
+        "Preview is required before any import.",
+        "Initial rescue cannot install, enable, approve, grant permissions, or execute code.",
+    ]
+    if source_error_rows:
+        trust_warnings.append("One or more approved discovery sources were unavailable or blocked.")
+
+    return {
+        "type": "capability_gap_rescue",
+        "missing_capability": capability or label or "helper",
+        "capability_label": label or None,
+        "user_goal": user_goal or None,
+        "search_query": search_query or None,
+        "source_scope": "approved_pack_sources_only",
+        "preview_required": True,
+        "install_allowed_initially": False,
+        "trust_warnings": trust_warnings,
+        "candidate_packs": candidate_packs,
+        "candidate_actions": candidate_actions,
+        "source_errors": source_error_rows,
     }
 
 
@@ -1198,13 +1406,13 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
                 if alternate_tradeoff:
                     lines.append(alternate_tradeoff)
                 lines.append(f"I'd start with {pack_name}.")
-                lines.append(f"If you want, say yes and I'll show the install details for {pack_name}.")
+                lines.append(f"If you want, say yes and I'll show the preview for {pack_name}.")
             else:
                 tradeoff = _render_tradeoff(pack_name, recommended_pack.get("tradeoff_note"))
                 if tradeoff:
                     lines.append(tradeoff)
                 lines.append("It is installable, but I can't confirm it is usable until I fetch and inspect it.")
-                lines.append("If you want, say yes and I'll show the install details.")
+                lines.append("If you want, say yes and I'll show the pack preview.")
         else:
             lines.append("I can't confirm it will work here yet.")
             _append_next_action(lines, normalized_state.get("next_action") or recommended_pack.get("next_action"))
@@ -1291,6 +1499,15 @@ def build_capability_gap_response(
         rendered_result["proposal_summary"] = proposal_summary
         rendered_result["helper_name"] = helper_name or _helper_name_for_capability(capability, label)
         rendered = render_pack_capability_response(rendered_result)
+        rescue = build_capability_gap_rescue(
+            text=text,
+            assessment=assessment,
+            recommendation=recommendation,
+            fallback=str(recommendation.get("fallback") or "install_preview"),
+            source_errors=source_errors,
+            proposal_summary=proposal_summary,
+            helper_name=helper_name or _helper_name_for_capability(capability, label),
+        )
         return {
             "ok": True,
             "type": "capability_gap_plan",
@@ -1306,6 +1523,7 @@ def build_capability_gap_response(
             "source_errors": source_errors,
             "proposal_summary": proposal_summary,
             "helper_name": helper_name or _helper_name_for_capability(capability, label),
+            "capability_gap_rescue": rescue,
         }
 
     proposal_result = {
@@ -1324,6 +1542,15 @@ def build_capability_gap_response(
         "queries": [],
     }
     rendered = render_pack_capability_response(proposal_result)
+    rescue = build_capability_gap_rescue(
+        text=text,
+        assessment=assessment,
+        recommendation=None,
+        fallback="propose_new_capability",
+        source_errors=source_errors,
+        proposal_summary=str(proposal_result.get("proposal_summary") or "").strip() or None,
+        helper_name=str(proposal_result.get("helper_name") or "").strip() or None,
+    )
     return {
         "ok": True,
         "type": "capability_gap_plan",
@@ -1339,4 +1566,5 @@ def build_capability_gap_response(
         "source_errors": source_errors,
         "proposal_summary": proposal_result["proposal_summary"],
         "helper_name": proposal_result["helper_name"],
+        "capability_gap_rescue": rescue,
     }

@@ -40,6 +40,89 @@ function ClarificationCard({ clarification }) {
   );
 }
 
+function CapabilityCard({ capability, disabled, onReply }) {
+  if (!capability) return null;
+
+  if (capability.type === "rescue") {
+    return (
+      <div className="capability-card">
+        <div className="capability-card-header">
+          <p className="inline-action-eyebrow">Capability rescue</p>
+          <p className="inline-action-title">{capability.title}</p>
+          <p className="inline-action-text">
+            Search is limited to approved pack sources. Preview is required before any import.
+          </p>
+        </div>
+        {capability.candidates.length > 0 ? (
+          <div className="capability-candidates">
+            {capability.candidates.map((candidate) => (
+              <div className="capability-candidate" key={`${candidate.sourceId}:${candidate.remoteId}:${candidate.name}`}>
+                <div>
+                  <p className="capability-candidate-name">{candidate.name}</p>
+                  <p className="capability-candidate-meta">{candidate.source} - {candidate.artifactType}</p>
+                </div>
+                {candidate.summary ? <p className="capability-candidate-summary">{candidate.summary}</p> : null}
+                <p className="capability-candidate-warning">{candidate.warning}</p>
+                {candidate.recommended ? <span className="capability-tag">Recommended</span> : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="inline-action-text">No candidate pack was found from the approved sources.</p>
+        )}
+        {capability.warnings.length > 0 ? (
+          <ul className="capability-warning-list">
+            {capability.warnings.map((warning) => (
+              <li key={warning}>{warning}</li>
+            ))}
+          </ul>
+        ) : null}
+        {capability.candidates.length > 0 ? (
+          <div className="inline-action-buttons">
+            <button className="button-primary" disabled={disabled} onClick={() => onReply(capability.previewCommand)} type="button">
+              Show preview
+            </button>
+            <button disabled={disabled} onClick={() => onReply(capability.cancelCommand)} type="button">
+              Cancel
+            </button>
+          </div>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (capability.type === "preview") {
+    return (
+      <div className="capability-card capability-preview-card">
+        <p className="inline-action-eyebrow">Pack preview</p>
+        <p className="inline-action-title">{capability.title}</p>
+        {capability.summary ? <p className="inline-action-text">{capability.summary}</p> : null}
+        <div className="capability-preview-grid">
+          <span>Source</span>
+          <strong>{capability.sourceId || "approved source"}</strong>
+          <span>Remote id</span>
+          <strong>{capability.remoteId || "unknown"}</strong>
+          <span>Artifact</span>
+          <strong>{capability.artifactType}</strong>
+        </div>
+        <p className="capability-candidate-warning">{capability.policyHint}</p>
+      </div>
+    );
+  }
+
+  if (capability.type === "import_result") {
+    return (
+      <div className={`capability-card ${capability.ok ? "capability-import-ok" : "capability-import-blocked"}`}>
+        <p className="inline-action-eyebrow">Pack import</p>
+        <p className="inline-action-title">{capability.title}</p>
+        <p className="inline-action-text">{capability.summary}</p>
+      </div>
+    );
+  }
+
+  return null;
+}
+
 function MessageBubble({ busy, message, onReply }) {
   const bubbleClass = [
     "chat-bubble",
@@ -54,6 +137,7 @@ function MessageBubble({ busy, message, onReply }) {
       <div className={bubbleClass}>
         <p className="chat-message-copy">{message.content}</p>
         <ClarificationCard clarification={message.ui?.clarification} />
+        <CapabilityCard capability={message.ui?.capability} disabled={busy} onReply={onReply} />
         <ApprovalCard confirmation={message.ui?.confirmation} disabled={busy} onReply={onReply} />
       </div>
     </div>

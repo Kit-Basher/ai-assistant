@@ -2338,6 +2338,49 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(0, len(llm.chat_calls))
 
+    def test_assistant_capabilities_plain_english_prompt_uses_concise_summary(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "What kind of help can you give me, in plain English?",
+                "user1",
+            )
+        self.assertEqual("assistant_capabilities", response.data["route"])
+        self.assertNotIn("- System inspection:", response.text)
+        self.assertIn("I can help inspect this system", response.text)
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertTrue(bool(payload.get("brief_prompt")))
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_bluejay_canary_uses_deterministic_general_knowledge_reply(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("What colour is a bluejay?", "user1")
+        self.assertEqual("generic_chat", response.data["route"])
+        self.assertIn("blue", response.text.lower())
+        self.assertIn("jay", response.text.lower())
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(0, len(llm.chat_calls))
+
     def test_assistant_capabilities_guided_thinking_prompt_uses_short_natural_reply(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
@@ -2353,6 +2396,33 @@ class TestOrchestrator(unittest.TestCase):
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message(
                 "I need help thinking through something messy, but keep it simple.",
+                "user1",
+            )
+        self.assertEqual("assistant_capabilities", response.data["route"])
+        self.assertEqual(
+            "Yes. Tell me the goal, the messy part, and any constraint, and I’ll help break it down simply.",
+            response.text,
+        )
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertTrue(bool(payload.get("guided_thinking_prompt")))
+        self.assertFalse(response.data["used_llm"])
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_assistant_capabilities_untangle_prompt_uses_short_natural_reply(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(
+                "Can you help me untangle a messy problem without turning it into a whole framework?",
                 "user1",
             )
         self.assertEqual("assistant_capabilities", response.data["route"])
@@ -2417,6 +2487,7 @@ class TestOrchestrator(unittest.TestCase):
             list_response = orchestrator.handle_message(f'list files in "{safe_root}"', "user1")
             stat_response = orchestrator.handle_message(f'how big is "{note_path}"', "user1")
             read_response = orchestrator.handle_message(f'read "{note_path}"', "user1")
+            read_the_file_response = orchestrator.handle_message(f"read the file {note_path}", "user1")
             relative_read_response = orchestrator.handle_message("read note.txt", "user1")
 
         self.assertEqual("action_tool", list_response.data["route"])
@@ -2456,6 +2527,12 @@ class TestOrchestrator(unittest.TestCase):
             )
         )
         self.assertIn("native filesystem skill", read_response.text)
+        self.assertIn(("filesystem_read_text_file", note_path), runtime_truth.calls)
+
+        self.assertEqual("action_tool", read_the_file_response.data["route"])
+        self.assertEqual(["filesystem"], read_the_file_response.data["used_tools"])
+        self.assertFalse(read_the_file_response.data["used_llm"])
+        self.assertIn("native filesystem skill", read_the_file_response.text)
         self.assertIn(("filesystem_read_text_file", note_path), runtime_truth.calls)
 
         self.assertEqual("action_tool", relative_read_response.data["route"])
@@ -4515,9 +4592,21 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("pack_capability_recommendation", payload.get("type"))
         self.assertEqual("voice_output", payload.get("capability_required"))
         self.assertEqual("install_preview", payload.get("fallback"))
+        rescue = payload.get("capability_gap_rescue")
+        self.assertIsInstance(rescue, dict)
+        assert isinstance(rescue, dict)
+        self.assertEqual("capability_gap_rescue", rescue.get("type"))
+        self.assertEqual("voice_output", rescue.get("missing_capability"))
+        self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+        self.assertTrue(rescue.get("preview_required"))
+        self.assertFalse(rescue.get("install_allowed_initially"))
+        actions = rescue.get("candidate_actions")
+        self.assertIsInstance(actions, list)
+        assert isinstance(actions, list)
+        self.assertTrue(any(isinstance(row, dict) and row.get("action") == "show_preview" for row in actions))
         self.assertIn("Voice output isn't installed.", response.text)
         self.assertIn("most practical option here", response.text)
-        self.assertIn("install details", response.text)
+        self.assertIn("pack preview", response.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_pack_capability_prompt_short_circuits_before_llm_without_frontdoor(self) -> None:
@@ -4551,9 +4640,503 @@ class TestOrchestrator(unittest.TestCase):
 
         response = orchestrator.handle_message("hey can you read something to me?", "user1")
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        rescue = payload.get("capability_gap_rescue")
+        self.assertIsInstance(rescue, dict)
+        assert isinstance(rescue, dict)
+        self.assertEqual("capability_gap_rescue", rescue.get("type"))
+        self.assertEqual("voice_output", rescue.get("missing_capability"))
+        self.assertFalse(rescue.get("install_allowed_initially"))
         self.assertIn("voice helper", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
+
+    def test_generic_unsupported_tool_request_returns_capability_rescue(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("Generate a QR code for https://example.com", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("capability_gap_plan", payload.get("type"))
+        rescue = payload.get("capability_gap_rescue")
+        self.assertIsInstance(rescue, dict)
+        assert isinstance(rescue, dict)
+        self.assertEqual("capability_gap_rescue", rescue.get("type"))
+        self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+        self.assertTrue(rescue.get("preview_required"))
+        self.assertFalse(rescue.get("install_allowed_initially"))
+        self.assertNotIn("not sure what you need", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_capability_prompts_do_not_dead_end(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return []
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                _ = query
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        prompts = [
+            "Generate a QR code for https://example.com",
+            "Create an image of a launch badge",
+            "Convert this PDF to DOCX",
+            "Sync this with Notion",
+            "install a browser automation skill",
+        ]
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                llm = _FakeChatLLM(enabled=True, text="should not run")
+                orchestrator = Orchestrator(
+                    db=self.db,
+                    skills_path=self.skills_path,
+                    log_path=self.log_path,
+                    timezone="UTC",
+                    llm_client=llm,
+                    chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+                )
+                orchestrator._pack_store = _FakePackStore()
+                orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+                response = orchestrator.handle_message(prompt, f"user-{prompt[:8]}")
+                payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+                rescue = payload.get("capability_gap_rescue") if isinstance(payload.get("capability_gap_rescue"), dict) else {}
+                self.assertEqual("action_tool", response.data["route"])
+                self.assertEqual("capability_gap_rescue", rescue.get("type"))
+                self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+                self.assertTrue(rescue.get("preview_required"))
+                self.assertFalse(rescue.get("install_allowed_initially"))
+                lowered = response.text.lower()
+                self.assertNotIn("i can't help", lowered)
+                self.assertNotIn("not sure what you need", lowered)
+                self.assertEqual(0, len(llm.chat_calls))
+
+    def test_mcp_server_request_is_blocked_without_pack_search(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def __init__(self) -> None:
+                self.search_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [{"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True}]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                self.search_calls.append((source_id, query))
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        discovery = _FakePackDiscovery()
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("run this random MCP server", "user1")
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
+        self.assertFalse(response.data["ok"])
+        self.assertEqual("managed_adapter_required", response.data["error_kind"])
+        self.assertEqual("capability_gap_blocker", payload.get("type"))
+        self.assertFalse(payload.get("searched"))
+        self.assertEqual([], discovery.search_calls)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_yes_after_generic_capability_candidate_previews_not_installs(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def __init__(self) -> None:
+                self.preview_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [{"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True}]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = query
+                return {
+                    "source": {"id": source_id, "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "browser-helper",
+                                "name": "Browser Helper",
+                                "summary": "Browser workflow instructions.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "https://github.com/example/browser-helper/archive/main.zip",
+                                "source_kind_hint": "github_archive",
+                            }
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+            def preview(self, source_id: str, remote_id: str) -> dict[str, object]:
+                self.preview_calls.append((source_id, remote_id))
+                return {
+                    "source": {"id": source_id, "name": "Local Catalog"},
+                    "preview": {
+                        "summary": "Browser Helper explains browser automation workflows.",
+                        "artifact_type_hint": "portable_text_skill",
+                        "policy_hint": "Text skill only; metadata is untrusted until normalized.",
+                        "listing": {"remote_id": remote_id, "name": "Browser Helper"},
+                        "install_handoff": {
+                            "source": "https://github.com/example/browser-helper/archive/main.zip",
+                            "source_kind": "github_archive",
+                            "ref": "main",
+                        },
+                    },
+                }
+
+        install_calls: list[dict[str, object]] = []
+
+        def _install(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            install_calls.append(dict(payload))
+            return True, {"ok": True, "pack": {"name": "Browser Helper"}}
+
+        discovery = _FakePackDiscovery()
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            pack_install_handler=_install,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
+
+        first = orchestrator.handle_message("install a browser automation skill", "user1")
+        self.assertEqual(["capability_gap_planning"], first.data["used_tools"])
+        second = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_gap_preview"], second.data["used_tools"])
+        self.assertEqual([("local", "browser-helper")], discovery.preview_calls)
+        self.assertEqual([], install_calls)
+
+    def test_yes_after_pack_candidate_shows_preview_not_import(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def __init__(self) -> None:
+                self.preview_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                if query != "voice":
+                    return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+                return {
+                    "source": {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "local-voice",
+                                "name": "Local Voice",
+                                "summary": "Local speech output for this machine.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "https://github.com/example/local-voice/archive/main.zip",
+                                "source_kind_hint": "github_archive",
+                            }
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+            def preview(self, source_id: str, remote_id: str) -> dict[str, object]:
+                self.preview_calls.append((source_id, remote_id))
+                return {
+                    "source": {"id": source_id, "name": "Local Catalog"},
+                    "preview": {
+                        "summary": "Local Voice reads text aloud.",
+                        "artifact_type_hint": "portable_text_skill",
+                        "policy_hint": "This looks like a text-based skill pack and is likely compatible with safe import.",
+                        "source_hints": ["Registry metadata is untrusted."],
+                        "listing": {
+                            "remote_id": remote_id,
+                            "name": "Local Voice",
+                            "summary": "Local speech output for this machine.",
+                            "artifact_type_hint": "portable_text_skill",
+                        },
+                        "install_handoff": {
+                            "source": "https://github.com/example/local-voice/archive/main.zip",
+                            "source_kind": "github_archive",
+                            "ref": "main",
+                        },
+                    },
+                }
+
+        install_calls: list[dict[str, object]] = []
+
+        def _install(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            install_calls.append(dict(payload))
+            return True, {"ok": True, "pack": {"name": "Local Voice"}, "normalization_result": {"pack": {"permissions": {"granted": []}}}}
+
+        discovery = _FakePackDiscovery()
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            pack_install_handler=_install,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
+
+        first = orchestrator.handle_message("Talk to me out loud", "user1")
+        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
+        self.assertIn("pack preview", first.text.lower())
+
+        second = orchestrator.handle_message("yes please", "user1")
+        self.assertEqual(["capability_gap_preview"], second.data["used_tools"])
+        self.assertEqual([("local", "local-voice")], discovery.preview_calls)
+        self.assertEqual([], install_calls)
+        self.assertIn("preview for local voice", second.text.lower())
+        self.assertIn("nothing has been imported", second.text.lower())
+        self.assertIn("say yes to import it for review", second.text.lower())
+
+    def test_yes_after_pack_preview_imports_for_review_only_after_second_confirmation(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                if query != "voice":
+                    return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+                return {
+                    "source": {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "local-voice",
+                                "name": "Local Voice",
+                                "summary": "Local speech output for this machine.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "https://github.com/example/local-voice/archive/main.zip",
+                                "source_kind_hint": "github_archive",
+                            }
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+            def preview(self, source_id: str, remote_id: str) -> dict[str, object]:
+                return {
+                    "source": {"id": source_id, "name": "Local Catalog"},
+                    "preview": {
+                        "summary": "Local Voice reads text aloud.",
+                        "artifact_type_hint": "portable_text_skill",
+                        "policy_hint": "This looks like a text-based skill pack and is likely compatible with safe import.",
+                        "source_hints": ["Registry metadata is untrusted."],
+                        "listing": {"remote_id": remote_id, "name": "Local Voice"},
+                        "install_handoff": {
+                            "source": "https://github.com/example/local-voice/archive/main.zip",
+                            "source_kind": "github_archive",
+                            "ref": "main",
+                        },
+                    },
+                }
+
+        install_calls: list[dict[str, object]] = []
+
+        def _install(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            install_calls.append(dict(payload))
+            return True, {
+                "ok": True,
+                "pack": {"name": "Local Voice", "enabled": None, "permissions": {"granted": []}},
+                "normalization_result": {"pack": {"permissions": {"granted": []}}},
+            }
+
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            pack_install_handler=_install,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        orchestrator.handle_message("Talk to me out loud", "user1")
+        preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_gap_preview"], preview.data["used_tools"])
+        self.assertEqual([], install_calls)
+
+        imported = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_gap_import"], imported.data["used_tools"])
+        self.assertEqual(1, len(install_calls))
+        self.assertEqual("https://github.com/example/local-voice/archive/main.zip", install_calls[0]["source"])
+        self.assertEqual("github_archive", install_calls[0]["source_kind"])
+        self.assertEqual("local", install_calls[0]["source_id"])
+        self.assertIn("imported local voice for review", imported.text.lower())
+        self.assertIn("not enabled", imported.text.lower())
+        self.assertIn("not approved", imported.text.lower())
+        self.assertIn("no granted permissions", imported.text.lower())
+        self.assertIn("not been executed", imported.text.lower())
+
+    def test_native_preview_does_not_offer_chat_import(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                _ = source_id
+                if query != "voice":
+                    return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+                return {
+                    "source": {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+                    "search": {
+                        "results": [
+                            {
+                                "remote_id": "native-voice",
+                                "name": "Native Voice",
+                                "summary": "Native speech integration.",
+                                "artifact_type_hint": "portable_text_skill",
+                                "installable_by_current_policy": True,
+                                "source_url": "https://github.com/example/native-voice/archive/main.zip",
+                                "source_kind_hint": "github_archive",
+                            }
+                        ]
+                    },
+                    "from_cache": False,
+                    "stale": False,
+                }
+
+            def preview(self, source_id: str, remote_id: str) -> dict[str, object]:
+                return {
+                    "source": {"id": source_id, "name": "Local Catalog"},
+                    "preview": {
+                        "summary": "Native Voice needs executable code.",
+                        "artifact_type_hint": "native_code_pack",
+                        "policy_hint": "This appears to be a code or plugin package and would be blocked by current policy.",
+                        "listing": {"remote_id": remote_id, "name": "Native Voice"},
+                        "install_handoff": {
+                            "source": "https://github.com/example/native-voice/archive/main.zip",
+                            "source_kind": "github_archive",
+                            "ref": "main",
+                        },
+                    },
+                }
+
+        install_calls: list[dict[str, object]] = []
+
+        def _install(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            install_calls.append(dict(payload))
+            return True, {"ok": True, "pack": {"name": "Native Voice"}}
+
+        llm = _FakeChatLLM(enabled=True, text="No pending import.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            pack_install_handler=_install,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: _FakePackDiscovery()  # type: ignore[assignment]
+
+        orchestrator.handle_message("Talk to me out loud", "user1")
+        preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_gap_preview"], preview.data["used_tools"])
+        self.assertIn("does not expose a safe portable text-pack import handoff", preview.text.lower())
+        self.assertEqual([], install_calls)
+        pending = orchestrator._memory_runtime.list_pending_items("user1", include_expired=True)  # noqa: SLF001
+        self.assertFalse(any(str(row.get("origin_tool") or "") == "capability_gap_import" for row in pending))
 
     def test_pack_capability_recommendation_compares_two_good_options_without_auto_install(self) -> None:
         class _FakePackStore:
@@ -4623,7 +5206,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("Local Voice looks like the lighter option.", response.text)
         self.assertIn("Studio Voice may need more resources.", response.text)
         self.assertIn("I'd start with Local Voice.", response.text)
-        self.assertIn("install details for Local Voice", response.text)
+        self.assertIn("preview for Local Voice", response.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_installed_but_disabled_pack_is_explained_without_auto_install(self) -> None:
@@ -4797,7 +5380,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
         self.assertIn("Voice output isn't installed.", response.text)
         self.assertIn("Local Voice", response.text)
-        self.assertIn("install details", response.text.lower())
+        self.assertIn("pack preview", response.text.lower())
         self.assertNotIn("best fit for this machine", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 

@@ -130,14 +130,102 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertEqual("Local Voice", result["recommended_pack"]["name"])
         self.assertTrue(result["recommended_pack"]["installable"])
         self.assertEqual("lighter", result["recommended_pack"]["tradeoff_note"])
+        self.assertEqual("If you want, say yes and I'll show the pack preview.", result["next_step"])
 
         rendered = render_pack_capability_response(result)
         self.assertIn("Voice output isn't installed.", rendered)
         self.assertIn("most practical option here", rendered)
         self.assertIn("Local Voice looks like the lighter option.", rendered)
-        self.assertIn("If you want, say yes and I'll show the install details.", rendered)
+        self.assertIn("If you want, say yes and I'll show the pack preview.", rendered)
         self.assertEqual("single_recommendation", result["comparison_mode"])
         self.assertIsNone(result["alternate_pack"])
+
+    def test_capability_gap_response_includes_structured_rescue_contract(self) -> None:
+        store = _FakePackStore([])
+        discovery = _FakeDiscovery(
+            sources=[
+                {"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True},
+            ],
+            search_map={
+                ("local", "voice"): [
+                    {
+                        "remote_id": "local-voice",
+                        "name": "Local Voice",
+                        "summary": "Local speech output for this machine.",
+                        "artifact_type_hint": "portable_text_skill",
+                        "installable_by_current_policy": True,
+                        "source_url": "/tmp/local-voice",
+                    }
+                ]
+            },
+        )
+        result = build_capability_gap_response(
+            "Talk to me out loud",
+            pack_store=store,
+            pack_registry_discovery=discovery,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        rescue = result.get("capability_gap_rescue")
+        self.assertIsInstance(rescue, dict)
+        assert isinstance(rescue, dict)
+        self.assertEqual("capability_gap_rescue", rescue.get("type"))
+        self.assertEqual("voice_output", rescue.get("missing_capability"))
+        self.assertEqual("Talk to me out loud", rescue.get("user_goal"))
+        self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+        self.assertTrue(rescue.get("preview_required"))
+        self.assertFalse(rescue.get("install_allowed_initially"))
+        self.assertTrue(any("untrusted" in line for line in rescue.get("trust_warnings", [])))
+        candidates = rescue.get("candidate_packs")
+        self.assertIsInstance(candidates, list)
+        assert isinstance(candidates, list)
+        self.assertEqual(1, len(candidates))
+        self.assertEqual("local", candidates[0].get("source_id"))
+        self.assertEqual("local-voice", candidates[0].get("remote_id"))
+        self.assertFalse(candidates[0].get("metadata_trusted"))
+        self.assertTrue(candidates[0].get("preview_required"))
+        actions = rescue.get("candidate_actions")
+        self.assertIsInstance(actions, list)
+        assert isinstance(actions, list)
+        preview_actions = [row for row in actions if isinstance(row, dict) and row.get("action") == "show_preview"]
+        self.assertEqual(1, len(preview_actions))
+        self.assertEqual("local", preview_actions[0].get("source_id"))
+        self.assertEqual("local-voice", preview_actions[0].get("remote_id"))
+        self.assertFalse(preview_actions[0].get("install_allowed_initially"))
+
+    def test_generic_unsupported_tool_request_creates_rescue_without_web_or_install(self) -> None:
+        store = _FakePackStore([])
+        discovery = _FakeDiscovery([], {})
+        result = build_capability_gap_response(
+            "Generate a QR code for https://example.com",
+            pack_store=store,
+            pack_registry_discovery=discovery,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("propose_new_capability", result.get("fallback"))
+        rescue = result.get("capability_gap_rescue")
+        self.assertIsInstance(rescue, dict)
+        assert isinstance(rescue, dict)
+        self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
+        self.assertTrue(rescue.get("preview_required"))
+        self.assertFalse(rescue.get("install_allowed_initially"))
+        self.assertIn("QR", str(rescue.get("search_query") or ""))
+        actions = rescue.get("candidate_actions")
+        self.assertIsInstance(actions, list)
+        assert isinstance(actions, list)
+        self.assertTrue(any(isinstance(row, dict) and row.get("action") == "sketch_helper" for row in actions))
+
+    def test_knowledge_question_still_does_not_create_rescue(self) -> None:
+        store = _FakePackStore([])
+        discovery = _FakeDiscovery([], {})
+        self.assertIsNone(
+            build_capability_gap_response(
+                "What is a QR code?",
+                pack_store=store,
+                pack_registry_discovery=discovery,
+            )
+        )
 
     def test_partial_capability_render_includes_intro_once(self) -> None:
         rendered = render_pack_capability_response(
@@ -213,7 +301,41 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertIn("Local Voice looks like the lighter option.", rendered)
         self.assertIn("Studio Voice may need more resources.", rendered)
         self.assertIn("I'd start with Local Voice.", rendered)
-        self.assertIn("If you want, say yes and I'll show the install details for Local Voice.", rendered)
+        self.assertIn("If you want, say yes and I'll show the preview for Local Voice.", rendered)
+
+    def test_blocked_discovery_source_is_not_searched(self) -> None:
+        class _BlockedDiscovery:
+            def __init__(self) -> None:
+                self.search_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [
+                    {
+                        "id": "blocked",
+                        "name": "Blocked Catalog",
+                        "enabled": True,
+                        "allowed_by_policy": False,
+                        "queryable": False,
+                        "blocked_reason": "denied_by_policy",
+                    }
+                ]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                self.search_calls.append((source_id, query))
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        store = _FakePackStore([])
+        discovery = _BlockedDiscovery()
+        result = recommend_packs_for_capability(
+            "Talk to me out loud",
+            pack_store=store,
+            pack_registry_discovery=discovery,
+        )
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual([], discovery.search_calls)
+        self.assertEqual("propose_new_capability", result["fallback"])
+        self.assertEqual("denied_by_policy", result["source_errors"][0]["error"])
 
     def test_weak_or_blocked_alternate_is_not_forced_into_comparison(self) -> None:
         store = _FakePackStore([])
