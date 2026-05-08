@@ -1,3 +1,0 @@
-# Canonical dependency metadata lives in pyproject.toml.
-# This file remains as a compatibility shim for repo-local installs.
--e .
