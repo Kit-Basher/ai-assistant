@@ -34,4 +34,4 @@ control/agent_events.jsonl
 *.sqlite3
 
 # Generated build artifacts
-dist/
+/dist/

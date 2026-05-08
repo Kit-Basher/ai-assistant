@@ -5,6 +5,7 @@ import sys
 import tarfile
 import tempfile
 import shutil
+import tomllib
 import unittest
 import zipfile
 from pathlib import Path
@@ -53,6 +54,21 @@ class TestPackagingBuild(unittest.TestCase):
         self.assertEqual(Path("VERSION").read_text(encoding="utf-8").strip(), info.version)
         self.assertEqual("repo_file", info.version_source)
 
+    def test_readme_entry_points_match_pyproject_scripts(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+        scripts = set(project["project"]["scripts"])
+        readme = (repo_root / "README.md").read_text(encoding="utf-8")
+        marker = "- Canonical packaged CLI entry points:\n"
+        start = readme.index(marker) + len(marker)
+        section = readme[start : readme.index("- Debian packaging", start)]
+        documented = {
+            line.strip()[3:-1]
+            for line in section.splitlines()
+            if line.strip().startswith("- `") and line.strip().endswith("`")
+        }
+        self.assertEqual(scripts, documented)
+
     def test_build_backend_produces_clean_wheel_and_sdist(self) -> None:
         version = Path("VERSION").read_text(encoding="utf-8").strip()
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -87,6 +103,7 @@ class TestPackagingBuild(unittest.TestCase):
                 entry_points = zf.read(f"personal_agent-{version}.dist-info/entry_points.txt").decode("utf-8")
                 self.assertIn("personal-agent = agent.cli:main", entry_points)
                 self.assertIn("personal-agent-api = agent.api_server:main", entry_points)
+                self.assertIn("personal-agent-control = agent.control_plane:main", entry_points)
                 self.assertIn("personal-agent-telegram = telegram_adapter.bot:run", entry_points)
                 self.assertNotIn("memory/agent.db", names)
                 self.assertNotIn("memory/llm_usage_stats.json", names)

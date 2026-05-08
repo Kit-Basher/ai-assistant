@@ -45,6 +45,8 @@ RELEASE_GATE_COMMANDS: tuple[tuple[str, ...], ...] = (
     ("git", "diff", "--check"),
 )
 
+PY_COMPILE_COMMAND: tuple[str, ...] = RELEASE_GATE_COMMANDS[0]
+
 
 def _print_commands() -> None:
     print("release gate commands:", flush=True)
@@ -60,10 +62,18 @@ def _run_command(command: tuple[str, ...]) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the canonical Personal Agent release gate.")
     parser.add_argument("--list", action="store_true", help="Print the exact commands without running them.")
+    parser.add_argument(
+        "--py-compile-only",
+        action="store_true",
+        help="Run only the canonical release-gate py_compile target list.",
+    )
     args = parser.parse_args(argv)
     if bool(args.list):
         _print_commands()
         return 0
+    if bool(args.py_compile_only):
+        print(f"Running: {' '.join(PY_COMPILE_COMMAND)}", flush=True)
+        return _run_command(PY_COMPILE_COMMAND)
     for command in RELEASE_GATE_COMMANDS:
         print(f"Running: {' '.join(command)}", flush=True)
         exit_code = _run_command(command)
