@@ -37,6 +37,8 @@ The `/version` response should report the runtime instance marker.
 
 1. Make your code changes in the repo checkout.
 2. Run `bash scripts/promote_local_stable.sh` to build and install the stable runtime.
+   The script restarts `personal-agent-api.service` and waits for `GET /ready`
+   before it prints `Stable runtime promotion complete.`
 3. Use `python -m agent split_status` to confirm the active copy.
 4. Keep using the stable desktop launcher for daily work.
 5. Restart the dev service only when you want to test checkout changes.
