@@ -775,6 +775,7 @@ class AgentRuntime:
         )
         self._safe_mode_explicit_chat_target_override: dict[str, str] | None = None
         self._temporary_chat_target_override: dict[str, str] | None = None
+        self._active_chat_scope: dict[str, str] | None = None
         latest_notification_rows = self._notification_store.recent(limit=1)
         latest_notification = latest_notification_rows[0] if latest_notification_rows else {}
         self._last_notify_status: dict[str, Any] = {
@@ -4824,16 +4825,49 @@ class AgentRuntime:
             str(override_body.get("provider") or override_provider).strip().lower() or override_provider
         )
         temporary_model = str(override_body.get("model_id") or override_model).strip() or override_model
-        effective["default_provider"] = temporary_provider
-        effective["resolved_default_model"] = temporary_model
         effective["temporary_override_active"] = True
         effective["temporary_effective_provider"] = temporary_provider
         effective["temporary_effective_model"] = temporary_model
         effective["temporary_chat_target"] = {
             "provider": temporary_provider,
             "model_id": temporary_model,
+            "user_id": str(override.get("user_id") or "").strip() or None,
+            "thread_id": str(override.get("thread_id") or "").strip() or None,
         }
+        active_scope = dict(self._active_chat_scope) if isinstance(self._active_chat_scope, dict) else {}
+        override_user_id = str(override.get("user_id") or "").strip()
+        override_thread_id = str(override.get("thread_id") or "").strip()
+        active_user_id = str(active_scope.get("user_id") or "").strip()
+        active_thread_id = str(active_scope.get("thread_id") or "").strip()
+        scope_matches = (
+            bool(active_user_id == override_user_id and active_thread_id == override_thread_id)
+            if override_user_id and override_thread_id
+            else True
+        )
+        if scope_matches:
+            effective["default_provider"] = temporary_provider
+            effective["resolved_default_model"] = temporary_model
         return effective
+
+    def _set_active_chat_scope(self, *, user_id: str | None, thread_id: str | None) -> dict[str, str] | None:
+        previous = dict(self._active_chat_scope) if isinstance(self._active_chat_scope, dict) else None
+        normalized_user_id = str(user_id or "").strip()
+        normalized_thread_id = str(thread_id or "").strip()
+        self._active_chat_scope = (
+            {"user_id": normalized_user_id, "thread_id": normalized_thread_id}
+            if normalized_user_id and normalized_thread_id
+            else None
+        )
+        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
+        if callable(invalidate_truth_cache):
+            invalidate_truth_cache()
+        return previous
+
+    def _restore_active_chat_scope(self, previous: dict[str, str] | None) -> None:
+        self._active_chat_scope = dict(previous) if isinstance(previous, dict) else None
+        invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
+        if callable(invalidate_truth_cache):
+            invalidate_truth_cache()
 
     @staticmethod
     def _best_local_embedding_model(models: dict[str, Any]) -> str | None:
@@ -9103,6 +9137,8 @@ class AgentRuntime:
         )
         if not switch_allowed:
             return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(normalized_model)
+        previous_default = self._stored_chat_default_target() or {}
+        previous_model = str(previous_default.get("model") or "").strip() or "none"
         ok, body = self.update_defaults(
             {
                 "default_provider": provider_id,
@@ -9115,7 +9151,11 @@ class AgentRuntime:
         response = body if isinstance(body, dict) else {"ok": True}
         response["provider"] = provider_id
         response["model_id"] = normalized_model
-        response["message"] = f"Now using {normalized_model} for chat."
+        response["previous_model_id"] = None if previous_model == "none" else previous_model
+        response["message"] = (
+            f"Default chat model updated from {previous_model} to {normalized_model}. "
+            f"Previous default: {previous_model}. New default: {normalized_model}."
+        )
         return True, response
 
     def set_confirmed_chat_model_target(
@@ -9150,6 +9190,8 @@ class AgentRuntime:
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
+        previous_default = self._stored_chat_default_target() or {}
+        previous_model = str(previous_default.get("model") or "").strip() or "none"
         previous_override = (
             dict(self._safe_mode_explicit_chat_target_override)
             if isinstance(self._safe_mode_explicit_chat_target_override, dict)
@@ -9180,7 +9222,11 @@ class AgentRuntime:
         response = body if isinstance(body, dict) else {"ok": True}
         response["provider"] = applied_provider
         response["model_id"] = applied_model
-        response["message"] = f"Now using {applied_model} for chat."
+        response["previous_model_id"] = None if previous_model == "none" else previous_model
+        response["message"] = (
+            f"Default chat model updated from {previous_model} to {applied_model}. "
+            f"Previous default: {previous_model}. New default: {applied_model}."
+        )
         return True, response
 
     def set_temporary_chat_model_target(
@@ -9224,7 +9270,10 @@ class AgentRuntime:
                 "ok": True,
                 "provider": applied_provider,
                 "model_id": applied_model,
-                "message": f"Temporarily using {applied_model} for chat.",
+                "message": (
+                    f"Temporary chat model switched to {applied_model}. "
+                    "This does not change your default model."
+                ),
             }
         stored_default = self._stored_chat_default_target()
         default_model = str((stored_default or {}).get("model") or "").strip() or None
@@ -9235,6 +9284,8 @@ class AgentRuntime:
             self._temporary_chat_target_override = {
                 "provider": applied_provider,
                 "model": applied_model,
+                "user_id": str((self._active_chat_scope or {}).get("user_id") or "").strip(),
+                "thread_id": str((self._active_chat_scope or {}).get("thread_id") or "").strip(),
             }
         invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
         if callable(invalidate_truth_cache):
@@ -9243,7 +9294,10 @@ class AgentRuntime:
             "ok": True,
             "provider": applied_provider,
             "model_id": applied_model,
-            "message": f"Temporarily using {applied_model} for chat.",
+            "message": (
+                f"Temporary chat model switched to {applied_model}. "
+                "This does not change your default model."
+            ),
         }
 
     def restore_temporary_chat_model_target(
@@ -9308,7 +9362,10 @@ class AgentRuntime:
                 "ok": True,
                 "provider": applied_provider,
                 "model_id": applied_model,
-                "message": f"Now using {applied_model} for chat.",
+                "message": (
+                    f"Temporary chat model switched to {applied_model}. "
+                    "This does not change your default model."
+                ),
             }
         stored_default = self._stored_chat_default_target()
         default_model = str((stored_default or {}).get("model") or "").strip() or None
@@ -9319,6 +9376,8 @@ class AgentRuntime:
             self._temporary_chat_target_override = {
                 "provider": applied_provider,
                 "model": applied_model,
+                "user_id": str((self._active_chat_scope or {}).get("user_id") or "").strip(),
+                "thread_id": str((self._active_chat_scope or {}).get("thread_id") or "").strip(),
             }
         invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
         if callable(invalidate_truth_cache):
@@ -9327,7 +9386,10 @@ class AgentRuntime:
             "ok": True,
             "provider": applied_provider,
             "model_id": applied_model,
-            "message": f"Now using {applied_model} for chat.",
+            "message": (
+                f"Temporary chat model switched to {applied_model}. "
+                "This does not change your default model."
+            ),
         }
 
     def configure_local_chat_model(self, model_id: str) -> tuple[bool, dict[str, Any]]:
@@ -9756,6 +9818,7 @@ class AgentRuntime:
                 generic_fallback_reason=serialized.generic_fallback_reason,
             )
             return bool(serialized.ok), serialized.body
+        previous_chat_scope = self._set_active_chat_scope(user_id=user_id, thread_id=thread_id)
         try:
             with self._orchestrator_lock:
                 orchestrator_started = time.monotonic()
@@ -9823,6 +9886,8 @@ class AgentRuntime:
                 },
             )
             raise
+        finally:
+            self._restore_active_chat_scope(previous_chat_scope)
         meta = serialized.body.get("meta") if isinstance(serialized.body.get("meta"), dict) else {}
         meta = dict(meta)
         meta["chat_timing_ms"] = chat_timing_ms
@@ -20078,6 +20143,7 @@ class AgentRuntime:
 
         applied_model = str((body if isinstance(body, dict) else {}).get("model_id") or canonical_model).strip() or canonical_model
         applied_provider = str((body if isinstance(body, dict) else {}).get("provider") or provider).strip().lower() or provider
+        previous_model = str((body if isinstance(body, dict) else {}).get("previous_model_id") or "").strip() or "none"
         self._record_memory_event(
             text=f"Switched default model to {applied_model} for {purpose}.",
             tags={
@@ -20095,7 +20161,10 @@ class AgentRuntime:
             "confidence": 1.0,
             "did_work": True,
             "error_kind": None,
-            "message": f"Switched to {applied_model} for {purpose}.",
+            "message": (
+                f"Default chat model updated from {previous_model} to {applied_model}. "
+                f"Previous default: {previous_model}. New default: {applied_model}."
+            ),
             "next_question": None,
             "actions": [],
             "errors": [],
@@ -20211,7 +20280,10 @@ class AgentRuntime:
             "confidence": 1.0,
             "did_work": True,
             "error_kind": None,
-            "message": f"Temporarily switched to {applied_model} for {purpose}.",
+            "message": (
+                f"Temporary chat model switched to {applied_model}. "
+                "This does not change your default model."
+            ),
             "next_question": None,
             "actions": [],
             "errors": [],

@@ -86,10 +86,16 @@ def _temporary_switch_prompt(model_id: str) -> str:
 
 def _switch_chat_model(base_url: str, model_id: str, *, thread_id: str, timeout: float, label: str) -> dict[str, Any]:
     payload = _chat(base_url, _temporary_switch_prompt(model_id), thread_id=thread_id, timeout=timeout)
-    print(f"{label}_response={_response_text(payload)}")
+    text = _response_text(payload)
+    print(f"{label}_response={text}")
+    if "default updated" in text.lower() or "default model updated" in text.lower():
+        raise RuntimeError("temporary switch response claimed the default was updated")
     if _needs_confirmation(payload):
         payload = _chat(base_url, "yes", thread_id=thread_id, timeout=timeout)
-        print(f"{label}_confirm_response={_response_text(payload)}")
+        text = _response_text(payload)
+        print(f"{label}_confirm_response={text}")
+        if "default updated" in text.lower() or "default model updated" in text.lower():
+            raise RuntimeError("temporary switch confirmation claimed the default was updated")
     return payload
 
 

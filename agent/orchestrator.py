@@ -481,6 +481,12 @@ _MODEL_CONTROLLER_TRIAL_SWITCH_PHRASES = (
     "switch to it temporarily",
     "use it temporarily",
     "try it temporarily",
+    "for this chat session only",
+    "for this session only",
+    "for this chat only",
+    "this chat session only",
+    "this session only",
+    "chat session only",
 )
 _MODEL_CONTROLLER_PROMOTE_PHRASES = (
     "make this model the default",
@@ -3691,7 +3697,7 @@ class Orchestrator:
             return True
         has_explicit_target = _DIRECT_MODEL_SWITCH_TOKEN_RE.search(normalized) is not None
         return bool(
-            "temporarily" in normalized
+            ("temporarily" in normalized or "session only" in normalized or "chat only" in normalized)
             and any(token in normalized for token in ("switch", "use", "try"))
             and ("model" in normalized or has_explicit_target)
         )
@@ -5617,7 +5623,7 @@ class Orchestrator:
             applied_provider=applied_provider,
             applied_model=applied_model,
             success_type="model_controller",
-            success_title="Temporary model switch",
+            success_title="Temporary chat model switched",
             failure_title="Temporary switch failed",
         )
 
@@ -5650,8 +5656,8 @@ class Orchestrator:
             return self._execute_model_controller_trial_switch(user_id, model_id=None, provider_id=None)
         if not confirmed:
             question = (
-                f"Temporary switch preview: I will switch chat temporarily to {matched_model}. "
-                "This mutates the active chat target. Say yes to continue, or no to cancel."
+                f"Temporary chat model switch preview: I will switch chat temporarily to {matched_model}. "
+                "This does not change your default model. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id,
@@ -5665,7 +5671,7 @@ class Orchestrator:
                         "provider_id": provider_id,
                     },
                 },
-                title="Temporary switch confirmation",
+                title="Temporary chat model switch confirmation",
                 preview_payload={
                     "provider": provider_id,
                     "model_id": matched_model,
@@ -5714,6 +5720,8 @@ class Orchestrator:
             )
         current_target = truth.current_chat_target_status()
         previous_provider, previous_model = self._target_snapshot_from_truth(current_target)
+        previous_default_model = str(current_target.get("configured_model") or previous_model or "").strip() or None
+        previous_default_provider = str(current_target.get("configured_provider") or previous_provider or "").strip().lower() or None
         if promote_default:
             policy_status = (
                 truth.model_controller_policy_status()
@@ -5738,14 +5746,21 @@ class Orchestrator:
             else:
                 default_ok, default_body = truth.set_default_chat_model(matched_model)
         else:
-            explicit_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+            explicit_setter = getattr(truth, "set_temporary_chat_model_target", None)
             if callable(explicit_setter):
                 default_ok, default_body = explicit_setter(
                     matched_model,
                     provider_id=normalized_provider,
                 )
             else:
-                default_ok, default_body = truth.set_default_chat_model(matched_model)
+                fallback_setter = getattr(truth, "set_confirmed_chat_model_target", None)
+                if callable(fallback_setter):
+                    default_ok, default_body = fallback_setter(
+                        matched_model,
+                        provider_id=normalized_provider,
+                    )
+                else:
+                    default_ok, default_body = truth.set_default_chat_model(matched_model)
         self._clear_runtime_setup_state(user_id)
         if promote_default:
             applied_provider = normalized_provider
@@ -5760,14 +5775,23 @@ class Orchestrator:
                     current_after = truth.current_chat_target_status()
                     active_provider_after, active_model_after = self._target_snapshot_from_truth(current_after)
                     if active_model_after == applied_model and (not applied_provider or active_provider_after == applied_provider):
-                        default_body["message"] = f"{applied_model} is now the default chat model, and chat is now using it."
+                        default_body["message"] = (
+                            f"Default chat model updated from {previous_default_model or 'none'} to {applied_model}. "
+                            f"Previous default: {previous_default_model or 'none'}. "
+                            f"New default: {applied_model}. Chat is now using it."
+                        )
                     elif active_model_after:
                         default_body["message"] = (
-                            f"{applied_model} is now the default chat model. "
+                            f"Default chat model updated from {previous_default_model or 'none'} to {applied_model}. "
+                            f"Previous default: {previous_default_model or 'none'}. "
+                            f"New default: {applied_model}. "
                             f"Chat is still using {active_model_after}."
                         )
                     else:
-                        default_body["message"] = f"{applied_model} is now the default chat model."
+                        default_body["message"] = (
+                            f"Default chat model updated from {previous_default_model or 'none'} to {applied_model}. "
+                            f"Previous default: {previous_default_model or 'none'}. New default: {applied_model}."
+                        )
             else:
                 self._record_model_trial_switch(
                     user_id,
@@ -5791,8 +5815,10 @@ class Orchestrator:
                     "type": "model_controller" if default_ok else "provider_test_result",
                     "provider": applied_provider,
                     "model_id": applied_model,
+                    "previous_provider": previous_default_provider,
+                    "previous_model_id": previous_default_model,
                     "ok": bool(default_ok),
-                    "title": "Default model updated" if default_ok else "Default model update failed",
+                    "title": "Default chat model updated" if default_ok else "Default chat model update failed",
                     "summary": message,
                 },
             )
@@ -5806,7 +5832,7 @@ class Orchestrator:
             applied_provider=applied_provider,
             applied_model=applied_model,
             success_type="setup_complete",
-            success_title="Default model updated",
+            success_title="Temporary chat model switched",
             failure_title="Model switch failed",
         )
 
@@ -5860,7 +5886,10 @@ class Orchestrator:
                 switch_ok, switch_body = truth.set_default_chat_model(previous_model)
         if switch_ok:
             self._clear_model_trial_state(user_id)
-        message = str((switch_body if isinstance(switch_body, dict) else {}).get("message") or f"Now using {previous_model} for chat.")
+        message = str(
+            (switch_body if isinstance(switch_body, dict) else {}).get("message")
+            or f"Temporary chat model switched to {previous_model}. This does not change your default model."
+        )
         return self._runtime_truth_response(
             text=message,
             route="model_status",
@@ -10055,8 +10084,8 @@ class Orchestrator:
             return self._execute_model_controller_switch_back(user_id)
         if not confirmed:
             question = (
-                f"I will switch chat back to {previous_model}. "
-                "This mutates the active chat target. Say yes to continue, or no to cancel."
+                f"I will switch this chat back to {previous_model}. "
+                "This does not change your default model. Say yes to continue, or no to cancel."
             )
             return self._confirmation_preview_response(
                 user_id,
@@ -11283,8 +11312,8 @@ class Orchestrator:
                 )
             else:
                 question = (
-                    f"I will switch chat to {matched_model}. "
-                    "This mutates the active chat target. Say yes to continue, or no to cancel."
+                    f"Temporary chat model switch preview: I will switch chat temporarily to {matched_model}. "
+                    "This does not change your default model. Say yes to continue, or no to cancel."
                 )
             return self._confirmation_preview_response(
                 user_id,
@@ -11300,7 +11329,7 @@ class Orchestrator:
                         "used_memory": bool(state),
                     },
                 },
-                title="Default model confirmation" if promote_default else "Model switch confirmation",
+                title="Default chat model confirmation" if promote_default else "Temporary chat model switch confirmation",
                 preview_payload={
                     "provider": provider_id,
                     "model_id": matched_model,
