@@ -161,6 +161,23 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
         "installed_blocker": "it isn't enabled as a live capability yet",
         "blocked_blocker": "the pack was blocked during import",
     },
+    "email_access": {
+        "label": "email access integration",
+        "phrases": (
+            "read my email",
+            "read email",
+            "check my email",
+            "open my email",
+            "read my inbox",
+            "check my inbox",
+            "gmail",
+            "mailbox",
+            "inbox",
+        ),
+        "search_terms": ("email", "mail", "gmail", "inbox"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
     "voice_output": {
         "label": "voice output",
         "phrases": (
@@ -247,6 +264,7 @@ _CAPABILITY_HELPER_NAMES = {
     "linux_troubleshooting": "Linux troubleshooting helper",
     "file_organization": "file organization helper",
     "project_code_audit": "project audit helper",
+    "email_access": "email integration helper",
     "voice_output": "voice helper",
     "voice_input": "speech input helper",
     "avatar_visual": "visual avatar helper",
@@ -264,6 +282,7 @@ _CAPABILITY_PROPOSAL_SUMMARIES = {
     "linux_troubleshooting": "structures Linux troubleshooting without running commands automatically",
     "file_organization": "plans file organization safely before any file operation",
     "project_code_audit": "structures project and code audits",
+    "email_access": "connects to email through an approved managed integration",
     "voice_output": "reads text aloud",
     "voice_input": "listens and transcribes speech",
     "avatar_visual": "shows a visual avatar",
@@ -278,7 +297,10 @@ _CAPABILITY_DETECTION_PRIORITY = (
     "linux_troubleshooting",
     "file_organization",
     "project_code_audit",
+    "email_access",
 )
+
+_CHAT_NATIVE_CAPABILITIES = {"dev_tools", "system_tools", "creative_tools"}
 
 _PARTIAL_HELP_CUES = (
     "help me",
@@ -457,6 +479,8 @@ def detect_pack_capability_need(text: str | None) -> dict[str, Any] | None:
             }
     for capability, rule in _CAPABILITY_RULES.items():
         if capability in _CAPABILITY_DETECTION_PRIORITY:
+            continue
+        if capability in _CHAT_NATIVE_CAPABILITIES:
             continue
         if _matches_rule(normalized, rule):
             return {
@@ -637,7 +661,7 @@ def _behavioral_capability_match(normalized: str) -> dict[str, Any] | None:
             "label": "voice input",
             "confidence": 0.82,
         }
-    if any(phrase in normalized for phrase in ("camera feed", "camera stream", "webcam", "keep an eye on", "look at the camera", "watch the camera", "see what", "look at what", "video feed", "live feed")):
+    if any(phrase in normalized for phrase in ("camera feed", "camera stream", "keep an eye on", "look at the camera", "watch the camera", "see what", "look at what", "video feed", "live feed")):
         return {
             "capability": "camera_feed",
             "label": "camera feed",
@@ -648,18 +672,6 @@ def _behavioral_capability_match(normalized: str) -> dict[str, Any] | None:
             "capability": "avatar_visual",
             "label": "visual avatar",
             "confidence": 0.8,
-        }
-    if any(phrase in normalized for phrase in ("write code", "write a script", "code this", "debug this", "terminal", "git ", "run tests", "programming", "developer tools", "coding")):
-        return {
-            "capability": "dev_tools",
-            "label": "coding tools",
-            "confidence": 0.8,
-        }
-    if any(phrase in normalized for phrase in ("install", "configure", "set up", "set up", "troubleshoot", "repair", "fix my pc", "manage files", "monitor the system", "watch my machine", "keep an eye on", "alert me when", "notify me when")):
-        return {
-            "capability": "system_tools",
-            "label": "system tools",
-            "confidence": 0.78,
         }
     return None
 
@@ -1455,6 +1467,42 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
     blocked_pack = result.get("blocked_pack") if isinstance(result.get("blocked_pack"), dict) else None
     comparison_mode = str(result.get("comparison_mode") or "").strip().lower()
 
+    def _missing_capability_phrase(capability_key: str | None, label_text: str) -> str:
+        key = str(capability_key or "").strip().lower()
+        if key == "qr_code_guidance":
+            return "QR-code generation"
+        if key == "document_conversion_guidance":
+            return "document conversion"
+        if key == "image_editing_guidance":
+            return "image editing"
+        if key == "browser_automation_planning":
+            return "browser automation"
+        if key == "linux_troubleshooting":
+            return "Linux troubleshooting"
+        if key == "file_organization":
+            return "file organization"
+        if key == "project_code_audit":
+            return "project/code audit guidance"
+        cleaned_label = str(label_text or "").strip()
+        return cleaned_label[:1].upper() + cleaned_label[1:] if cleaned_label else "That capability"
+
+    def _searched_source_phrase(pack: dict[str, Any]) -> str:
+        source_id = str(pack.get("source_id") or "").strip().lower()
+        source_name = str(pack.get("source_name") or "").strip().lower()
+        if "starter" in source_id or "starter" in source_name:
+            return "approved starter skill sources"
+        return "approved pack sources"
+
+    def _candidate_pack_kind(pack: dict[str, Any]) -> str:
+        artifact_type = str(pack.get("artifact_type_hint") or "").strip().lower()
+        if artifact_type != "portable_text_skill":
+            return "candidate pack"
+        source_id = str(pack.get("source_id") or "").strip().lower()
+        source_name = str(pack.get("source_name") or "").strip().lower()
+        if "starter" in source_id or "starter" in source_name:
+            return "safe text-only guidance pack"
+        return "safe text-only pack"
+
     def _render_tradeoff(name: str, note: str | None) -> str | None:
         cleaned = str(note or "").strip().lower()
         if not cleaned:
@@ -1473,6 +1521,20 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
         cleaned = str(next_action or "").strip()
         if cleaned:
             lines.append(cleaned)
+
+    if recommended_pack is not None and installed_pack is None and (
+        alternate_pack is None or comparison_mode != "recommended_plus_alternate"
+    ):
+        pack_name = str(recommended_pack.get("name") or "that pack").strip() or "that pack"
+        pack_kind = _candidate_pack_kind(recommended_pack)
+        capability_phrase = _missing_capability_phrase(result.get("capability_required"), label)
+        source_phrase = _searched_source_phrase(recommended_pack)
+        lines = [
+            f"I don't have {capability_phrase} installed yet, but I searched the {source_phrase} and found a {pack_kind}: {pack_name}.",
+            "It is not installed yet. I can show you the preview first, including what it contains and any safety notes.",
+            "Say yes to preview it.",
+        ]
+        return normalize_persona_text(" ".join(lines).strip())
 
     lines: list[str] = []
     if classification == "can_partially_answer_but_capability_would_help":
@@ -1543,11 +1605,8 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
                 lines.append(f"I'd start with {pack_name}.")
                 lines.append(f"If you want, say yes and I'll show the preview for {pack_name}.")
             else:
-                tradeoff = _render_tradeoff(pack_name, recommended_pack.get("tradeoff_note"))
-                if tradeoff:
-                    lines.append(tradeoff)
-                lines.append("It is installable, but I can't confirm it is usable until I fetch and inspect it.")
-                lines.append("If you want, say yes and I'll show the pack preview.")
+                lines.append("It is not installed yet. I can show you the preview first, including what it contains and any safety notes.")
+                lines.append("Say yes to preview it.")
         else:
             lines.append("I can't confirm it will work here yet.")
             _append_next_action(lines, normalized_state.get("next_action") or recommended_pack.get("next_action"))

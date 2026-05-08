@@ -231,6 +231,9 @@ class TestSetupChatFlow(unittest.TestCase):
             ("Use the avatar", "avatar_visual"),
             ("Open the robot camera feed", "camera_feed"),
             ("What pack do I need for voice output?", "voice_output"),
+            ("can you make me a qr code", "qr_code_guidance"),
+            ("install a skill pack for qr codes", "qr_code_guidance"),
+            ("can you read my email", "email_access"),
         )
         for text, capability in cases:
             with self.subTest(text=text):
@@ -239,6 +242,27 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertEqual("pack_capability_recommendation", decision.get("kind"))
                 self.assertEqual(capability, decision.get("capability"))
                 self.assertFalse(bool(decision.get("generic_allowed")))
+
+    def test_agent_skill_pack_language_never_routes_to_package_manager(self) -> None:
+        cases = (
+            "can you install skill packs? can you read my email?",
+            "install a skill pack for qr codes",
+            "install whatever skill you need",
+            "install a capability pack",
+            "install an agent skill",
+            "install this MCP server",
+        )
+        for text in cases:
+            with self.subTest(text=text):
+                decision = classify_runtime_chat_route(text)
+                self.assertNotEqual("shell_install_package", decision.get("kind"))
+
+    def test_real_os_package_install_still_routes_to_package_manager(self) -> None:
+        decision = classify_runtime_chat_route("install ripgrep")
+        self.assertEqual("action_tool", decision.get("route"))
+        self.assertEqual("shell_install_package", decision.get("kind"))
+        self.assertEqual("apt", decision.get("manager"))
+        self.assertEqual("ripgrep", decision.get("package"))
 
     def test_skill_pack_capability_questions_route_to_assistant_capabilities(self) -> None:
         cases = (

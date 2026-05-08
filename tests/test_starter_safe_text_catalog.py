@@ -32,7 +32,7 @@ class TestStarterSafeTextCatalog(unittest.TestCase):
             self.assertTrue(starter.get("allowlisted"))
             self.assertTrue(starter.get("allowed_by_policy"))
             self.assertEqual("local_catalog", starter.get("kind"))
-            self.assertIn("portable text-only", str(starter.get("notes") or "").lower())
+            self.assertIn("portable text-only guidance packs", str(starter.get("notes") or "").lower())
 
             payload = json.loads(catalog_path.read_text(encoding="utf-8"))
             packs = payload.get("packs")

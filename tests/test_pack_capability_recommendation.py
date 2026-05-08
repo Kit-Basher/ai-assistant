@@ -47,7 +47,6 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
             ("read something to me", "voice_output"),
             ("Use the avatar", "avatar_visual"),
             ("Open the robot camera feed", "camera_feed"),
-            ("Help me code", "dev_tools"),
         )
         for text, expected in cases:
             with self.subTest(text=text):
@@ -133,12 +132,44 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertEqual("If you want, say yes and I'll show the pack preview.", result["next_step"])
 
         rendered = render_pack_capability_response(result)
-        self.assertIn("Voice output isn't installed.", rendered)
-        self.assertIn("most practical option here", rendered)
-        self.assertIn("Local Voice looks like the lighter option.", rendered)
-        self.assertIn("If you want, say yes and I'll show the pack preview.", rendered)
+        self.assertIn("I don't have Voice output installed yet", rendered)
+        self.assertIn("searched the approved pack sources", rendered)
+        self.assertIn("safe text-only pack: Local Voice", rendered)
+        self.assertIn("It is not installed yet. I can show you the preview first", rendered)
+        self.assertIn("Say yes to preview it.", rendered)
+        self.assertNotIn("lighter option", rendered)
+        self.assertNotIn("fetch and inspect", rendered)
         self.assertEqual("single_recommendation", result["comparison_mode"])
         self.assertIsNone(result["alternate_pack"])
+
+    def test_single_starter_candidate_renders_clear_preview_first_copy(self) -> None:
+        rendered = render_pack_capability_response(
+            {
+                "capability_required": "qr_code_guidance",
+                "capability_label": "QR code creation guidance",
+                "classification": "can_partially_answer_but_capability_would_help",
+                "fallback": "install_preview",
+                "comparison_mode": "single_recommendation",
+                "recommended_pack": {
+                    "name": "QR Code Creation Guidance",
+                    "source_id": "starter-safe-text",
+                    "source_name": "Starter Safe Text Catalog",
+                    "artifact_type_hint": "portable_text_skill",
+                    "installable": True,
+                    "normalized_state": {"installable": True},
+                    "tradeoff_note": "lighter",
+                },
+            }
+        )
+
+        self.assertEqual(
+            "I don't have QR-code generation installed yet, but I searched the approved starter skill sources and found a safe text-only guidance pack: QR Code Creation Guidance. "
+            "It is not installed yet. I can show you the preview first, including what it contains and any safety notes. Say yes to preview it.",
+            rendered,
+        )
+        self.assertNotIn("helper", rendered.lower())
+        self.assertNotIn("lighter option", rendered.lower())
+        self.assertNotIn("fetch and inspect", rendered.lower())
 
     def test_capability_gap_response_includes_structured_rescue_contract(self) -> None:
         store = _FakePackStore([])

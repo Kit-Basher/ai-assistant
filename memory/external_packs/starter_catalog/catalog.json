@@ -1,7 +1,7 @@
 {
   "meta": {
     "catalog_id": "starter-safe-text-catalog-v2",
-    "description": "Approved local starter catalog for portable text-only skills. Discovery metadata is advisory; preview and import remain separate confirmations.",
+    "description": "Approved local starter catalog for portable text-only guidance packs. Discovery metadata is advisory; preview and import remain separate confirmations.",
     "policy": "No executable code, dependency install, MCP server, plugin handler, auto-enable, auto-approve, or one-click execution path."
   },
   "packs": [

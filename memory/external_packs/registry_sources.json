@@ -432,7 +432,7 @@
       "id": "starter-safe-text",
       "kind": "local_catalog",
       "name": "Starter Safe Text Catalog",
-      "notes": "Approved local starter catalog for portable text-only skill packs. Entries are discovery-only and still require preview before import.",
+      "notes": "Approved local starter catalog for portable text-only guidance packs. Entries are discovery-only and still require preview before import.",
       "supports_compare_hint": true,
       "supports_preview": true,
       "supports_search": true

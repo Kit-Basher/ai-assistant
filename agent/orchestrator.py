@@ -6893,6 +6893,52 @@ class Orchestrator:
         )
         return any(phrase in normalized for phrase in broad_install_phrases)
 
+    @staticmethod
+    def _looks_like_agent_pack_install_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if re.search(r"\b(?:install|add|get|find)\b.{0,80}\b(?:skill|skills|guidance pack|guidance packs)\b", normalized):
+            return True
+        phrases = (
+            "install skill pack",
+            "install skill packs",
+            "install a skill pack",
+            "install guidance pack",
+            "install guidance packs",
+            "install a guidance pack",
+            "install agent skill",
+            "install an agent skill",
+            "install capability pack",
+            "install a capability pack",
+            "install whatever skill",
+            "skill pack",
+            "skill packs",
+            "guidance pack",
+            "guidance packs",
+            "capability pack",
+            "capability packs",
+            "agent skill",
+            "agent skills",
+        )
+        return any(phrase in normalized for phrase in phrases)
+
+    @staticmethod
+    def _looks_like_email_access_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return any(
+            phrase in normalized
+            for phrase in (
+                "read my email",
+                "check my email",
+                "open my email",
+                "read email",
+                "check email",
+                "read my inbox",
+                "check my inbox",
+                "my inbox",
+                "gmail",
+            )
+        )
+
     def _unbounded_install_block_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = text
         message = (
@@ -6912,6 +6958,62 @@ class Orchestrator:
                 "type": "capability_gap_blocker",
                 "blocked_reason": "unbounded_install_blocked",
                 "source_scope": "none",
+                "searched": False,
+                "preview_required": True,
+                "install_allowed_initially": False,
+                "summary": message,
+            },
+        )
+
+    def _agent_pack_install_explanation_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        email_part = ""
+        if self._looks_like_email_access_request(text):
+            email_part = (
+                " I also do not currently have an email-reading capability configured; email access would need "
+                "a safe approved integration with explicit permissions before I could read an inbox."
+            )
+        message = (
+            "Skill packs are handled through approved pack discovery, preview, and separate import confirmation, "
+            "not apt or package-manager install."
+            f"{email_part} Nothing was installed, imported, enabled, approved, or executed."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_blocker"],
+            error_kind="agent_pack_install_not_os_package",
+            ok=False,
+            payload={
+                "type": "capability_gap_blocker",
+                "blocked_reason": "agent_pack_install_not_os_package",
+                "source_scope": "approved_pack_sources_only",
+                "searched": False,
+                "preview_required": True,
+                "install_allowed_initially": False,
+                "summary": message,
+            },
+        )
+
+    def _email_capability_unavailable_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = text
+        message = (
+            "I do not currently have an email-reading capability configured. "
+            "Email access requires a safe approved integration with explicit permissions; I will not claim I can read email from chat alone."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_gap_blocker"],
+            error_kind="email_capability_unavailable",
+            ok=False,
+            payload={
+                "type": "capability_gap_blocker",
+                "blocked_reason": "email_capability_unavailable",
+                "source_scope": "approved_pack_sources_only",
                 "searched": False,
                 "preview_required": True,
                 "install_allowed_initially": False,
@@ -11462,6 +11564,10 @@ class Orchestrator:
             return self._managed_adapter_block_response(user_id, text)
         if self._looks_like_unbounded_install_request(text):
             return self._unbounded_install_block_response(user_id, text)
+        if self._looks_like_agent_pack_install_request(text) and self._looks_like_email_access_request(text):
+            return self._agent_pack_install_explanation_response(user_id, text)
+        if self._looks_like_email_access_request(text):
+            return self._email_capability_unavailable_response(user_id, text)
         decision = classify_runtime_chat_route(
             text,
             awaiting_secret=str(state.get("step") or "") == "awaiting_openrouter_key",
@@ -11503,10 +11609,11 @@ class Orchestrator:
             "model_scout_strategy",
             "model_scout_discovery",
         }
-        if kind == "shell_install_package" and "skill" in " ".join(str(text or "").strip().lower().split()):
+        if kind == "shell_install_package" and self._looks_like_agent_pack_install_request(text):
             capability_gap_response = self._capability_gap_planning_response(user_id, text)
             if capability_gap_response is not None:
                 return capability_gap_response
+            return self._agent_pack_install_explanation_response(user_id, text)
         control_mode_response = (
             None if kind in mode_safe_model_kinds else self._control_mode_intent_response(text)
         )
@@ -11548,12 +11655,14 @@ class Orchestrator:
             return self._operational_status_response(user_id, text, kind)
         if kind == "assistant_capabilities":
             return self._assistant_capabilities_response(text)
-        if self._model_acquisition_requested(normalize_setup_text(text).replace("/", " ")):
-            return self._model_acquire_response(user_id, text)
         if kind == "pack_capability_recommendation":
             return self._pack_capability_recommendation_response(user_id, text)
         if kind == "capability_gap_plan":
             return self._capability_gap_planning_response(user_id, text)
+        if kind not in {"shell_install_package", "shell_safe_command", "shell_blocked_request"} and self._model_acquisition_requested(
+            normalize_setup_text(text).replace("/", " ")
+        ):
+            return self._model_acquire_response(user_id, text)
         if kind in {"agent_memory_inspect", "agent_memory_preferences", "agent_memory_open_loops"}:
             return self._agent_memory_response(user_id, kind, query_text=text)
         if self._runtime_truth() is None:
@@ -16164,6 +16273,13 @@ class Orchestrator:
                     next_action="Ask me to run it again.",
                 )
             if followup_type == "none" and followup_reason == "no_pending":
+                normalized_followup_text = " ".join(str(text or "").strip().lower().split())
+                if (
+                    str(self._last_offer_topic.get(user_id) or "").strip() == "no_chat_bootstrap"
+                    and normalized_followup_text in {"yes", "yes please", "sure", "ok", "okay", "please"}
+                    and not self._llm_chat_available()
+                ):
+                    return self._bootstrap_no_chat_response()
                 if str(self._last_offer_topic.get(user_id) or "").strip() != "brief_offer":
                     return self._continuity_error_response(
                         title="❌ No resumable work is active.",
@@ -16500,6 +16616,7 @@ class Orchestrator:
                             query_text="what are we working on",
                         )
                     if not self._llm_chat_available():
+                        self._last_offer_topic[user_id] = "no_chat_bootstrap"
                         return self._bootstrap_no_chat_response()
 
             interpretable_result = self._current_interpretable_result(user_id)

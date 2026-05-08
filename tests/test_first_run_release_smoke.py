@@ -199,7 +199,10 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
         mock_recommend.assert_called_once()
         self.assertEqual("coding", mock_recommend.call_args.args[0])
         self.assertIn("I can add capabilities for coding.", response.text)
-        self.assertIn("say yes and I'll show the pack preview", response.text)
+        self.assertIn("show you the preview first", response.text)
+        self.assertIn("Say yes to preview it.", response.text)
+        self.assertNotIn("lighter option", response.text.lower())
+        self.assertNotIn("fetch and inspect", response.text.lower())
         self.assertEqual("true", str(self.db.get_user_pref(onboarding_completed_key("user1")) or "").strip().lower())
         self.assertEqual([], llm.chat_calls)
 
