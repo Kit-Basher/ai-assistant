@@ -109,6 +109,12 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
     "browser_automation_planning": {
         "label": "browser automation planning",
         "phrases": (
+            "browse the web",
+            "browse websites",
+            "lets you browse",
+            "let you browse",
+            "skill that lets you browse",
+            "skill to browse",
             "automate my browser",
             "browser automation",
             "automate the browser",

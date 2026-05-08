@@ -46,6 +46,8 @@ _OLLAMA_SWITCH_KEYWORDS = ("use", "switch", "default")
 _BETTER_LOCAL_MODEL_PHRASES = (
     "switch to a better local model",
     "use a better local model",
+    "use the best local model",
+    "switch to the best local model",
     "upgrade the local model",
 )
 _SETUP_EXPLANATION_PHRASES = (
@@ -541,6 +543,12 @@ _MODEL_LIFECYCLE_LIST_PHRASES = (
     "which models failed to install",
 )
 _AGENT_MEMORY_PHRASES = (
+    "is memory on",
+    "is your memory on",
+    "is agent memory on",
+    "is memory enabled",
+    "is your memory enabled",
+    "is agent memory enabled",
     "what is in your memory files",
     "what is currently in your memory files",
     "what is currently in your memory",
@@ -550,6 +558,7 @@ _AGENT_MEMORY_PHRASES = (
     "what is in the memory database",
 )
 _AGENT_MEMORY_WORKING_CONTEXT_PHRASES = (
+    "do you remember what we were doing",
     "what are we working on",
     "what were we working on",
     "what were we doing before",

@@ -1096,6 +1096,18 @@ class Orchestrator:
         if any(
             phrase in normalized
             for phrase in (
+                "is memory on",
+                "is your memory on",
+                "is agent memory on",
+                "is memory enabled",
+                "is your memory enabled",
+                "is agent memory enabled",
+            )
+        ):
+            return "memory_status"
+        if any(
+            phrase in normalized
+            for phrase in (
                 "what are we working on",
                 "what were we working on",
                 "what were we doing before",
@@ -1355,6 +1367,21 @@ class Orchestrator:
                 if open_loop_titles:
                     lines.append(f"Relevant open loops include {', '.join(open_loop_titles)}.")
             message = " ".join(lines).strip() or "I do not have a richer saved system profile yet."
+        elif focus == "memory_status":
+            continuity_ok = bool(continuity_health.get("healthy", True))
+            lines = [
+                "Local continuity memory is on and readable."
+                if continuity_ok
+                else "Local continuity memory is enabled, but it is degraded right now."
+            ]
+            if has_saved_memory:
+                lines.append("I have saved context I can summarize.")
+            else:
+                lines.append("I do not have saved preferences, open loops, or project notes yet.")
+            lines.append("This is separate from system RAM.")
+            if continuity_warning:
+                lines.insert(0, continuity_warning)
+            message = " ".join(lines)
         else:
             if not has_saved_memory:
                 message = (
@@ -1364,7 +1391,7 @@ class Orchestrator:
                 if continuity_warning:
                     message = f"{continuity_warning} {message}"
             else:
-                lines = ["Here’s what I remember right now."]
+                lines = ["Here’s the useful memory I have right now."]
                 if continuity_warning:
                     lines.insert(0, continuity_warning)
                 if preference_hints:
@@ -3234,6 +3261,7 @@ class Orchestrator:
         return any(
             phrase in normalized
             for phrase in (
+                "do you remember what we were doing",
                 "go back and explain the larger task",
                 "explain the larger task",
                 "what is the larger task",
@@ -4234,10 +4262,15 @@ class Orchestrator:
             return False
         if normalized.startswith("please "):
             normalized = normalized[len("please "):].strip()
-        if any(
-            normalized.startswith(prefix)
-            for prefix in ("install ", "download ", "pull ", "acquire ", "import ")
-        ):
+        model_context = (
+            "model" in normalized
+            or "ollama" in normalized
+            or "openrouter" in normalized
+            or ":" in normalized
+        )
+        if any(normalized.startswith(prefix) for prefix in ("install ", "download ", "pull ", "acquire ", "import ")):
+            if not model_context:
+                return False
             return True
         return any(
             phrase in normalized
@@ -6149,6 +6182,38 @@ class Orchestrator:
                 "reason": str(reason or "unclear_input").strip() or "unclear_input",
                 "summary": message,
             },
+        )
+
+    @staticmethod
+    def _open_app_requested(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        return any(
+            phrase in normalized
+            for phrase in (
+                "open the app",
+                "open app",
+                "open personal agent",
+                "open the personal agent app",
+                "launch the app",
+                "show the app",
+            )
+        )
+
+    def _open_app_response(self) -> OrchestratorResponse:
+        message = (
+            "You are already talking to the Personal Agent chat surface. "
+            "If you need to open it again, use the desktop launcher or browse to http://127.0.0.1:8765/."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_capabilities",
+            used_runtime_state=False,
+            payload={
+                "type": "open_app_guidance",
+                "summary": message,
+                "url": "http://127.0.0.1:8765/",
+            },
+            skip_post_response_hooks=True,
         )
 
     def _assistant_unmatched_input_response(
@@ -8067,6 +8132,10 @@ class Orchestrator:
             phrase in normalized
             for phrase in (
                 "are you broken",
+                "why arent you working",
+                "why are not you working",
+                "why are you not working",
+                "why aren't you working",
                 "why are you so slow",
                 "why are you slow",
                 "what are you doing",
@@ -8641,9 +8710,26 @@ class Orchestrator:
         effective_provider = str(current.get("effective_provider") or configured_provider or "").strip().lower() or None
         effective_model = str(current.get("effective_model") or configured_model or "").strip() or None
         if not configured_model and not effective_model:
-            return self._runtime_state_unavailable_response(
+            message = (
+                "No chat model is configured right now. I can still answer deterministic runtime, setup, memory, "
+                "and system-status questions, but open-ended chat needs a local or configured provider first."
+            )
+            return self._runtime_truth_response(
+                text=message,
                 route="model_status",
-                reason="current_model_missing",
+                payload={
+                    "type": "model_status",
+                    "provider": None,
+                    "model_id": None,
+                    "configured_provider": configured_provider,
+                    "configured_model": configured_model,
+                    "title": "Current model",
+                    "ready": False,
+                    "health_status": "not_configured",
+                    "provider_health_status": "not_configured",
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
             )
         provider_label = self._setup_provider_label(configured_provider)
         effective_provider_label = self._setup_provider_label(effective_provider)
@@ -11627,6 +11713,8 @@ class Orchestrator:
             cards_payload["generic_fallback_allowed"] = False
             return self._cards_response(user_id, cards_payload)
         if route == "generic_chat" or kind in {"none", "generic_chat"}:
+            if self._open_app_requested(text):
+                return self._open_app_response()
             if self._runtime_location_requested(text):
                 return self._runtime_location_response()
             if self._assistant_self_diagnostics_requested(text):
@@ -17851,11 +17939,16 @@ class Orchestrator:
                 followups = ["Show the biggest memory users", "Show only CPU deltas"]
 
         if blocked_count and not cards:
+            if resource_question_kind:
+                summary_parts.append(
+                    "I could not run the local read-only system probes from this runtime, so I cannot ground a live system diagnosis yet."
+                )
+                followups = followups or ["Check runtime status", "Run agent doctor"]
             cards.append(
                 {
                     "key": "nl-read-only-refused",
-                    "title": "Read-only guard",
-                    "lines": ["NL path refused non read-only skill execution."],
+                    "title": "System probes unavailable",
+                    "lines": ["The native read-only system inspection skills are not available in this runtime."],
                     "severity": "warn",
                 }
             )

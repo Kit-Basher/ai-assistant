@@ -153,6 +153,8 @@ def classify_trivial_social_turn(text: str | None) -> str | None:
         return None
     if normalized in _SOCIAL_GREET_REQUESTS:
         return "greeting"
+    if normalized.startswith("why "):
+        return None
     if any(
         phrase in normalized
         for phrase in (

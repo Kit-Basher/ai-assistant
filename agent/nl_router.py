@@ -102,6 +102,13 @@ _PLAN_DAY = re.compile(
 _SHOW_PREFS = re.compile(r"\b(show my preferences|what are my preferences|preferences)\b", re.IGNORECASE)
 _MEMORY_INSPECT = re.compile(
     r"\b("
+    r"is memory on|"
+    r"is your memory on|"
+    r"is agent memory on|"
+    r"is memory enabled|"
+    r"is your memory enabled|"
+    r"is agent memory enabled|"
+    r"do you remember what we were doing|"
     r"what do you remember about me|"
     r"what do you remember|"
     r"what are we working on|"

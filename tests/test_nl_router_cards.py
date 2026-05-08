@@ -277,7 +277,8 @@ class TestNLRouterCards(unittest.TestCase):
         )
         orchestrator.skills["storage_governor"].functions["storage_report"].read_only = False
         response = orchestrator.handle_message("show disk status", "user-1")
-        self.assertIn("Read-only guard", response.text)
+        self.assertIn("System probes unavailable", response.text)
+        self.assertIn("native read-only system inspection skills are not available", response.text)
 
     def test_memory_writes_only_on_explicit_intent(self) -> None:
         orchestrator = Orchestrator(
