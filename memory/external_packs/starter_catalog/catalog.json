@@ -1,0 +1,105 @@
+{
+  "meta": {
+    "catalog_id": "starter-safe-text-catalog-v2",
+    "description": "Approved local starter catalog for portable text-only guidance packs. Discovery metadata is advisory; preview and import remain separate confirmations.",
+    "policy": "No executable code, dependency install, MCP server, plugin handler, auto-enable, auto-approve, or one-click execution path."
+  },
+  "packs": [
+    {
+      "id": "qr-code-guidance",
+      "name": "QR Code Creation Guidance",
+      "summary": "Plan QR code content, safety checks, export format, and validation without generating or executing code.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/qr-code-guidance",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["qr", "qrcode", "barcode", "creation", "guidance", "text_only"]
+    },
+    {
+      "id": "document-conversion-guidance",
+      "name": "PDF and Document Conversion Guidance",
+      "summary": "Plan safe document conversion steps, input checks, formatting choices, and verification before any file action.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/document-conversion-guidance",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["pdf", "document", "conversion", "file", "guidance", "text_only"]
+    },
+    {
+      "id": "image-editing-workflow",
+      "name": "Image Editing Workflow Guidance",
+      "summary": "Turn image-editing requests into a clear, reviewable workflow without invoking image tools.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/image-editing-workflow",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["image", "photo", "editing", "workflow", "guidance", "text_only"]
+    },
+    {
+      "id": "browser-automation-planning",
+      "name": "Browser Automation Planning Guidance",
+      "summary": "Design browser automation plans, selectors, risks, and dry-run checks without controlling a browser.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/browser-automation-planning",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["browser", "automation", "planning", "web", "text_only", "no_execution"]
+    },
+    {
+      "id": "linux-troubleshooting-workflow",
+      "name": "Linux Troubleshooting Workflow",
+      "summary": "Structure Linux diagnostics, evidence collection, and rollback-safe repair plans before commands are run.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/linux-troubleshooting-workflow",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["linux", "troubleshooting", "debugging", "system", "workflow", "text_only"]
+    },
+    {
+      "id": "file-organization-workflow",
+      "name": "File Organization Workflow",
+      "summary": "Plan file organization, naming, deduplication, and dry-run review before any filesystem mutation.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/file-organization-workflow",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["file", "files", "organization", "organizing", "workflow", "text_only"]
+    },
+    {
+      "id": "writing-editing-workflow",
+      "name": "Writing and Editing Workflow",
+      "summary": "Guide drafting, rewriting, critique, tone, and editing passes for text work.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/writing-editing-workflow",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["writing", "editing", "draft", "content", "creative", "text_only"]
+    },
+    {
+      "id": "project-code-audit-workflow",
+      "name": "Project and Code Audit Workflow",
+      "summary": "Plan repository audits focused on risks, tests, maintainability, and user-facing behavior.",
+      "author": "Personal Agent Starter Catalog",
+      "source_url": "memory/external_packs/starter_catalog/packs/project-code-audit-workflow",
+      "source_kind_hint": "local_path",
+      "latest_ref_hint": "starter-v2",
+      "artifact_type_hint": "portable_text_skill",
+      "has_skill_md": true,
+      "tags": ["code", "project", "audit", "review", "repository", "text_only"]
+    }
+  ]
+}

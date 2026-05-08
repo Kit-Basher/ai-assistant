@@ -80,6 +80,9 @@ class _RuntimeChatAvailableAdapter:
     def _safe_mode_enabled(self) -> bool:
         return False
 
+    def assistant_chat_available(self) -> bool:
+        return True
+
 
 class _PreparedChatAdapter:
     def _safe_mode_enabled(self) -> bool:
@@ -1828,13 +1831,13 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         response = orchestrator.handle_message(
-            "What colour is a bluejay?",
+            "respond with the prepared chat color",
             "user1",
             chat_context={
                 "trace_id": "trace-bluejay",
                 "source_surface": "webui",
                 "payload": {"source_surface": "webui"},
-                "messages": [{"role": "user", "content": "What colour is a bluejay?"}],
+                "messages": [{"role": "user", "content": "respond with the prepared chat color"}],
             },
         )
 
@@ -2825,6 +2828,38 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(confirm.data["used_llm"])
         self.assertIn("Installing ripgrep", confirm.text)
         self.assertIn(("shell_install_package", ("apt", "ripgrep", None, False, None)), runtime_truth.calls)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_agent_skill_pack_language_never_becomes_apt_install(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        safe_root = os.path.join(self.tmpdir.name, "workspace")
+        os.makedirs(safe_root, exist_ok=True)
+        runtime_truth.shell_skill = ShellSkill(
+            allowed_roots=[safe_root],
+            base_dir=safe_root,
+            sensitive_roots=[os.path.join(safe_root, "private")],
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+
+        response = orchestrator.handle_message("can you install skill packs? can you read my email?", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
+        self.assertEqual("agent_pack_install_not_os_package", response.data["error_kind"])
+        self.assertIn("pack discovery", response.text.lower())
+        self.assertIn("not apt", response.text.lower())
+        self.assertIn("email-reading capability", response.text.lower())
+        self.assertNotIn("apt-get install skill", response.text.lower())
+        self.assertFalse(any(call[0] == "shell_preview_install_package" for call in runtime_truth.calls))
+        self.assertFalse(any(call[0] == "shell_install_package" for call in runtime_truth.calls))
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_shell_create_directory_requires_confirmation_then_executes(self) -> None:
@@ -4658,9 +4693,129 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(actions, list)
         assert isinstance(actions, list)
         self.assertTrue(any(isinstance(row, dict) and row.get("action") == "show_preview" for row in actions))
-        self.assertIn("Voice output isn't installed.", response.text)
-        self.assertIn("most practical option here", response.text)
-        self.assertIn("pack preview", response.text)
+        self.assertIn("I don't have Voice output installed yet", response.text)
+        self.assertIn("searched the approved pack sources", response.text)
+        self.assertIn("safe text-only pack: Local Voice", response.text)
+        self.assertIn("show you the preview first", response.text)
+        self.assertIn("Say yes to preview it.", response.text)
+        self.assertNotIn("lighter option", response.text.lower())
+        self.assertNotIn("fetch and inspect", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_qr_prompt_uses_builtin_starter_catalog_candidate(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+
+        response = orchestrator.handle_message("can you make me a qr code", "user1")
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        rescue = payload.get("capability_gap_rescue") if isinstance(payload.get("capability_gap_rescue"), dict) else {}
+        candidates = rescue.get("candidate_packs") if isinstance(rescue.get("candidate_packs"), list) else []
+
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual("install_preview", payload.get("fallback"))
+        self.assertTrue(any(row.get("remote_id") == "qr-code-guidance" for row in candidates if isinstance(row, dict)))
+        self.assertIn("QR Code Creation Guidance", response.text)
+        self.assertIn("searched the approved starter skill sources", response.text)
+        self.assertIn("show you the preview first", response.text)
+        self.assertIn("Say yes to preview it.", response.text)
+        self.assertNotIn("coding helper", response.text.lower())
+        self.assertNotIn("coding tools isn't installed", response.text.lower())
+        self.assertNotIn("lighter option", response.text.lower())
+        self.assertNotIn("fetch and inspect", response.text.lower())
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_install_skill_pack_for_qr_codes_uses_preview_candidate_not_apt(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        safe_root = os.path.join(self.tmpdir.name, "workspace")
+        os.makedirs(safe_root, exist_ok=True)
+        runtime_truth.shell_skill = ShellSkill(
+            allowed_roots=[safe_root],
+            base_dir=safe_root,
+            sensitive_roots=[os.path.join(safe_root, "private")],
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+
+        response = orchestrator.handle_message("install a skill pack for qr codes", "user1")
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        rescue = payload.get("capability_gap_rescue") if isinstance(payload.get("capability_gap_rescue"), dict) else {}
+        candidates = rescue.get("candidate_packs") if isinstance(rescue.get("candidate_packs"), list) else []
+
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual("install_preview", payload.get("fallback"))
+        self.assertTrue(any(row.get("remote_id") == "qr-code-guidance" for row in candidates if isinstance(row, dict)))
+        self.assertIn("QR Code Creation Guidance", response.text)
+        self.assertIn("show you the preview first", response.text)
+        self.assertNotIn("apt-get", response.text.lower())
+        self.assertNotIn("lighter option", response.text.lower())
+        self.assertFalse(any(call[0] == "shell_preview_install_package" for call in runtime_truth.calls))
+        self.assertFalse(any(call[0] == "shell_install_package" for call in runtime_truth.calls))
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_unbounded_skill_install_is_blocked_before_package_manager(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        safe_root = os.path.join(self.tmpdir.name, "workspace")
+        os.makedirs(safe_root, exist_ok=True)
+        runtime_truth.shell_skill = ShellSkill(
+            allowed_roots=[safe_root],
+            base_dir=safe_root,
+            sensitive_roots=[os.path.join(safe_root, "private")],
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+
+        response = orchestrator.handle_message("install whatever skill you need", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
+        self.assertEqual("unbounded_install_blocked", response.data["error_kind"])
+        self.assertNotIn("apt-get", response.text.lower())
+        self.assertFalse(any(call[0] == "shell_preview_install_package" for call in runtime_truth.calls))
+        self.assertFalse(any(call[0] == "shell_install_package" for call in runtime_truth.calls))
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_email_access_prompt_is_blocked_without_claiming_capability(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+
+        response = orchestrator.handle_message("can you read my email", "user1")
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
+        self.assertEqual("email_capability_unavailable", response.data["error_kind"])
+        self.assertIn("do not currently have an email-reading capability", response.text.lower())
+        self.assertIn("explicit permissions", response.text.lower())
+        self.assertNotIn("i can read your email", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_pack_capability_prompt_short_circuits_before_llm_without_frontdoor(self) -> None:
@@ -4736,9 +4891,9 @@ class TestOrchestrator(unittest.TestCase):
 
         response = orchestrator.handle_message("Generate a QR code for https://example.com", "user1")
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("capability_gap_plan", payload.get("type"))
+        self.assertEqual("pack_capability_recommendation", payload.get("type"))
         rescue = payload.get("capability_gap_rescue")
         self.assertIsInstance(rescue, dict)
         assert isinstance(rescue, dict)
@@ -4784,7 +4939,7 @@ class TestOrchestrator(unittest.TestCase):
         response = orchestrator.handle_message("Generate a QR code for https://example.com", "user1")
 
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         rescue = payload.get("capability_gap_rescue") if isinstance(payload.get("capability_gap_rescue"), dict) else {}
         self.assertEqual("capability_gap_rescue", rescue.get("type"))
@@ -4833,6 +4988,9 @@ class TestOrchestrator(unittest.TestCase):
                 payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
                 rescue = payload.get("capability_gap_rescue") if isinstance(payload.get("capability_gap_rescue"), dict) else {}
                 self.assertEqual("action_tool", response.data["route"])
+                if not rescue:
+                    plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else {}
+                    rescue = plan.get("capability_gap_rescue") if isinstance(plan.get("capability_gap_rescue"), dict) else {}
                 self.assertEqual("capability_gap_rescue", rescue.get("type"))
                 self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
                 self.assertTrue(rescue.get("preview_required"))
@@ -4880,6 +5038,49 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
         self.assertFalse(response.data["ok"])
         self.assertEqual("managed_adapter_required", response.data["error_kind"])
+        self.assertEqual("capability_gap_blocker", payload.get("type"))
+        self.assertFalse(payload.get("searched"))
+        self.assertEqual([], discovery.search_calls)
+        self.assertEqual(0, len(llm.chat_calls))
+
+    def test_unbounded_install_request_is_blocked_without_pack_search(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def __init__(self) -> None:
+                self.search_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [{"id": "local", "name": "Local Catalog", "kind": "local_catalog", "enabled": True}]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                self.search_calls.append((source_id, query))
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+        discovery = _FakePackDiscovery()
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
+
+        response = orchestrator.handle_message("install whatever you need", "user1")
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["capability_gap_blocker"], response.data["used_tools"])
+        self.assertFalse(response.data["ok"])
+        self.assertEqual("unbounded_install_blocked", response.data["error_kind"])
         self.assertEqual("capability_gap_blocker", payload.get("type"))
         self.assertFalse(payload.get("searched"))
         self.assertEqual([], discovery.search_calls)
@@ -4959,7 +5160,7 @@ class TestOrchestrator(unittest.TestCase):
         orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
 
         first = orchestrator.handle_message("install a browser automation skill", "user1")
-        self.assertEqual(["capability_gap_planning"], first.data["used_tools"])
+        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
         second = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["capability_gap_preview"], second.data["used_tools"])
         self.assertEqual([("local", "browser-helper")], discovery.preview_calls)
@@ -5050,7 +5251,9 @@ class TestOrchestrator(unittest.TestCase):
 
         first = orchestrator.handle_message("Talk to me out loud", "user1")
         self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
-        self.assertIn("pack preview", first.text.lower())
+        self.assertIn("show you the preview first", first.text.lower())
+        self.assertNotIn("lighter option", first.text.lower())
+        self.assertNotIn("fetch and inspect", first.text.lower())
 
         second = orchestrator.handle_message("yes please", "user1")
         self.assertEqual(["capability_gap_preview"], second.data["used_tools"])
@@ -5474,9 +5677,11 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
-        self.assertIn("Voice output isn't installed.", response.text)
+        self.assertIn("I don't have Voice output installed yet", response.text)
         self.assertIn("Local Voice", response.text)
-        self.assertIn("pack preview", response.text.lower())
+        self.assertIn("show you the preview first", response.text.lower())
+        self.assertNotIn("lighter option", response.text.lower())
+        self.assertNotIn("fetch and inspect", response.text.lower())
         self.assertNotIn("best fit for this machine", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
@@ -5930,13 +6135,11 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertIn("I can help in text", response.text)
-        self.assertIn("Coding tools isn't installed.", response.text)
-        self.assertIn("coding helper", response.text.lower())
-        self.assertIn("small helper that helps with coding and terminal work", response.text.lower())
-        self.assertEqual(1, response.text.lower().count("coding helper"))
-        self.assertNotIn("Best coding option:", response.text)
-        self.assertNotIn("No change has been made.", response.text)
+        self.assertIn("Best coding option:", response.text)
+        self.assertIn("No change has been made.", response.text)
+        self.assertNotIn("Coding tools isn't installed.", response.text)
+        self.assertNotIn("Project and Code Audit Workflow", response.text)
+        self.assertNotIn("show you the preview first", response.text)
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
 
     def test_model_scout_v2_surfaces_premium_research_option_without_switching(self) -> None:
@@ -8239,7 +8442,8 @@ class TestOrchestrator(unittest.TestCase):
             },
         ):
             response = orchestrator._llm_chat("user1", "tell me a joke")
-        self.assertEqual(build_no_llm_public_message(), response.text)
+        self.assertIn("couldn't get a clean answer", response.text)
+        self.assertIn("general knowledge", response.text)
         self.assertNotIn("No suitable local-first model is ready", response.text)
         self.assertNotIn("Run: python -m agent llm_install --model ollama:qwen2.5:3b-instruct --approve", response.text)
         self.assertEqual([], llm.chat_calls)

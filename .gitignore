@@ -32,3 +32,6 @@ control/agent_events.jsonl
 *.db
 *.sqlite
 *.sqlite3
+
+# Generated build artifacts
+/dist/

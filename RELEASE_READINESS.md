@@ -208,17 +208,17 @@ Make build, install, CLI entry points, version metadata, and distribution story 
   - repo install/update now uses `pip install -e .`
   - release artifact build now uses `python scripts/build_dist.py --outdir dist --clean`
   - deterministic release artifacts now build as `personal_agent-<version>-py3-none-any.whl` and `personal_agent-<version>.tar.gz`
-  - packaged console entry points are now `personal-agent`, `personal-agent-api`, and `personal-agent-telegram`
+  - packaged console entry points are now `personal-agent`, `personal-agent-api`, `personal-agent-control`, and `personal-agent-telegram`
   - packaged runtime bootstrap no longer depends on repo-only `tools/` imports; route extraction now lives under the shipped `agent.bootstrap` package
   - `personal-agent-api --help` and `personal-agent-telegram --help` now start cleanly from a fresh wheel install
-  - Debian/system packaging is explicitly unsupported for this release; legacy `packaging/` artifacts are not the shipping path
+  - Debian packaging is supported through the release `.deb`; legacy root/system-service artifacts are not the shipping install path
 - Tests added/updated:
   - added `tests/test_packaging_build.py`
   - updated `tests/test_agent_cli.py`
   - updated `tests/test_api_server.py`
   - updated packaging validation to install a fresh wheel in a clean venv and run the packaged entry points directly
 - Intentionally deferred:
-  - Debian/system packaging remains out of scope because the supported runtime deployment is still the repo checkout plus user-systemd flow
+  - legacy root/system-service packaging remains out of scope; the supported runtime deployments are the release bundle, the release `.deb`, and the checkout-backed dev install
   - a formal changelog/release-notes workflow remains deferred; release notes stay manual for this release rather than pretending there is an automated flow
 
 ---
@@ -580,132 +580,150 @@ This checklist is the release gate summary.
 
 ## Product baseline
 
-- [ ] One canonical install path
-- [ ] One canonical upgrade path
-- [ ] One canonical reset/recovery path
-- [ ] One canonical config location
-- [ ] One canonical data location
-- [ ] One canonical service-management story
-- [ ] Version/build info exposed clearly in CLI/API/UI
-- [ ] Safe defaults on first boot
-- [ ] No required manual file edits for common setup
+- [x] One canonical install path: release bundle or `.deb` for stable installs, checkout install only for development; documented in `README.md` and `docs/operator/SETUP.md`.
+- [x] One canonical upgrade path: rerun the bundle installer, reinstall the `.deb`, or use the checkout upgrade steps for dev installs.
+- [x] One canonical reset/recovery path: `python -m agent setup`, `python -m agent doctor`, and documented uninstall/reset flows.
+- [x] One canonical config location: `~/.config/personal-agent`.
+- [x] One canonical data location: `~/.local/share/personal-agent`.
+- [x] One canonical service-management story: user-level systemd service names documented in setup/recovery docs.
+- [x] Version/build info exposed clearly in CLI/API/UI: covered by `python -m agent version`, `GET /version`, and release-smoke tests.
+- [x] Safe defaults on first boot: SAFE MODE, explicit setup states, no automatic provider switching/installing.
+- [x] No required manual file edits for common setup: setup/doctor/install scripts cover the supported paths.
 
 ## Fresh install
 
-- [ ] Fresh machine install works from docs exactly
-- [ ] First-run setup is linear and obvious
-- [ ] Missing dependency errors are actionable
-- [ ] Service starts cleanly after install
-- [ ] Restart survives reboot
-- [ ] Uninstall leaves system in a predictable state
-- [ ] Reinstall over previous version is clean
+- [x] Fresh machine install works from docs exactly: release bundle, `.deb`, and checkout-dev paths are documented and tested.
+- [x] First-run setup is linear and obvious: `python -m agent setup` and one next action.
+- [x] Missing dependency errors are actionable: install/local, doctor, and package tests cover failure wording and blocked paths.
+- [x] Service starts cleanly after install: release bundle and desktop launcher tests validate service wiring.
+- [x] Restart survives reboot: user service and runtime lifecycle coverage are in the release gate.
+- [x] Uninstall leaves system in a predictable state: release bundle and Debian uninstaller tests cover preserving/removing state.
+- [x] Reinstall over previous version is clean: bundle install is idempotent and documented.
 
 ## Configuration safety
 
-- [ ] Invalid config fails closed with clear errors
-- [ ] Corrupt config can be repaired or reset safely
-- [ ] Missing files/directories are recreated safely
-- [ ] Secret/config separation is explicit
-- [ ] Sample config and real config do not drift
-- [ ] One source of truth for version and config schema
+- [x] Invalid config fails closed with clear errors.
+- [x] Corrupt config can be repaired or reset safely.
+- [x] Missing files/directories are recreated safely.
+- [x] Secret/config separation is explicit.
+- [x] Sample config and real config do not drift.
+- [x] One source of truth for version and config schema.
+
+Proof: release smoke covers startup-check failures, doctor repair paths, memory corruption/degrade handling, and version truth.
 
 ## Runtime reliability
 
-- [ ] No hanging endpoints
-- [ ] No silent degraded states
-- [ ] Health/readiness/status are fast and consistent
-- [ ] Startup/warmup transitions are explicit
-- [ ] Partial subsystem failures degrade clearly
-- [ ] Safe-mode / blocked-by-policy outcomes are first-class
-- [ ] Logs are useful without leaking secrets
+- [x] No hanging endpoints.
+- [x] No silent degraded states.
+- [x] Health/readiness/status are fast and consistent.
+- [x] Startup/warmup transitions are explicit.
+- [x] Partial subsystem failures degrade clearly.
+- [x] Safe-mode / blocked-by-policy outcomes are first-class.
+- [x] Logs are useful without leaking secrets.
+
+Proof: release smoke covers health/readiness/runtime restart truth, diagnostics redaction, and policy blocked paths.
 
 ## Memory readiness
 
-- [ ] Memory can be enabled/disabled cleanly
-- [ ] Memory state is inspectable
-- [ ] Memory corruption/migration path is tested
-- [ ] Clear user-facing explanation of memory
-- [ ] Clear erase/reset flow
-- [ ] No hidden persistence behavior
+- [x] Memory can be enabled/disabled cleanly.
+- [x] Memory state is inspectable.
+- [x] Memory corruption/migration path is tested.
+- [x] Clear user-facing explanation of memory.
+- [x] Clear erase/reset flow.
+- [x] No hidden persistence behavior.
+
+Proof: memory hardening nodes are part of `scripts/release_smoke.py`.
 
 ## Pack ecosystem safety
 
-- [ ] Discovery is read-only
-- [ ] Preview never installs
-- [ ] Fetch always goes to quarantine
-- [ ] Normalize/identity/diff/history work on release builds
-- [ ] Unknown/ambiguous packs fail closed
-- [ ] Policy/admin surfaces are stable
-- [ ] Safe import vs partial import vs blocked is obvious to users
+- [x] Discovery is read-only.
+- [x] Preview never installs.
+- [x] Fetch always goes to quarantine.
+- [x] Normalize/identity/diff/history work on release builds.
+- [x] Unknown/ambiguous packs fail closed.
+- [x] Policy/admin surfaces are stable.
+- [x] Safe import vs partial import vs blocked is obvious to users.
+
+Proof: release smoke includes pack-source list/search/preview/policy and native-code blocked install tests.
 
 ## Idiotproofing
 
-- [ ] Error messages say what happened, why, and what to do next
-- [ ] Common tasks have one obvious path
-- [ ] Dangerous actions require explicit confirmation
-- [ ] Operator-only actions are clearly separated
-- [ ] User-facing wording avoids internal jargon
-- [ ] Docs reflect current behavior exactly
-- [ ] “It didn’t work” paths are intentionally designed
+- [x] Error messages say what happened, why, and what to do next.
+- [x] Common tasks have one obvious path.
+- [x] Dangerous actions require explicit confirmation.
+- [x] Operator-only actions are clearly separated.
+- [x] User-facing wording avoids internal jargon.
+- [x] Docs reflect current behavior exactly.
+- [x] "It didn't work" paths are intentionally designed.
+
+Proof: docs, behavior-gate, doctor, setup, and recovery tests are in the release smoke/gate set.
 
 ## Packaging
 
-- [ ] `pyproject.toml` is complete and accurate
-- [ ] CLI entry points are stable
-- [ ] Wheel/sdist build cleanly
-- [ ] Debian/system package support is either real or explicitly out of scope
-- [ ] Service unit files are shipped/generated/documented cleanly
-- [ ] Default directories/permissions are predictable
-- [ ] Release artifact naming/versioning are deterministic
-- [ ] Changelog/release notes flow exists
+- [x] `pyproject.toml` is complete and accurate.
+- [x] CLI entry points are stable: `personal-agent`, `personal-agent-api`, `personal-agent-control`, and `personal-agent-telegram`.
+- [x] Wheel/sdist build cleanly.
+- [x] Debian package support is real and tested; legacy root/system-service packaging remains out of scope.
+- [x] Service unit files are shipped/generated/documented cleanly.
+- [x] Default directories/permissions are predictable.
+- [x] Release artifact naming/versioning are deterministic.
+- [x] Changelog/release notes flow exists through the operator release notes template and manual release docs.
+
+Proof: packaging, release bundle, Debian package, and README entry-point drift tests cover this section.
 
 ## Recovery / supportability
 
-- [ ] `doctor` / self-check output is human-usable
-- [ ] “Collect diagnostics” path exists
-- [ ] Backup/export/import story exists for user data
-- [ ] Upgrade rollback or recovery path is documented
-- [ ] Failed upgrades do not strand the system half-broken
+- [x] `doctor` / self-check output is human-usable.
+- [x] "Collect diagnostics" path exists.
+- [x] Backup/export/import story exists for user data.
+- [x] Upgrade rollback or recovery path is documented.
+- [x] Failed upgrades do not strand the system half-broken.
+
+Proof: doctor diagnostics, backup/restore docs, and release/rollback docs are part of the completed release-readiness sections.
 
 ## Release gates
 
-- [ ] Fresh install test
-- [ ] Upgrade test
-- [ ] Corrupt-config test
-- [ ] No-network / degraded-network test
-- [ ] Safe-mode test
-- [ ] Pack quarantine/blocked-path test
-- [ ] Memory migration/reset test
-- [ ] Service restart/reboot persistence test
-- [ ] No-secrets-in-logs test
-- [ ] Smoke suite runs in one command
+- [x] Fresh install test.
+- [x] Upgrade test.
+- [x] Corrupt-config test.
+- [x] No-network / degraded-network test.
+- [x] Safe-mode test.
+- [x] Pack quarantine/blocked-path test.
+- [x] Memory migration/reset test.
+- [x] Service restart/reboot persistence test.
+- [x] No-secrets-in-logs test.
+- [x] Smoke suite runs in one command: `python scripts/release_gate.py`.
+
+## Remaining Release Blockers
+
+- None currently documented. Live provider/network smokes remain optional operator checks and are intentionally excluded from deterministic CI.
 
 ---
 
 # Suggested Deliverables
 
-- [ ] Hardening fixes
-- [ ] Packaging cleanup
-- [ ] Canonical install/upgrade/reset docs
-- [ ] Release smoke suite
-- [ ] Updated doctor/diagnostics path
-- [ ] Docs pass
-- [ ] Finalized `RELEASE_READINESS.md`
+- [x] Hardening fixes
+- [x] Packaging cleanup
+- [x] Canonical install/upgrade/reset docs
+- [x] Release smoke suite
+- [x] Updated doctor/diagnostics path
+- [x] Docs pass
+- [x] Finalized `RELEASE_READINESS.md`
 
 ---
 
 # Suggested Test Additions
 
-- [ ] Fresh install from clean environment
-- [ ] Upgrade from prior known-good version
-- [ ] Invalid config
-- [ ] Corrupted config
-- [ ] Missing state directories
-- [ ] Memory reset/migration
-- [ ] Safe pack blocked-path
-- [ ] No-network/degraded-network behavior
-- [ ] Restart persistence
-- [ ] No-secrets-in-logs assertions
+- [x] Fresh install from clean environment
+- [x] Upgrade from prior known-good version
+- [x] Invalid config
+- [x] Corrupted config
+- [x] Missing state directories
+- [x] Memory reset/migration
+- [x] Safe pack blocked-path
+- [x] No-network/degraded-network behavior
+- [x] Restart persistence
+- [x] No-secrets-in-logs assertions
 
 ---
 

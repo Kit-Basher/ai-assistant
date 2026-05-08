@@ -1,1 +1,0 @@
-"""Opinion layer skill package."""

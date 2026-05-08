@@ -1,1 +1,0 @@
-"""Resource governor skill package."""

@@ -299,6 +299,51 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual("normalized", install_payload["normalization_result"]["status"])
         self.assertEqual(1, len(self.runtime.pack_store.list_external_packs()))
 
+    def test_chat_api_uses_builtin_starter_catalog_for_qr_capability_rescue(self) -> None:
+        ok, payload = self.runtime.chat(
+            {
+                "messages": [{"role": "user", "content": "can you make me a qr code"}],
+                "source_surface": "telegram",
+                "user_id": "telegram:test",
+                "thread_id": "telegram-thread",
+            }
+        )
+
+        self.assertTrue(ok)
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        self.assertEqual("action_tool", meta.get("route"))
+        message = str(payload.get("message") or payload.get("text") or "")
+        self.assertIn("QR Code Creation Guidance", message)
+        self.assertIn("searched the approved starter skill sources", message)
+        self.assertIn("Say yes to preview it.", message)
+        self.assertNotIn("lighter option", message.lower())
+        self.assertNotIn("fetch and inspect", message.lower())
+        setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}
+        rescue = setup.get("capability_gap_rescue") if isinstance(setup.get("capability_gap_rescue"), dict) else {}
+        candidates = rescue.get("candidate_packs") if isinstance(rescue.get("candidate_packs"), list) else []
+        self.assertTrue(any(row.get("remote_id") == "qr-code-guidance" for row in candidates if isinstance(row, dict)))
+        self.assertTrue(rescue.get("preview_required"))
+        self.assertFalse(rescue.get("install_allowed_initially"))
+
+    def test_chat_api_does_not_translate_skill_pack_install_to_apt(self) -> None:
+        ok, payload = self.runtime.chat(
+            {
+                "messages": [{"role": "user", "content": "can you install skill packs? can you read my email?"}],
+                "source_surface": "telegram",
+                "user_id": "telegram:test",
+                "thread_id": "telegram-thread",
+            }
+        )
+
+        self.assertFalse(ok)
+        text = str(payload.get("message") or payload.get("text") or "")
+        meta = payload.get("meta") if isinstance(payload.get("meta"), dict) else {}
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("pack discovery", text.lower())
+        self.assertIn("not apt", text.lower())
+        self.assertIn("email-reading capability", text.lower())
+        self.assertNotIn("apt-get install skill", text.lower())
+
     def test_pack_source_preview_does_not_persist_registry_cache(self) -> None:
         remote_url = "https://github.com/example/docs-skill/archive/main.zip"
         with open(self.catalog_path, "w", encoding="utf-8") as handle:
@@ -641,7 +686,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         final_sources_handler.do_GET()
         final_sources_payload = json.loads(final_sources_handler.body.decode("utf-8"))
         self.assertEqual(200, final_sources_handler.status_code)
-        self.assertEqual([], final_sources_payload["sources"])
+        self.assertEqual(1, len(final_sources_payload["sources"]))
+        self.assertEqual("starter-safe-text", final_sources_payload["sources"][0]["id"])
+        self.assertTrue(final_sources_payload["sources"][0]["queryable"])
 
         sources_file = self._read_json_file(self._sources_file_path())
         self.assertEqual([], sources_file["sources"])

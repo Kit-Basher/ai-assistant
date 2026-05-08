@@ -58,6 +58,14 @@ _SOURCE_WRITE_FIELDS = {
 _SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,63}$")
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _starter_catalog_path() -> Path:
+    return _repo_root() / "memory" / "external_packs" / "starter_catalog" / "catalog.json"
+
+
 def _safe_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
 
@@ -553,7 +561,8 @@ class PackRegistryDiscoveryService:
     def _load_sources(self) -> list[RegistrySource]:
         document, persisted_exists = self._read_sources_document()
         if persisted_exists:
-            return [self._normalize_source(row) for row in self._raw_sources(document) if isinstance(row, dict)]
+            sources = [self._normalize_source(row) for row in self._raw_sources(document) if isinstance(row, dict)]
+            return sources or self._default_starter_sources()
         local_catalog_path = self.storage_root / "registry_catalog.json"
         if local_catalog_path.exists():
             return [
@@ -570,7 +579,34 @@ class PackRegistryDiscoveryService:
                     notes="Local discovery catalog for development and tests.",
                 )
             ]
+        starter_sources = self._default_starter_sources()
+        if starter_sources:
+            return starter_sources
         return []
+
+    def _default_starter_sources(self) -> list[RegistrySource]:
+        catalog_path = self.storage_root / "starter_catalog" / "catalog.json"
+        if not catalog_path.exists():
+            catalog_path = _starter_catalog_path()
+        if not catalog_path.exists():
+            return []
+        return [
+            RegistrySource(
+                id="starter-safe-text",
+                kind=REGISTRY_KIND_LOCAL_CATALOG,
+                name="Starter Safe Text Catalog",
+                base_url=str(catalog_path),
+                enabled=True,
+                discovery_only=True,
+                supports_search=True,
+                supports_preview=True,
+                supports_compare_hint=True,
+                notes=(
+                    "Approved built-in starter catalog for portable text-only guidance packs. "
+                    "Entries are discovery-only and still require preview before import."
+                ),
+            )
+        ]
 
     def _read_sources_document(self) -> tuple[dict[str, Any], bool]:
         with self._lock:
@@ -1197,7 +1233,7 @@ class PackRegistryDiscoveryService:
 
     def _fetch_catalog(self, source: RegistrySource) -> Any:
         if source.kind == REGISTRY_KIND_LOCAL_CATALOG:
-            payload = json.loads(Path(source.base_url).read_text(encoding="utf-8"))
+            payload = json.loads(self._resolve_local_catalog_path(source.base_url).read_text(encoding="utf-8"))
             return payload
         parsed = urllib.parse.urlparse(source.base_url)
         if str(parsed.scheme or "").lower() != "https":
@@ -1233,6 +1269,10 @@ class PackRegistryDiscoveryService:
         source_url = (
             str(row.get("source_url") or row.get("repo_url") or row.get("artifact_url") or row.get("url") or "").strip() or None
         )
+        if source.kind == REGISTRY_KIND_LOCAL_CATALOG and source_url:
+            parsed_source_url = urllib.parse.urlparse(source_url)
+            if not parsed_source_url.scheme and not parsed_source_url.netloc:
+                source_url = str(self._resolve_local_listing_path(source.base_url, source_url))
         latest_ref_hint = str(row.get("latest_ref_hint") or row.get("ref") or row.get("latest_ref") or row.get("commit") or "").strip() or None
         artifact_type_hint = self._artifact_type_hint(row)
         source_kind_hint = (
@@ -1294,6 +1334,38 @@ class PackRegistryDiscoveryService:
             installable_by_current_policy=listing.installable_by_current_policy,
             install_block_reason_if_known=listing.install_block_reason_if_known,
         )
+
+    def _resolve_local_catalog_path(self, path_value: str | None) -> Path:
+        path = Path(str(path_value or "").strip()).expanduser()
+        if path.is_absolute():
+            return path
+        candidates = [
+            (self.sources_path.parent / path).resolve(),
+            (_repo_root() / path).resolve(),
+            path.resolve(),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
+
+    def _resolve_local_listing_path(self, catalog_path_value: str | None, source_url: str) -> Path:
+        path = Path(str(source_url or "").strip()).expanduser()
+        if path.is_absolute():
+            return path
+        parsed = urllib.parse.urlparse(str(source_url or "").strip())
+        if parsed.scheme or parsed.netloc:
+            return path
+        catalog_path = self._resolve_local_catalog_path(catalog_path_value)
+        candidates = [
+            (catalog_path.parent / path).resolve(),
+            (_repo_root() / path).resolve(),
+            path.resolve(),
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0]
 
     def _artifact_type_hint(self, row: dict[str, Any]) -> str:
         explicit = str(row.get("artifact_type_hint") or row.get("artifact_type") or "").strip().lower()

@@ -61,6 +61,27 @@ class TestReleaseGate(unittest.TestCase):
         self.assertTrue(calls[0][0].endswith("python") or "python" in calls[0][0])
         self.assertEqual(["git", "diff", "--check"], calls[-1])
 
+    def test_release_gate_py_compile_only_reuses_canonical_target_list(self) -> None:
+        module = _load_module(REPO_ROOT / "scripts" / "release_gate.py", "release_gate_script_compile_only")
+        calls: list[list[str]] = []
+
+        def _fake_run(command, cwd=None, check=False):  # noqa: ANN001
+            _ = cwd
+            _ = check
+            calls.append(list(command))
+
+            class _Result:
+                returncode = 0
+
+            return _Result()
+
+        with patch.object(module.subprocess, "run", side_effect=_fake_run):
+            exit_code = module.main(["--py-compile-only"])
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual([list(module.PY_COMPILE_COMMAND)], calls)
+        self.assertEqual(list(module.RELEASE_GATE_COMMANDS[0]), calls[0])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,1 +1,0 @@
-"""Storage governor skill package."""

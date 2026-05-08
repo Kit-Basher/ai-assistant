@@ -1,1 +1,0 @@
-"""Knowledge query skill package."""

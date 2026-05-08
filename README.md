@@ -277,6 +277,7 @@ Useful local commands:
 - Canonical packaged CLI entry points:
   - `personal-agent`
   - `personal-agent-api`
+  - `personal-agent-control`
   - `personal-agent-telegram`
 - Debian packaging is supported through the release `.deb` and user-service
   activation model described in `docs/operator/SETUP.md`.

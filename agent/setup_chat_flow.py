@@ -1499,7 +1499,12 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
             "fallback_reason": "action_tool",
         }
 
-    if "model" not in normalized_space and "ollama" not in normalized_space and "openrouter" not in normalized_space:
+    if (
+        "model" not in normalized_space
+        and "ollama" not in normalized_space
+        and "openrouter" not in normalized_space
+        and not _looks_like_agent_pack_language(normalized_space)
+    ):
         install_match = re.search(
             r"\b(?:install|add)\s+(?:(?:python|pip) package\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
             raw_text,
@@ -1528,6 +1533,32 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
         }
 
     return None
+
+
+def _looks_like_agent_pack_language(normalized: str | None) -> bool:
+    text = normalize_setup_text(normalized)
+    if not text:
+        return False
+    if re.search(r"\b(?:install|add|get|find)\b.{0,80}\b(?:skill|skills|guidance pack|guidance packs)\b", text):
+        return True
+    phrases = (
+        "skill pack",
+        "skill packs",
+        "guidance pack",
+        "guidance packs",
+        "capability pack",
+        "capability packs",
+        "agent skill",
+        "agent skills",
+        "whatever skill",
+        "portable text skill",
+        "portable text skills",
+        "mcp server",
+        "mcp adapter",
+        "plugin pack",
+        "native code pack",
+    )
+    return any(phrase in text for phrase in phrases)
 
 
 def classify_setup_intent(
@@ -1669,10 +1700,6 @@ def classify_runtime_chat_route(
     if model_policy_route is not None:
         return model_policy_route
 
-    shell_route = _classify_shell_route(text, normalized)
-    if shell_route is not None:
-        return shell_route
-
     setup_intent = classify_setup_intent(
         text,
         awaiting_secret=awaiting_secret,
@@ -1784,6 +1811,9 @@ def classify_runtime_chat_route(
             "generic_allowed": False,
             "fallback_reason": "assistant_capabilities",
         }
+    shell_route = _classify_shell_route(text, normalized)
+    if shell_route is not None:
+        return shell_route
     capability_gap = classify_capability_gap_request(normalized)
     if str(capability_gap.get("request_kind") or "").strip().lower() == "capability" and str(
         capability_gap.get("classification") or ""
