@@ -1,0 +1,7 @@
+May 08 12:00:00 host python[123]: GET https://api.telegram.org/bot123456789:AASecretToken_abcdefghijklmnopqrstuvwxyz/sendMessage
+May 08 12:00:01 host python[123]: POST url=https://api.telegram.org/bot987654321:BBAnotherSecret_abcdefghijklmnopqrstuvwxyz/getUpdates status=200
+May 08 12:00:02 host python[123]: callback=/bot555555555:CCPathSecret_abcdefghijklmnopqrstuvwxyz/webhook
+May 08 12:00:03 host python[123]: Authorization: Bearer rawBearerToken.abcdef123456789
+May 08 12:00:04 host python[123]: TELEGRAM_BOT_TOKEN=222222222:DDEnvSecret_abcdefghijklmnopqrstuvwxyz
+May 08 12:00:05 host python[123]: "openai_api_key": "sk-testabcdefghijklmnopqrstuvwxyz123456"
+May 08 12:00:06 host python[123]: secret-store value: secretStoreRawValue123456

@@ -4,6 +4,7 @@ set -euo pipefail
 OUTDIR="${1:-/tmp}"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT="$OUTDIR/personal-agent-context-$STAMP.txt"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 json_or_raw() {
   if command -v python >/dev/null 2>&1; then
@@ -33,16 +34,14 @@ curl_endpoint() {
   section "$name"
   {
     echo "\$ curl -sS $url"
+    set +e
     curl -sS --max-time 10 "$url" 2>&1 | json_or_raw
+    set -e
   } >> "$OUT"
 }
 
 redact_file() {
-  sed -E \
-    -e 's/(token[=: ][[:space:]]*)[A-Za-z0-9:_-]{12,}/\1<redacted>/Ig' \
-    -e 's/(api[_-]?key[=: ][[:space:]]*)[A-Za-z0-9._-]{12,}/\1<redacted>/Ig' \
-    -e 's/(authorization: bearer )[A-Za-z0-9._-]+/\1<redacted>/Ig' \
-    "$OUT" > "$OUT.redacted"
+  python "$REPO_ROOT/scripts/redact_support_context.py" "$OUT" > "$OUT.redacted"
   mv "$OUT.redacted" "$OUT"
 }
 
@@ -63,6 +62,18 @@ run systemctl --user status personal-agent-api.service --no-pager
 section "service: telegram"
 run systemctl --user cat personal-agent-telegram.service
 run systemctl --user status personal-agent-telegram.service --no-pager
+
+section "runtime split guidance"
+cat >> "$OUT" <<'EOF'
+If personal-agent-api.service runs from ~/.local/share/personal-agent/runtime/current, restarting that
+service does not load repo checkout edits. Run bash scripts/promote_local_stable.sh after checkout
+changes that should affect the stable API service.
+
+If personal-agent-telegram.service runs from ~/personal-agent/.venv while the API service runs from
+runtime/current, Telegram is using checkout/dev code and API is using stable code. Keep that split
+only when it is intentional; otherwise update the Telegram service or promote the checkout.
+EOF
+run python -m agent split_status
 
 curl_endpoint "live ready" "http://127.0.0.1:8765/ready"
 curl_endpoint "live state" "http://127.0.0.1:8765/state"

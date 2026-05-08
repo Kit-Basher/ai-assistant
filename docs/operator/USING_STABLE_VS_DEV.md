@@ -41,6 +41,17 @@ The `/version` response should report the runtime instance marker.
 4. Keep using the stable desktop launcher for daily work.
 5. Restart the dev service only when you want to test checkout changes.
 
+When `personal-agent-api.service` points at `~/.local/share/personal-agent/runtime/current`,
+the API service uses stable runtime code. A service restart loads that installed copy again;
+it does not load repo checkout edits. Run `bash scripts/promote_local_stable.sh` after
+checkout changes that should affect the stable API service.
+
+Telegram is optional and can be wired separately. On a maintainer workstation,
+Telegram service may still use the checkout venv while the API service uses stable
+runtime code. Keep that split only when it is intentional. If Telegram should match
+stable API behavior, update its service to the stable runtime or promote the checkout
+before restarting it.
+
 ## Recovery Flow
 
 - If the wrong copy is active, stop that service first.

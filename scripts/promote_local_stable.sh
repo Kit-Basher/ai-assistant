@@ -66,6 +66,9 @@ else
 fi
 
 printf '%s\n' "Stable runtime promotion complete."
+printf '%s\n' "Note: restarting personal-agent-api.service does not load repo checkout edits when"
+printf '%s\n' "that service points at runtime/current. Run bash scripts/promote_local_stable.sh"
+printf '%s\n' "after checkout changes that should affect the stable API service."
 printf '%s\n' "Verify with:"
 printf '%s\n' "  python -m agent split_status"
 printf '%s\n' "  python scripts/split_smoke.py"
