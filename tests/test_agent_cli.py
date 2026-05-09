@@ -832,6 +832,15 @@ class TestAgentCLI(unittest.TestCase):
         ), patch("agent.cli.runtime_port", return_value=8765), patch(
             "agent.cli.Path.home",
             return_value=Path("/home/test"),
+        ), patch(
+            "agent.cli._systemctl_user_cat_text",
+            side_effect=[
+                "[Service]\nWorkingDirectory=%h/.local/share/personal-agent/runtime/current\nExecStart=%h/.local/share/personal-agent/runtime/current/.venv/bin/python -m agent.api_server\n",
+                "[Service]\nWorkingDirectory=%h/personal-agent\nExecStart=%h/personal-agent/.venv/bin/python -m telegram_adapter\n",
+            ],
+        ), patch(
+            "agent.cli._telegram_chat_bridge_mode",
+            return_value="api_proxy_first",
         ), redirect_stdout(output):
             code = cli.main(["split_status"])
         self.assertEqual(0, code)
@@ -842,6 +851,11 @@ class TestAgentCLI(unittest.TestCase):
         self.assertIn("launcher_target: /home/test/.local/share/personal-agent/bin/personal-agent-webui", text)
         self.assertIn("api_base_url: http://127.0.0.1:8765", text)
         self.assertIn("legacy_checkout_service: retired", text)
+        self.assertIn("api_service_code_root: /home/test/.local/share/personal-agent/runtime/current", text)
+        self.assertIn("telegram_service_code_root: /home/test/personal-agent", text)
+        self.assertIn("api_telegram_code_aligned: false", text)
+        self.assertIn("telegram_chat_path: api_proxy_first", text)
+        self.assertIn("ordinary chat proxies to API /chat first", text)
 
     def test_memory_subcommand_prints_summary(self) -> None:
         payload = {"ok": True, "message": "Memory summary (thread user:1):\nPending items: 0"}

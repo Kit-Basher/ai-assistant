@@ -50,9 +50,18 @@ checkout changes that should affect the stable API service.
 
 Telegram is optional and can be wired separately. On a maintainer workstation,
 Telegram service may still use the checkout venv while the API service uses stable
-runtime code. Keep that split only when it is intentional. If Telegram should match
-stable API behavior, update its service to the stable runtime or promote the checkout
-before restarting it.
+runtime code. That split is intentional only for adapter/transport development:
+ordinary Telegram chat must proxy to the stable API `POST /chat`, and the bridge
+smoke must pass. If Telegram should match stable API code byte-for-byte, update
+its service to the stable runtime instead of running the checkout venv.
+
+Use these checks when Telegram is enabled:
+
+- `python -m agent split_status` reports `api_service_code_root`,
+  `telegram_service_code_root`, `api_telegram_code_aligned`, and
+  `telegram_chat_path`.
+- `python scripts/telegram_bridge_smoke.py` proves normal Telegram text reaches
+  the `/chat` contract without contacting Telegram servers.
 
 ## Recovery Flow
 

@@ -1079,6 +1079,54 @@ def _cmd_version(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _systemctl_user_cat_text(unit: str) -> str:
+    try:
+        proc = subprocess.run(
+            ["systemctl", "--user", "cat", unit],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except Exception:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return str(proc.stdout or "")
+
+
+def _systemd_value(unit_text: str, key: str) -> str | None:
+    prefix = f"{key}="
+    for raw_line in str(unit_text or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith(prefix):
+            value = line[len(prefix):].strip().strip('"')
+            return value or None
+    return None
+
+
+def _expand_user_systemd_path(value: str | None) -> str | None:
+    if not value:
+        return None
+    home = str(Path.home())
+    return str(value).replace("%h", home).replace("${HOME}", home).replace("$HOME", home)
+
+
+def _telegram_chat_bridge_mode(repo_root: Path) -> str:
+    adapter = repo_root / "telegram_adapter" / "bot.py"
+    bridge = repo_root / "agent" / "telegram_bridge.py"
+    try:
+        adapter_text = adapter.read_text(encoding="utf-8")
+        bridge_text = bridge.read_text(encoding="utf-8")
+    except OSError:
+        return "unknown"
+    if "_post_local_api_chat_json_async" in adapter_text and 'handler_name="api_chat_proxy"' in bridge_text:
+        return "api_proxy_first"
+    if "canonical_runtime_chat" in bridge_text or "canonical_orchestrator_chat" in bridge_text:
+        return "direct_runtime_possible"
+    return "unknown"
+
+
 def _cmd_split_status(_args: argparse.Namespace) -> int:
     runtime_root = runtime_root_path()
     launcher_name = runtime_launcher_name()
@@ -1088,6 +1136,24 @@ def _cmd_split_status(_args: argparse.Namespace) -> int:
         launcher_target = launcher_path.resolve()
     except Exception:
         launcher_target = launcher_path
+    api_unit = _systemctl_user_cat_text("personal-agent-api.service")
+    telegram_unit = _systemctl_user_cat_text("personal-agent-telegram.service")
+    api_code_root = _expand_user_systemd_path(_systemd_value(api_unit, "WorkingDirectory"))
+    telegram_code_root = _expand_user_systemd_path(_systemd_value(telegram_unit, "WorkingDirectory"))
+    api_exec = _expand_user_systemd_path(_systemd_value(api_unit, "ExecStart"))
+    telegram_exec = _expand_user_systemd_path(_systemd_value(telegram_unit, "ExecStart"))
+    if api_code_root and telegram_code_root:
+        api_telegram_code_aligned = "true" if api_code_root == telegram_code_root else "false"
+    else:
+        api_telegram_code_aligned = "unknown"
+    telegram_chat_path = _telegram_chat_bridge_mode(_repo_root())
+    telegram_split_note = "unknown"
+    if api_telegram_code_aligned == "true":
+        telegram_split_note = "telegram and api service code roots match"
+    elif api_telegram_code_aligned == "false" and telegram_chat_path == "api_proxy_first":
+        telegram_split_note = "telegram code root differs, but ordinary chat proxies to API /chat first"
+    elif api_telegram_code_aligned == "false":
+        telegram_split_note = "telegram code root differs and chat bridge mode is not proven api-proxy-only"
     print(
         "\n".join(
             [
@@ -1099,6 +1165,13 @@ def _cmd_split_status(_args: argparse.Namespace) -> int:
                 f"api_base_url: {runtime_api_base_url()}",
                 f"api_port: {runtime_port()}",
                 "legacy_checkout_service: retired",
+                f"api_service_code_root: {api_code_root or 'unknown'}",
+                f"api_service_exec: {api_exec or 'unknown'}",
+                f"telegram_service_code_root: {telegram_code_root or 'unknown'}",
+                f"telegram_service_exec: {telegram_exec or 'unknown'}",
+                f"api_telegram_code_aligned: {api_telegram_code_aligned}",
+                f"telegram_chat_path: {telegram_chat_path}",
+                f"telegram_split_note: {telegram_split_note}",
             ]
         ),
         flush=True,

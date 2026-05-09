@@ -70,8 +70,10 @@ service does not load repo checkout edits. Run bash scripts/promote_local_stable
 changes that should affect the stable API service.
 
 If personal-agent-telegram.service runs from ~/personal-agent/.venv while the API service runs from
-runtime/current, Telegram is using checkout/dev code and API is using stable code. Keep that split
-only when it is intentional; otherwise update the Telegram service or promote the checkout.
+runtime/current, Telegram is using checkout/dev transport code and API is using stable code. This
+split is acceptable only when Telegram ordinary chat is API-proxy-first through POST /chat and the
+Telegram bridge smoke passes. Otherwise update the Telegram service to the stable runtime or promote
+the checkout before restarting it.
 EOF
 run python -m agent split_status
 

@@ -324,6 +324,106 @@ class TestTelegramBridge(unittest.TestCase):
         self.assertEqual("Ready.", str(result.get("text") or "").splitlines()[0])
         self.assertEqual(["runtime_status"], result.get("used_tools"))
 
+    def test_dumb_user_prompts_use_api_chat_proxy_contract(self) -> None:
+        prompts = [
+            "what model am i using",
+            "why arent you working",
+            "is memory on",
+            "do you remember what we were doing",
+            "use ollama:qwen3.6:35b-a3b for this chat session only",
+            "yes",
+            "what model am i using",
+        ]
+        calls: list[dict[str, object]] = []
+        pending_switch = False
+        active_model = "ollama:qwen2.5:3b-instruct"
+
+        def _proxy(payload: dict[str, object]) -> dict[str, object]:
+            nonlocal pending_switch, active_model
+            calls.append(payload)
+            messages = payload.get("messages") if isinstance(payload.get("messages"), list) else []
+            message = messages[-1] if messages else {}
+            text = str(message.get("content") if isinstance(message, dict) else "").lower()
+            if "qwen3.6" in text and "session only" in text:
+                pending_switch = True
+                return {
+                    "ok": True,
+                    "assistant": {
+                        "content": (
+                            "Switch to ollama:qwen3.6:35b-a3b for this chat session only? "
+                            "Reply yes to confirm. This does not change your default model."
+                        )
+                    },
+                    "meta": {"route": "setup_flow", "used_runtime_state": True},
+                }
+            if text == "yes" and pending_switch:
+                pending_switch = False
+                active_model = "ollama:qwen3.6:35b-a3b"
+                return {
+                    "ok": True,
+                    "assistant": {
+                        "content": (
+                            "Temporary chat model switched to ollama:qwen3.6:35b-a3b. "
+                            "This does not change your default model."
+                        )
+                    },
+                    "meta": {"route": "setup_flow", "used_runtime_state": True},
+                }
+            if "what model" in text:
+                return {
+                    "ok": True,
+                    "assistant": {"content": f"You are using {active_model} for this chat."},
+                    "meta": {"route": "model_status", "used_runtime_state": True},
+                }
+            if "why arent" in text:
+                return {
+                    "ok": True,
+                    "assistant": {"content": "I am reachable through the API chat path. Runtime is ready."},
+                    "meta": {"route": "runtime_status", "used_runtime_state": True},
+                }
+            if "memory" in text or "remember" in text:
+                return {
+                    "ok": True,
+                    "assistant": {"content": "Memory is available for this thread when the runtime has saved context."},
+                    "meta": {"route": "agent_memory", "used_memory": True},
+                }
+            return {"ok": True, "assistant": {"content": "Handled."}, "meta": {"route": "generic_chat"}}
+
+        results = [
+            handle_telegram_text(
+                text=prompt,
+                chat_id="4242",
+                trace_id=f"tg-contract-{index}",
+                runtime=None,
+                orchestrator=None,
+                fetch_local_api_chat_json=_proxy,
+            )
+            for index, prompt in enumerate(prompts, start=1)
+        ]
+
+        self.assertEqual(len(prompts), len(calls))
+        for payload in calls:
+            self.assertEqual("telegram", payload.get("source_surface"))
+            self.assertEqual("telegram:4242", payload.get("user_id"))
+            self.assertEqual("telegram:4242:thread", payload.get("thread_id"))
+        for result in results:
+            self.assertTrue(bool(result.get("handled")))
+            self.assertEqual("api_chat_proxy", result.get("handler_name"))
+            self.assertFalse(bool(result.get("legacy_compatibility")))
+            self.assertNotIn("source_surface", str(result.get("text") or ""))
+            self.assertNotIn("thread_id", str(result.get("text") or ""))
+
+        why_text = str(results[1].get("text") or "").lower()
+        self.assertNotIn("i'm here", why_text)
+        self.assertNotIn("i’m here", why_text)
+        self.assertNotIn("what should i do next", why_text)
+        switch_text = f"{results[4].get('text')}\n{results[5].get('text')}".lower()
+        self.assertIn("temporary chat model switched", switch_text)
+        self.assertIn("this does not change your default model", switch_text)
+        self.assertNotIn("default model updated", switch_text)
+        self.assertNotIn("default chat model updated", switch_text)
+        self.assertIn("qwen3.6:35b-a3b", str(results[-1].get("text") or ""))
+
     def test_chat_proxy_unavailable_returns_truthful_backend_message(self) -> None:
         def _proxy(_payload: dict[str, object]) -> dict[str, object]:
             return {"_proxy_error": {"kind": "unreachable", "backend_reachable": False, "backend_ready": False}}

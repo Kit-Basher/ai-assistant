@@ -21,5 +21,7 @@ def test_stable_vs_dev_doc_calls_out_api_telegram_split() -> None:
 
     assert "API service uses stable runtime" in doc
     assert "Telegram service may still use the checkout venv" in doc
+    assert "ordinary Telegram chat must proxy to the stable API `POST /chat`" in doc
+    assert "telegram_bridge_smoke.py" in doc
     assert "promote_local_stable.sh" in doc
     assert "waits for `GET /ready`" in doc
