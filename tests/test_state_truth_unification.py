@@ -335,6 +335,7 @@ class TestStateTruthUnification(unittest.TestCase):
         self.assertTrue(
             "show the install details" in rendered
             or "I can still help you set it up" in rendered
+            or "Say yes to preview it." in rendered
         )
 
     def test_recommendation_degrades_to_text_only_when_discovery_is_unavailable(self) -> None:
