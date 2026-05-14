@@ -3283,6 +3283,8 @@ class Orchestrator:
                 "what were we working on",
                 "what are we doing",
                 "what were we doing before",
+                "where were we before",
+                "where were we",
             )
         )
 
@@ -6223,10 +6225,97 @@ class Orchestrator:
                 "open app",
                 "open personal agent",
                 "open the personal agent app",
+                "open the web ui",
+                "open web ui",
+                "how do i open the web ui",
+                "how do i open web ui",
+                "how do i open the app",
                 "launch the app",
                 "show the app",
             )
         )
+
+    @staticmethod
+    def _direct_runtime_health_question(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(
+            phrase in normalized
+            for phrase in (
+                "is the local api healthy",
+                "is local api healthy",
+                "is the api healthy",
+                "is api healthy",
+                "api health",
+                "local api health",
+                "api status",
+                "local api status",
+                "are you actually connected to a model",
+                "connected to a model right now",
+                "connected to the model",
+                "connected to model",
+                "are you connected",
+            )
+        ):
+            return True
+        words = {piece for piece in normalized.split(" ") if piece}
+        return bool(words & {"api", "runtime", "agent"} and words & {"healthy", "health", "status", "ready", "working"})
+
+    @staticmethod
+    def _direct_setup_question(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if _looks_like_setup_explanation_query(normalized):
+            return True
+        return any(
+            phrase in normalized
+            for phrase in (
+                "is setup complete",
+                "is the setup complete",
+                "setup complete",
+                "help me set this up",
+                "help me setup this",
+                "help me setup",
+                "help me with setup",
+            )
+        )
+
+    @staticmethod
+    def _direct_frustration_diagnostic_question(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        return any(
+            phrase in normalized
+            for phrase in (
+                "this feels broken",
+                "what is wrong",
+                "what s wrong",
+                "whats wrong",
+                "why arent you working",
+                "why are you not working",
+                "diagnose yourself",
+                "fix yourself",
+            )
+        )
+
+    def _direct_standalone_assistant_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        _ = user_id
+        if self._direct_runtime_health_question(text):
+            return self._runtime_status_response("runtime_status")
+        if self._open_app_requested(text):
+            return self._open_app_response()
+        if self._direct_setup_question(text):
+            return self._setup_explanation_response(
+                used_memory=bool(self._current_runtime_setup_state(user_id))
+            )
+        if self._looks_like_working_context_rewind_prompt(text):
+            return self._assistant_memory_overview_response(user_id, query_text=text)
+        if self._direct_frustration_diagnostic_question(text):
+            return self._assistant_self_diagnostics_response(text)
+        return None
 
     def _open_app_response(self) -> OrchestratorResponse:
         message = (
@@ -6252,6 +6341,9 @@ class Orchestrator:
     ) -> OrchestratorResponse | None:
         if str(text or "").strip().startswith("/"):
             return None
+        direct_response = self._direct_standalone_assistant_response(user_id, text)
+        if direct_response is not None:
+            return direct_response
         context = self._current_interpretable_result(user_id)
         if self._looks_like_confusion_prompt(text):
             used_memory = bool(self._current_runtime_setup_state(user_id))

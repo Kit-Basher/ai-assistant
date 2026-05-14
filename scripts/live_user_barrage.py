@@ -43,6 +43,7 @@ MODEL_ACQUISITION_MARKERS = (
     "acquire a model",
     "pull a model",
 )
+DIRECT_QUESTION_CATEGORIES = {"runtime_status", "memory", "frustration", "app_setup"}
 
 
 @dataclass(frozen=True)
@@ -182,6 +183,8 @@ def classify_barrage_response(case: PromptCase, response: dict[str, Any]) -> lis
 
     if not text:
         failures.append("empty response")
+    if case.category in DIRECT_QUESTION_CATEGORIES and str(response.get("route") or "").strip().lower() == "assistant_clarification":
+        failures.append("clear direct question routed to assistant_clarification")
     if text.lower() in WHOLE_ANSWER_FORBIDDEN:
         failures.append("stale whole-answer placeholder")
     for marker in INTERNAL_LEAK_MARKERS:

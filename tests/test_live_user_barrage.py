@@ -54,6 +54,19 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
         )
         self.assertIn("diagnostic/frustration prompt got stale ready-to-help wording", failures)
 
+    def test_rejects_direct_questions_routed_to_assistant_clarification(self) -> None:
+        failures = classify_barrage_response(
+            PromptCase(category="app_setup", prompt="how do i open the web UI"),
+            {
+                "text": "I was following: model status. Do you want me to continue?",
+                "first_line": "I was following: model status. Do you want me to continue?",
+                "route": "assistant_clarification",
+                "used_llm": False,
+                "used_runtime_state": False,
+            },
+        )
+        self.assertIn("clear direct question routed to assistant_clarification", failures)
+
     def test_allows_ready_to_help_for_normal_open_chat(self) -> None:
         failures = self._classify(
             "open_chat",

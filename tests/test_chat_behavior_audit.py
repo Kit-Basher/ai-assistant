@@ -94,6 +94,29 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 if prompt == "install a skill that lets you browse":
                     self.assertNotIn("which model do you want me to acquire", lowered)
 
+    def test_direct_questions_do_not_fall_into_stale_clarification_context(self) -> None:
+        cases = {
+            "is the local API healthy": ("runtime_status", ("ready", "chat")),
+            "are you actually connected to a model right now": ("runtime_status", ("ready", "chat")),
+            "how do i open the web UI": ("assistant_capabilities", ("127.0.0.1", "personal agent")),
+            "is setup complete": ("setup_flow", ("setup", "chat")),
+            "help me set this up": ("setup_flow", ("setup", "chat")),
+            "where were we before": ("agent_memory", ("runtime context", "saved")),
+            "this feels broken, what is wrong": ("runtime_status", ("chat target", "runtime")),
+        }
+
+        for prompt, (expected_route, required_phrases) in cases.items():
+            with self.subTest(prompt=prompt):
+                self._post_chat("what model am i using")
+                _status, body, text = self._assert_grounded_reply(prompt)
+                meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                self.assertEqual(expected_route, meta.get("route"))
+                self.assertNotEqual("assistant_clarification", meta.get("route"))
+                self.assertNotIn("i was following", text.lower())
+                lowered = text.lower()
+                for phrase in required_phrases:
+                    self.assertIn(phrase, lowered)
+
 
 if __name__ == "__main__":
     unittest.main()
