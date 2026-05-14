@@ -27,6 +27,7 @@ from agent.public_chat import (
     build_trivial_social_turn_message,
     classify_trivial_social_turn,
     is_no_llm_error_kind,
+    normalize_public_assistant_text,
 )
 from agent.runtime_contract import normalize_user_facing_status
 from agent.setup_wizard import (
@@ -54,9 +55,11 @@ _ROTATE_TOKEN_TEXT = (
 )
 
 
-def _safe_text(value: Any) -> str:
-    text = str(value or "").strip()
-    return text if text else "I’m still here. What should I do next?"
+def _safe_telegram_reply_text(value: Any) -> str:
+    return normalize_public_assistant_text(
+        str(value or ""),
+        fallback="I could not show that reply safely. Ask again, or send /status to check the runtime.",
+    )
 
 
 def _normalize_user_text(text: str | None) -> str:
@@ -423,7 +426,7 @@ def build_telegram_memory(
     response = orchestrator.handle_message("/memory", user_id=chat_id)
     return {
         "ok": True,
-        "text": _safe_text(getattr(response, "text", "")),
+        "text": _safe_telegram_reply_text(getattr(response, "text", "")),
         "route": "memory",
         "trace_id": trace_id,
         "next_action": None,
@@ -454,7 +457,7 @@ def classify_telegram_text_command(text: str) -> str | None:
     normalized = _normalize_user_text(text)
     if not normalized:
         return None
-    if normalized in {"/help", "help", "commands"}:
+    if normalized in {"/start", "start", "/help", "help", "commands"}:
         return "/help"
     if normalized in {"/setup", "setup"}:
         return "/setup"
@@ -552,7 +555,7 @@ def _canonical_chat_result(
     response = orchestrator.handle_message(text, user_id=chat_id)
     response_data = getattr(response, "data", None)
     payload = response_data if isinstance(response_data, dict) else {}
-    message = _safe_text(str(getattr(response, "text", "") or "").strip() or _structured_error_text(payload))
+    message = _safe_telegram_reply_text(str(getattr(response, "text", "") or "").strip() or _structured_error_text(payload))
     route = str(payload.get("route") or "generic_chat").strip().lower() or "generic_chat"
     used_tools = [
         str(item).strip()
@@ -661,7 +664,7 @@ def build_telegram_chat_payload_result(
     return {
         "ok": bool(ok),
         "handled": True,
-        "text": _safe_text(message),
+        "text": _safe_telegram_reply_text(message),
         "route": route,
         "trace_id": trace_id,
         "next_action": str(payload.get("next_question") or "").strip() or None,
@@ -926,7 +929,7 @@ def handle_telegram_command(
         return _attach_command_meta(
             {
                 "ok": True,
-                "text": _safe_text(getattr(response, "text", "")),
+                "text": _safe_telegram_reply_text(getattr(response, "text", "")),
                 "route": normalized.lstrip("/"),
                 "trace_id": trace_id,
                 "next_action": None,

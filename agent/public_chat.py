@@ -24,6 +24,8 @@ _INTERNAL_TEXT_MARKERS = (
     "thread_id:",
     "user_id:",
     "source_surface:",
+    "read-only guard",
+    "nl path refused",
 )
 _INTERNAL_JSON_KEYS = {
     "trace_id",
@@ -81,7 +83,7 @@ _TRIVIAL_SOCIAL_TURN_REPLIES = {
     "ack": "Got it. What should I do next?",
     "morning": "Good morning. What can I help with?",
     "evening": "Good evening. What can I help with?",
-    "presence_check": "Yes — I’m here and ready to help. What can I do for you?",
+    "presence_check": "Yes — I’m here. Ask your question, or ask for status if you want a runtime check.",
     "style_short": "Okay. I’ll keep it short.",
 }
 _SOCIAL_GREET_REQUESTS = {"say hi", "say hello", "say hey"}

@@ -21507,7 +21507,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         text=input_text,
                     )
                     if handled_choice and isinstance(choice_payload, dict):
-                        message = str(choice_payload.get("message") or "").strip() or "Done."
+                        message = str(choice_payload.get("message") or "").strip() or "I handled that choice. Send the next request when ready."
                         response = {
                             "ok": bool(choice_payload.get("ok", True)),
                             "intent": str(choice_payload.get("intent") or intent_name),
@@ -21557,7 +21557,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         text=input_text,
                     )
                     if handled_binary_choice and isinstance(binary_choice_payload, dict):
-                        message = str(binary_choice_payload.get("message") or "").strip() or "Done."
+                        message = str(binary_choice_payload.get("message") or "").strip() or "I handled that choice. Send the next request when ready."
                         response = {
                             "ok": bool(binary_choice_payload.get("ok", True)),
                             "intent": str(binary_choice_payload.get("intent") or intent_name),
@@ -21607,7 +21607,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                         text=input_text,
                     )
                     if handled_intent_choice and isinstance(intent_choice_payload, dict):
-                        message = str(intent_choice_payload.get("message") or "").strip() or "Done."
+                        message = str(intent_choice_payload.get("message") or "").strip() or "I handled that choice. Send the next request when ready."
                         response = {
                             "ok": bool(intent_choice_payload.get("ok", True)),
                             "intent": str(intent_choice_payload.get("intent") or intent_name),

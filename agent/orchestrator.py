@@ -856,7 +856,7 @@ class Orchestrator:
             return None
         if error_kind in {"no_suitable_model", "llm_unavailable"}:
             return OrchestratorResponse(
-                "I’m here and ready to continue. Ask your next question and I’ll answer directly."
+                "I can respond here, but the chat model is unavailable right now. Ask for status or setup help, or try again after the model is healthy."
             )
         return None
 
@@ -8771,7 +8771,7 @@ class Orchestrator:
             else {}
         )
         if ready:
-            message = f"Chat is currently using {configured_model} on {provider_label}."
+            message = f"Chat is currently using the configured model {configured_model} on {provider_label}."
         elif effective_model and effective_provider and effective_model != configured_model:
             message = (
                 f"Chat is configured to use {configured_model} on {provider_label}, but it is not healthy right now. "
