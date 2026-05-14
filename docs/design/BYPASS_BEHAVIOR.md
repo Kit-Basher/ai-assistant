@@ -23,3 +23,5 @@ This file tracks intentional pre-chat and Telegram-local paths that can return u
 | Numeric no-wizard text | Telegram text like `1` or `2` with no local command/wizard state | `agent/telegram_bridge.py::handle_telegram_text()` | Routes to API chat proxy or runtime chat | Normal chat result | Yes. Numbers are not commands unless a pending chooser exists in the API/runtime. | Low |
 
 Bypasses should stay limited to protocol validation, explicit compatibility continuations, health/setup commands, and deterministic social turns. When a path has enough user intent and the chat runtime is reachable, it should route through `AgentRuntime.chat()`.
+
+For live validation after promoting stable runtime changes, see [../operator/LIVE_BEHAVIOR_SMOKES.md](../operator/LIVE_BEHAVIOR_SMOKES.md).
