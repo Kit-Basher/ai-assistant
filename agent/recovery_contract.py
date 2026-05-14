@@ -49,6 +49,15 @@ def _telegram_enabled(ready_payload: Mapping[str, Any]) -> bool:
     return True
 
 
+def _telegram_required(ready_payload: Mapping[str, Any]) -> bool:
+    telegram = _as_map(ready_payload.get("telegram"))
+    raw = telegram.get("required")
+    if isinstance(raw, bool):
+        return raw
+    normalized = _norm(raw)
+    return normalized in {"1", "true", "on", "yes"}
+
+
 def _health_status(payload: Mapping[str, Any], key: str) -> str:
     row = _as_map(payload.get(key))
     return _norm(row.get("status"))
@@ -79,9 +88,10 @@ def detect_recovery_mode(
 
     telegram = _as_map(ready.get("telegram"))
     telegram_enabled = _telegram_enabled(ready)
+    telegram_required = _telegram_required(ready)
     telegram_state = _norm(telegram.get("state"))
     telegram_configured = telegram.get("configured")
-    if telegram_enabled:
+    if telegram_enabled and telegram_required:
         if telegram_state == "crash_loop":
             return RECOVERY_TELEGRAM_DOWN
         if telegram_configured is True and telegram_state == "stopped":

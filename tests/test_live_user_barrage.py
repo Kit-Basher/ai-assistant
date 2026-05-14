@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 
+from scripts import live_user_barrage
 from scripts.live_user_barrage import PromptCase, classify_barrage_response, first_line
 
 
@@ -92,6 +93,43 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
             "I can preview browser-related skill options and explain what approval is needed.",
         )
         self.assertEqual([], failures)
+
+    def test_ready_gate_accepts_core_and_chat_ready_with_optional_surface_warning(self) -> None:
+        original = live_user_barrage.request_json
+        try:
+            live_user_barrage.request_json = lambda *_args, **_kwargs: (
+                200,
+                {
+                    "ok": True,
+                    "ready": True,
+                    "core_ready": True,
+                    "chat_ready": True,
+                    "surfaces": {
+                        "telegram": {
+                            "state": "stopped",
+                            "required": False,
+                            "warning": "Telegram is stopped.",
+                        }
+                    },
+                },
+            )
+            payload = live_user_barrage.require_ready("http://127.0.0.1:8765", timeout=1)
+        finally:
+            live_user_barrage.request_json = original
+        self.assertTrue(payload["core_ready"])
+        self.assertTrue(payload["chat_ready"])
+
+    def test_ready_gate_rejects_when_core_split_says_chat_not_ready(self) -> None:
+        original = live_user_barrage.request_json
+        try:
+            live_user_barrage.request_json = lambda *_args, **_kwargs: (
+                200,
+                {"ok": True, "ready": False, "core_ready": True, "chat_ready": False, "runtime_mode": "DEGRADED"},
+            )
+            with self.assertRaisesRegex(RuntimeError, "chat-ready"):
+                live_user_barrage.require_ready("http://127.0.0.1:8765", timeout=1)
+        finally:
+            live_user_barrage.request_json = original
 
 
 if __name__ == "__main__":

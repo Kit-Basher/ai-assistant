@@ -451,6 +451,7 @@ class RuntimeTruthService:
         telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
         telegram_state = str(observability.get("telegram_state") or "stopped")
         telegram_enabled = bool(observability.get("telegram_enabled", False))
+        telegram_required = bool(observability.get("telegram_required", False))
         llm_status = observability["llm_status"] if isinstance(observability.get("llm_status"), dict) else {}
         canonical_llm_runtime_status = (
             observability["canonical_llm_runtime_status"]
@@ -468,9 +469,23 @@ class RuntimeTruthService:
             observability["normalized_status"] if isinstance(observability.get("normalized_status"), dict) else {}
         )
         ready = bool(observability.get("ready", False))
+        chat_ready = bool(canonical_llm_runtime_status.get("ready", False))
+        startup_core_ready = startup_phase == "ready" and not warmup_remaining
+        core_ready = bool(startup_core_ready and chat_ready)
+        telegram_warning = None
+        telegram_next_action = str(telegram.get("next_action") or "").strip() or None
+        if telegram_enabled and not telegram_required and telegram_state in {"stopped", "crash_loop", "disabled_missing_token"}:
+            if telegram_state == "stopped":
+                telegram_warning = "Telegram is stopped. Restart Telegram if you want that surface."
+            elif telegram_state == "crash_loop":
+                telegram_warning = "Telegram is failing to stay running. Restart or diagnose Telegram if you want that surface."
+            else:
+                telegram_warning = "Telegram is missing a token. Configure Telegram if you want that surface."
         setup_context_ready_payload: dict[str, Any] = {
             "ok": True,
             "ready": bool(ready),
+            "core_ready": core_ready,
+            "chat_ready": chat_ready,
             "phase": phase,
             "startup_phase": startup_phase,
             "failure_code": str(normalized_status.get("failure_code") or "").strip() or None,
@@ -478,9 +493,12 @@ class RuntimeTruthService:
             "runtime_status": normalized_status,
             "telegram": {
                 "enabled": telegram_enabled,
+                "required": telegram_required,
                 "configured": bool(telegram.get("configured", False)),
                 "state": telegram_state,
                 "effective_state": str(telegram.get("effective_state") or "unknown"),
+                "warning": telegram_warning,
+                "next_action": telegram_next_action,
             },
         }
         onboarding_state = detect_onboarding_state(
@@ -542,9 +560,24 @@ class RuntimeTruthService:
             safe_mode_target=safe_mode_target,
             failure_recovery=failure_recovery,
         )
+        if ready and telegram_warning:
+            message = f"Core chat is ready. {telegram_warning}"
+        surface_warnings = []
+        if telegram_warning:
+            surface_warnings.append(
+                {
+                    "surface": "telegram",
+                    "state": telegram_state,
+                    "required": telegram_required,
+                    "warning": telegram_warning,
+                    "next_action": telegram_next_action,
+                }
+            )
         return {
             "ok": True,
             "ready": bool(ready),
+            "core_ready": core_ready,
+            "chat_ready": chat_ready,
             "chat_usable": bool(chat_usable),
             "phase": phase,
             "startup_phase": startup_phase,
@@ -569,9 +602,21 @@ class RuntimeTruthService:
             },
             "telegram": {
                 **telegram,
+                "required": telegram_required,
+                "warning": telegram_warning,
                 "status": telegram_state,
                 "recent_messages": recent_messages,
             },
+            "surfaces": {
+                "telegram": {
+                    **telegram,
+                    "required": telegram_required,
+                    "warning": telegram_warning,
+                    "next_action": telegram_next_action,
+                    "status": telegram_state,
+                },
+            },
+            "surface_warnings": surface_warnings,
             "model_watch": {
                 "hf": hf_status,
             },

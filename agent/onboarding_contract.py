@@ -66,6 +66,17 @@ def _telegram_enabled(ready_payload: Mapping[str, Any]) -> bool:
     return True
 
 
+def _telegram_required(ready_payload: Mapping[str, Any]) -> bool:
+    telegram = _as_map(ready_payload.get("telegram"))
+    raw = telegram.get("required")
+    if isinstance(raw, bool):
+        return raw
+    normalized = _norm(raw)
+    if normalized in {"1", "true", "on", "yes"}:
+        return True
+    return False
+
+
 def _health_status(status_payload: Mapping[str, Any], key: str) -> str:
     row = _as_map(status_payload.get(key))
     return _norm(row.get("status"))
@@ -104,12 +115,13 @@ def detect_onboarding_state(
     telegram_state = _norm(telegram.get("state"))
     telegram_configured = telegram.get("configured")
     telegram_enabled = _telegram_enabled(ready)
+    telegram_required = _telegram_required(ready)
 
-    if telegram_enabled and failure_code in _TOKEN_FAILURE_CODES:
+    if telegram_enabled and telegram_required and failure_code in _TOKEN_FAILURE_CODES:
         return ONBOARDING_TOKEN_MISSING
-    if telegram_enabled and telegram_state == "disabled_missing_token":
+    if telegram_enabled and telegram_required and telegram_state == "disabled_missing_token":
         return ONBOARDING_TOKEN_MISSING
-    if telegram_enabled and telegram_configured is False:
+    if telegram_enabled and telegram_required and telegram_configured is False:
         return ONBOARDING_TOKEN_MISSING
 
     ready_flag = bool(ready.get("ready", False))
@@ -161,12 +173,13 @@ def onboarding_next_action(
     telegram = _as_map(ready.get("telegram"))
     telegram_state = _norm(telegram.get("state"))
     telegram_enabled = _telegram_enabled(ready)
+    telegram_required = _telegram_required(ready)
     if normalized == ONBOARDING_READY:
         return "No action needed."
     if normalized == ONBOARDING_TOKEN_MISSING:
         return "Run: python -m agent.secrets set telegram:bot_token"
     if normalized == ONBOARDING_SERVICES_DOWN:
-        if telegram_enabled and telegram_state in {"stopped", "crash_loop"}:
+        if telegram_enabled and telegram_required and telegram_state in {"stopped", "crash_loop"}:
             return "Run: systemctl --user restart personal-agent-telegram.service"
         return f"Run: systemctl --user restart {runtime_service_name()}"
     if normalized == ONBOARDING_LLM_MISSING:

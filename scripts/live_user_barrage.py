@@ -70,7 +70,7 @@ PROMPT_CASES: tuple[PromptCase, ...] = (
     PromptCase("app_setup", "is setup complete"),
     PromptCase("app_setup", "help me set this up"),
     PromptCase("model_switch", "use ollama:qwen3.6:35b-a3b for this chat session only"),
-    PromptCase("model_switch", "yes"),
+    PromptCase("model_switch", "no"),
     PromptCase("model_switch", "what model am i using now"),
     PromptCase("model_switch", "make qwen3.6 the default model"),
     PromptCase("skill_install", "install a skill that lets you browse"),
@@ -134,11 +134,18 @@ def require_ready(base_url: str, *, timeout: float) -> dict[str, Any]:
     status, payload = request_json("GET", base_url, "/ready", timeout=timeout)
     if status >= 400 or not payload:
         raise RuntimeError(f"/ready unavailable: status={status}")
-    if payload.get("ok") is not True or payload.get("ready") is not True:
+    has_core_split = "core_ready" in payload or "chat_ready" in payload
+    ready_enough = (
+        payload.get("ok") is True
+        and bool(payload.get("core_ready", False))
+        and bool(payload.get("chat_ready", False))
+    ) if has_core_split else (payload.get("ok") is True and payload.get("ready") is True)
+    if not ready_enough:
         runtime_mode = str(payload.get("runtime_mode") or payload.get("phase") or "unknown")
         next_action = str(payload.get("next_action") or "")
         raise RuntimeError(
-            f"/ready is not ready: ok={payload.get('ok')!r} ready={payload.get('ready')!r} "
+            f"/ready is not chat-ready: ok={payload.get('ok')!r} ready={payload.get('ready')!r} "
+            f"core_ready={payload.get('core_ready')!r} chat_ready={payload.get('chat_ready')!r} "
             f"runtime_mode={runtime_mode} next_action={next_action}"
         )
     return payload

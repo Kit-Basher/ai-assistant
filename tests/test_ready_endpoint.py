@@ -122,6 +122,46 @@ class TestReadyEndpoint(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
+    def _make_chat_healthy(self, runtime: AgentRuntime) -> None:
+        runtime.startup_phase = "ready"
+        runtime.add_provider_model(
+            "ollama",
+            {
+                "model": "llama3.2",
+                "capabilities": ["chat"],
+                "available": True,
+            },
+        )
+        runtime.set_default_chat_model("ollama:llama3.2")
+        runtime._health_monitor.state["providers"] = {  # type: ignore[attr-defined]
+            "ollama": {"status": "ok", "last_checked_at": 123}
+        }
+        runtime._health_monitor.state["models"] = {  # type: ignore[attr-defined]
+            "ollama:llama3.2": {"provider_id": "ollama", "status": "ok", "last_checked_at": 123}
+        }
+        runtime._router.set_external_health_state(runtime._health_monitor.state)  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _telegram_stopped_payload(*, enabled: bool = True) -> dict[str, object]:
+        return {
+            "enabled": enabled,
+            "token_configured": True,
+            "token_source": "secret_store",
+            "ready_state": "stopped",
+            "effective_state": "enabled_stopped",
+            "config_source": "config",
+            "config_source_path": "/tmp/override.conf",
+            "service_installed": True,
+            "service_active": False,
+            "service_enabled": True,
+            "lock_present": False,
+            "lock_live": False,
+            "lock_stale": False,
+            "lock_path": None,
+            "lock_pid": None,
+            "next_action": "Run: systemctl --user restart personal-agent-telegram.service",
+        }
+
     def test_ready_telegram_disabled_optional_defers_to_canonical_llm_readiness(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         with patch(
@@ -199,8 +239,92 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertTrue(bool(payload["telegram"]["enabled"]))
         self.assertEqual("disabled_missing_token", payload["telegram"]["state"])
 
-    def test_ready_reports_not_ready_when_telegram_crash_loop(self) -> None:
+    def test_ready_optional_telegram_stopped_keeps_core_chat_ready(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
+        self._make_chat_healthy(runtime)
+        with patch(
+            "agent.api_server.get_telegram_runtime_state",
+            return_value=self._telegram_stopped_payload(),
+        ):
+            handler = _HandlerForTest(runtime, "/ready")
+            handler.do_GET()
+
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertTrue(payload["ready"])
+        self.assertTrue(payload["core_ready"])
+        self.assertTrue(payload["chat_ready"])
+        self.assertTrue(payload["chat_usable"])
+        self.assertEqual("READY", payload["runtime_mode"])
+        self.assertEqual("stopped", payload["telegram"]["state"])
+        self.assertFalse(payload["telegram"]["required"])
+        self.assertIn("Telegram is stopped", payload["telegram"]["warning"])
+        self.assertIn("Core chat is ready", payload["message"])
+        surfaces = payload.get("surfaces") if isinstance(payload.get("surfaces"), dict) else {}
+        telegram_surface = surfaces.get("telegram") if isinstance(surfaces.get("telegram"), dict) else {}
+        self.assertEqual("stopped", telegram_surface.get("state"))
+        self.assertFalse(telegram_surface.get("required"))
+        self.assertTrue(payload.get("surface_warnings"))
+        self.assertNotEqual("SERVICES_DOWN", payload["onboarding"]["state"])
+        self.assertNotEqual("TELEGRAM_DOWN", payload["recovery"]["mode"])
+
+    def test_ready_required_telegram_stopped_degrades_global_ready(self) -> None:
+        runtime = AgentRuntime(replace(_config(self.registry_path, self.db_path, telegram_enabled=True), telegram_required=True))
+        self._make_chat_healthy(runtime)
+        with patch(
+            "agent.api_server.get_telegram_runtime_state",
+            return_value=self._telegram_stopped_payload(),
+        ):
+            handler = _HandlerForTest(runtime, "/ready")
+            handler.do_GET()
+
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertFalse(payload["ready"])
+        self.assertTrue(payload["core_ready"])
+        self.assertTrue(payload["chat_ready"])
+        self.assertEqual("DEGRADED", payload["runtime_mode"])
+        self.assertTrue(payload["telegram"]["required"])
+        self.assertEqual("TELEGRAM_DOWN", payload["recovery"]["mode"])
+
+    def test_ready_chat_unhealthy_degraded_regardless_of_optional_telegram(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
+        runtime.startup_phase = "ready"
+        unhealthy_status = normalize_user_facing_status(
+            ready=False,
+            bootstrap_required=False,
+            failure_code="model_unhealthy",
+            provider="ollama",
+            model="ollama:llama3.2",
+            local_providers={"ollama"},
+        )
+        with patch.object(
+            runtime,
+            "_canonical_llm_ready_context",
+            return_value={
+                "status_payload": _canonical_llm_status_payload(
+                    failure_code="model_unhealthy",
+                    active_model_status="down",
+                ),
+                "runtime_status": unhealthy_status,
+                "provider": "ollama",
+                "model": "ollama:llama3.2",
+                "local_providers": {"ollama"},
+            },
+        ), patch(
+            "agent.api_server.get_telegram_runtime_state",
+            return_value=self._telegram_stopped_payload(),
+        ):
+            handler = _HandlerForTest(runtime, "/ready")
+            handler.do_GET()
+
+        payload = json.loads(handler.body.decode("utf-8"))
+        self.assertFalse(payload["ready"])
+        self.assertFalse(payload["core_ready"])
+        self.assertFalse(payload["chat_ready"])
+        self.assertNotEqual("READY", payload["runtime_mode"])
+        self.assertEqual("model_unhealthy", payload["runtime_status"]["failure_code"])
+
+    def test_ready_reports_not_ready_when_telegram_crash_loop(self) -> None:
+        runtime = AgentRuntime(replace(_config(self.registry_path, self.db_path, telegram_enabled=True), telegram_required=True))
         runtime._telegram_runner = _FakeRunner(
             {
                 "state": "crash_loop",
@@ -497,11 +621,11 @@ class TestReadyEndpoint(unittest.TestCase):
         llm_payload = json.loads(llm_handler.body.decode("utf-8"))
         self.assertFalse(ready_payload["ready"])
         self.assertEqual("BOOTSTRAP_REQUIRED", ready_payload["runtime_mode"])
-        self.assertEqual("READY", llm_payload["runtime_mode"])
+        self.assertEqual("BOOTSTRAP_REQUIRED", llm_payload["runtime_mode"])
         self.assertEqual("model_unhealthy", ready_payload["runtime_status"]["failure_code"])
-        self.assertIsNone(llm_payload["runtime_status"]["failure_code"])
+        self.assertEqual("model_unhealthy", llm_payload["runtime_status"]["failure_code"])
         self.assertEqual("BOOTSTRAP_REQUIRED", ready_payload["llm"]["runtime_status"]["runtime_mode"])
-        self.assertEqual("READY", llm_payload["runtime_status"]["runtime_mode"])
+        self.assertEqual("BOOTSTRAP_REQUIRED", llm_payload["runtime_status"]["runtime_mode"])
         self.assertEqual("ok", ready_payload["llm"]["active_provider_health"]["status"])
 
     def test_ready_preserves_canonical_llm_status_during_startup_overlay(self) -> None:
@@ -608,9 +732,13 @@ class TestReadyEndpoint(unittest.TestCase):
 
         ready_payload = json.loads(ready_handler.body.decode("utf-8"))
         llm_payload = json.loads(llm_handler.body.decode("utf-8"))
-        self.assertFalse(ready_payload["ready"])
-        self.assertEqual("service_down", ready_payload["runtime_status"]["failure_code"])
+        self.assertTrue(ready_payload["ready"])
+        self.assertTrue(ready_payload["core_ready"])
+        self.assertTrue(ready_payload["chat_ready"])
+        self.assertIsNone(ready_payload["runtime_status"]["failure_code"])
         self.assertEqual("stopped", ready_payload["telegram"]["state"])
+        self.assertFalse(ready_payload["telegram"]["required"])
+        self.assertIn("Telegram is stopped", ready_payload["telegram"]["warning"])
         self.assertEqual("READY", llm_payload["runtime_mode"])
         self.assertEqual(llm_payload["runtime_status"], ready_payload["llm"]["runtime_status"])
         self.assertEqual("READY", ready_payload["llm"]["runtime_status"]["runtime_mode"])

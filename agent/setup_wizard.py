@@ -472,19 +472,21 @@ def run_setup_wizard(
     except Exception:
         telegram_state = {}
     if telegram_state:
+        telegram_required = str(os.getenv("TELEGRAM_REQUIRED", "0")).strip().lower() in {"1", "true", "yes", "y", "on"}
         ready_payload["telegram"] = {
             "enabled": bool(telegram_state.get("enabled", False)),
+            "required": telegram_required,
             "configured": bool(telegram_state.get("token_configured", False)),
             "state": str(telegram_state.get("ready_state") or "disabled_optional"),
         }
         effective_state = str(telegram_state.get("effective_state") or "")
-        if effective_state == "enabled_blocked_by_lock":
+        if telegram_required and effective_state == "enabled_blocked_by_lock":
             ready_payload["failure_code"] = "lock_conflict"
             ready_payload["ready"] = False
-        elif effective_state == "enabled_stopped":
+        elif telegram_required and effective_state == "enabled_stopped":
             ready_payload["failure_code"] = "service_down"
             ready_payload["ready"] = False
-        elif effective_state == "enabled_misconfigured":
+        elif telegram_required and effective_state == "enabled_misconfigured":
             ready_payload["failure_code"] = "missing_token" if not bool(telegram_state.get("token_configured", False)) else "service_down"
             ready_payload["ready"] = False
     llm_status: Mapping[str, Any] = (

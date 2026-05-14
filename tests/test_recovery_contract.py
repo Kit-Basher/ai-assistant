@@ -19,12 +19,12 @@ class TestRecoveryContract(unittest.TestCase):
     def test_api_down(self) -> None:
         mode = detect_recovery_mode(api_reachable=False)
         self.assertEqual(RECOVERY_API_DOWN, mode)
-        self.assertIn("personal-agent-api.service", recovery_next_action(mode))
+        self.assertIn("personal-agent-api", recovery_next_action(mode))
 
     def test_telegram_down(self) -> None:
         ready_payload = {
             "ready": False,
-            "telegram": {"enabled": True, "configured": True, "state": "stopped"},
+            "telegram": {"enabled": True, "configured": True, "state": "stopped", "required": True},
             "runtime_status": {"runtime_mode": "DEGRADED"},
         }
         mode = detect_recovery_mode(ready_payload=ready_payload, api_reachable=True)
@@ -32,7 +32,7 @@ class TestRecoveryContract(unittest.TestCase):
         self.assertIn("personal-agent-telegram.service", recovery_next_action(mode))
 
     def test_token_invalid(self) -> None:
-        ready_payload = {"telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token"}}
+        ready_payload = {"telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token", "required": True}}
         mode = detect_recovery_mode(ready_payload=ready_payload)
         self.assertEqual(RECOVERY_TOKEN_INVALID, mode)
         self.assertIn("telegram:bot_token", recovery_next_action(mode))

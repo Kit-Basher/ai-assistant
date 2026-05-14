@@ -25,7 +25,7 @@ class TestOnboardingContract(unittest.TestCase):
         ready_payload = {
             "ready": False,
             "phase": "ready",
-            "telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token"},
+            "telegram": {"enabled": True, "configured": False, "state": "disabled_missing_token", "required": True},
             "runtime_status": {"runtime_mode": "BOOTSTRAP_REQUIRED", "failure_code": "telegram_token_missing"},
         }
         self.assertEqual(ONBOARDING_TOKEN_MISSING, detect_onboarding_state(ready_payload=ready_payload))
@@ -48,7 +48,7 @@ class TestOnboardingContract(unittest.TestCase):
         ready_payload = {
             "ready": False,
             "phase": "starting",
-            "telegram": {"enabled": True, "configured": True, "state": "stopped"},
+            "telegram": {"enabled": True, "configured": True, "state": "stopped", "required": True},
             "runtime_status": {"runtime_mode": "DEGRADED", "failure_code": "startup_check_failed"},
         }
         self.assertEqual(ONBOARDING_SERVICES_DOWN, detect_onboarding_state(ready_payload=ready_payload))

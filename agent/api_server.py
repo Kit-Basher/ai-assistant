@@ -5151,6 +5151,9 @@ class AgentRuntime:
             return "service_down"
         return None
 
+    def _telegram_required_for_ready(self) -> bool:
+        return bool(getattr(self.config, "telegram_required", False))
+
     def _current_runtime_lifecycle_phase(
         self,
         *,
@@ -5250,6 +5253,7 @@ class AgentRuntime:
         telegram = self.telegram_status()
         telegram_state = str(telegram.get("state") or "stopped")
         telegram_enabled = bool(telegram.get("enabled", False))
+        telegram_required = self._telegram_required_for_ready()
         llm_context = self._canonical_llm_ready_context()
         llm_status = llm_context["status_payload"] if isinstance(llm_context.get("status_payload"), dict) else {}
         canonical_llm_runtime_status = (
@@ -5281,7 +5285,7 @@ class AgentRuntime:
             )
             ready = False
         else:
-            telegram_failure_code = self._ready_telegram_failure_code(telegram)
+            telegram_failure_code = self._ready_telegram_failure_code(telegram) if telegram_required else None
             if telegram_failure_code:
                 normalized_status = normalize_user_facing_status(
                     ready=False,
@@ -5316,6 +5320,7 @@ class AgentRuntime:
             "telegram": telegram,
             "telegram_state": telegram_state,
             "telegram_enabled": telegram_enabled,
+            "telegram_required": telegram_required,
             "llm_context": llm_context,
             "llm_status": llm_status,
             "canonical_llm_runtime_status": canonical_llm_runtime_status,

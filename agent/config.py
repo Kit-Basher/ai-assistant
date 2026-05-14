@@ -167,6 +167,7 @@ class Config:
     enable_writes: bool = False
     enable_scheduled_snapshots: bool = False
     telegram_enabled: bool = False
+    telegram_required: bool = False
     llm_provider: str = "none"
     enable_llm_presentation: bool = False
     openai_base_url: str | None = None
@@ -325,6 +326,13 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         "on",
     }
     telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    telegram_required = os.getenv("TELEGRAM_REQUIRED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
     if require_telegram_token and telegram_enabled and not telegram_bot_token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
     if not telegram_bot_token:
@@ -938,6 +946,7 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         enable_writes=enable_writes,
         enable_scheduled_snapshots=enable_scheduled_snapshots,
         telegram_enabled=telegram_enabled,
+        telegram_required=telegram_required,
         llm_provider=llm_provider,
         enable_llm_presentation=enable_llm_presentation,
         openai_base_url=openai_base_url,
