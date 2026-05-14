@@ -122,6 +122,7 @@ class TestTelegramBridge(unittest.TestCase):
         self.assertIn("Setup is complete.", str(result.get("text") or ""))
 
     def test_classify_command_aliases(self) -> None:
+        self.assertEqual("/help", classify_telegram_text_command("/start"))
         self.assertEqual("/brief", classify_telegram_text_command("breif"))
         self.assertEqual("/memory", classify_telegram_text_command("what are we doing?"))
         self.assertIsNone(classify_telegram_text_command("what can you do"))
@@ -175,6 +176,8 @@ class TestTelegramBridge(unittest.TestCase):
         self.assertEqual("generic_chat", result.get("route"))
         self.assertFalse(bool(result.get("used_llm")))
         self.assertIn("I’m here", str(result.get("text") or ""))
+        self.assertNotIn("ready to help", str(result.get("text") or "").lower())
+        self.assertIn("status", str(result.get("text") or "").lower())
 
     def test_setup_not_started_returns_setup_summary(self) -> None:
         result = handle_telegram_text(

@@ -25,7 +25,8 @@ class TestPublicChat(unittest.TestCase):
         message = build_trivial_social_turn_message("are you really there")
         self.assertIsNotNone(message)
         self.assertIn("I’m here", str(message))
-        self.assertIn("ready to help", str(message))
+        self.assertNotIn("ready to help", str(message).lower())
+        self.assertIn("status", str(message).lower())
 
     def test_social_turn_message_acknowledges_brief_style_request(self) -> None:
         message = build_trivial_social_turn_message("keep it short")
