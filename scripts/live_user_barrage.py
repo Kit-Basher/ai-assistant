@@ -198,6 +198,14 @@ def classify_barrage_response(case: PromptCase, response: dict[str, Any]) -> lis
     if case.category == "skill_install" and ("browse" in case.prompt.lower() or "browser" in case.prompt.lower()):
         if any(marker in lowered for marker in MODEL_ACQUISITION_MARKERS):
             failures.append("browse skill request was treated as model acquisition")
+    if case.category == "skill_install":
+        route = str(response.get("route") or "").strip().lower()
+        if route == "interpretation_followup":
+            failures.append("skill/capability request routed to stale interpretation follow-up")
+        if "apt-get" in lowered or "using apt-get install" in lowered or "install a using" in lowered:
+            failures.append("skill/capability request was treated as OS package install")
+        if "likely cause:" in lowered:
+            failures.append("skill/capability request reused stale operational-status wording")
     return failures
 
 

@@ -2812,7 +2812,7 @@ class TestOrchestrator(unittest.TestCase):
             "agent.orchestrator.route_inference",
             side_effect=AssertionError("LLM should not run"),
         ):
-            preview = orchestrator.handle_message("install ripgrep", "user1")
+            preview = orchestrator.handle_message("apt install ripgrep", "user1")
             self.assertNotIn(("shell_install_package", ("apt", "ripgrep", None, False, None)), runtime_truth.calls)
             confirm = orchestrator.handle_message("yes", "user1")
 

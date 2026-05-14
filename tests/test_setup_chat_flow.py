@@ -258,7 +258,8 @@ class TestSetupChatFlow(unittest.TestCase):
                 self.assertNotEqual("shell_install_package", decision.get("kind"))
 
     def test_real_os_package_install_still_routes_to_package_manager(self) -> None:
-        decision = classify_runtime_chat_route("install ripgrep")
+        self.assertEqual("generic_chat", classify_runtime_chat_route("install ripgrep").get("kind"))
+        decision = classify_runtime_chat_route("apt install ripgrep")
         self.assertEqual("action_tool", decision.get("route"))
         self.assertEqual("shell_install_package", decision.get("kind"))
         self.assertEqual("apt", decision.get("manager"))

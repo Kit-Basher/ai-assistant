@@ -117,6 +117,28 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 for phrase in required_phrases:
                     self.assertIn(phrase, lowered)
 
+    def test_browser_skill_requests_use_pack_preview_not_apt_or_stale_followup(self) -> None:
+        prompts = (
+            "install a skill that lets you browse",
+            "can you add browser capabilities",
+            "what skills can you install for web research",
+            "add a capability for reading webpages",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self._post_chat("my computer is slow")
+                _status, body, text = self._assert_grounded_reply(prompt)
+                meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                self.assertEqual("action_tool", meta.get("route"))
+                self.assertIn("pack_capability_recommendation", meta.get("used_tools") or [])
+                lowered = text.lower()
+                self.assertIn("browser", lowered)
+                self.assertIn("preview", lowered)
+                self.assertNotIn("apt-get", lowered)
+                self.assertNotIn("install a using", lowered)
+                self.assertNotIn("which model do you want me to acquire", lowered)
+                self.assertNotIn("likely cause:", lowered)
+
 
 if __name__ == "__main__":
     unittest.main()

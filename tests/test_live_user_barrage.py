@@ -107,6 +107,25 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
         )
         self.assertEqual([], failures)
 
+    def test_rejects_skill_install_as_interpretation_followup_or_apt(self) -> None:
+        cases = [
+            ("interpretation_followup", "Likely cause: brave is using memory.", "stale interpretation"),
+            ("action_tool", "I will install a using apt-get install -y a.", "OS package install"),
+        ]
+        for route, text, expected in cases:
+            with self.subTest(route=route):
+                failures = classify_barrage_response(
+                    PromptCase(category="skill_install", prompt="add a capability for reading webpages"),
+                    {
+                        "text": text,
+                        "first_line": first_line(text),
+                        "route": route,
+                        "used_llm": False,
+                        "used_runtime_state": False,
+                    },
+                )
+                self.assertTrue(any(expected in failure for failure in failures), failures)
+
     def test_ready_gate_accepts_core_and_chat_ready_with_optional_surface_warning(self) -> None:
         original = live_user_barrage.request_json
         try:

@@ -1508,28 +1508,22 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
             "fallback_reason": "action_tool",
         }
 
-    if (
-        "model" not in normalized_space
-        and "ollama" not in normalized_space
-        and "openrouter" not in normalized_space
-        and not _looks_like_agent_pack_language(normalized_space)
-    ):
-        install_match = re.search(
-            r"\b(?:install|add)\s+(?:(?:python|pip) package\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
-            raw_text,
-            re.IGNORECASE,
-        )
-        if install_match is not None:
-            package = str(install_match.group("package") or "").strip() or None
-            manager = "pip" if re.search(r"\b(?:python|pip) package\b", normalized_space) else "apt"
-            return {
-                "route": "action_tool",
-                "kind": "shell_install_package",
-                "manager": manager,
-                "package": package,
-                "generic_allowed": False,
-                "fallback_reason": "action_tool",
-            }
+    install_match = re.search(
+        r"\b(?:(?:sudo\s+)?apt(?:-get)?\s+install|install\s+(?:a\s+)?(?:linux\s+|debian\s+|system\s+)?package|install\s+(?:a\s+)?(?:python\s+|pip\s+)?package|pip\s+install)\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
+        raw_text,
+        re.IGNORECASE,
+    )
+    if install_match is not None and not _looks_like_agent_pack_language(normalized_space):
+        package = str(install_match.group("package") or "").strip() or None
+        manager = "pip" if re.search(r"\b(?:pip\s+install|python\s+package|pip\s+package)\b", normalized_space) else "apt"
+        return {
+            "route": "action_tool",
+            "kind": "shell_install_package",
+            "manager": manager,
+            "package": package,
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
 
     create_directory_path = _extract_shell_create_directory_path(text, normalized)
     if create_directory_path:
@@ -1549,6 +1543,10 @@ def _looks_like_agent_pack_language(normalized: str | None) -> bool:
     if not text:
         return False
     if re.search(r"\b(?:install|add|get|find)\b.{0,80}\b(?:skill|skills|guidance pack|guidance packs)\b", text):
+        return True
+    if re.search(r"\b(?:install|add|get|find|show|list|what)\b.{0,100}\b(?:capability|capabilities|pack|packs)\b", text):
+        return True
+    if any(term in text for term in ("browser capability", "browser capabilities", "web research", "web browsing", "reading webpages", "reading web pages")):
         return True
     phrases = (
         "skill pack",

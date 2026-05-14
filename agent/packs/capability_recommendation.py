@@ -117,9 +117,21 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
             "skill to browse",
             "automate my browser",
             "browser automation",
+            "browser capabilities",
+            "browser capability",
             "automate the browser",
             "control my browser",
             "web automation",
+            "web research",
+            "web research skill",
+            "web browsing",
+            "web browsing skill",
+            "reading webpages",
+            "reading web pages",
+            "read webpages",
+            "read web pages",
+            "reading a webpage",
+            "read a webpage",
         ),
         "search_terms": ("browser", "automation", "planning", "web"),
         "installed_blocker": "it isn't enabled as a live capability yet",
@@ -608,6 +620,22 @@ def _has_partial_help_cues(normalized: str) -> bool:
 
 def _classify_request_kind(normalized: str) -> str:
     if not normalized:
+        return "action"
+    if any(token in normalized for token in ("skill", "skills", "capability", "capabilities", "pack", "packs")) and any(
+        token in normalized
+        for token in (
+            "install",
+            "add",
+            "web research",
+            "browser",
+            "browsing",
+            "browse",
+            "webpage",
+            "webpages",
+            "web page",
+            "web pages",
+        )
+    ):
         return "action"
     if any(normalized.startswith(prefix) for prefix in _KNOWLEDGE_QUESTION_PREFIXES):
         return "knowledge"

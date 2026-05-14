@@ -7084,6 +7084,20 @@ class Orchestrator:
         normalized = " ".join(str(text or "").strip().lower().split())
         if re.search(r"\b(?:install|add|get|find)\b.{0,80}\b(?:skill|skills|guidance pack|guidance packs)\b", normalized):
             return True
+        if re.search(r"\b(?:install|add|get|find|show|list|what)\b.{0,100}\b(?:capability|capabilities|pack|packs)\b", normalized):
+            return True
+        if any(
+            phrase in normalized
+            for phrase in (
+                "browser capability",
+                "browser capabilities",
+                "web research",
+                "web browsing",
+                "reading webpages",
+                "reading web pages",
+            )
+        ):
+            return True
         phrases = (
             "install skill pack",
             "install skill packs",
@@ -16425,6 +16439,16 @@ class Orchestrator:
 
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):
+                if self._looks_like_agent_pack_install_request(runtime_text) and self._looks_like_email_access_request(runtime_text):
+                    return self._agent_pack_install_explanation_response(user_id, runtime_text)
+                if self._looks_like_email_access_request(runtime_text):
+                    return self._email_capability_unavailable_response(user_id, runtime_text)
+                pack_capability_response = self._pack_capability_recommendation_response(user_id, runtime_text)
+                if pack_capability_response is not None:
+                    return pack_capability_response
+                capability_gap_response = self._capability_gap_planning_response(user_id, runtime_text)
+                if capability_gap_response is not None:
+                    return capability_gap_response
                 interpretation_response = self._interpret_previous_result_followup(
                     user_id,
                     runtime_text,
