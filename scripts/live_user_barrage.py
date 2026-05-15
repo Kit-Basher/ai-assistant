@@ -37,19 +37,71 @@ DIAGNOSTIC_READY_MARKERS = (
     "i’m here and ready to help",
 )
 WHOLE_ANSWER_FORBIDDEN = {"ok", "done."}
+LOW_VALUE_MARKERS = (
+    "i can help with that",
+    "happy to help",
+    "what can i do for you",
+    "what would you like me to do",
+)
+STALE_CONTEXT_MARKERS = (
+    "i was following",
+    "continue with that",
+    "switch to something else",
+    "your last request",
+    "previous result",
+    "likely cause:",
+)
+MODEL_UNAVAILABLE_MARKERS = (
+    "model unavailable",
+    "model is unavailable",
+    "not connected to a model",
+    "no model is available",
+    "not ready to chat",
+    "chat is not ready",
+)
+CAPABILITY_EXISTS_MARKERS = (
+    "i can browse",
+    "i can read webpages",
+    "browser capability is installed",
+    "web browsing is installed",
+)
+PREVIEW_ONLY_MARKERS = (
+    "preview",
+    "not installed yet",
+    "approval",
+)
+HALLUCINATED_ACTION_MARKERS = (
+    "installed ",
+    "i installed",
+    "i have installed",
+    "i ran ",
+    "i executed",
+    "i changed ",
+    "i opened ",
+)
 MODEL_ACQUISITION_MARKERS = (
     "which model do you want me to acquire",
     "model acquisition",
     "acquire a model",
     "pull a model",
 )
-DIRECT_QUESTION_CATEGORIES = {"runtime_status", "memory", "frustration", "app_setup"}
+DIRECT_QUESTION_CATEGORIES = {"runtime_status", "memory", "frustration", "app_setup", "open_chat", "system_slow"}
+STANDALONE_CATEGORIES = {"runtime_status", "memory", "frustration", "app_setup", "open_chat", "system_slow"}
 
 
 @dataclass(frozen=True)
 class PromptCase:
     category: str
     prompt: str
+
+
+@dataclass
+class QualityTracker:
+    seen_lines: dict[str, tuple[str, str]] | None = None
+
+    def __post_init__(self) -> None:
+        if self.seen_lines is None:
+            self.seen_lines = {}
 
 
 PROMPT_CASES: tuple[PromptCase, ...] = (
@@ -99,6 +151,26 @@ PROMPT_CASES: tuple[PromptCase, ...] = (
 def first_line(text: str) -> str:
     stripped = str(text or "").strip()
     return stripped.splitlines()[0] if stripped else ""
+
+
+def compact_text(text: str, *, max_len: int = 160) -> str:
+    return " ".join(str(text or "").strip().lower().split())[:max_len]
+
+
+def llm_status_healthy(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("chat_usable") is True:
+        return True
+    llm = payload.get("llm") if isinstance(payload.get("llm"), dict) else {}
+    runtime = llm.get("runtime_status") if isinstance(llm.get("runtime_status"), dict) else {}
+    provider_health = llm.get("active_provider_health") if isinstance(llm.get("active_provider_health"), dict) else {}
+    model_health = llm.get("active_model_health") if isinstance(llm.get("active_model_health"), dict) else {}
+    return bool(
+        runtime.get("ready") is True
+        and str(provider_health.get("status") or "").strip().lower() in {"ok", "healthy"}
+        and str(model_health.get("status") or "").strip().lower() in {"ok", "healthy"}
+    )
 
 
 def load_json(body: bytes) -> dict[str, Any]:
@@ -172,10 +244,78 @@ def extract_chat_result(status: int, payload: dict[str, Any]) -> dict[str, Any]:
         "route": str(meta.get("route") or payload.get("intent") or "unknown").strip().lower() or "unknown",
         "used_llm": bool(meta.get("used_llm", False)),
         "used_runtime_state": bool(meta.get("used_runtime_state", False)),
+        "quality_warnings": [],
+        "likely_stale_context": False,
+        "likely_low_value_response": False,
+        "likely_contradiction": False,
     }
 
 
-def classify_barrage_response(case: PromptCase, response: dict[str, Any]) -> list[str]:
+def classify_quality_response(
+    case: PromptCase,
+    response: dict[str, Any],
+    *,
+    tracker: QualityTracker | None = None,
+    runtime_healthy: bool = False,
+) -> dict[str, Any]:
+    text = str(response.get("text") or "").strip()
+    line = str(response.get("first_line") or first_line(text)).strip()
+    lowered = f"{line}\n{text}".lower()
+    route = str(response.get("route") or "").strip().lower()
+    warnings: list[str] = []
+    likely_stale_context = False
+    likely_low_value_response = False
+    likely_contradiction = False
+
+    if case.category in STANDALONE_CATEGORIES and any(marker in lowered for marker in STALE_CONTEXT_MARKERS):
+        likely_stale_context = True
+        warnings.append("likely stale-context bleed on standalone prompt")
+    if route == "assistant_clarification" and case.category in STANDALONE_CATEGORIES:
+        warnings.append("excessive clarification on standalone prompt")
+    if text.lower() in WHOLE_ANSWER_FORBIDDEN or any(marker in lowered for marker in LOW_VALUE_MARKERS):
+        likely_low_value_response = True
+        warnings.append("likely low-value non-actionable response")
+    if runtime_healthy and any(marker in lowered for marker in MODEL_UNAVAILABLE_MARKERS):
+        likely_contradiction = True
+        warnings.append("likely contradiction with healthy runtime/model status")
+    if case.category == "skill_install":
+        if "install a using" in lowered:
+            warnings.append("malformed operational wording: install a using")
+        if any(marker in lowered for marker in CAPABILITY_EXISTS_MARKERS) and not any(
+            marker in lowered for marker in PREVIEW_ONLY_MARKERS
+        ):
+            warnings.append("fake confidence: capability claimed as installed/available without preview caveat")
+        if any(marker in lowered for marker in HALLUCINATED_ACTION_MARKERS) and "preview" not in lowered:
+            warnings.append("possible hallucinated install/action")
+    if case.category == "system_slow" and "likely cause:" in lowered and route not in {"operational_status", "interpretation_followup"}:
+        likely_stale_context = True
+        warnings.append("irrelevant resource diagnosis reuse")
+    if tracker is not None and line:
+        normalized_line = compact_text(line)
+        if len(normalized_line) >= 32 and tracker.seen_lines is not None:
+            prior = tracker.seen_lines.get(normalized_line)
+            if prior is not None and prior[0] != case.category:
+                warnings.append(
+                    f"repeated wording across unrelated prompts: first seen in {prior[0]} prompt {prior[1]!r}"
+                )
+            else:
+                tracker.seen_lines[normalized_line] = (case.category, case.prompt)
+
+    return {
+        "quality_warnings": warnings,
+        "likely_stale_context": likely_stale_context,
+        "likely_low_value_response": likely_low_value_response,
+        "likely_contradiction": likely_contradiction,
+    }
+
+
+def classify_barrage_response(
+    case: PromptCase,
+    response: dict[str, Any],
+    *,
+    tracker: QualityTracker | None = None,
+    runtime_healthy: bool = False,
+) -> list[str]:
     text = str(response.get("text") or "").strip()
     line = str(response.get("first_line") or first_line(text)).strip()
     lowered = f"{line}\n{text}".lower()
@@ -206,6 +346,11 @@ def classify_barrage_response(case: PromptCase, response: dict[str, Any]) -> lis
             failures.append("skill/capability request was treated as OS package install")
         if "likely cause:" in lowered:
             failures.append("skill/capability request reused stale operational-status wording")
+    quality = classify_quality_response(case, response, tracker=tracker, runtime_healthy=runtime_healthy)
+    response["quality_warnings"] = quality["quality_warnings"]
+    response["likely_stale_context"] = quality["likely_stale_context"]
+    response["likely_low_value_response"] = quality["likely_low_value_response"]
+    response["likely_contradiction"] = quality["likely_contradiction"]
     return failures
 
 
@@ -244,6 +389,9 @@ def print_result(prefix: str, case: PromptCase, response: dict[str, Any], failur
         f"used_runtime_state={bool(response.get('used_runtime_state'))}"
     )
     print(f"[{prefix}] first_line={str(response.get('first_line') or '')[:220]}")
+    quality_warnings = response.get("quality_warnings") if isinstance(response.get("quality_warnings"), list) else []
+    if quality_warnings:
+        print(f"[{prefix}] quality_warnings={'; '.join(str(item) for item in quality_warnings)}")
     print(f"[{prefix}] result={'FAIL: ' + '; '.join(failures) if failures else 'PASS'}")
 
 
@@ -260,9 +408,25 @@ def telegram_proxy_factory(base_url: str, timeout: float) -> Callable[[dict[str,
     return _proxy
 
 
-def run_api_barrage(base_url: str, *, timeout: float, limit: int | None = None) -> list[str]:
+def _record_quality_summary(summary: dict[str, int], response: dict[str, Any]) -> None:
+    warnings = response.get("quality_warnings") if isinstance(response.get("quality_warnings"), list) else []
+    summary["quality_warnings"] = summary.get("quality_warnings", 0) + len(warnings)
+    for key in ("likely_stale_context", "likely_low_value_response", "likely_contradiction"):
+        if bool(response.get(key, False)):
+            summary[key] = summary.get(key, 0) + 1
+
+
+def run_api_barrage(
+    base_url: str,
+    *,
+    timeout: float,
+    limit: int | None = None,
+    runtime_healthy: bool = False,
+    quality_summary: dict[str, int] | None = None,
+) -> list[str]:
     failures: list[str] = []
     cases = PROMPT_CASES[: max(0, int(limit))] if limit is not None else PROMPT_CASES
+    tracker = QualityTracker()
     for index, case in enumerate(cases, start=1):
         trace_id = f"live-user-barrage-{index}-{int(time.time())}"
         try:
@@ -274,7 +438,12 @@ def run_api_barrage(base_url: str, *, timeout: float, limit: int | None = None) 
                 trace_id=trace_id,
                 timeout=timeout,
             )
-            case_failures = classify_barrage_response(case, response)
+            case_failures = classify_barrage_response(
+                case,
+                response,
+                tracker=tracker,
+                runtime_healthy=runtime_healthy,
+            )
         except Exception as exc:
             response = {
                 "route": "transport_error",
@@ -284,16 +453,26 @@ def run_api_barrage(base_url: str, *, timeout: float, limit: int | None = None) 
                 "text": "",
             }
             case_failures = [f"transport error: {exc}"]
+        if quality_summary is not None:
+            _record_quality_summary(quality_summary, response)
         print_result(f"api:{index:02d}:{case.category}", case, response, case_failures)
         failures.extend(f"api {index:02d} {case.prompt!r}: {failure}" for failure in case_failures)
     return failures
 
 
-def run_telegram_barrage(base_url: str, *, timeout: float, limit: int | None = None) -> list[str]:
+def run_telegram_barrage(
+    base_url: str,
+    *,
+    timeout: float,
+    limit: int | None = None,
+    runtime_healthy: bool = False,
+    quality_summary: dict[str, int] | None = None,
+) -> list[str]:
     failures: list[str] = []
     cases = PROMPT_CASES[: max(0, int(limit))] if limit is not None else PROMPT_CASES
     proxy = telegram_proxy_factory(base_url, timeout)
     chat_id = "live-user-barrage-telegram"
+    tracker = QualityTracker()
     for index, case in enumerate(cases, start=1):
         try:
             result = handle_telegram_text(
@@ -311,7 +490,12 @@ def run_telegram_barrage(base_url: str, *, timeout: float, limit: int | None = N
                 "text": str(result.get("text") or ""),
                 "first_line": first_line(str(result.get("text") or "")),
             }
-            case_failures = classify_barrage_response(case, response)
+            case_failures = classify_barrage_response(
+                case,
+                response,
+                tracker=tracker,
+                runtime_healthy=runtime_healthy,
+            )
             if str(result.get("handler_name") or "") != "api_chat_proxy" and case.prompt not in {
                 "/start",
                 "/help",
@@ -329,9 +513,21 @@ def run_telegram_barrage(base_url: str, *, timeout: float, limit: int | None = N
                 "first_line": "",
             }
             case_failures = [f"telegram bridge error: {exc}"]
+        if quality_summary is not None:
+            _record_quality_summary(quality_summary, response)
         print_result(f"tg:{index:02d}:{case.category}", case, response, case_failures)
         failures.extend(f"telegram {index:02d} {case.prompt!r}: {failure}" for failure in case_failures)
     return failures
+
+
+def print_quality_summary(summary: dict[str, int]) -> None:
+    print(
+        "[quality] "
+        f"warnings={summary.get('quality_warnings', 0)} "
+        f"likely_stale_context={summary.get('likely_stale_context', 0)} "
+        f"likely_low_value_response={summary.get('likely_low_value_response', 0)} "
+        f"likely_contradiction={summary.get('likely_contradiction', 0)}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -340,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--telegram-bridge", action="store_true", help="Also run prompts through Telegram bridge api_chat_proxy.")
     parser.add_argument("--limit", type=int, default=None, help="Run only the first N prompt cases.")
+    parser.add_argument("--strict-quality", action="store_true", help="Fail when deterministic quality heuristics warn.")
     args = parser.parse_args(argv)
 
     try:
@@ -352,9 +549,28 @@ def main(argv: list[str] | None = None) -> int:
         f"chat_usable={bool(ready.get('chat_usable', False))}"
     )
 
-    failures = run_api_barrage(str(args.base_url), timeout=float(args.timeout), limit=args.limit)
+    quality_summary: dict[str, int] = {}
+    runtime_healthy = llm_status_healthy(ready)
+    failures = run_api_barrage(
+        str(args.base_url),
+        timeout=float(args.timeout),
+        limit=args.limit,
+        runtime_healthy=runtime_healthy,
+        quality_summary=quality_summary,
+    )
     if args.telegram_bridge:
-        failures.extend(run_telegram_barrage(str(args.base_url), timeout=float(args.timeout), limit=args.limit))
+        failures.extend(
+            run_telegram_barrage(
+                str(args.base_url),
+                timeout=float(args.timeout),
+                limit=args.limit,
+                runtime_healthy=runtime_healthy,
+                quality_summary=quality_summary,
+            )
+        )
+    print_quality_summary(quality_summary)
+    if args.strict_quality and int(quality_summary.get("quality_warnings", 0)) > 0:
+        failures.append(f"strict quality failed with {quality_summary.get('quality_warnings', 0)} warning(s)")
 
     if failures:
         print("[live_user_barrage] FAIL")

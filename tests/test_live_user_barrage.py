@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from scripts import live_user_barrage
-from scripts.live_user_barrage import PromptCase, classify_barrage_response, first_line
+from scripts.live_user_barrage import PromptCase, QualityTracker, classify_barrage_response, first_line
 
 
 class TestLiveUserBarrageClassifier(unittest.TestCase):
@@ -66,6 +66,93 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
             },
         )
         self.assertIn("clear direct question routed to assistant_clarification", failures)
+
+    def test_quality_flags_stale_context_on_standalone_topic_change(self) -> None:
+        response = {
+            "text": "I was following: memory pressure. Do you want me to continue with that?",
+            "first_line": "I was following: memory pressure. Do you want me to continue with that?",
+            "route": "generic_chat",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        failures = classify_barrage_response(PromptCase("open_chat", "help me plan the next hour"), response)
+        self.assertEqual([], failures)
+        self.assertTrue(response["likely_stale_context"])
+        self.assertIn("likely stale-context bleed", response["quality_warnings"][0])
+
+    def test_quality_flags_low_value_response(self) -> None:
+        response = {
+            "text": "I can help with that.",
+            "first_line": "I can help with that.",
+            "route": "generic_chat",
+            "used_llm": True,
+            "used_runtime_state": False,
+        }
+        classify_barrage_response(PromptCase("open_chat", "give me a concise checklist for testing this app"), response)
+        self.assertTrue(response["likely_low_value_response"])
+        self.assertTrue(any("low-value" in warning for warning in response["quality_warnings"]))
+
+    def test_quality_flags_runtime_contradiction_when_ready_is_healthy(self) -> None:
+        response = {
+            "text": "No model is available, so chat is not ready.",
+            "first_line": "No model is available, so chat is not ready.",
+            "route": "generic_chat",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        classify_barrage_response(
+            PromptCase("open_chat", "write a short note saying the assistant is working"),
+            response,
+            runtime_healthy=True,
+        )
+        self.assertTrue(response["likely_contradiction"])
+        self.assertTrue(any("contradiction" in warning for warning in response["quality_warnings"]))
+
+    def test_quality_flags_fake_capability_confidence_and_hallucinated_install(self) -> None:
+        response = {
+            "text": "I installed browser support. I can browse webpages now.",
+            "first_line": "I installed browser support. I can browse webpages now.",
+            "route": "action_tool",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        classify_barrage_response(PromptCase("skill_install", "install a skill that lets you browse"), response)
+        self.assertTrue(any("fake confidence" in warning for warning in response["quality_warnings"]))
+        self.assertTrue(any("hallucinated install/action" in warning for warning in response["quality_warnings"]))
+
+    def test_quality_flags_repeated_wording_across_unrelated_prompts(self) -> None:
+        tracker = QualityTracker()
+        first = {
+            "text": "I can check runtime, models, setup, or help with a direct task.",
+            "first_line": "I can check runtime, models, setup, or help with a direct task.",
+            "route": "generic_chat",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        second = dict(first)
+        classify_barrage_response(PromptCase("runtime_status", "what is your runtime status"), first, tracker=tracker)
+        classify_barrage_response(PromptCase("open_chat", "help me plan the next hour"), second, tracker=tracker)
+        self.assertTrue(any("repeated wording" in warning for warning in second["quality_warnings"]))
+
+    def test_strict_quality_exits_failure_on_warning(self) -> None:
+        original_ready = live_user_barrage.require_ready
+        original_run = live_user_barrage.run_api_barrage
+        try:
+            live_user_barrage.require_ready = lambda *_args, **_kwargs: {"ok": True, "ready": True, "chat_usable": True}
+
+            def _run(*_args, **kwargs):
+                summary = kwargs["quality_summary"]
+                summary["quality_warnings"] = 1
+                return []
+
+            live_user_barrage.run_api_barrage = _run
+            self.assertEqual(
+                1,
+                live_user_barrage.main(["--base-url", "http://127.0.0.1:8765", "--strict-quality", "--limit", "1"]),
+            )
+        finally:
+            live_user_barrage.require_ready = original_ready
+            live_user_barrage.run_api_barrage = original_run
 
     def test_allows_ready_to_help_for_normal_open_chat(self) -> None:
         failures = self._classify(

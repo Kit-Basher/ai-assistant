@@ -6301,8 +6301,70 @@ class Orchestrator:
             )
         )
 
+    @staticmethod
+    def _direct_resource_status_question(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if any(
+            phrase in normalized
+            for phrase in (
+                "is something eating resources",
+                "what is using resources",
+                "what is eating memory",
+                "what is eating cpu",
+                "what is eating my memory",
+                "what is eating my cpu",
+                "what s eating memory",
+                "what s eating cpu",
+                "whats eating memory",
+                "whats eating cpu",
+            )
+        ):
+            return True
+        return bool(
+            re.search(r"\b(?:what|who|which|is something)\b", normalized)
+            and re.search(r"\b(?:eating|using|hogging|consuming)\b", normalized)
+            and re.search(r"\b(?:resources|memory|ram|cpu)\b", normalized)
+        )
+
+    @staticmethod
+    def _standalone_open_chat_prompt(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if not normalized:
+            return False
+        if "what should i ask you next" in normalized:
+            return True
+        if re.search(r"\bhelp me plan\b", normalized):
+            return True
+        if any(
+            phrase in normalized
+            for phrase in (
+                "explain this project in plain english",
+                "explain the project in plain english",
+                "summarize this project",
+                "summarise this project",
+                "summarize the project",
+                "summarise the project",
+            )
+        ):
+            return True
+        if "checklist" in normalized and any(
+            phrase in normalized
+            for phrase in (
+                "testing this app",
+                "test this app",
+                "testing the app",
+                "test the app",
+            )
+        ):
+            return True
+        return False
+
     def _direct_standalone_assistant_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         _ = user_id
+        if self._direct_resource_status_question(text):
+            return self._operational_status_response(user_id, text, "operational_observe")
         if self._direct_runtime_health_question(text):
             return self._runtime_status_response("runtime_status")
         if self._open_app_requested(text):
@@ -6344,6 +6406,10 @@ class Orchestrator:
         direct_response = self._direct_standalone_assistant_response(user_id, text)
         if direct_response is not None:
             return direct_response
+        if self._standalone_open_chat_prompt(text):
+            if "what should i ask you next" in normalize_setup_text(text).replace("/", " "):
+                return self._assistant_capabilities_response(text)
+            return None
         context = self._current_interpretable_result(user_id)
         if self._looks_like_confusion_prompt(text):
             used_memory = bool(self._current_runtime_setup_state(user_id))
@@ -16449,6 +16515,17 @@ class Orchestrator:
                 capability_gap_response = self._capability_gap_planning_response(user_id, runtime_text)
                 if capability_gap_response is not None:
                     return capability_gap_response
+                if self._direct_resource_status_question(runtime_text):
+                    return self._operational_status_response(user_id, runtime_text, "operational_observe")
+                if self._standalone_open_chat_prompt(runtime_text):
+                    if "what should i ask you next" in normalize_setup_text(runtime_text).replace("/", " "):
+                        return self._assistant_capabilities_response(runtime_text)
+                    runtime_response = self._handle_runtime_truth_chat(user_id, runtime_text)
+                    if runtime_response is not None:
+                        return runtime_response
+                    if self._llm_chat_available():
+                        return self._llm_chat(user_id, runtime_text, chat_context=context)
+                    return self._bootstrap_no_chat_response()
                 interpretation_response = self._interpret_previous_result_followup(
                     user_id,
                     runtime_text,

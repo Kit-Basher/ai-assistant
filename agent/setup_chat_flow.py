@@ -466,6 +466,16 @@ _OPERATIONAL_OBSERVE_PHRASES = (
     "what is my gpu",
     "what is my ram",
     "what is my disk",
+    "is something eating resources",
+    "what is using resources",
+    "what is eating memory",
+    "what is eating cpu",
+    "what is eating my memory",
+    "what is eating my cpu",
+    "what s eating memory",
+    "what s eating cpu",
+    "whats eating memory",
+    "whats eating cpu",
 )
 _ASSISTANT_CAPABILITY_PHRASES = (
     "what can you do",

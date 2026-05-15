@@ -139,6 +139,41 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 self.assertNotIn("which model do you want me to acquire", lowered)
                 self.assertNotIn("likely cause:", lowered)
 
+    def test_open_chat_prompts_after_operational_status_do_not_reuse_stale_context(self) -> None:
+        prompts = (
+            "help me plan the next hour",
+            "explain this project in plain english",
+            "give me a concise checklist for testing this app",
+            "what should I ask you next",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self._post_chat("my computer is slow")
+                _status, body, text = self._assert_grounded_reply(prompt)
+                meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                self.assertNotEqual("assistant_clarification", meta.get("route"))
+                self.assertNotEqual("interpretation_followup", meta.get("route"))
+                self.assertNotIn("i was following", text.lower())
+                self.assertNotIn("likely cause:", text.lower())
+                if prompt == "what should I ask you next":
+                    self.assertEqual("assistant_capabilities", meta.get("route"))
+
+    def test_resource_prompts_after_operational_status_route_to_operational_status(self) -> None:
+        prompts = (
+            "is something eating resources",
+            "what is using resources",
+            "what is eating memory",
+            "what is eating cpu",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                self._post_chat("my computer is slow")
+                _status, body, text = self._assert_grounded_reply(prompt)
+                meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                self.assertEqual("operational_status", meta.get("route"))
+                self.assertNotEqual("assistant_clarification", meta.get("route"))
+                self.assertNotIn("i was following", text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
