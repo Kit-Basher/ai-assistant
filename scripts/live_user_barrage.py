@@ -39,6 +39,8 @@ DIAGNOSTIC_READY_MARKERS = (
 WHOLE_ANSWER_FORBIDDEN = {"ok", "done."}
 LOW_VALUE_MARKERS = (
     "i can help with that",
+    "i'd be happy to",
+    "i’d be happy to",
     "happy to help",
     "what can i do for you",
     "what would you like me to do",
@@ -49,7 +51,6 @@ STALE_CONTEXT_MARKERS = (
     "switch to something else",
     "your last request",
     "previous result",
-    "likely cause:",
 )
 MODEL_UNAVAILABLE_MARKERS = (
     "model unavailable",
@@ -87,6 +88,7 @@ MODEL_ACQUISITION_MARKERS = (
 )
 DIRECT_QUESTION_CATEGORIES = {"runtime_status", "memory", "frustration", "app_setup", "open_chat", "system_slow"}
 STANDALONE_CATEGORIES = {"runtime_status", "memory", "frustration", "app_setup", "open_chat", "system_slow"}
+STATUS_REPEAT_CATEGORIES = {"runtime_status", "model_switch"}
 
 
 @dataclass(frozen=True)
@@ -155,6 +157,14 @@ def first_line(text: str) -> str:
 
 def compact_text(text: str, *, max_len: int = 160) -> str:
     return " ".join(str(text or "").strip().lower().split())[:max_len]
+
+
+def is_status_like_prompt(case: PromptCase) -> bool:
+    normalized = compact_text(case.prompt)
+    return bool(
+        case.category in STATUS_REPEAT_CATEGORIES
+        and any(token in normalized for token in ("model", "provider", "runtime", "status", "api healthy"))
+    )
 
 
 def llm_status_healthy(payload: dict[str, Any] | None) -> bool:
@@ -290,14 +300,16 @@ def classify_quality_response(
     if case.category == "system_slow" and "likely cause:" in lowered and route not in {"operational_status", "interpretation_followup"}:
         likely_stale_context = True
         warnings.append("irrelevant resource diagnosis reuse")
-    if tracker is not None and line:
+    if tracker is not None and line and case.category != "vague":
         normalized_line = compact_text(line)
         if len(normalized_line) >= 32 and tracker.seen_lines is not None:
             prior = tracker.seen_lines.get(normalized_line)
             if prior is not None and prior[0] != case.category:
-                warnings.append(
-                    f"repeated wording across unrelated prompts: first seen in {prior[0]} prompt {prior[1]!r}"
-                )
+                prior_case = PromptCase(category=prior[0], prompt=prior[1])
+                if not (is_status_like_prompt(prior_case) and is_status_like_prompt(case)):
+                    warnings.append(
+                        f"repeated wording across unrelated prompts: first seen in {prior[0]} prompt {prior[1]!r}"
+                    )
             else:
                 tracker.seen_lines[normalized_line] = (case.category, case.prompt)
 

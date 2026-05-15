@@ -144,6 +144,7 @@ class TestChatBehaviorAudit(unittest.TestCase):
             "help me plan the next hour",
             "explain this project in plain english",
             "give me a concise checklist for testing this app",
+            "write a short note saying the assistant is working",
             "what should I ask you next",
         )
         for prompt in prompts:
@@ -157,6 +158,20 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 self.assertNotIn("likely cause:", text.lower())
                 if prompt == "what should I ask you next":
                     self.assertEqual("assistant_capabilities", meta.get("route"))
+                if prompt == "write a short note saying the assistant is working":
+                    self.assertEqual("generic_chat", meta.get("route"))
+                    self.assertIn("assistant is working", text.lower())
+
+    def test_vague_fix_it_uses_short_clarification_not_setup_summary(self) -> None:
+        _status, body, text = self._assert_grounded_reply("fix it")
+        lowered = text.lower()
+        self.assertTrue(
+            "what should i fix" in lowered
+            or "reply 1, 2, or 3" in lowered
+            or body.get("error_kind") == "needs_clarification"
+        )
+        self.assertNotIn("setup looks okay", lowered)
+        self.assertNotIn("other local chat models", lowered)
 
     def test_resource_prompts_after_operational_status_route_to_operational_status(self) -> None:
         prompts = (

@@ -82,8 +82,8 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
 
     def test_quality_flags_low_value_response(self) -> None:
         response = {
-            "text": "I can help with that.",
-            "first_line": "I can help with that.",
+            "text": "I'd be happy to help with that.",
+            "first_line": "I'd be happy to help with that.",
             "route": "generic_chat",
             "used_llm": True,
             "used_runtime_state": False,
@@ -133,6 +133,46 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
         classify_barrage_response(PromptCase("runtime_status", "what is your runtime status"), first, tracker=tracker)
         classify_barrage_response(PromptCase("open_chat", "help me plan the next hour"), second, tracker=tracker)
         self.assertTrue(any("repeated wording" in warning for warning in second["quality_warnings"]))
+
+    def test_quality_allows_repeated_status_wording_for_status_prompts(self) -> None:
+        tracker = QualityTracker()
+        first = {
+            "text": "Chat is currently using the configured model ollama:qwen2.5:7b-instruct on Ollama.",
+            "first_line": "Chat is currently using the configured model ollama:qwen2.5:7b-instruct on Ollama.",
+            "route": "model_status",
+            "used_llm": False,
+            "used_runtime_state": True,
+        }
+        second = dict(first)
+        classify_barrage_response(PromptCase("runtime_status", "what model am i using"), first, tracker=tracker)
+        classify_barrage_response(PromptCase("model_switch", "what model am i using now"), second, tracker=tracker)
+        self.assertFalse(any("repeated wording" in warning for warning in second["quality_warnings"]))
+
+    def test_quality_allows_likely_cause_for_system_slow_operational_status(self) -> None:
+        response = {
+            "text": "Likely cause: browser processes are the largest sampled consumers.",
+            "first_line": "Likely cause: browser processes are the largest sampled consumers.",
+            "route": "operational_status",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        classify_barrage_response(PromptCase("system_slow", "why is my system lagging"), response)
+        self.assertFalse(response["likely_stale_context"])
+        self.assertFalse(any("stale-context" in warning for warning in response["quality_warnings"]))
+
+    def test_quality_allows_repeated_wording_for_vague_followups(self) -> None:
+        tracker = QualityTracker()
+        first = {
+            "text": "I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.",
+            "first_line": "I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.",
+            "route": "generic_chat",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        second = dict(first)
+        classify_barrage_response(PromptCase("model_switch", "no"), first, tracker=tracker)
+        classify_barrage_response(PromptCase("vague", "yes"), second, tracker=tracker)
+        self.assertFalse(any("repeated wording" in warning for warning in second["quality_warnings"]))
 
     def test_strict_quality_exits_failure_on_warning(self) -> None:
         original_ready = live_user_barrage.require_ready
