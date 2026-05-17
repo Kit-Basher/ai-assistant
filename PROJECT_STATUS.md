@@ -1,6 +1,9 @@
 # PROJECT_STATUS
 
-This is the current-state handover doc. Treat it as the source of truth when older notes disagree.
+This is the current-state handover doc. Product intent lives in
+`docs/product/PROJECT_INTENT.md`; runtime contract lives in
+`PRODUCT_RUNTIME_SPEC.md`. Treat this file as a status snapshot, not the sole
+source of truth.
 
 ## Current State
 

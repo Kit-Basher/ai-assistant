@@ -1,9 +1,11 @@
 # Product Runtime Spec
 
-This document captures the canonical product/runtime scope for the current
-Personal Agent. README is the product-facing overview; this file is the deeper
-runtime/contract companion. If older notes conflict with this file, this file
-wins.
+Product intent is defined in
+[`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/product/PROJECT_INTENT.md).
+This document captures the deeper runtime contract for that product direction.
+README is the product-facing overview. If older runtime notes conflict with
+this file, this file wins for runtime behavior; if runtime notes conflict with
+the project intent document, project intent wins.
 
 ## 1. Product Purpose
 - Personal Agent is a local-first assistant for grounded runtime/model control
@@ -116,6 +118,10 @@ wins.
   - canonical content identity is authoritative for normalized packs
   - imported content remains non-executable and gets no granted permissions by
     default
+- External packs are not bundled active abilities. Starter catalogs are
+  discoverable sources only, and a pack becomes usable only after the
+  appropriate preview, quarantine/import, inspection, approval, configuration,
+  permission, and enablement gates are complete.
 - Unsupported by design:
   - arbitrary shell
   - unrestricted disk access
@@ -200,6 +206,10 @@ wins.
 - Unsupported/native/plugin packs are blocked or reduced to safe text/assets
   only when possible.
 - No imported pack gets executable runtime privileges in this pass.
+- Missing capability handling should not dead-end: when no installed or
+  approved catalog pack can satisfy a user request, the assistant should say
+  what is missing and offer the next safe step, including scaffold preview where
+  a scaffold template exists.
 
 ## 10. Out Of Scope
 - Arbitrary autonomous shell behavior.

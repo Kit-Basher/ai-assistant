@@ -4,6 +4,9 @@ Personal Agent is a local-first AI assistant that answers from real runtime
 state, uses bounded native skills, and previews any mutating action before it
 executes it.
 
+Product intent is defined in
+[`docs/product/PROJECT_INTENT.md`](docs/product/PROJECT_INTENT.md).
+
 It is exposed through the HTTP API, the browser/web UI served by the API
 server, the CLI, and the optional Telegram adapter.
 
@@ -58,6 +61,8 @@ explicit confirmation step.
 ### Local Control Plane
 - A tiny loopback-only file-backed service lives at the repo-local `control/`
   directory.
+- This is development/operator assistance only. It is not the normal runtime
+  path for acquiring user-requested capabilities.
 - Canonical files:
   - `control/master_plan.md`
   - `control/DEVELOPMENT_TASKS.md`
@@ -122,6 +127,8 @@ explicit confirmation step.
 - No public arbitrary shell execution surface.
 
 ### External Packs
+- External packs are not bundled built-in abilities. Starter catalogs are
+  discoverable sources only, not installed or enabled capabilities.
 - Read-only discovery is available through pack sources:
   - `GET /pack_sources`
   - `GET /pack_sources/catalog`
@@ -148,6 +155,11 @@ explicit confirmation step.
 - Discovery cache is performance-only and remains untrusted metadata.
 - Preview is not install. Nothing becomes locally usable until an explicit
   fetch/install request goes through quarantine and review.
+- Missing capability requests should not dead-end: the assistant should explain
+  what is missing and guide the user to the next safe step, such as previewing a
+  discovered pack or scaffold.
+- A pack is usable only after the relevant approval, enablement,
+  configuration, and permission gates are complete.
 - `POST /packs/install` ingests either:
   - a local downloaded pack snapshot
   - a supported remote archive source over `https`

@@ -1,6 +1,18 @@
 # Managed Pack Adapters
 
+Status: current implemented direction for external/generated pack safety.
+
+Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/product/PROJECT_INTENT.md).
+
 External and generated skill packs do not run arbitrary code. Generated packs remain text-only review artifacts unless the core runtime implements and gates a managed adapter.
+
+## External Pack Lifecycle Contract
+
+External packs are not bundled active abilities. Starter catalogs are discoverable sources only; they are not installed capabilities and must not be described as built-in skills.
+
+Missing capability flow must not dead-end. The assistant should tell the user what is missing and the next safe step: preview a discovered pack, preview a scaffold, create a review-only candidate, or explain why the capability is blocked.
+
+The intended lifecycle is discover -> preview -> scaffold/create -> quarantine -> inspect -> approve -> configure -> permission -> enable -> use. A pack is usable only after the relevant approval, enablement, configuration, and permission gates are complete.
 
 ## Phase 3 Contract
 

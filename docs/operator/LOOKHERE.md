@@ -2,9 +2,10 @@
 
 ## Source Priority
 
+- Product intent: `docs/product/PROJECT_INTENT.md`
 - Product-facing overview: `README.md`
 - Product/runtime contract: `PRODUCT_RUNTIME_SPEC.md`
-- Current branch reality: `PROJECT_STATUS.md`
+- Current branch status snapshot: `PROJECT_STATUS.md`
 - Install/recovery path: `docs/operator/SETUP.md`
 - Release bundle path: `bash scripts/build_release_bundle.sh --clean`
 - Debian package path: `bash scripts/build_deb.sh --clean`

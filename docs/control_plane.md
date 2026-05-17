@@ -4,6 +4,13 @@ The local control plane is the shared coordination surface for one machine and
 one project. It is intentionally small: loopback-only HTTP, file-backed state,
 atomic writes, no auth, no database, no queue, no websocket layer.
 
+This is a development/operator assistance surface. It is not part of the normal
+runtime user workflow, and it is not how Personal Agent should acquire
+user-requested capabilities. Runtime capability acquisition is handled by the
+assistant through external pack discovery, preview, scaffold/create,
+quarantine, inspection, approval, configuration, permission, enablement, and
+use.
+
 ## Canonical Storage
 
 These are the documented defaults on this machine:

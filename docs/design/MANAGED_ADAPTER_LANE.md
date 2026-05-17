@@ -1,6 +1,16 @@
 # Managed Adapter Lane
 
-Status: design only
+Status: historical design proposal for executable/process-backed adapters.
+
+For current implemented external/generated pack adapter behavior, use
+[`docs/design/MANAGED_PACK_ADAPTERS.md`](/home/c/personal-agent/docs/design/MANAGED_PACK_ADAPTERS.md).
+For product intent, use
+[`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/product/PROJECT_INTENT.md).
+
+This document is retained as a future-design sketch for MCP servers, native
+integrations, plugin packs, dependency-backed tools, and other adapters that
+would execute code or start processes. It does not describe current implemented
+text-pack behavior.
 
 ## Purpose
 
