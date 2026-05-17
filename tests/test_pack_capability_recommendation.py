@@ -131,6 +131,9 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertEqual("install_preview", result["fallback"])
         self.assertIsNotNone(result["recommended_pack"])
         self.assertEqual("Local Voice", result["recommended_pack"]["name"])
+        self.assertEqual("discovered", result["lifecycle_state"])
+        self.assertFalse(result["lifecycle"]["usable"])
+        self.assertEqual("preview", result["lifecycle"]["missing_gate"])
         self.assertTrue(result["recommended_pack"]["installable"])
         self.assertEqual("lighter", result["recommended_pack"]["tradeoff_note"])
         self.assertEqual("If you want, say yes and I'll show the pack preview.", result["next_step"])
@@ -167,7 +170,7 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         )
 
         self.assertEqual(
-            "I don't have QR-code generation installed yet, but I searched the approved starter skill sources and found a safe text-only guidance pack: QR Code Creation Guidance. "
+            "I don't have QR-code generation installed yet, but I searched the approved starter catalog sources and found a safe text-only guidance pack: QR Code Creation Guidance. "
             "It is not installed yet. I can show you the preview first, including what it contains and any safety notes. Say yes to preview it.",
             rendered,
         )
@@ -269,6 +272,11 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertEqual("scaffold_preview", result.get("fallback"))
+        self.assertEqual("missing", result.get("lifecycle_state"))
+        lifecycle = result.get("lifecycle")
+        self.assertIsInstance(lifecycle, dict)
+        assert isinstance(lifecycle, dict)
+        self.assertEqual("scaffold_preview", (lifecycle.get("next_step") or {}).get("action"))
         self.assertEqual("youtube_history_search", result.get("capability_required"))
         self.assertIn("cannot read or search your history today", str(result.get("summary") or "").lower())
         self.assertIn("say yes to preview the scaffold", str(result.get("summary") or "").lower())
