@@ -20,6 +20,13 @@ runtime. These limits are deliberate.
 - discovery metadata is advisory, not authoritative
 - pack discovery can be degraded or unavailable without making the core
   runtime invalid
+- generated skill scaffolds start with a preview, then may create a local
+  text-only review candidate through the existing quarantine and normalization
+  path; generated packs are not approved, enabled, permissioned, or executable
+- private-history capabilities, including YouTube history search, are not live
+  capabilities yet; the current scaffold starts from a future user-selected
+  local Google Takeout import and explicitly defers OAuth, browser scraping,
+  transcript fetching, network lookup, and video/audio downloads
 - release and recovery diagnostics are deterministic, but they are not a full
   observability stack
 

@@ -55,6 +55,8 @@ from agent.packs.capability_recommendation import (
     recommend_packs_for_capability,
     render_pack_capability_response,
 )
+from agent.packs.external_ingestion import ExternalPackIngestor
+from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.store import PackStore
@@ -6368,6 +6370,12 @@ class Orchestrator:
         normalized = normalize_setup_text(text).replace("/", " ")
         if "write a short note saying" in normalized and "assistant is working" in normalized:
             message = "The assistant is working and ready to help with the next task."
+        elif re.search(r"\bhelp me plan\b", normalized) and "next hour" in normalized:
+            message = (
+                "Next-hour plan: pick one priority, spend 10 minutes clarifying the outcome, spend 35 minutes on "
+                "the main work, reserve 10 minutes to test or review, and use the last 5 minutes to write down the "
+                "next action."
+            )
         elif any(
             phrase in normalized
             for phrase in (
@@ -6886,6 +6894,9 @@ class Orchestrator:
             proposal_summary=str(gap.get("proposal_summary") or "").strip() or None,
             helper_name=str(gap.get("helper_name") or "").strip() or None,
         )
+        scaffold_preview = recommendation.get("scaffold_preview") if isinstance(recommendation.get("scaffold_preview"), dict) else None
+        if scaffold_preview is not None:
+            self._queue_capability_scaffold_followup(user_id, message=message, preview=scaffold_preview)
         self._queue_capability_preview_followup(user_id, message=message, rescue=rescue)
         return self._runtime_truth_response(
             text=message,
@@ -6902,6 +6913,7 @@ class Orchestrator:
                 "comparison_mode": recommendation.get("comparison_mode"),
                 "fallback": recommendation.get("fallback"),
                 "next_step": recommendation.get("next_step"),
+                "scaffold_preview": scaffold_preview,
                 "capability_gap_rescue": rescue,
             },
         )
@@ -6984,6 +6996,150 @@ class Orchestrator:
                     "remote_id": str(preview_action.get("remote_id") or "").strip(),
                     "pack_name": str(preview_action.get("pack_name") or "").strip() or None,
                 },
+            },
+        )
+
+    def _queue_capability_scaffold_followup(self, user_id: str, *, message: str, preview: dict[str, Any]) -> None:
+        if not isinstance(preview, dict):
+            return
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "capability_scaffold_preview",
+                "question": str(message or "").strip() or "Preview this skill scaffold?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "scaffold_preview": dict(preview),
+                },
+            },
+        )
+
+    def _capability_scaffold_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        preview = context.get("scaffold_preview") if isinstance(context.get("scaffold_preview"), dict) else {}
+        message = render_scaffold_preview(preview)
+        if preview:
+            pending_id = str(uuid.uuid4())
+            now_epoch = int(time.time())
+            self._memory_runtime.add_pending_item(
+                user_id,
+                {
+                    "pending_id": pending_id,
+                    "kind": "followup",
+                    "origin_tool": "capability_scaffold_create",
+                    "question": "Create this review-only scaffolded pack candidate?",
+                    "options": ["yes", "no"],
+                    "created_at": now_epoch,
+                    "expires_at": now_epoch + 600,
+                    "thread_id": self._active_thread_id_for_user(user_id),
+                    "status": PENDING_STATUS_READY_TO_RESUME,
+                    "context": {
+                        "scaffold_preview": dict(preview),
+                    },
+                },
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_scaffold_preview"],
+            payload={
+                "type": "capability_scaffold_preview",
+                "ok": bool(preview),
+                "summary": message,
+                "scaffold_preview": preview,
+                "creates_files": False,
+                "executes_code": False,
+                "installed": False,
+            },
+        )
+
+    def _capability_scaffold_create_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        preview = context.get("scaffold_preview") if isinstance(context.get("scaffold_preview"), dict) else {}
+        if not preview:
+            message = "I cannot create that scaffold candidate because the preview data is missing. No pack was installed."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_scaffold_create"],
+                payload={"type": "capability_scaffold_create", "ok": False, "summary": message},
+            )
+        try:
+            source_result = create_generated_scaffold_source(
+                preview,
+                storage_root=self._pack_store.external_storage_root(),
+            )
+            ingestor = ExternalPackIngestor(self._pack_store.external_storage_root())
+            normalization_result, review_envelope = ingestor.ingest_from_path(
+                str(source_result.get("source_path") or ""),
+                source_origin="generated_scaffold",
+                created_by="capability_scaffold_create",
+            )
+            pack_row = self._pack_store.record_external_pack(
+                canonical_pack=normalization_result.pack.to_dict(),
+                classification=normalization_result.classification,
+                status=normalization_result.status,
+                risk_report=normalization_result.risk_report.to_dict(),
+                review_envelope=review_envelope.to_dict(),
+                quarantine_path=normalization_result.quarantine_path,
+                normalized_path=normalization_result.normalized_path,
+            )
+        except Exception as exc:
+            message = "I could not create the scaffold candidate for review. No pack was enabled or executed."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["capability_scaffold_create"],
+                payload={
+                    "type": "capability_scaffold_create",
+                    "ok": False,
+                    "summary": message,
+                    "error": exc.__class__.__name__,
+                },
+            )
+        pack_name = str(pack_row.get("name") or preview.get("title") or "the scaffolded pack").strip()
+        canonical_pack = pack_row.get("canonical_pack") if isinstance(pack_row.get("canonical_pack"), dict) else {}
+        message = (
+            f"I created a review-only scaffolded pack candidate: {pack_name}. "
+            "It is not enabled and cannot access your files yet. "
+            "It has not been approved, has no granted permissions, and no code was executed. "
+            "Next step: review/approve/import path. Review it before any future use."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["capability_scaffold_create"],
+            payload={
+                "type": "capability_scaffold_create",
+                "ok": True,
+                "summary": message,
+                "source_result": source_result,
+                "pack": pack_row,
+                "normalization_result": {
+                    **normalization_result.to_dict(),
+                    "pack": canonical_pack or normalization_result.pack.to_dict(),
+                },
+                "review": review_envelope.to_dict(),
+                "approved": False,
+                "enabled": False,
+                "permissions_granted": [],
+                "executes_code": False,
             },
         )
 
@@ -7407,6 +7563,12 @@ class Orchestrator:
         ]
         if preview_actions:
             self._queue_capability_preview_followup(user_id, message=message, rescue=rescue)
+        elif isinstance(plan.get("recommendation"), dict) and isinstance(plan["recommendation"].get("scaffold_preview"), dict):
+            self._queue_capability_scaffold_followup(
+                user_id,
+                message=message,
+                preview=plan["recommendation"]["scaffold_preview"],
+            )
         elif str(plan.get("fallback") or "").strip().lower() == "propose_new_capability":
             pending_id = str(uuid.uuid4())
             now_epoch = int(time.time())
@@ -16728,6 +16890,24 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I cancelled the pack preview.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_scaffold_preview":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_scaffold_preview_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I cancelled the scaffold preview.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_scaffold_create":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._capability_scaffold_create_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not create the scaffold candidate.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_import":
                     if followup_intent in {"accept", "details"}:
                         if pending_id:

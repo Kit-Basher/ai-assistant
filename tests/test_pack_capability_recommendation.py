@@ -47,6 +47,10 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
             ("read something to me", "voice_output"),
             ("Use the avatar", "avatar_visual"),
             ("Open the robot camera feed", "camera_feed"),
+            ("Look through my YouTube history and find the video about neurons differentiating during animal infancy.", "youtube_history_search"),
+            ("Search my browser history for the article about CUDA setup.", "browser_history_search"),
+            ("Import my Google Takeout watch history.", "google_takeout_import"),
+            ("Search YouTube transcripts for this phrase.", "transcript_search"),
         )
         for text, expected in cases:
             with self.subTest(text=text):
@@ -246,6 +250,49 @@ class TestPackCapabilityRecommendation(unittest.TestCase):
         self.assertIsInstance(actions, list)
         assert isinstance(actions, list)
         self.assertTrue(any(isinstance(row, dict) and row.get("action") == "sketch_helper" for row in actions))
+
+    def test_youtube_history_gap_returns_scaffold_preview_offer_not_browser_automation(self) -> None:
+        store = _FakePackStore([])
+        discovery = _FakeDiscovery(
+            sources=[
+                {"id": "starter-safe-text", "name": "Starter Safe Text Catalog", "kind": "local_catalog", "enabled": True},
+            ],
+            search_map={},
+        )
+
+        result = build_capability_gap_response(
+            "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
+            pack_store=store,
+            pack_registry_discovery=discovery,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("scaffold_preview", result.get("fallback"))
+        self.assertEqual("youtube_history_search", result.get("capability_required"))
+        self.assertIn("cannot read or search your history today", str(result.get("summary") or "").lower())
+        self.assertIn("say yes to preview the scaffold", str(result.get("summary") or "").lower())
+        self.assertIn("should not treat browser automation planning as the solution", str(result.get("summary") or "").lower())
+        recommendation = result.get("recommendation")
+        self.assertIsInstance(recommendation, dict)
+        assert isinstance(recommendation, dict)
+        preview = recommendation.get("scaffold_preview")
+        self.assertIsInstance(preview, dict)
+        assert isinstance(preview, dict)
+        self.assertFalse(preview.get("creates_files"))
+        self.assertFalse(preview.get("executes_code"))
+        blocked = " ".join(str(item) for item in preview.get("blocked_actions", []))
+        self.assertIn("No OAuth", blocked)
+        self.assertIn("No browser history scraping", blocked)
+        self.assertIn("No transcript fetching", blocked)
+        rescue = result.get("capability_gap_rescue")
+        self.assertIsInstance(rescue, dict)
+        assert isinstance(rescue, dict)
+        actions = rescue.get("candidate_actions")
+        self.assertIsInstance(actions, list)
+        assert isinstance(actions, list)
+        self.assertTrue(any(isinstance(row, dict) and row.get("action") == "preview_scaffold" for row in actions))
+        self.assertFalse(any(isinstance(row, dict) and row.get("action") == "show_preview" for row in actions))
 
     def test_real_world_starter_prompts_find_safe_text_candidates(self) -> None:
         store = _FakePackStore([])

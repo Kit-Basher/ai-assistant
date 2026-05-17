@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from agent.persona import normalize_persona_text
+from agent.packs.scaffolding import build_scaffold_preview, render_scaffold_offer
 from agent.packs.state_truth import normalize_available_pack_truth, normalize_installed_pack_truth
 
 
@@ -134,6 +135,75 @@ _CAPABILITY_RULES: dict[str, dict[str, Any]] = {
             "read a webpage",
         ),
         "search_terms": ("browser", "automation", "planning", "web"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "youtube_history_search": {
+        "label": "YouTube history search",
+        "phrases": (
+            "youtube history",
+            "youtube watch history",
+            "my youtube history",
+            "look through my youtube history",
+            "search my youtube history",
+            "find a video i watched",
+            "video i watched",
+            "watched on youtube",
+        ),
+        "search_terms": ("youtube history", "watch history", "takeout", "transcript"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "browser_history_search": {
+        "label": "browser history search",
+        "phrases": (
+            "browser history",
+            "my browsing history",
+            "search my browser history",
+            "look through my browser history",
+            "chrome history",
+            "firefox history",
+            "brave history",
+        ),
+        "search_terms": ("browser history", "local history", "search"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "google_takeout_import": {
+        "label": "Google Takeout import",
+        "phrases": (
+            "google takeout",
+            "takeout export",
+            "youtube takeout",
+            "import my takeout",
+            "takeout watch history",
+        ),
+        "search_terms": ("google takeout", "takeout", "import"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "transcript_search": {
+        "label": "transcript search",
+        "phrases": (
+            "transcript search",
+            "search transcripts",
+            "youtube transcript",
+            "video transcript",
+            "find transcript",
+        ),
+        "search_terms": ("transcript", "captions", "search"),
+        "installed_blocker": "it isn't enabled as a live capability yet",
+        "blocked_blocker": "the pack was blocked during import",
+    },
+    "private_history_search": {
+        "label": "private history search",
+        "phrases": (
+            "private history",
+            "watch history",
+            "search my history",
+            "look through my history",
+        ),
+        "search_terms": ("private history", "local history", "search"),
         "installed_blocker": "it isn't enabled as a live capability yet",
         "blocked_blocker": "the pack was blocked during import",
     },
@@ -279,6 +349,11 @@ _CAPABILITY_HELPER_NAMES = {
     "document_conversion_guidance": "document conversion helper",
     "image_editing_guidance": "image editing workflow helper",
     "browser_automation_planning": "browser automation planning helper",
+    "youtube_history_search": "YouTube history search helper",
+    "browser_history_search": "browser history search helper",
+    "google_takeout_import": "Google Takeout import helper",
+    "transcript_search": "transcript search helper",
+    "private_history_search": "private history search helper",
     "linux_troubleshooting": "Linux troubleshooting helper",
     "file_organization": "file organization helper",
     "project_code_audit": "project audit helper",
@@ -297,6 +372,11 @@ _CAPABILITY_PROPOSAL_SUMMARIES = {
     "document_conversion_guidance": "guides safe document and PDF conversion planning",
     "image_editing_guidance": "guides image editing workflows without executing tools",
     "browser_automation_planning": "plans browser automation safely without controlling a browser",
+    "youtube_history_search": "searches a local, user-provided YouTube watch-history export",
+    "browser_history_search": "searches local browser history only after explicit user-selected access",
+    "google_takeout_import": "imports a user-provided Google Takeout export locally",
+    "transcript_search": "searches video transcripts only when transcript data is explicitly available",
+    "private_history_search": "searches private local history only after explicit user-selected access",
     "linux_troubleshooting": "structures Linux troubleshooting without running commands automatically",
     "file_organization": "plans file organization safely before any file operation",
     "project_code_audit": "structures project and code audits",
@@ -308,6 +388,11 @@ _CAPABILITY_PROPOSAL_SUMMARIES = {
 }
 
 _CAPABILITY_DETECTION_PRIORITY = (
+    "youtube_history_search",
+    "google_takeout_import",
+    "browser_history_search",
+    "transcript_search",
+    "private_history_search",
     "qr_code_guidance",
     "document_conversion_guidance",
     "image_editing_guidance",
@@ -1299,6 +1384,10 @@ def recommend_packs_for_capability(
     else:
         state = "missing"
 
+    scaffold_preview = None
+    if installed_top is None and recommended_top is None and blocked_top is None:
+        scaffold_preview = build_scaffold_preview(capability_key, user_goal=text)
+
     if recommendation_pack is not None:
         fallback = "install_preview"
         next_step = "If you want, say yes and I'll show the pack preview."
@@ -1308,6 +1397,9 @@ def recommend_packs_for_capability(
     elif blocked_pack is not None:
         fallback = "text_only"
         next_step = "I can still help you set it up or keep this in text."
+    elif scaffold_preview is not None:
+        fallback = "scaffold_preview"
+        next_step = "Say yes to preview the scaffold."
     else:
         fallback = "propose_new_capability"
         next_step = f"I can help sketch a small {_helper_name_for_capability(capability_key, label)}."
@@ -1340,6 +1432,7 @@ def recommend_packs_for_capability(
         "alternate_pack": alternate_pack,
         "alternates": [alternate_pack] if alternate_pack is not None else [],
         "blocked_pack": blocked_pack,
+        "scaffold_preview": scaffold_preview,
         "comparison_mode": comparison_mode,
         "fallback": fallback,
         "next_step": next_step,
@@ -1443,6 +1536,21 @@ def build_capability_gap_rescue(
             candidate = _candidate_metadata_from_pack(pack or {}, recommended=recommended)
             if candidate is not None:
                 candidate_packs.append(candidate)
+        scaffold_preview = recommendation.get("scaffold_preview") if isinstance(recommendation.get("scaffold_preview"), dict) else None
+        if scaffold_preview is not None:
+            candidate_actions.append(
+                {
+                    "action": "preview_scaffold",
+                    "label": f"Preview scaffold for {str(scaffold_preview.get('title') or 'this capability').strip()}",
+                    "scaffold_id": str(scaffold_preview.get("scaffold_id") or "").strip() or None,
+                    "capability": str(scaffold_preview.get("capability") or capability or "").strip() or None,
+                    "recommended": True,
+                    "preview_required": True,
+                    "install_allowed_initially": False,
+                    "creates_files": False,
+                    "executes_code": False,
+                }
+            )
     candidate_actions.append(
         {
             "action": "keep_text_only",
@@ -1499,7 +1607,11 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
     recommended_pack = result.get("recommended_pack") if isinstance(result.get("recommended_pack"), dict) else None
     alternate_pack = result.get("alternate_pack") if isinstance(result.get("alternate_pack"), dict) else None
     blocked_pack = result.get("blocked_pack") if isinstance(result.get("blocked_pack"), dict) else None
+    scaffold_preview = result.get("scaffold_preview") if isinstance(result.get("scaffold_preview"), dict) else None
     comparison_mode = str(result.get("comparison_mode") or "").strip().lower()
+
+    if str(result.get("fallback") or "").strip().lower() == "scaffold_preview" and scaffold_preview is not None:
+        return normalize_persona_text(render_scaffold_offer(scaffold_preview))
 
     def _missing_capability_phrase(capability_key: str | None, label_text: str) -> str:
         key = str(capability_key or "").strip().lower()
@@ -1718,6 +1830,7 @@ def build_capability_gap_response(
             recommendation.get("installed_pack")
             or recommendation.get("recommended_pack")
             or recommendation.get("blocked_pack")
+            or recommendation.get("scaffold_preview")
         )
     )
 

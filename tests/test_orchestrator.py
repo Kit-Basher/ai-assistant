@@ -5166,6 +5166,143 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual([("local", "browser-helper")], discovery.preview_calls)
         self.assertEqual([], install_calls)
 
+    def test_youtube_history_request_offers_scaffold_preview_only(self) -> None:
+        class _FakePackStore:
+            def list_external_packs(self) -> list[dict[str, object]]:
+                return []
+
+            def list_external_pack_removals(self) -> list[dict[str, object]]:
+                return []
+
+        class _FakePackDiscovery:
+            def __init__(self) -> None:
+                self.search_calls: list[tuple[str, str]] = []
+                self.preview_calls: list[tuple[str, str]] = []
+
+            def list_sources(self) -> list[dict[str, object]]:
+                return [{"id": "starter-safe-text", "name": "Starter Safe Text Catalog", "kind": "local_catalog", "enabled": True}]
+
+            def search(self, source_id: str, query: str) -> dict[str, object]:
+                self.search_calls.append((source_id, query))
+                return {"source": {}, "search": {"results": []}, "from_cache": False, "stale": False}
+
+            def preview(self, source_id: str, remote_id: str) -> dict[str, object]:
+                self.preview_calls.append((source_id, remote_id))
+                return {"source": {}, "preview": {}}
+
+        install_calls: list[dict[str, object]] = []
+
+        def _install(payload: dict[str, object]) -> tuple[bool, dict[str, object]]:
+            install_calls.append(dict(payload))
+            return True, {"ok": True}
+
+        discovery = _FakePackDiscovery()
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            pack_install_handler=_install,
+        )
+        orchestrator._pack_store = _FakePackStore()
+        orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
+        before_files = sorted(str(path.relative_to(self.tmpdir.name)) for path in Path(self.tmpdir.name).rglob("*"))
+
+        first = orchestrator.handle_message(
+            "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
+            "user1",
+        )
+        self.assertEqual("action_tool", first.data["route"])
+        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
+        payload = first.data.get("runtime_payload") if isinstance(first.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("scaffold_preview", payload.get("fallback"))
+        self.assertEqual("youtube_history_search", payload.get("capability_required"))
+        self.assertIn("cannot read or search your history today", first.text.lower())
+        self.assertIn("say yes to preview the scaffold", first.text.lower())
+        self.assertNotIn("browser automation planning helper", first.text.lower())
+        self.assertNotIn("i can access your youtube history", first.text.lower())
+        scaffold_preview = payload.get("scaffold_preview")
+        self.assertIsInstance(scaffold_preview, dict)
+        assert isinstance(scaffold_preview, dict)
+        self.assertFalse(scaffold_preview.get("creates_files"))
+        self.assertFalse(scaffold_preview.get("executes_code"))
+
+        second = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_preview"], second.data["used_tools"])
+        second_payload = second.data.get("runtime_payload") if isinstance(second.data.get("runtime_payload"), dict) else {}
+        preview = second_payload.get("scaffold_preview")
+        self.assertIsInstance(preview, dict)
+        assert isinstance(preview, dict)
+        self.assertEqual("YouTube History Search", preview.get("title"))
+        self.assertFalse(second_payload.get("creates_files"))
+        self.assertFalse(second_payload.get("executes_code"))
+        self.assertIn("no files were created", second.text.lower())
+        self.assertIn("no oauth", second.text.lower())
+        self.assertIn("no browser history scraping", second.text.lower())
+        self.assertIn("no transcript fetching", second.text.lower())
+        self.assertEqual([], discovery.preview_calls)
+        self.assertEqual([], install_calls)
+        self.assertEqual(0, len(llm.chat_calls))
+        after_files = sorted(str(path.relative_to(self.tmpdir.name)) for path in Path(self.tmpdir.name).rglob("*"))
+        self.assertEqual(before_files, after_files)
+
+    def test_second_yes_after_scaffold_preview_creates_review_only_candidate(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        storage_root = Path(orchestrator._pack_store.external_storage_root())  # noqa: SLF001
+
+        first = orchestrator.handle_message(
+            "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
+            "user1",
+        )
+        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
+        before_generated = sorted(storage_root.glob("quarantine/generated-*"))
+
+        second = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_preview"], second.data["used_tools"])
+        self.assertIn("no files were created", second.text.lower())
+        self.assertEqual(before_generated, sorted(storage_root.glob("quarantine/generated-*")))
+
+        third = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_create"], third.data["used_tools"])
+        self.assertIn("I created a review-only scaffolded pack candidate", third.text)
+        self.assertIn("not enabled and cannot access your files yet", third.text)
+        self.assertIn("Next step: review/approve/import path.", third.text)
+        payload = third.data.get("runtime_payload") if isinstance(third.data.get("runtime_payload"), dict) else {}
+        self.assertFalse(payload.get("approved"))
+        self.assertFalse(payload.get("enabled"))
+        self.assertFalse(payload.get("executes_code"))
+        self.assertEqual([], payload.get("permissions_granted"))
+        source_result = payload.get("source_result") if isinstance(payload.get("source_result"), dict) else {}
+        source_path = Path(str(source_result.get("source_path") or ""))
+        self.assertTrue(source_path.is_dir())
+        self.assertTrue(source_path.name.startswith("generated-"))
+        self.assertTrue((source_path / "SKILL.md").is_file())
+        self.assertTrue((source_path / "manifest.json").is_file())
+        self.assertTrue((source_path / "metadata.json").is_file())
+        self.assertFalse((source_path / "handler.py").exists())
+        self.assertFalse((source_path / "requirements.txt").exists())
+        pack = payload.get("pack") if isinstance(payload.get("pack"), dict) else {}
+        self.assertIn(str(pack.get("status") or ""), {"normalized", "partial_safe_import"})
+        self.assertIsNone(pack.get("enabled"))
+        normalized_path = Path(str(pack.get("normalized_path") or ""))
+        self.assertTrue(normalized_path.is_dir())
+        normalized_manifest = json.loads((normalized_path / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual([], normalized_manifest["permissions_granted"])
+        combined_source = "\n".join(path.read_text(encoding="utf-8") for path in source_path.iterdir() if path.is_file())
+        self.assertNotIn("neurons differentiating", combined_source)
+        self.assertEqual(0, len(llm.chat_calls))
+
     def test_yes_after_pack_candidate_shows_preview_not_import(self) -> None:
         class _FakePackStore:
             def list_external_packs(self) -> list[dict[str, object]]:
