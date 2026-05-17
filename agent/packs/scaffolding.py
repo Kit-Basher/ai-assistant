@@ -7,6 +7,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from agent.packs.managed_adapters import ADAPTER_LOCAL_FILE_IMPORT, USER_SELECTED_FILE_ONLY
+
 
 _YOUTUBE_HISTORY_CAPABILITIES = {
     "youtube_history_search",
@@ -56,6 +58,17 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
             "purpose": "Capability labels, phase marker, and non-execution safety metadata.",
         },
     ]
+    managed_adapters = [
+        {
+            "kind": ADAPTER_LOCAL_FILE_IMPORT,
+            "purpose": "Import a user-selected Google Takeout YouTube watch-history file.",
+            "allowed_extensions": [".json", ".html"],
+            "max_file_size_mb": 50,
+            "path_policy": USER_SELECTED_FILE_ONLY,
+            "stores_local_index": True,
+            "network_allowed": False,
+        }
+    ]
     proposed_manifest = {
         "schema_version": 1,
         "kind": "skill",
@@ -70,6 +83,7 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
         "creates_files": False,
         "executes_code": False,
         "permissions_granted": [],
+        "managed_adapters": managed_adapters,
     }
     permissions_requested = [
         {
@@ -90,8 +104,8 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
         "Raw history rows, full URLs, account identifiers, and private search terms are excluded from logs and support context by default.",
     ]
     blocked_actions = [
-        "No files are created in Phase 1.",
-        "No packs are installed, approved, enabled, or executed in Phase 1.",
+        "No arbitrary executable pack code is created or run.",
+        "No packs are approved, enabled, or executed by the scaffold flow.",
         "No OAuth or Google account connection in v1.",
         "No browser history scraping in v1.",
         "No transcript fetching or network lookup in v1.",
@@ -110,7 +124,7 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
         "permissions_requested": permissions_requested,
         "privacy_notes": privacy_notes,
         "blocked_actions": blocked_actions,
-        "next_step": "A later create phase would write this candidate into quarantine for normal review; Phase 1 only shows this preview.",
+        "next_step": "After preview, a later confirmation can create a text-only review candidate in quarantine; permission grants remain metadata-only in this phase.",
         "creates_files": False,
         "executes_code": False,
     }
@@ -133,6 +147,7 @@ def create_generated_scaffold_source(preview: dict[str, Any], *, storage_root: s
     source_dir.mkdir(parents=False, exist_ok=False)
 
     manifest = preview.get("proposed_manifest") if isinstance(preview.get("proposed_manifest"), dict) else {}
+    managed_adapters = manifest.get("managed_adapters") if isinstance(manifest.get("managed_adapters"), list) else []
     manifest_payload = {
         **manifest,
         "phase": "generated_review_candidate",
@@ -155,6 +170,7 @@ def create_generated_scaffold_source(preview: dict[str, Any], *, storage_root: s
         "approved": False,
         "enabled": False,
         "permissions_granted": [],
+        "managed_adapters": list(managed_adapters),
         "privacy_notes": list(preview.get("privacy_notes") if isinstance(preview.get("privacy_notes"), list) else []),
         "blocked_actions": list(preview.get("blocked_actions") if isinstance(preview.get("blocked_actions"), list) else []),
         "support_context_policy": "exclude_raw_history_rows_full_urls_account_identifiers_and_private_search_terms",

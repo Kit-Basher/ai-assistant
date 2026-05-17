@@ -3,6 +3,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+from agent.llm.support import sanitize_support_payload
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -39,3 +41,14 @@ def test_support_context_redacts_telegram_urls_and_secret_values() -> None:
         "secretStoreRawValue123456",
     ]:
         assert raw not in redacted
+
+
+def test_support_context_redacts_private_history_import_paths() -> None:
+    raw_path = "/home/c/Takeout/YouTube and YouTube Music/history/watch-history.json"
+    redacted = _load_redactor().redact_text(f"grant path: {raw_path}")
+    assert raw_path not in redacted
+    assert "<redacted-local-history-path>" in redacted
+
+    payload = sanitize_support_payload({"selected_path": raw_path, "kind": "local_file_import"})
+    assert raw_path not in str(payload)
+    assert "<redacted-local-history-path>" in str(payload)

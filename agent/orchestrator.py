@@ -56,6 +56,18 @@ from agent.packs.capability_recommendation import (
     render_pack_capability_response,
 )
 from agent.packs.external_ingestion import ExternalPackIngestor
+from agent.packs.managed_adapters import (
+    ADAPTER_LOCAL_FILE_IMPORT,
+    GRANT_GRANTED,
+    build_permission_request,
+    create_metadata_only_grant,
+    extract_local_path,
+    record_adapter_grant,
+    render_permission_preview,
+    validate_local_file_path_metadata,
+    validate_managed_adapter_declarations,
+    validate_managed_adapter_spec,
+)
 from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
@@ -620,6 +632,7 @@ class Orchestrator:
         self.perception_interval_seconds = max(1, int(perception_interval_seconds))
         self._knowledge_cache = KnowledgeQueryCache()
         self._pending_compare: dict[str, dict[str, str]] = {}
+        self._pending_managed_adapter_requests: dict[str, dict[str, Any]] = {}
         self._last_offer_topic: dict[str, str] = {}
         self._started_at = datetime.now(__import__("datetime").timezone.utc)
         self._epistemic_monitor = EpistemicMonitor(db)
@@ -6621,6 +6634,172 @@ class Orchestrator:
             for key, lines in sections.items()
         }
 
+    @staticmethod
+    def _external_pack_managed_adapters(row: dict[str, Any]) -> list[dict[str, Any]]:
+        canonical_pack = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
+        for source in (
+            canonical_pack.get("managed_adapters"),
+            (canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}).get("managed_adapters"),
+            (canonical_pack.get("permissions") if isinstance(canonical_pack.get("permissions"), dict) else {}).get("managed_adapters"),
+        ):
+            if isinstance(source, list):
+                return [dict(item) for item in source if isinstance(item, dict)]
+        return []
+
+    def _managed_adapter_path_request_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        pending = self._pending_managed_adapter_requests.get(user_id)
+        if not isinstance(pending, dict):
+            return None
+        normalized_text = normalize_setup_text(text).replace("/", " ")
+        requested_path = extract_local_path(text)
+        if not requested_path and normalized_text not in {"use it", "use the pack", "start", "start it", "run it"}:
+            return None
+        adapter_rows = pending.get("managed_adapters") if isinstance(pending.get("managed_adapters"), list) else []
+        adapter_row = next(
+            (row for row in adapter_rows if isinstance(row, dict) and str(row.get("kind") or "").strip().lower() == ADAPTER_LOCAL_FILE_IMPORT),
+            adapter_rows[0] if adapter_rows and isinstance(adapter_rows[0], dict) else None,
+        )
+        if not isinstance(adapter_row, dict):
+            return None
+        ok, errors, adapter = validate_managed_adapter_spec(adapter_row)
+        pack_name = str(pending.get("pack_name") or "This pack").strip()
+        if not ok:
+            message = f"{pack_name} has an invalid managed adapter declaration and needs review before use: {', '.join(errors)}."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission"],
+                payload={"type": "managed_adapter_permission", "ok": False, "errors": errors, "summary": message},
+            )
+        if not requested_path:
+            message = (
+                f"{pack_name} needs permission to import a local Google Takeout history file. "
+                "Give me the local path if you want to grant local-file access."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission"],
+                payload={"type": "managed_adapter_path_request", "summary": message, "pack_name": pack_name},
+            )
+        request = build_permission_request(
+            pack_id=str(pending.get("pack_id") or "").strip(),
+            pack_name=pack_name,
+            adapter=adapter,
+            requested_path=requested_path,
+        )
+        self._queue_managed_adapter_permission_followup(user_id, request=request)
+        message = render_permission_preview(request)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["managed_adapter_permission_preview"],
+            payload={
+                "type": "managed_adapter_permission_preview",
+                "summary": message,
+                "permission_request": request.to_dict(),
+                "reads_file": False,
+                "executes_code": False,
+            },
+        )
+
+    def _queue_managed_adapter_permission_followup(self, user_id: str, *, request: Any) -> None:
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "managed_adapter_permission_grant",
+                "question": "Record this managed adapter grant metadata?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "permission_request": request.to_dict(),
+                },
+            },
+        )
+
+    def _managed_adapter_permission_grant_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        request_payload = context.get("permission_request") if isinstance(context.get("permission_request"), dict) else {}
+        adapter_payload = request_payload.get("adapter") if isinstance(request_payload.get("adapter"), dict) else {}
+        ok, errors, adapter = validate_managed_adapter_spec(adapter_payload)
+        pack_name = str(request_payload.get("pack_name") or "This pack").strip()
+        if not ok:
+            message = f"{pack_name} has an invalid managed adapter declaration and needs review before use: {', '.join(errors)}."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission_grant"],
+                payload={"type": "managed_adapter_permission_grant", "ok": False, "errors": errors, "summary": message},
+            )
+        requested_path = str(request_payload.get("requested_path") or "").strip()
+        path_ok, path_errors, path_metadata = validate_local_file_path_metadata(requested_path, adapter)
+        if not path_ok:
+            message = (
+                f"I did not record the grant because the selected file did not pass metadata validation: {', '.join(path_errors)}. "
+                "I did not read the file."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission_grant"],
+                payload={
+                    "type": "managed_adapter_permission_grant",
+                    "ok": False,
+                    "errors": path_errors,
+                    "path_metadata": path_metadata,
+                    "summary": message,
+                    "reads_file": False,
+                },
+            )
+        request = build_permission_request(
+            pack_id=str(request_payload.get("pack_id") or "").strip(),
+            pack_name=pack_name,
+            adapter=adapter,
+            requested_path=requested_path,
+        )
+        grant = create_metadata_only_grant(request=request, state=GRANT_GRANTED, path_metadata=path_metadata)
+        grant_payload = record_adapter_grant(self._pack_store.external_storage_root(), grant)
+        self._pending_managed_adapter_requests.pop(user_id, None)
+        message = (
+            f"I recorded a metadata-only local-file grant for {pack_name}. "
+            "The pack is still review-only: it is not approved, not enabled, cannot execute code, and I did not read or parse the file."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["managed_adapter_permission_grant"],
+            payload={
+                "type": "managed_adapter_permission_grant",
+                "ok": True,
+                "summary": message,
+                "grant": grant_payload,
+                "approved": False,
+                "enabled": False,
+                "permissions_granted": [],
+                "executes_code": False,
+                "reads_file": False,
+            },
+        )
+
     def _external_pack_knowledge_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         query_tokens = self._external_pack_query_tokens(text)
         if not query_tokens:
@@ -6827,6 +7006,56 @@ class Orchestrator:
             ).strip()
         )
         status = str(row.get("status") or "").strip().lower()
+        managed_adapters = self._external_pack_managed_adapters(row)
+        if status != "blocked" and managed_adapters:
+            ok_adapters, adapter_errors, normalized_adapters = validate_managed_adapter_declarations(managed_adapters)
+            pack_id = str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None
+            if not ok_adapters:
+                message = f"{pack_name} is imported for review, but its managed adapter declaration needs review: {', '.join(adapter_errors)}."
+                return self._runtime_truth_response(
+                    text=message,
+                    route="action_tool",
+                    used_runtime_state=False,
+                    used_memory=bool(self._current_runtime_setup_state(user_id)),
+                    used_tools=["external_pack_lookup", "managed_adapter_permission"],
+                    payload={
+                        "type": "external_pack_managed_adapter_invalid",
+                        "summary": message,
+                        "pack_id": pack_id,
+                        "pack_name": pack_name,
+                        "errors": adapter_errors,
+                    },
+                )
+            self._pending_managed_adapter_requests[user_id] = {
+                "pack_id": pack_id,
+                "pack_name": pack_name,
+                "managed_adapters": normalized_adapters,
+            }
+            requested_path = extract_local_path(text)
+            if requested_path:
+                return self._managed_adapter_path_request_response(user_id, text)
+            message = (
+                f"{pack_name} is imported for review only and cannot access your files yet. "
+                "This pack needs permission to import a local Google Takeout history file. "
+                "Give me the local path if you want to grant local-file access."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["external_pack_lookup", "managed_adapter_permission"],
+                payload={
+                    "type": "external_pack_managed_adapter_permission_needed",
+                    "summary": message,
+                    "pack_id": pack_id,
+                    "pack_name": pack_name,
+                    "managed_adapters": normalized_adapters,
+                    "approved": False,
+                    "enabled": False,
+                    "executes_code": False,
+                },
+            )
         if status == "blocked":
             message = f"{pack_name} is blocked, so I cannot use it through chat."
         else:
@@ -7087,8 +7316,20 @@ class Orchestrator:
                 source_origin="generated_scaffold",
                 created_by="capability_scaffold_create",
             )
+            canonical_pack = normalization_result.pack.to_dict()
+            proposed_manifest = preview.get("proposed_manifest") if isinstance(preview.get("proposed_manifest"), dict) else {}
+            managed_adapters = proposed_manifest.get("managed_adapters") if isinstance(proposed_manifest.get("managed_adapters"), list) else []
+            ok_adapters, adapter_errors, normalized_adapters = validate_managed_adapter_declarations(managed_adapters)
+            if not ok_adapters:
+                raise ValueError("invalid managed adapter declaration: " + ",".join(adapter_errors))
+            if normalized_adapters:
+                canonical_pack["managed_adapters"] = normalized_adapters
+                runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
+                canonical_pack["runtime"] = {**runtime, "managed_adapters": normalized_adapters}
+                permissions = canonical_pack.get("permissions") if isinstance(canonical_pack.get("permissions"), dict) else {}
+                canonical_pack["permissions"] = {**permissions, "managed_adapters": normalized_adapters, "granted": []}
             pack_row = self._pack_store.record_external_pack(
-                canonical_pack=normalization_result.pack.to_dict(),
+                canonical_pack=canonical_pack,
                 classification=normalization_result.classification,
                 status=normalization_result.status,
                 risk_report=normalization_result.risk_report.to_dict(),
@@ -7117,8 +7358,15 @@ class Orchestrator:
             f"I created a review-only scaffolded pack candidate: {pack_name}. "
             "It is not enabled and cannot access your files yet. "
             "It has not been approved, has no granted permissions, and no code was executed. "
-            "Next step: review/approve/import path. Review it before any future use."
+            "Next step: review/approve/import path. If you want to use it later, give me a local Google Takeout history file path to preview a managed local-file permission grant."
         )
+        managed_adapters = self._external_pack_managed_adapters(pack_row)
+        if managed_adapters:
+            self._pending_managed_adapter_requests[user_id] = {
+                "pack_id": str(pack_row.get("pack_id") or pack_row.get("canonical_id") or canonical_pack.get("id") or "").strip(),
+                "pack_name": pack_name,
+                "managed_adapters": managed_adapters,
+            }
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -7140,6 +7388,7 @@ class Orchestrator:
                 "enabled": False,
                 "permissions_granted": [],
                 "executes_code": False,
+                "managed_adapters": managed_adapters,
             },
         )
 
@@ -16742,6 +16991,9 @@ class Orchestrator:
 
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):
+                managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)
+                if managed_adapter_response is not None:
+                    return managed_adapter_response
                 if self._looks_like_agent_pack_install_request(runtime_text) and self._looks_like_email_access_request(runtime_text):
                     return self._agent_pack_install_explanation_response(user_id, runtime_text)
                 if self._looks_like_email_access_request(runtime_text):
@@ -16908,6 +17160,15 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I did not create the scaffold candidate.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "managed_adapter_permission_grant":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._managed_adapter_permission_grant_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not record that managed adapter grant.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_import":
                     if followup_intent in {"accept", "details"}:
                         if pending_id:

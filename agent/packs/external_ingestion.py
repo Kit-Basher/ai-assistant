@@ -976,6 +976,7 @@ class ExternalPackIngestor:
         assets: list[dict[str, Any]],
         capabilities: dict[str, Any],
         permissions_granted: list[str],
+        managed_adapters: list[dict[str, Any]],
         main_sections: list[dict[str, str]],
         example_sections: list[dict[str, str]],
         kept_snapshot_paths: list[str],
@@ -1114,6 +1115,7 @@ class ExternalPackIngestor:
                 "review_required": True,
             },
             "permissions_granted": list(permissions_granted),
+            "managed_adapters": list(managed_adapters or []),
             "contents": {
                 "pack_md": "PACK.md",
                 "skill_md": "SKILL.md",
@@ -1476,6 +1478,11 @@ class ExternalPackIngestor:
         requested_permissions = self._normalize_str_list(
             combined_meta.get("permissions") or combined_meta.get("requested_permissions")
         )
+        managed_adapters = [
+            dict(row)
+            for row in (combined_meta.get("managed_adapters") if isinstance(combined_meta.get("managed_adapters"), list) else [])
+            if isinstance(row, dict)
+        ]
         declared_capabilities = self._normalize_str_list(combined_meta.get("capabilities") or combined_meta.get("tags"))
         inferred_capabilities = ["text_instruction"] if skill_record else []
         normalized_dir = self.normalized_root / f"{pack_id}-{int(time.time() * 1000)}"
@@ -1706,6 +1713,7 @@ class ExternalPackIngestor:
             permissions={
                 "requested": list(requested_permissions),
                 "granted": granted_permissions,
+                "managed_adapters": list(managed_adapters),
             },
             components=tuple(components),
             assets=tuple(assets),
@@ -1715,6 +1723,7 @@ class ExternalPackIngestor:
                 "isolation": "quarantined_text_only",
                 "requires_process": False,
                 "requires_gpu": False,
+                "managed_adapters": list(managed_adapters),
             },
             adaptation={
                 "strategy": adaptation_strategy,
@@ -1758,6 +1767,7 @@ class ExternalPackIngestor:
                 "summary": description,
             },
             permissions_granted=granted_permissions,
+            managed_adapters=list(managed_adapters),
             main_sections=list(source_docs["main_sections"]),
             example_sections=list(source_docs["example_sections"]),
             kept_snapshot_paths=list(source_docs["kept_snapshot_paths"]),

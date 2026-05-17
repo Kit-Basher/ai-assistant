@@ -27,6 +27,10 @@ runtime. These limits are deliberate.
   capabilities yet; the current scaffold starts from a future user-selected
   local Google Takeout import and explicitly defers OAuth, browser scraping,
   transcript fetching, network lookup, and video/audio downloads
+- generated packs may request managed adapters, but those adapters are core
+  runtime contracts rather than generated code; `local_file_import` currently
+  records a confirmed grant and validates path metadata only, without reading
+  or indexing file contents
 - release and recovery diagnostics are deterministic, but they are not a full
   observability stack
 

@@ -5299,9 +5299,36 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(normalized_path.is_dir())
         normalized_manifest = json.loads((normalized_path / "manifest.json").read_text(encoding="utf-8"))
         self.assertEqual([], normalized_manifest["permissions_granted"])
+        canonical_pack = pack.get("canonical_pack") if isinstance(pack.get("canonical_pack"), dict) else {}
+        adapters = canonical_pack.get("managed_adapters") if isinstance(canonical_pack.get("managed_adapters"), list) else []
+        self.assertEqual("local_file_import", adapters[0]["kind"])
+        self.assertFalse(adapters[0]["network_allowed"])
         combined_source = "\n".join(path.read_text(encoding="utf-8") for path in source_path.iterdir() if path.is_file())
         self.assertNotIn("neurons differentiating", combined_source)
         self.assertEqual(0, len(llm.chat_calls))
+
+        use_response = orchestrator.handle_message("use it", "user1")
+        self.assertEqual(["managed_adapter_permission"], use_response.data["used_tools"])
+        self.assertIn("needs permission to import a local Google Takeout history file", use_response.text)
+
+        selected_path = storage_root / "watch-history.json"
+        selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
+        with patch("pathlib.Path.read_text", side_effect=AssertionError("permission preview should not read files")):
+            path_response = orchestrator.handle_message(f"use {selected_path}", "user1")
+        self.assertEqual(["managed_adapter_permission_preview"], path_response.data["used_tools"])
+        self.assertIn("<redacted-local-history-path>/watch-history.json", path_response.text)
+        self.assertIn("I will not read or parse the file", path_response.text)
+
+        grant_response = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["managed_adapter_permission_grant"], grant_response.data["used_tools"])
+        self.assertIn("metadata-only local-file grant", grant_response.text)
+        grant_payload = grant_response.data.get("runtime_payload") if isinstance(grant_response.data.get("runtime_payload"), dict) else {}
+        self.assertFalse(grant_payload.get("approved"))
+        self.assertFalse(grant_payload.get("enabled"))
+        self.assertEqual([], grant_payload.get("permissions_granted"))
+        self.assertFalse(grant_payload.get("executes_code"))
+        self.assertFalse(grant_payload.get("reads_file"))
+        self.assertNotIn("history contents", str(grant_payload))
 
     def test_yes_after_pack_candidate_shows_preview_not_import(self) -> None:
         class _FakePackStore:

@@ -28,6 +28,13 @@ class TestPackScaffolding(unittest.TestCase):
         assert isinstance(manifest, dict)
         self.assertEqual([], manifest.get("permissions_granted"))
         self.assertIn("google_takeout_import", manifest.get("capabilities"))
+        adapters = manifest.get("managed_adapters")
+        self.assertIsInstance(adapters, list)
+        assert isinstance(adapters, list)
+        self.assertEqual("local_file_import", adapters[0].get("kind"))
+        self.assertEqual([".json", ".html"], adapters[0].get("allowed_extensions"))
+        self.assertEqual("user_selected_file_only", adapters[0].get("path_policy"))
+        self.assertFalse(adapters[0].get("network_allowed"))
         blocked = " ".join(str(item) for item in preview.get("blocked_actions", []))
         self.assertIn("No OAuth", blocked)
         self.assertIn("No browser history scraping", blocked)
@@ -64,6 +71,7 @@ class TestPackScaffolding(unittest.TestCase):
             self.assertNotIn("neurons differentiating", combined)
             metadata = json.loads((source_path / "metadata.json").read_text(encoding="utf-8"))
             self.assertEqual("exclude_raw_history_rows_full_urls_account_identifiers_and_private_search_terms", metadata["support_context_policy"])
+            self.assertEqual("local_file_import", metadata["managed_adapters"][0]["kind"])
 
             ingestor = ExternalPackIngestor(tmpdir)
             normalized, _review = ingestor.ingest_from_path(str(source_path), source_origin="generated_scaffold")
@@ -71,6 +79,7 @@ class TestPackScaffolding(unittest.TestCase):
             normalized_root = Path(str(normalized.normalized_path))
             manifest = json.loads((normalized_root / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual([], manifest["permissions_granted"])
+            self.assertEqual("local_file_import", manifest["managed_adapters"][0]["kind"])
 
     def test_generated_scaffold_with_executable_file_is_stripped_by_ingestion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
