@@ -20,6 +20,7 @@ _SECRET_KEY_HINTS = {
 }
 _URL_FIELD_HINTS = {"base_url", "url", "endpoint"}
 _REDACTED_VALUE = "[REDACTED]"
+_PRIVATE_HISTORY_PATH_RE = re.compile(r"(?:~|/).{0,180}(?:watch-history|youtube-history|history).{0,80}\.(?:json|html)", re.IGNORECASE)
 
 _PROVIDER_CAUSE_ORDER = {
     "provider_not_found": 0,
@@ -233,7 +234,7 @@ def _sanitize_string(value: str, *, key_hint: str = "") -> str:
     lowered = cleaned.lower()
     if "secrets.enc" in lowered or "secret_store" in lowered:
         return _REDACTED_VALUE
-    return cleaned
+    return _PRIVATE_HISTORY_PATH_RE.sub("<redacted-local-history-path>", cleaned)
 
 
 def sanitize_support_payload(value: Any, *, key_hint: str = "") -> Any:

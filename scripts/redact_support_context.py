@@ -13,6 +13,7 @@ _OPENROUTER_KEY_RE = re.compile(r"\bsk-or(?:-v1)?-[A-Za-z0-9_-]{16,}\b")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
 _BEARER_RE = re.compile(r"(?i)(authorization\s*:\s*bearer\s+)[A-Za-z0-9._~+/=-]+")
 _SECRET_STORE_VALUE_RE = re.compile(r"(?i)(secret[-_ ]store(?: value)?\s*[:=]\s*)[^\s,}]+")
+_PRIVATE_HISTORY_PATH_RE = re.compile(r"(?i)(?:~|/).{0,180}(?:watch-history|youtube-history|history).{0,80}\.(?:json|html)")
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"""(?ix)
     (?P<prefix>
@@ -44,6 +45,7 @@ def redact_text(text: str) -> str:
     redacted = _OPENROUTER_KEY_RE.sub("<redacted>", redacted)
     redacted = _OPENAI_KEY_RE.sub("<redacted>", redacted)
     redacted = _TELEGRAM_TOKEN_RE.sub("<redacted>", redacted)
+    redacted = _PRIVATE_HISTORY_PATH_RE.sub("<redacted-local-history-path>", redacted)
     return redacted
 
 
