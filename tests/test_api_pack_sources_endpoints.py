@@ -314,7 +314,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual("action_tool", meta.get("route"))
         message = str(payload.get("message") or payload.get("text") or "")
         self.assertIn("QR Code Creation Guidance", message)
-        self.assertIn("searched the approved starter skill sources", message)
+        self.assertIn("searched the approved starter catalog sources", message)
         self.assertIn("Say yes to preview it.", message)
         self.assertNotIn("lighter option", message.lower())
         self.assertNotIn("fetch and inspect", message.lower())

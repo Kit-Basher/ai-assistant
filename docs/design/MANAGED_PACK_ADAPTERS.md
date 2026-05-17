@@ -4,6 +4,8 @@ Status: current implemented direction for external/generated pack safety.
 
 Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/product/PROJECT_INTENT.md).
 
+Lifecycle source of truth: [`docs/design/PACK_LIFECYCLE.md`](/home/c/personal-agent/docs/design/PACK_LIFECYCLE.md).
+
 External and generated skill packs do not run arbitrary code. Generated packs remain text-only review artifacts unless the core runtime implements and gates a managed adapter.
 
 ## External Pack Lifecycle Contract

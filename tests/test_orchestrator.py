@@ -4723,7 +4723,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("install_preview", payload.get("fallback"))
         self.assertTrue(any(row.get("remote_id") == "qr-code-guidance" for row in candidates if isinstance(row, dict)))
         self.assertIn("QR Code Creation Guidance", response.text)
-        self.assertIn("searched the approved starter skill sources", response.text)
+        self.assertIn("searched the approved starter catalog sources", response.text)
         self.assertIn("show you the preview first", response.text)
         self.assertIn("Say yes to preview it.", response.text)
         self.assertNotIn("coding helper", response.text.lower())
@@ -5219,6 +5219,11 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
         payload = first.data.get("runtime_payload") if isinstance(first.data.get("runtime_payload"), dict) else {}
         self.assertEqual("scaffold_preview", payload.get("fallback"))
+        lifecycle = payload.get("recommendation", {}).get("lifecycle") if isinstance(payload.get("recommendation"), dict) else {}
+        self.assertIsInstance(lifecycle, dict)
+        assert isinstance(lifecycle, dict)
+        self.assertEqual("missing", lifecycle.get("state"))
+        self.assertEqual("scaffold_preview", (lifecycle.get("next_step") or {}).get("action"))
         self.assertEqual("youtube_history_search", payload.get("capability_required"))
         self.assertIn("cannot read or search your history today", first.text.lower())
         self.assertIn("say yes to preview the scaffold", first.text.lower())
@@ -5283,6 +5288,10 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(payload.get("enabled"))
         self.assertFalse(payload.get("executes_code"))
         self.assertEqual([], payload.get("permissions_granted"))
+        lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+        self.assertEqual("imported_for_review", lifecycle.get("state"))
+        self.assertFalse(lifecycle.get("usable"))
+        self.assertEqual("approval", lifecycle.get("missing_gate"))
         source_result = payload.get("source_result") if isinstance(payload.get("source_result"), dict) else {}
         source_path = Path(str(source_result.get("source_path") or ""))
         self.assertTrue(source_path.is_dir())

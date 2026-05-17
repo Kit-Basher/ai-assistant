@@ -62,12 +62,14 @@ from agent.packs.managed_adapters import (
     build_permission_request,
     create_metadata_only_grant,
     extract_local_path,
+    list_adapter_grants,
     record_adapter_grant,
     render_permission_preview,
     validate_local_file_path_metadata,
     validate_managed_adapter_declarations,
     validate_managed_adapter_spec,
 )
+from agent.packs.lifecycle import PackLifecycleService, render_lifecycle_response
 from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
@@ -7007,6 +7009,16 @@ class Orchestrator:
         )
         status = str(row.get("status") or "").strip().lower()
         managed_adapters = self._external_pack_managed_adapters(row)
+        try:
+            permission_grants = list_adapter_grants(self._pack_store.external_storage_root())
+        except Exception:
+            permission_grants = []
+        lifecycle = PackLifecycleService().evaluate(
+            capability=None,
+            imported_pack=row,
+            permission_grants=permission_grants,
+        )
+        lifecycle_payload = lifecycle.to_dict()
         if status != "blocked" and managed_adapters:
             ok_adapters, adapter_errors, normalized_adapters = validate_managed_adapter_declarations(managed_adapters)
             pack_id = str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None
@@ -7024,6 +7036,7 @@ class Orchestrator:
                         "pack_id": pack_id,
                         "pack_name": pack_name,
                         "errors": adapter_errors,
+                        "lifecycle": lifecycle_payload,
                     },
                 )
             self._pending_managed_adapter_requests[user_id] = {
@@ -7051,15 +7064,16 @@ class Orchestrator:
                     "pack_id": pack_id,
                     "pack_name": pack_name,
                     "managed_adapters": normalized_adapters,
-                    "approved": False,
-                    "enabled": False,
-                    "executes_code": False,
-                },
-            )
+                        "approved": False,
+                        "enabled": False,
+                        "executes_code": False,
+                        "lifecycle": lifecycle_payload,
+                    },
+                )
         if status == "blocked":
             message = f"{pack_name} is blocked, so I cannot use it through chat."
         else:
-            message = f"{pack_name} is available as an imported pack. I won’t repeat the pack text here."
+            message = render_lifecycle_response(lifecycle)
             if status == "partial_safe_import":
                 message = f"{message} Some unsafe files were stripped during import."
         return self._runtime_truth_response(
@@ -7074,6 +7088,7 @@ class Orchestrator:
                 "pack_id": str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None,
                 "pack_name": pack_name,
                 "status": status or None,
+                "lifecycle": lifecycle_payload,
             },
         )
 
@@ -7154,11 +7169,13 @@ class Orchestrator:
         proposal_summary = str(payload.get("proposal_summary") or "").strip()
         capability_label = str(payload.get("capability_label") or "").strip()
         if proposal_summary:
-            message = f"I can sketch a {helper_phrase} that {proposal_summary}. What should it read from first?"
+            message = f"I can sketch a {helper_phrase} scaffold plan that {proposal_summary}. What should it read from first?"
         elif capability_label:
-            message = f"I can sketch a {helper_phrase} for {capability_label}. What should it read from first?"
+            message = f"I can sketch a {helper_phrase} scaffold plan for {capability_label}. What should it read from first?"
         else:
-            message = f"I can sketch a {helper_phrase}. What should it read from first?"
+            message = f"I can sketch a {helper_phrase} scaffold plan. What should it read from first?"
+        message = f"{message} It would still need preview, quarantine, review, approval, enablement, and any required permissions before use."
+        lifecycle = PackLifecycleService().evaluate(capability=str(payload.get("capability_required") or "").strip() or None).to_dict()
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -7170,6 +7187,7 @@ class Orchestrator:
                 "summary": message,
                 "fallback": "propose_new_capability",
                 "next_step": message,
+                "lifecycle": lifecycle,
                 "helper_name": helper_name,
                 "proposal_summary": proposal_summary or None,
                 "capability_label": capability_label or None,
@@ -7255,6 +7273,11 @@ class Orchestrator:
         context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
         preview = context.get("scaffold_preview") if isinstance(context.get("scaffold_preview"), dict) else {}
         message = render_scaffold_preview(preview)
+        lifecycle = PackLifecycleService().evaluate(
+            capability=str(preview.get("capability") or "").strip() or None,
+            scaffold_preview=preview,
+            scaffold_preview_shown=True,
+        ).to_dict()
         if preview:
             pending_id = str(uuid.uuid4())
             now_epoch = int(time.time())
@@ -7286,6 +7309,7 @@ class Orchestrator:
                 "ok": bool(preview),
                 "summary": message,
                 "scaffold_preview": preview,
+                "lifecycle": lifecycle,
                 "creates_files": False,
                 "executes_code": False,
                 "installed": False,
@@ -7361,6 +7385,15 @@ class Orchestrator:
             "Next step: review/approve/import path. If you want to use it later, give me a local Google Takeout history file path to preview a managed local-file permission grant."
         )
         managed_adapters = self._external_pack_managed_adapters(pack_row)
+        try:
+            permission_grants = list_adapter_grants(self._pack_store.external_storage_root())
+        except Exception:
+            permission_grants = []
+        lifecycle = PackLifecycleService().evaluate(
+            capability=str(preview.get("capability") or "").strip() or None,
+            imported_pack=pack_row,
+            permission_grants=permission_grants,
+        ).to_dict()
         if managed_adapters:
             self._pending_managed_adapter_requests[user_id] = {
                 "pack_id": str(pack_row.get("pack_id") or pack_row.get("canonical_id") or canonical_pack.get("id") or "").strip(),
@@ -7389,6 +7422,7 @@ class Orchestrator:
                 "permissions_granted": [],
                 "executes_code": False,
                 "managed_adapters": managed_adapters,
+                "lifecycle": lifecycle,
             },
         )
 
@@ -7465,6 +7499,7 @@ class Orchestrator:
             )
         preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
         listing = preview.get("listing") if isinstance(preview.get("listing"), dict) else {}
+        lifecycle = PackLifecycleService().evaluate(catalog_preview=preview if preview else listing).to_dict()
         pack_name = str(listing.get("name") or context.get("pack_name") or "That pack").strip() or "That pack"
         artifact_type = str(preview.get("artifact_type_hint") or listing.get("artifact_type_hint") or "").strip().lower()
         summary = str(preview.get("summary") or listing.get("summary") or "").strip()
@@ -7514,6 +7549,7 @@ class Orchestrator:
                 "source_id": source_id,
                 "remote_id": remote_id,
                 "preview": preview,
+                "lifecycle": lifecycle,
                 "import_offered": import_offer,
             },
         )
@@ -7576,6 +7612,7 @@ class Orchestrator:
             )
         pack = body.get("pack") if isinstance(body.get("pack"), dict) else {}
         pack_name = str(pack.get("name") or context.get("pack_name") or "That pack").strip() or "That pack"
+        lifecycle = PackLifecycleService().evaluate(imported_pack=pack).to_dict() if pack else None
         message = (
             f"Imported {pack_name} for review. It is not enabled, not approved, has no granted permissions, "
             "and has not been executed."
@@ -7586,7 +7623,7 @@ class Orchestrator:
             used_runtime_state=False,
             used_memory=bool(self._current_runtime_setup_state(user_id)),
             used_tools=["capability_gap_import"],
-            payload={"type": "capability_gap_import", "ok": True, "summary": message, "install_result": body},
+            payload={"type": "capability_gap_import", "ok": True, "summary": message, "install_result": body, "lifecycle": lifecycle},
         )
 
     @staticmethod

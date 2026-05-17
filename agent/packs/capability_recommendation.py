@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from agent.persona import normalize_persona_text
+from agent.packs.lifecycle import PackLifecycleService
 from agent.packs.scaffolding import build_scaffold_preview, render_scaffold_offer
 from agent.packs.state_truth import normalize_available_pack_truth, normalize_installed_pack_truth
 
@@ -1388,6 +1389,31 @@ def recommend_packs_for_capability(
     if installed_top is None and recommended_top is None and blocked_top is None:
         scaffold_preview = build_scaffold_preview(capability_key, user_goal=text)
 
+    lifecycle_service = PackLifecycleService()
+    lifecycle_result = None
+    if installed_top is not None and isinstance(installed_top.get("row"), dict):
+        lifecycle_result = lifecycle_service.evaluate(capability=capability_key, installed_pack=installed_top["row"])
+    elif recommended_top is not None and isinstance(recommended_top.get("listing"), dict):
+        lifecycle_result = lifecycle_service.evaluate(capability=capability_key, catalog_pack=recommended_top["listing"])
+    elif scaffold_preview is not None:
+        lifecycle_result = lifecycle_service.evaluate(capability=capability_key, scaffold_preview=scaffold_preview)
+    elif blocked_top is not None and isinstance(blocked_top.get("listing"), dict):
+        lifecycle_result = lifecycle_service.evaluate(capability=capability_key, catalog_pack=blocked_top["listing"])
+    else:
+        lifecycle_result = lifecycle_service.evaluate(capability=capability_key)
+    lifecycle = lifecycle_result.to_dict()
+    if installed_pack is not None:
+        installed_pack["lifecycle"] = lifecycle
+        installed_pack["lifecycle_state"] = lifecycle.get("state")
+    if recommendation_pack is not None:
+        recommendation_pack["lifecycle"] = lifecycle
+        recommendation_pack["lifecycle_state"] = lifecycle.get("state")
+    if blocked_pack is not None:
+        blocked_pack["lifecycle"] = lifecycle
+        blocked_pack["lifecycle_state"] = lifecycle.get("state")
+    if scaffold_preview is not None:
+        scaffold_preview["lifecycle"] = lifecycle
+
     if recommendation_pack is not None:
         fallback = "install_preview"
         next_step = "If you want, say yes and I'll show the pack preview."
@@ -1436,6 +1462,8 @@ def recommend_packs_for_capability(
         "comparison_mode": comparison_mode,
         "fallback": fallback,
         "next_step": next_step,
+        "lifecycle": lifecycle,
+        "lifecycle_state": lifecycle.get("state"),
         "proposal_summary": _proposal_summary_for_capability(capability_key, label) if fallback == "propose_new_capability" else None,
         "helper_name": _helper_name_for_capability(capability_key, label) if fallback == "propose_new_capability" else None,
         "warnings": list(source_errors),
@@ -1636,7 +1664,7 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
         source_id = str(pack.get("source_id") or "").strip().lower()
         source_name = str(pack.get("source_name") or "").strip().lower()
         if "starter" in source_id or "starter" in source_name:
-            return "approved starter skill sources"
+            return "approved starter catalog sources"
         return "approved pack sources"
 
     def _candidate_pack_kind(pack: dict[str, Any]) -> str:
@@ -1781,7 +1809,7 @@ def render_pack_capability_response(result: dict[str, Any] | None) -> str:
             lines.append(f"The simplest way to add it would be a small helper that {proposal_summary}.")
         else:
             lines.append("The simplest way to add it would be a small helper for this task.")
-        lines.append("If you want, I can sketch that with you.")
+        lines.append("If you want, I can sketch that with you as a scaffold plan; it would still need preview, quarantine, review, approval, enablement, and any required permissions before use.")
     else:
         fallback = str(result.get("fallback") or "").strip().lower()
         if fallback == "text_only":
@@ -1860,6 +1888,8 @@ def build_capability_gap_response(
             "confidence": float(assessment.get("confidence") or 0.0),
             "fallback": str(recommendation.get("fallback") or "install_preview").strip() or "install_preview",
             "next_step": str(recommendation.get("next_step") or "").strip() or None,
+            "lifecycle": recommendation.get("lifecycle"),
+            "lifecycle_state": recommendation.get("lifecycle_state"),
             "recommendation": recommendation,
             "source_errors": source_errors,
             "proposal_summary": proposal_summary,
@@ -1879,6 +1909,7 @@ def build_capability_gap_response(
         "helper_name": helper_name or _helper_name_for_capability(capability, label),
         "source_errors": source_errors,
         "next_step": "If you want, I can help sketch it.",
+        "lifecycle": PackLifecycleService().evaluate(capability=capability).to_dict(),
         "warnings": source_errors,
         "queries": [],
     }
@@ -1903,6 +1934,8 @@ def build_capability_gap_response(
         "confidence": proposal_result["confidence"],
         "fallback": proposal_result["fallback"],
         "next_step": proposal_result["next_step"],
+        "lifecycle": proposal_result["lifecycle"],
+        "lifecycle_state": proposal_result["lifecycle"]["state"],
         "recommendation": None,
         "source_errors": source_errors,
         "proposal_summary": proposal_result["proposal_summary"],

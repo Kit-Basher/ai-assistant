@@ -517,8 +517,9 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         orchestrator.llm_client = fake_llm
         with mock.patch.object(orchestrator, "_llm_chat_available", return_value=True):
             response = orchestrator.handle_message("What is Repo Helper for?", "user-a")
-        self.assertIn("available as an imported pack", response.text.lower())
-        self.assertIn("repo helper", response.text.lower())
+        self.assertIn("imported for review only", response.text.lower())
+        self.assertIn("not approved", response.text.lower())
+        self.assertIn("repo-helper", response.text.lower())
         self.assertNotIn("safe imported text pack", response.text.lower())
         self.assertNotIn("example prompts:", response.text.lower())
         self.assertNotIn("inputs:", response.text.lower())
