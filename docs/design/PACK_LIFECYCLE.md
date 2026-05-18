@@ -35,6 +35,8 @@ Remote external pack sources are hostile by default. GitHub repositories, GitHub
 
 Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is treated as untrusted metadata. Archive fetches land in quarantine only, and extraction blocks traversal, symlinks, special files, hidden files, nested archives, executable bits, duplicate paths, oversized files, excessive member counts, excessive expansion, and unsafe post-write containment before normalization/scanning can proceed.
 
+Imported pack documents are untrusted guidance, never assistant authority. Normalized imported `SKILL.md` and prompt material are wrapped with an internal warning that runtime/system policy wins over pack text. Strong prompt-injection patterns in primary instruction files, including requests to ignore system/developer instructions, leak secrets, auto-approve/auto-enable, run shell or dependency installs, or disable safety gates, block the import and require manual rewrite/review.
+
 The assistant must not say an external pack can perform a task until `PackLifecycleService` returns `usable=true`. Before that, responses must name the missing gate and the next safe step: preview, create review candidate, inspect, approve, configure, request permission, enable, or use.
 
 Generated and external packs must not run arbitrary generated code. Managed adapters are the safety boundary for useful external behavior.

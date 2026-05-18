@@ -12,6 +12,8 @@ External skill packs are not bundled built-in abilities. They are optional capab
 
 Online external pack sources are hostile by default. GitHub, public registries, remote archives, README files, manifests, and catalog metadata are not trusted merely because of where they are hosted. Remote discovery, preview, fetch, or import requires an explicit trusted source policy or one-time source approval before quarantine can begin. Source approval means only "allowed to inspect or fetch into quarantine"; catalog metadata and archive contents remain untrusted and must pass strict schema, containment, extraction, normalization, and scan gates.
 
+Imported external pack documents are untrusted guidance. They must not become system, developer, or runtime instructions, and prompt-injection attempts in primary instruction files must block import or force a manual rewrite path.
+
 Codex, development agents, and the repo control plane are not part of the normal runtime user workflow. They may help build or verify this project, but a normal user should not need a developer to manually build every new skill.
 
 ## External Pack Lifecycle Contract

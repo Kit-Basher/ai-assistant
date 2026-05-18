@@ -14,6 +14,8 @@ External packs are not bundled active abilities. Starter catalogs are discoverab
 
 Trusted source policy only allows discovery or quarantine fetch. Catalog entries remain untrusted text and archives remain hostile bytes until strict schema validation, local path containment, archive extraction hardening, normalization, static scan, review, approval, configuration, permission, and enablement gates pass.
 
+Imported `SKILL.md`, README, and reference files are guidance only. They are wrapped as untrusted imported guidance during normalization, and prompt-injection language that tries to override policy, leak secrets, self-approve, install dependencies, execute shell commands, or disable safety checks blocks the pack or forces manual rewrite.
+
 Missing capability flow must not dead-end. The assistant should tell the user what is missing and the next safe step: preview a discovered pack, preview a scaffold, create a review-only candidate, or explain why the capability is blocked.
 
 The intended lifecycle is discover -> preview -> scaffold/create -> quarantine -> inspect -> approve -> configure -> permission -> enable -> use. A pack is usable only after the relevant approval, enablement, configuration, and permission gates are complete.

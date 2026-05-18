@@ -21,6 +21,15 @@ _SECRET_KEY_HINTS = {
 _URL_FIELD_HINTS = {"base_url", "url", "endpoint"}
 _REDACTED_VALUE = "[REDACTED]"
 _PRIVATE_HISTORY_PATH_RE = re.compile(r"(?:~|/).{0,180}(?:watch-history|youtube-history|history).{0,80}\.(?:json|html)", re.IGNORECASE)
+_IMPORTED_PACK_TEXT_KEYS = {
+    "skill_text",
+    "skill_md",
+    "readme",
+    "readme_md",
+    "imported_guidance",
+    "imported_pack_guidance",
+    "source_skill_text",
+}
 
 _PROVIDER_CAUSE_ORDER = {
     "provider_not_found": 0,
@@ -228,6 +237,8 @@ def _sanitize_string(value: str, *, key_hint: str = "") -> str:
     if _looks_secret_key(key_hint):
         return _REDACTED_VALUE
     hint = str(key_hint or "").strip().lower()
+    if hint in _IMPORTED_PACK_TEXT_KEYS:
+        return "[REDACTED_IMPORTED_PACK_TEXT]"
     if hint in _URL_FIELD_HINTS or hint.endswith("_url"):
         return _sanitize_url(value)
     cleaned = sanitize_notification_text(value)
