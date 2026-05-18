@@ -5339,6 +5339,43 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(grant_payload.get("reads_file"))
         self.assertNotIn("history contents", str(grant_payload))
 
+    def test_generated_scaffold_yes_continues_one_lifecycle_gate_at_a_time(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+
+        orchestrator.handle_message(
+            "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
+            "user1",
+        )
+        preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_preview"], preview.data["used_tools"])
+        created = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_scaffold_create"], created.data["used_tools"])
+        created_payload = created.data.get("runtime_payload") if isinstance(created.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("imported_for_review", (created_payload.get("lifecycle") or {}).get("state"))
+
+        approved = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
+        approved_payload = approved.data.get("runtime_payload") if isinstance(approved.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("review_approve", approved_payload.get("action"))
+        self.assertEqual("approved", (approved_payload.get("lifecycle") or {}).get("state"))
+        self.assertIn("not usable until enablement", approved.text.lower())
+
+        enabled = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
+        enabled_payload = enabled.data.get("runtime_payload") if isinstance(enabled.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("enable", enabled_payload.get("action"))
+        self.assertEqual("needs_permission", (enabled_payload.get("lifecycle") or {}).get("state"))
+        self.assertFalse((enabled_payload.get("lifecycle") or {}).get("usable"))
+        self.assertIn("permission", enabled.text.lower())
+
     def test_yes_after_pack_candidate_shows_preview_not_import(self) -> None:
         class _FakePackStore:
             def list_external_packs(self) -> list[dict[str, object]]:

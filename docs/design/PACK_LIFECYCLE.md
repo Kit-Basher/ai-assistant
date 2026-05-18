@@ -6,6 +6,8 @@ Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/p
 
 `agent/packs/lifecycle.py` is the runtime source of truth for whether an external or generated pack can be used. It does not create files, install packs, approve packs, enable packs, grant permissions, execute code, or fetch data. It only evaluates observed facts and returns the current state, missing gate, and next safe assistant step.
 
+`agent/packs/lifecycle_actions.py` performs gated lifecycle continuations. It accepts a `PackLifecycleResult`, validates that the requested action matches the current state, and then calls an existing safe handler for exactly one transition. It refuses mismatched states, blocked/removed packs, missing handlers, and attempts to skip directly across review, enablement, configuration, or permission gates.
+
 ## Lifecycle States
 
 - `missing`: no installed, discovered, or scaffold candidate is currently usable.
@@ -47,3 +49,19 @@ Generated and external packs must not run arbitrary generated code. Managed adap
 - `disabled` or `removed`: re-enable only through the approved lifecycle, or discover/import again.
 
 No missing capability should dead-end at “I can sketch a helper” without a lifecycle action.
+
+## Action Continuation
+
+Each confirmation advances at most one gate:
+
+- `discovered` + `preview`: show catalog preview only.
+- `previewed` + `import_for_review`: import into quarantine/review only.
+- `scaffold_previewed` + `create_review_candidate`: create a generated text-only candidate only.
+- `imported_for_review` + `review_approve`: record approval only.
+- `approved` + `enable`: enable only; configuration and permission may still be required.
+- `needs_configuration` + `request_configuration`: ask for missing configuration.
+- `needs_permission` + `request_permission`: show permission requirements or path request.
+- permission preview + confirmation: record metadata-only grant.
+- `usable` + `use_if_usable`: use only through the approved managed adapter/runtime path.
+
+The action controller does not add arbitrary external code execution, OAuth, browser scraping, transcript fetching, network fetching, or private file reads. Local-file permission remains metadata-only until a later explicitly scoped adapter implementation reads or indexes content.

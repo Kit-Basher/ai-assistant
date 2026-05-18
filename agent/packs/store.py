@@ -1176,6 +1176,33 @@ class PackStore:
         self._write_with_retry(_write)
         return self.get_external_pack(canonical_id)
 
+    def set_external_pack_enabled(self, canonical_id: str, *, enabled: bool) -> dict[str, Any] | None:
+        current = self.get_external_pack(canonical_id)
+        if current is None:
+            return None
+        canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
+        runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
+        canonical_pack["runtime"] = {**runtime, "enabled": bool(enabled)}
+
+        def _write() -> None:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    UPDATE external_packs
+                    SET canonical_json = ?, updated_at = ?
+                    WHERE pack_id = ?
+                    """,
+                    (
+                        json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        self._now_ts(),
+                        canonical_id,
+                    ),
+                )
+                self._conn.commit()
+
+        self._write_with_retry(_write)
+        return self.get_external_pack(canonical_id)
+
     def external_storage_root(self) -> str:
         parent = Path(self.db_path).expanduser().resolve().parent
         return str((parent / "external_packs").resolve())
