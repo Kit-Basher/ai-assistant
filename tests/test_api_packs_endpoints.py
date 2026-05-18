@@ -151,6 +151,29 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
+    def _trust_remote_source(self, source_id: str = "trusted-remote") -> str:
+        storage_root = self.runtime.pack_store.external_storage_root()
+        os.makedirs(storage_root, exist_ok=True)
+        with open(os.path.join(storage_root, "registry_sources.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "sources": [
+                        {
+                            "id": source_id,
+                            "kind": "generic_registry_api",
+                            "name": "Trusted Remote Source",
+                            "base_url": "https://example.com/catalog.json",
+                            "enabled": True,
+                        }
+                    ]
+                },
+                handle,
+                ensure_ascii=True,
+            )
+        with open(os.path.join(storage_root, "registry_source_policy.json"), "w", encoding="utf-8") as handle:
+            json.dump({"overrides": [{"source_id": source_id, "allowlisted": True}]}, handle, ensure_ascii=True)
+        return source_id
+
     def test_install_and_list_portable_text_pack_endpoints(self) -> None:
         pack_dir = os.path.join(self.tmpdir.name, "pack_one")
         os.makedirs(pack_dir, exist_ok=True)
@@ -236,6 +259,26 @@ class TestAPIPacksEndpoints(unittest.TestCase):
             }
         )
         remote_url = "https://github.com/example/repo/archive/main.zip"
+        storage_root = self.runtime.pack_store.external_storage_root()
+        os.makedirs(storage_root, exist_ok=True)
+        with open(os.path.join(storage_root, "registry_sources.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "sources": [
+                        {
+                            "id": "trusted-github",
+                            "kind": "generic_registry_api",
+                            "name": "Trusted GitHub Source",
+                            "base_url": "https://example.com/catalog.json",
+                            "enabled": True,
+                        }
+                    ]
+                },
+                handle,
+                ensure_ascii=True,
+            )
+        with open(os.path.join(storage_root, "registry_source_policy.json"), "w", encoding="utf-8") as handle:
+            json.dump({"overrides": [{"source_id": "trusted-github", "allowlisted": True}]}, handle, ensure_ascii=True)
         fake_fetcher = RemotePackFetcher(
             self.runtime.pack_store.external_storage_root(),
             opener=_FakeOpener({remote_url: _FakeResponse(archive, url=remote_url)}),
@@ -244,7 +287,7 @@ class TestAPIPacksEndpoints(unittest.TestCase):
             install_handler = _HandlerForTest(
                 self.runtime,
                 "/packs/install",
-                {"source": remote_url, "source_kind": "github_archive", "ref": "main"},
+                {"source": remote_url, "source_kind": "github_archive", "ref": "main", "source_id": "trusted-github"},
             )
             install_handler.do_POST()
             install_payload = json.loads(install_handler.body.decode("utf-8"))
@@ -259,20 +302,57 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertTrue(install_payload["pack"]["source"]["archive_sha256"])
         self.assertTrue(install_payload["pack"]["quarantine_path"])
 
-    def test_remote_install_blocks_generic_urls_without_trusted_source(self) -> None:
+    def test_remote_install_blocks_remote_urls_without_trusted_source(self) -> None:
+        cases = [
+            {"source": "https://example.com/skill-pack.zip", "source_kind": "generic_archive_url"},
+            {"source": "https://github.com/example/repo", "source_kind": "github_repo"},
+            {"source": "https://github.com/example/repo/archive/main.zip", "source_kind": "github_archive"},
+        ]
+        with mock.patch("agent.api_server.ExternalPackIngestor", side_effect=AssertionError("ingestor should not be constructed")):
+            for payload in cases:
+                install_handler = _HandlerForTest(self.runtime, "/packs/install", payload)
+                install_handler.do_POST()
+                install_payload = json.loads(install_handler.body.decode("utf-8"))
+
+                self.assertEqual(400, install_handler.status_code)
+                self.assertFalse(install_payload["ok"])
+                self.assertEqual("source_trust_required", install_payload["error"])
+                self.assertIn("not trusted yet", str(install_payload["message"] or "").lower())
+                self.assertIn("preview/source approval", str(install_payload["message"] or "").lower())
+                self.assertIn("/pack_sources", str(install_payload["next_question"] or ""))
+
+    def test_remote_install_blocks_disallowed_source_id_before_fetch(self) -> None:
+        storage_root = self.runtime.pack_store.external_storage_root()
+        os.makedirs(storage_root, exist_ok=True)
+        with open(os.path.join(storage_root, "registry_sources.json"), "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "sources": [
+                        {
+                            "id": "remote-source",
+                            "kind": "generic_registry_api",
+                            "name": "Remote Source",
+                            "base_url": "https://example.com/catalog.json",
+                            "enabled": True,
+                        }
+                    ]
+                },
+                handle,
+                ensure_ascii=True,
+            )
         with mock.patch("agent.api_server.ExternalPackIngestor", side_effect=AssertionError("ingestor should not be constructed")):
             install_handler = _HandlerForTest(
                 self.runtime,
                 "/packs/install",
-                {"source": "https://example.com/skill-pack.zip", "source_kind": "generic_archive_url"},
+                {"source": "https://example.com/skill-pack.zip", "source_kind": "generic_archive_url", "source_id": "remote-source"},
             )
             install_handler.do_POST()
             install_payload = json.loads(install_handler.body.decode("utf-8"))
 
         self.assertEqual(400, install_handler.status_code)
         self.assertFalse(install_payload["ok"])
-        self.assertEqual("source_trust_required", install_payload["error"])
-        self.assertIn("trusted source", str(install_payload["message"] or "").lower())
+        self.assertEqual("pack_source_not_allowed", install_payload["error"])
+        self.assertIn("not allowed by policy", str(install_payload["message"] or "").lower())
         self.assertIn("/pack_sources", str(install_payload["next_question"] or ""))
 
     def test_pack_state_endpoint_reports_installed_available_and_blocked_packs(self) -> None:
@@ -555,6 +635,7 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertIn("metadata/normalization.json", install_payload["why"])
 
     def test_remote_install_deduplicates_identical_content_across_sources(self) -> None:
+        trusted_source_id = self._trust_remote_source("trusted-dedupe")
         archive = _zip_bytes(
             {
                 "repo-main/SKILL.md": b"# Remote Skill\n\nUse the repository notes.\n",
@@ -576,14 +657,14 @@ class TestAPIPacksEndpoints(unittest.TestCase):
             first_handler = _HandlerForTest(
                 self.runtime,
                 "/packs/install",
-                {"source": first_url, "source_kind": "github_archive", "ref": "main"},
+                {"source": first_url, "source_kind": "github_archive", "ref": "main", "source_id": trusted_source_id},
             )
             first_handler.do_POST()
             first_payload = json.loads(first_handler.body.decode("utf-8"))
             second_handler = _HandlerForTest(
                 self.runtime,
                 "/packs/install",
-                {"source": second_url, "source_kind": "github_archive", "ref": "main"},
+                {"source": second_url, "source_kind": "github_archive", "ref": "main", "source_id": trusted_source_id},
             )
             second_handler.do_POST()
             second_payload = json.loads(second_handler.body.decode("utf-8"))
@@ -596,6 +677,7 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         self.assertEqual(1, len(self.runtime.pack_store.list_external_packs()))
 
     def test_remote_install_returns_changed_upstream_review_when_source_mutates(self) -> None:
+        trusted_source_id = self._trust_remote_source("trusted-mutation")
         remote_url = "https://github.com/example/repo/archive/main.zip"
         first_archive = _zip_bytes(
             {
@@ -618,7 +700,7 @@ class TestAPIPacksEndpoints(unittest.TestCase):
             first_handler = _HandlerForTest(
                 self.runtime,
                 "/packs/install",
-                {"source": remote_url, "source_kind": "github_archive", "ref": "main"},
+                {"source": remote_url, "source_kind": "github_archive", "ref": "main", "source_id": trusted_source_id},
             )
             first_handler.do_POST()
             first_payload = json.loads(first_handler.body.decode("utf-8"))
@@ -631,7 +713,7 @@ class TestAPIPacksEndpoints(unittest.TestCase):
             second_handler = _HandlerForTest(
                 self.runtime,
                 "/packs/install",
-                {"source": remote_url, "source_kind": "github_archive", "ref": "main"},
+                {"source": remote_url, "source_kind": "github_archive", "ref": "main", "source_id": trusted_source_id},
             )
             second_handler.do_POST()
             second_payload = json.loads(second_handler.body.decode("utf-8"))

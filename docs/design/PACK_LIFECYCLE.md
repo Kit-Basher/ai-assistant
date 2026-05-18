@@ -31,6 +31,8 @@ Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/p
 
 External packs are never bundled native abilities. Starter catalogs are discoverable sources only, not active capabilities.
 
+Remote external pack sources are hostile by default. GitHub repositories, GitHub archives, generic archive URLs, and online registries require explicit source policy or source approval before fetch/import. GitHub is not trusted by default, and a local starter catalog entry does not make a remote URL trusted.
+
 The assistant must not say an external pack can perform a task until `PackLifecycleService` returns `usable=true`. Before that, responses must name the missing gate and the next safe step: preview, create review candidate, inspect, approve, configure, request permission, enable, or use.
 
 Generated and external packs must not run arbitrary generated code. Managed adapters are the safety boundary for useful external behavior.

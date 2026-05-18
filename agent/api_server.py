@@ -1979,11 +1979,7 @@ class AgentRuntime:
                 elif source_text in {"path", "local"}:
                     pack_dir = str(payload.get("pack_path") or "").strip()
         if remote_source is not None:
-            remote_kind = str(remote_source.kind or "").strip().lower()
-            remote_host = urllib.parse.urlparse(str(remote_source.url or "")).netloc.lower()
-            trusted_remote_source = remote_kind in {"github_repo", "github_archive"}
-            if not trusted_remote_source and remote_host in {"github.com", "www.github.com", "codeload.github.com"}:
-                trusted_remote_source = True
+            trusted_remote_source = False
             if not trusted_remote_source and source_id:
                 try:
                     source_policy_payload = self._pack_registry_discovery().get_source_policy(source_id)
@@ -2000,7 +1996,7 @@ class AgentRuntime:
                         error_kind="bad_request",
                         message="I couldn't verify the pack source trust policy.",
                         why=str(exc),
-                        next_question="Use a GitHub archive/repo source or a trusted pack source id from /pack_sources.",
+                        next_question="Use a trusted source_id from /pack_sources, or approve this source before fetch/import.",
                     )
                 effective_policy = (
                     source_policy_payload.get("effective_policy")
@@ -2012,15 +2008,18 @@ class AgentRuntime:
                         error="pack_source_not_allowed",
                         error_kind="bad_request",
                         message=f"pack source {source_id} is not allowed by policy",
-                        next_question="Use a source id from /pack_sources that is allowed by policy, or install from a GitHub archive/repo.",
+                        next_question="Use a source id from /pack_sources that is explicitly allowed by policy, or approve this source before fetch/import.",
                     )
                 trusted_remote_source = True
             if not trusted_remote_source:
                 return self._pack_error(
                     error="source_trust_required",
                     error_kind="bad_request",
-                    message="Generic remote pack installs require a trusted source id or a GitHub archive/repo URL.",
-                    next_question="Use a GitHub archive/repo source or pass a trusted source_id from /pack_sources.",
+                    message=(
+                        "I found a remote pack source, but it is not trusted yet. "
+                        "Preview/source approval is required before fetch or import."
+                    ),
+                    next_question="Use a trusted source_id from /pack_sources, or approve this source before fetch/import.",
                 )
         if remote_source is None and not pack_dir:
             return self._pack_error(

@@ -125,6 +125,7 @@ class RegistrySourcePolicy:
     notes: str | None = None
     allowed_by_policy: bool = True
     blocked_reason: str | None = None
+    implicit_local_catalog_allow: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -138,6 +139,7 @@ class RegistrySourcePolicy:
             "notes": self.notes,
             "allowed_by_policy": bool(self.allowed_by_policy),
             "blocked_reason": self.blocked_reason,
+            "implicit_local_catalog_allow": bool(self.implicit_local_catalog_allow),
         }
 
 
@@ -938,9 +940,11 @@ class PackRegistryDiscoveryService:
         for row in overrides:
             row.pop("allowed_by_policy", None)
             row.pop("blocked_reason", None)
+            row.pop("implicit_local_catalog_allow", None)
         defaults_payload = defaults.to_dict()
         defaults_payload.pop("allowed_by_policy", None)
         defaults_payload.pop("blocked_reason", None)
+        defaults_payload.pop("implicit_local_catalog_allow", None)
         return {
             "defaults": defaults_payload,
             "overrides": sorted(overrides, key=lambda row: str(row.get("source_id") or "")),
@@ -1056,10 +1060,11 @@ class PackRegistryDiscoveryService:
         allowed_source_kinds = self._normalize_allowed_source_kinds(row.get("allowed_source_kinds"))
         cache_ttl_seconds = self._normalize_policy_int(row.get("cache_ttl_seconds"), DEFAULT_DISCOVERY_CACHE_TTL_SECONDS)
         max_results = self._normalize_policy_int(row.get("max_results"), DEFAULT_DISCOVERY_MAX_RESULTS)
+        explicit_allowlisted = "allowlisted" in row
         return RegistrySourcePolicy(
             source_id="*",
             enabled=bool(row.get("enabled", True)),
-            allowlisted=bool(row.get("allowlisted", True)),
+            allowlisted=bool(row.get("allowlisted", False)),
             denied=bool(row.get("denied", False)),
             allowed_source_kinds=allowed_source_kinds,
             cache_ttl_seconds=cache_ttl_seconds,
@@ -1067,6 +1072,7 @@ class PackRegistryDiscoveryService:
             notes=str(row.get("notes") or "").strip() or None,
             allowed_by_policy=True,
             blocked_reason=None,
+            implicit_local_catalog_allow=not explicit_allowlisted,
         )
 
     def _normalize_policy_override(
@@ -1088,6 +1094,7 @@ class PackRegistryDiscoveryService:
                 notes=defaults.notes,
                 allowed_by_policy=True,
                 blocked_reason=None,
+                implicit_local_catalog_allow=defaults.implicit_local_catalog_allow,
             )
         allowed_source_kinds = (
             self._normalize_allowed_source_kinds(row.get("allowed_source_kinds"))
@@ -1113,6 +1120,7 @@ class PackRegistryDiscoveryService:
             notes=str(row.get("notes") or defaults.notes or "").strip() or None,
             allowed_by_policy=True,
             blocked_reason=None,
+            implicit_local_catalog_allow=False,
         )
 
     @staticmethod
@@ -1144,6 +1152,12 @@ class PackRegistryDiscoveryService:
         base = override or policy.defaults
         blocked_reason: str | None = None
         allowed_by_policy = True
+        implicitly_allow_local_catalog = (
+            source.kind == REGISTRY_KIND_LOCAL_CATALOG
+            and override is None
+            and bool(base.implicit_local_catalog_allow)
+        )
+        effective_allowlisted = bool(base.allowlisted) or implicitly_allow_local_catalog
         if not bool(source.enabled):
             allowed_by_policy = False
             blocked_reason = "source_disabled"
@@ -1153,7 +1167,7 @@ class PackRegistryDiscoveryService:
         elif bool(base.denied):
             allowed_by_policy = False
             blocked_reason = "source_denied_by_policy"
-        elif not bool(base.allowlisted):
+        elif not effective_allowlisted:
             allowed_by_policy = False
             blocked_reason = "source_not_allowlisted"
         elif source.kind not in set(base.allowed_source_kinds):
@@ -1162,7 +1176,7 @@ class PackRegistryDiscoveryService:
         return RegistrySourcePolicy(
             source_id=source.id,
             enabled=bool(base.enabled),
-            allowlisted=bool(base.allowlisted),
+            allowlisted=effective_allowlisted,
             denied=bool(base.denied),
             allowed_source_kinds=tuple(base.allowed_source_kinds),
             cache_ttl_seconds=max(0, int(base.cache_ttl_seconds)),
@@ -1170,6 +1184,7 @@ class PackRegistryDiscoveryService:
             notes=base.notes,
             allowed_by_policy=allowed_by_policy,
             blocked_reason=blocked_reason,
+            implicit_local_catalog_allow=bool(base.implicit_local_catalog_allow),
         )
 
     def _load_listings(
@@ -1490,6 +1505,7 @@ class PackRegistryDiscoveryService:
             install_handoff = {
                 "source": str(listing.get("source_url") or ""),
                 "source_kind": source_kind_hint,
+                "source_id": source.id,
             }
             latest_ref_hint = str(listing.get("latest_ref_hint") or "").strip()
             if latest_ref_hint:

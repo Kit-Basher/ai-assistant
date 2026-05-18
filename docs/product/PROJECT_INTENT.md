@@ -10,6 +10,8 @@ Native skills ship with the agent. They are built-in, bounded runtime abilities 
 
 External skill packs are not bundled built-in abilities. They are optional capability packages that the assistant can discover, preview, import, review, configure, permission, enable, and use only after the user asks for a capability and completes the required safety gates.
 
+Online external pack sources are hostile by default. GitHub, public registries, remote archives, README files, manifests, and catalog metadata are not trusted merely because of where they are hosted. Remote discovery, preview, fetch, or import requires an explicit trusted source policy or one-time source approval before quarantine can begin.
+
 Codex, development agents, and the repo control plane are not part of the normal runtime user workflow. They may help build or verify this project, but a normal user should not need a developer to manually build every new skill.
 
 ## External Pack Lifecycle Contract
@@ -30,6 +32,8 @@ The intended lifecycle is:
 10. use it only after approval, enablement, configuration, and permissions are complete
 
 Starter catalogs are discoverable sources only. A starter catalog entry is not an installed capability, not an enabled pack, and not a bundled native ability.
+
+The bundled local starter catalog is discovery-only and does not create trust for remote URLs. Any online source named by a starter entry, catalog entry, or user prompt still needs explicit source approval before fetch/import.
 
 Generated and external packs must not run arbitrary generated code. Text-only pack content may guide behavior, but executable behavior must go through managed adapters implemented in the core runtime.
 

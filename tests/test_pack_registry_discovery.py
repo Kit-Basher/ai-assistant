@@ -136,11 +136,13 @@ class TestPackRegistryDiscovery(unittest.TestCase):
                 }
             ]
         )
+        self._write_policy({"overrides": [{"source_id": "generic-registry", "allowlisted": True}]})
         opener = _CountingOpener({source_url: _FakeResponse(json.dumps(catalog).encode("utf-8"), url=source_url)})
         service = PackRegistryDiscoveryService(
             pack_store=self.store,
             storage_root=str(self.storage_root),
             sources_path=str(self.sources_path),
+            policy_path=str(self.policy_path),
             opener=opener,
         )
 
@@ -163,6 +165,32 @@ class TestPackRegistryDiscovery(unittest.TestCase):
         self.assertEqual("plugin-pack", search_payload["search"]["results"][0]["remote_id"])
         self.assertTrue(sources[0]["allowed_by_policy"])
         self.assertEqual(300, sources[0]["cache_ttl_seconds"])
+
+    def test_remote_registry_source_with_no_policy_is_denied_by_default(self) -> None:
+        source_url = "https://example.com/catalog.json"
+        self._write_sources(
+            [
+                {
+                    "id": "generic-registry",
+                    "kind": "generic_registry_api",
+                    "name": "Generic Registry",
+                    "base_url": source_url,
+                    "enabled": True,
+                }
+            ]
+        )
+        service = PackRegistryDiscoveryService(
+            pack_store=self.store,
+            storage_root=str(self.storage_root),
+            sources_path=str(self.sources_path),
+            policy_path=str(self.policy_path),
+        )
+
+        sources = service.list_sources()
+        self.assertFalse(sources[0]["allowed_by_policy"])
+        self.assertEqual("source_not_allowlisted", sources[0]["blocked_reason"])
+        with self.assertRaises(RegistrySourcePolicyError):
+            service.search("generic-registry", "docs")
 
     def test_preview_uses_existing_local_pack_and_compare_hints(self) -> None:
         remote_url = "https://github.com/example/docs-skill"
@@ -407,6 +435,7 @@ class TestPackRegistryDiscovery(unittest.TestCase):
                 "overrides": [
                     {
                         "source_id": "generic-registry",
+                        "allowlisted": True,
                         "cache_ttl_seconds": 9,
                         "max_results": 7,
                     }
@@ -452,11 +481,13 @@ class TestPackRegistryDiscovery(unittest.TestCase):
                 }
             ]
         )
+        self._write_policy({"overrides": [{"source_id": "generic-registry", "allowlisted": True}]})
         opener = _CountingOpener({source_url: _FakeResponse(json.dumps(catalog).encode("utf-8"), url=source_url)})
         service = PackRegistryDiscoveryService(
             pack_store=self.store,
             storage_root=str(self.storage_root),
             sources_path=str(self.sources_path),
+            policy_path=str(self.policy_path),
             opener=opener,
         )
 
@@ -478,6 +509,7 @@ class TestPackRegistryDiscovery(unittest.TestCase):
             pack_store=self.store,
             storage_root=str(self.storage_root),
             sources_path=str(self.sources_path),
+            policy_path=str(self.policy_path),
             opener=_CountingOpener({}, fail=True),
         )
         stale = failing_service.list_packs("generic-registry")

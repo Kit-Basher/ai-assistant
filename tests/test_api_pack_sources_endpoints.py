@@ -489,7 +489,7 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         get_payload = json.loads(get_handler.body.decode("utf-8"))
         self.assertEqual(200, get_handler.status_code)
         self.assertTrue(get_payload["ok"])
-        self.assertTrue(get_payload["normalized_policy"]["defaults"]["allowlisted"])
+        self.assertFalse(get_payload["normalized_policy"]["defaults"]["allowlisted"])
         self.assertEqual(str(self._policy_path()), get_payload["path"])
 
         put_handler = _HandlerForTest(
@@ -652,7 +652,8 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         pack_sources_payload = json.loads(pack_sources_handler.body.decode("utf-8"))
         self.assertEqual(200, pack_sources_handler.status_code)
         self.assertEqual("generic-registry", pack_sources_payload["sources"][0]["id"])
-        self.assertTrue(pack_sources_payload["sources"][0]["queryable"])
+        self.assertFalse(pack_sources_payload["sources"][0]["queryable"])
+        self.assertEqual("source_not_allowlisted", pack_sources_payload["sources"][0]["blocked_reason"])
 
         update_handler = _HandlerForTest(
             self.runtime,
