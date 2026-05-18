@@ -12,6 +12,8 @@ External and generated skill packs do not run arbitrary code. Generated packs re
 
 External packs are not bundled active abilities. Starter catalogs are discoverable sources only; they are not installed capabilities and must not be described as built-in skills.
 
+Trusted source policy only allows discovery or quarantine fetch. Catalog entries remain untrusted text and archives remain hostile bytes until strict schema validation, local path containment, archive extraction hardening, normalization, static scan, review, approval, configuration, permission, and enablement gates pass.
+
 Missing capability flow must not dead-end. The assistant should tell the user what is missing and the next safe step: preview a discovered pack, preview a scaffold, create a review-only candidate, or explain why the capability is blocked.
 
 The intended lifecycle is discover -> preview -> scaffold/create -> quarantine -> inspect -> approve -> configure -> permission -> enable -> use. A pack is usable only after the relevant approval, enablement, configuration, and permission gates are complete.

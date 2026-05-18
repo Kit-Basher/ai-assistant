@@ -20,6 +20,8 @@ from typing import Any
 MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 500
 MAX_UNPACKED_BYTES = 50 * 1024 * 1024
+MAX_ARCHIVE_FILE_BYTES = 10 * 1024 * 1024
+MAX_ZIP_COMPRESSION_RATIO = 100
 CHUNK_SIZE = 64 * 1024
 
 REMOTE_KIND_GITHUB_REPO = "github_repo"
@@ -31,6 +33,7 @@ ALLOWED_REMOTE_KINDS = {
     REMOTE_KIND_GENERIC_ARCHIVE_URL,
 }
 ALLOWED_ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
+NESTED_ARCHIVE_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz", ".tbz", ".tbz2", ".tar.bz2", ".tar.xz", ".txz", ".gz", ".bz2", ".xz", ".7z", ".rar")
 
 
 def _now_iso() -> str:
@@ -421,15 +424,25 @@ class RemotePackFetcher:
                         source=source,
                         error_kind="duplicate_archive_member",
                         message="The remote archive contains duplicate file paths.",
-                        flags=("unknown_archive_layout",),
-                        hard_block_reasons=("unknown_archive_layout",),
+                        flags=("duplicate_archive_member",),
+                        hard_block_reasons=("duplicate_archive_member",),
                         archive_sha256=source.archive_sha256,
                     )
                 seen_paths.add(rel_path)
                 if member.is_dir():
                     continue
+                if mode & 0o111:
+                    raise RemoteFetchError(
+                        source=source,
+                        error_kind="archive_executable_bit_blocked",
+                        message="The remote archive contains executable file mode bits and was blocked.",
+                        flags=("archive_executable_bit_blocked",),
+                        hard_block_reasons=("archive_executable_bit_blocked",),
+                        archive_sha256=source.archive_sha256,
+                    )
                 file_count += 1
-                total_bytes += int(member.file_size or 0)
+                file_size = int(member.file_size or 0)
+                total_bytes += file_size
                 if file_count > MAX_ARCHIVE_MEMBERS:
                     raise RemoteFetchError(
                         source=source,
@@ -437,6 +450,15 @@ class RemotePackFetcher:
                         message="The remote archive contains too many files.",
                         flags=("too_many_archive_members",),
                         hard_block_reasons=("too_many_archive_members",),
+                        archive_sha256=source.archive_sha256,
+                    )
+                if file_size > MAX_ARCHIVE_FILE_BYTES:
+                    raise RemoteFetchError(
+                        source=source,
+                        error_kind="archive_file_too_large",
+                        message="The remote archive contains a file over the per-file size limit.",
+                        flags=("archive_file_too_large",),
+                        hard_block_reasons=("archive_file_too_large",),
                         archive_sha256=source.archive_sha256,
                     )
                 if total_bytes > MAX_UNPACKED_BYTES:
@@ -448,13 +470,25 @@ class RemotePackFetcher:
                         hard_block_reasons=("oversized_archive_rejected",),
                         archive_sha256=source.archive_sha256,
                     )
+                if self._zip_member_ratio_too_high(member):
+                    raise RemoteFetchError(
+                        source=source,
+                        error_kind="archive_compression_ratio_blocked",
+                        message="The remote archive has an unsafe compression ratio.",
+                        flags=("archive_compression_ratio_blocked",),
+                        hard_block_reasons=("archive_compression_ratio_blocked",),
+                        archive_sha256=source.archive_sha256,
+                    )
                 target = destination / rel_path
+                self._assert_contained_path(destination, target, source=source)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with handle.open(member, "r") as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                self._assert_contained_path(destination, target, source=source)
                 first_part = PurePosixPath(rel_path).parts[0]
                 top_level_parts.add(first_part)
         top_level_dir_name = next(iter(top_level_parts)) if len(top_level_parts) == 1 else None
+        self._assert_post_extraction_containment(destination, source=source)
         return file_count, total_bytes, top_level_dir_name
 
     def _extract_tar(
@@ -505,15 +539,25 @@ class RemotePackFetcher:
                         source=source,
                         error_kind="duplicate_archive_member",
                         message="The remote archive contains duplicate file paths.",
-                        flags=("unknown_archive_layout",),
-                        hard_block_reasons=("unknown_archive_layout",),
+                        flags=("duplicate_archive_member",),
+                        hard_block_reasons=("duplicate_archive_member",),
                         archive_sha256=source.archive_sha256,
                     )
                 seen_paths.add(rel_path)
                 if member.isdir():
                     continue
+                if member.mode & 0o111:
+                    raise RemoteFetchError(
+                        source=source,
+                        error_kind="archive_executable_bit_blocked",
+                        message="The remote archive contains executable file mode bits and was blocked.",
+                        flags=("archive_executable_bit_blocked",),
+                        hard_block_reasons=("archive_executable_bit_blocked",),
+                        archive_sha256=source.archive_sha256,
+                    )
                 file_count += 1
-                total_bytes += int(member.size or 0)
+                file_size = int(member.size or 0)
+                total_bytes += file_size
                 if file_count > MAX_ARCHIVE_MEMBERS:
                     raise RemoteFetchError(
                         source=source,
@@ -521,6 +565,15 @@ class RemotePackFetcher:
                         message="The remote archive contains too many files.",
                         flags=("too_many_archive_members",),
                         hard_block_reasons=("too_many_archive_members",),
+                        archive_sha256=source.archive_sha256,
+                    )
+                if file_size > MAX_ARCHIVE_FILE_BYTES:
+                    raise RemoteFetchError(
+                        source=source,
+                        error_kind="archive_file_too_large",
+                        message="The remote archive contains a file over the per-file size limit.",
+                        flags=("archive_file_too_large",),
+                        hard_block_reasons=("archive_file_too_large",),
                         archive_sha256=source.archive_sha256,
                     )
                 if total_bytes > MAX_UNPACKED_BYTES:
@@ -536,12 +589,15 @@ class RemotePackFetcher:
                 if src is None:
                     continue
                 target = destination / rel_path
+                self._assert_contained_path(destination, target, source=source)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
+                self._assert_contained_path(destination, target, source=source)
                 first_part = PurePosixPath(rel_path).parts[0]
                 top_level_parts.add(first_part)
         top_level_dir_name = next(iter(top_level_parts)) if len(top_level_parts) == 1 else None
+        self._assert_post_extraction_containment(destination, source=source)
         return file_count, total_bytes, top_level_dir_name
 
     @staticmethod
@@ -571,4 +627,53 @@ class RemotePackFetcher:
                 hard_block_reasons=("traversal_entries_rejected",),
                 archive_sha256=source.archive_sha256,
             )
+        if any(part.startswith(".") for part in parts):
+            raise RemoteFetchError(
+                source=source,
+                error_kind="archive_hidden_file_blocked",
+                message="The remote archive contains hidden files or directories and was blocked.",
+                flags=("archive_hidden_file_blocked",),
+                hard_block_reasons=("archive_hidden_file_blocked",),
+                archive_sha256=source.archive_sha256,
+            )
+        lowered = normalized.lower()
+        if lowered.endswith(NESTED_ARCHIVE_SUFFIXES):
+            raise RemoteFetchError(
+                source=source,
+                error_kind="archive_nested_archive_blocked",
+                message="The remote archive contains a nested archive and was blocked.",
+                flags=("archive_nested_archive_blocked",),
+                hard_block_reasons=("archive_nested_archive_blocked",),
+                archive_sha256=source.archive_sha256,
+            )
         return str(pure)
+
+    @staticmethod
+    def _zip_member_ratio_too_high(member: zipfile.ZipInfo) -> bool:
+        file_size = int(member.file_size or 0)
+        compressed = int(member.compress_size or 0)
+        if file_size <= 0 or compressed <= 0:
+            return False
+        return file_size >= 1024 * 1024 and (file_size / compressed) > MAX_ZIP_COMPRESSION_RATIO
+
+    @staticmethod
+    def _assert_contained_path(destination: Path, target: Path, *, source: RemotePackSource) -> None:
+        try:
+            target.resolve().relative_to(destination.resolve())
+        except ValueError as exc:
+            raise RemoteFetchError(
+                source=source,
+                error_kind="post_extraction_containment_failed",
+                message="The remote archive attempted to write outside quarantine.",
+                flags=("post_extraction_containment_failed",),
+                hard_block_reasons=("post_extraction_containment_failed",),
+                archive_sha256=source.archive_sha256,
+            ) from exc
+
+    def _assert_post_extraction_containment(self, destination: Path, *, source: RemotePackSource) -> None:
+        root = destination.resolve()
+        for current_root, dirs, files in os.walk(root):
+            current = Path(current_root)
+            self._assert_contained_path(root, current, source=source)
+            for name in dirs + files:
+                self._assert_contained_path(root, current / name, source=source)

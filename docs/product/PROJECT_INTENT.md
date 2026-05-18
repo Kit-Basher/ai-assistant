@@ -10,7 +10,7 @@ Native skills ship with the agent. They are built-in, bounded runtime abilities 
 
 External skill packs are not bundled built-in abilities. They are optional capability packages that the assistant can discover, preview, import, review, configure, permission, enable, and use only after the user asks for a capability and completes the required safety gates.
 
-Online external pack sources are hostile by default. GitHub, public registries, remote archives, README files, manifests, and catalog metadata are not trusted merely because of where they are hosted. Remote discovery, preview, fetch, or import requires an explicit trusted source policy or one-time source approval before quarantine can begin.
+Online external pack sources are hostile by default. GitHub, public registries, remote archives, README files, manifests, and catalog metadata are not trusted merely because of where they are hosted. Remote discovery, preview, fetch, or import requires an explicit trusted source policy or one-time source approval before quarantine can begin. Source approval means only "allowed to inspect or fetch into quarantine"; catalog metadata and archive contents remain untrusted and must pass strict schema, containment, extraction, normalization, and scan gates.
 
 Codex, development agents, and the repo control plane are not part of the normal runtime user workflow. They may help build or verify this project, but a normal user should not need a developer to manually build every new skill.
 

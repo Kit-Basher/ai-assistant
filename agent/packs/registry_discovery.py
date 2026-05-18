@@ -29,6 +29,95 @@ ALLOWED_ARTIFACT_TYPE_HINTS = {
     "native_code_pack",
     "unknown",
 }
+ALLOWED_LISTING_SOURCE_KIND_HINTS = {
+    "github_repo",
+    "github_archive",
+    "generic_archive_url",
+    "local_path",
+}
+_CATALOG_ENTRY_ALLOWED_FIELDS = {
+    "id",
+    "remote_id",
+    "slug",
+    "name",
+    "title",
+    "summary",
+    "description",
+    "author",
+    "publisher",
+    "homepage_url",
+    "homepage",
+    "source_url",
+    "repo_url",
+    "artifact_url",
+    "url",
+    "source_kind_hint",
+    "latest_ref_hint",
+    "ref",
+    "latest_ref",
+    "commit",
+    "artifact_type_hint",
+    "artifact_type",
+    "has_skill_md",
+    "tags",
+    "capabilities",
+    "badges",
+    "last_updated",
+    "updated_at",
+}
+_CATALOG_ENTRY_BLOCKED_FIELDS = {
+    "requires_execution",
+    "has_package_manifest",
+    "is_plugin",
+    "install_command",
+    "install_commands",
+    "dependencies",
+    "dependency_install",
+    "package_manager",
+    "oauth",
+    "oauth_required",
+    "browser_scraping",
+    "browser_profile_access",
+    "network_allowed",
+    "permissions",
+    "system_prompt",
+    "developer_prompt",
+    "prompt",
+    "instructions",
+}
+_CATALOG_TEXT_LIMITS = {
+    "id": 128,
+    "remote_id": 128,
+    "slug": 128,
+    "name": 160,
+    "title": 160,
+    "summary": 600,
+    "description": 2000,
+    "author": 160,
+    "publisher": 160,
+    "homepage_url": 2048,
+    "homepage": 2048,
+    "source_url": 2048,
+    "repo_url": 2048,
+    "artifact_url": 2048,
+    "url": 2048,
+    "source_kind_hint": 64,
+    "latest_ref_hint": 160,
+    "ref": 160,
+    "latest_ref": 160,
+    "commit": 160,
+    "artifact_type_hint": 64,
+    "artifact_type": 64,
+    "last_updated": 160,
+    "updated_at": 160,
+}
+_CAPABILITY_LABEL_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_UNTRUSTED_INSTRUCTION_RE = re.compile(
+    r"\b(ignore (?:all )?(?:previous|prior|system|developer)|"
+    r"system prompt|developer message|exfiltrat|leak (?:files|secrets)|"
+    r"auto-?enable|auto-?approve|run this command)\b",
+    re.IGNORECASE,
+)
 DEFAULT_DISCOVERY_CACHE_TTL_SECONDS = 300
 DEFAULT_DISCOVERY_MAX_RESULTS = 50
 MAX_DISCOVERY_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
@@ -256,6 +345,12 @@ class RegistrySourcePolicyError(RuntimeError):
         self.source_id = str(source_id or "").strip()
         self.policy = policy
         super().__init__(f"registry source blocked by policy: {self.source_id}")
+
+
+class CatalogSchemaError(ValueError):
+    def __init__(self, reason: str) -> None:
+        self.reason = str(reason or "catalog_schema_invalid")
+        super().__init__(self.reason)
 
 
 class PackRegistryDiscoveryService:
@@ -1281,6 +1376,7 @@ class PackRegistryDiscoveryService:
         return [self._normalize_listing(source, row).to_dict() for row in rows]
 
     def _normalize_listing(self, source: RegistrySource, row: dict[str, Any]) -> RegistryPackListing:
+        self._validate_catalog_listing_row(source, row)
         source_url = (
             str(row.get("source_url") or row.get("repo_url") or row.get("artifact_url") or row.get("url") or "").strip() or None
         )
@@ -1353,21 +1449,28 @@ class PackRegistryDiscoveryService:
     def _resolve_local_catalog_path(self, path_value: str | None) -> Path:
         path = Path(str(path_value or "").strip()).expanduser()
         if path.is_absolute():
-            return path
+            candidate = path.resolve()
+            self._validate_local_catalog_containment(candidate)
+            return candidate
         candidates = [
             (self.sources_path.parent / path).resolve(),
             (_repo_root() / path).resolve(),
             path.resolve(),
         ]
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.exists() and self._is_allowed_local_catalog_path(candidate):
                 return candidate
-        return candidates[0]
+        candidate = candidates[0]
+        self._validate_local_catalog_containment(candidate)
+        return candidate
 
     def _resolve_local_listing_path(self, catalog_path_value: str | None, source_url: str) -> Path:
         path = Path(str(source_url or "").strip()).expanduser()
         if path.is_absolute():
-            return path
+            candidate = path.resolve()
+            catalog_path = self._resolve_local_catalog_path(catalog_path_value)
+            self._validate_local_listing_containment(catalog_path, candidate)
+            return candidate
         parsed = urllib.parse.urlparse(str(source_url or "").strip())
         if parsed.scheme or parsed.netloc:
             return path
@@ -1378,19 +1481,116 @@ class PackRegistryDiscoveryService:
             path.resolve(),
         ]
         for candidate in candidates:
-            if candidate.exists():
+            if candidate.exists() and self._is_allowed_local_listing_path(catalog_path, candidate):
                 return candidate
-        return candidates[0]
+        candidate = candidates[0]
+        self._validate_local_listing_containment(catalog_path, candidate)
+        return candidate
+
+    def _validate_catalog_listing_row(self, source: RegistrySource, row: dict[str, Any]) -> None:
+        keys = {str(key) for key in row.keys()}
+        if keys & _CATALOG_ENTRY_BLOCKED_FIELDS:
+            raise CatalogSchemaError("catalog_schema_execution_field")
+        if keys - _CATALOG_ENTRY_ALLOWED_FIELDS:
+            raise CatalogSchemaError("catalog_schema_unknown_field")
+        for key, max_length in _CATALOG_TEXT_LIMITS.items():
+            if key in row and row.get(key) is not None:
+                value = row.get(key)
+                if not isinstance(value, str):
+                    raise CatalogSchemaError("catalog_schema_invalid_field_type")
+                if len(value) > max_length:
+                    raise CatalogSchemaError("catalog_schema_oversized_text")
+                if key in {"name", "title", "summary", "description"} and _UNTRUSTED_INSTRUCTION_RE.search(value):
+                    raise CatalogSchemaError("catalog_schema_untrusted_instruction")
+        if "has_skill_md" in row and not isinstance(row.get("has_skill_md"), bool):
+            raise CatalogSchemaError("catalog_schema_invalid_field_type")
+        self._validate_catalog_sequence_field(row, "tags", allow_hyphen=True)
+        self._validate_catalog_sequence_field(row, "badges", allow_hyphen=True)
+        self._validate_catalog_sequence_field(row, "capabilities", allow_hyphen=False)
+        artifact_type_hint = str(row.get("artifact_type_hint") or row.get("artifact_type") or "").strip().lower()
+        if artifact_type_hint and artifact_type_hint not in ALLOWED_ARTIFACT_TYPE_HINTS:
+            raise CatalogSchemaError("catalog_schema_invalid_artifact_type")
+        source_kind_hint = str(row.get("source_kind_hint") or "").strip().lower()
+        if source_kind_hint and source_kind_hint not in ALLOWED_LISTING_SOURCE_KIND_HINTS:
+            raise CatalogSchemaError("catalog_schema_invalid_source_kind")
+        for key in ("homepage_url", "homepage"):
+            value = str(row.get(key) or "").strip()
+            if value:
+                self._validate_catalog_remote_url(value)
+        source_url = str(row.get("source_url") or row.get("repo_url") or row.get("artifact_url") or row.get("url") or "").strip()
+        if source_url:
+            self._validate_catalog_source_url(source, source_url)
+
+    @staticmethod
+    def _validate_catalog_sequence_field(row: dict[str, Any], key: str, *, allow_hyphen: bool) -> None:
+        if key not in row:
+            return
+        value = row.get(key)
+        if not isinstance(value, list):
+            raise CatalogSchemaError("catalog_schema_invalid_field_type")
+        if len(value) > 50:
+            raise CatalogSchemaError("catalog_schema_oversized_text")
+        item_re = re.compile(r"^[a-z][a-z0-9_-]{0,63}$") if allow_hyphen else _CAPABILITY_LABEL_RE
+        for item in value:
+            if not isinstance(item, str):
+                raise CatalogSchemaError("catalog_schema_invalid_field_type")
+            if len(item) > 64:
+                raise CatalogSchemaError("catalog_schema_oversized_text")
+            if not item_re.fullmatch(item.strip()):
+                raise CatalogSchemaError("catalog_schema_malformed_capability_label" if key == "capabilities" else "catalog_schema_invalid_label")
+
+    @staticmethod
+    def _validate_catalog_remote_url(value: str) -> None:
+        parsed = urllib.parse.urlparse(value)
+        if str(parsed.scheme or "").lower() != "https" or not parsed.netloc or parsed.username or parsed.password:
+            raise CatalogSchemaError("catalog_schema_bad_url")
+
+    def _validate_catalog_source_url(self, source: RegistrySource, value: str) -> None:
+        parsed = urllib.parse.urlparse(value)
+        scheme = str(parsed.scheme or "").lower()
+        if source.kind == REGISTRY_KIND_LOCAL_CATALOG and not scheme and not parsed.netloc:
+            return
+        if scheme != "https" or not parsed.netloc or parsed.username or parsed.password:
+            raise CatalogSchemaError("catalog_schema_bad_url")
+
+    def _allowed_local_catalog_roots(self) -> tuple[Path, ...]:
+        roots = [
+            self.storage_root.resolve(),
+            self.sources_path.parent.resolve(),
+            (_repo_root() / "memory" / "external_packs" / "starter_catalog").resolve(),
+        ]
+        return tuple(dict.fromkeys(roots))
+
+    @staticmethod
+    def _path_is_relative_to(path: Path, root: Path) -> bool:
+        try:
+            path.resolve().relative_to(root.resolve())
+            return True
+        except ValueError:
+            return False
+
+    def _is_allowed_local_catalog_path(self, candidate: Path) -> bool:
+        return any(self._path_is_relative_to(candidate, root) for root in self._allowed_local_catalog_roots())
+
+    def _validate_local_catalog_containment(self, candidate: Path) -> None:
+        if not self._is_allowed_local_catalog_path(candidate):
+            raise ValueError("local_catalog_path_outside_root")
+
+    def _is_allowed_local_listing_path(self, catalog_path: Path, candidate: Path) -> bool:
+        catalog_parent = catalog_path.resolve().parent
+        return self._path_is_relative_to(candidate, catalog_parent) or self._is_allowed_local_catalog_path(candidate)
+
+    def _validate_local_listing_containment(self, catalog_path: Path, candidate: Path) -> None:
+        if not self._is_allowed_local_listing_path(catalog_path, candidate):
+            raise CatalogSchemaError("catalog_schema_bad_url")
 
     def _artifact_type_hint(self, row: dict[str, Any]) -> str:
         explicit = str(row.get("artifact_type_hint") or row.get("artifact_type") or "").strip().lower()
         if explicit in ALLOWED_ARTIFACT_TYPE_HINTS:
             return explicit
-        if bool(row.get("requires_execution")) or bool(row.get("has_package_manifest")) or bool(row.get("is_plugin")):
-            return "native_code_pack"
         if bool(row.get("is_experience_pack")) or str(row.get("format") or "").strip().lower() == "experience":
             return "experience_pack"
-        if bool(row.get("has_skill_md")) and not bool(row.get("requires_execution")):
+        if bool(row.get("has_skill_md")):
             return "portable_text_skill"
         return "unknown"
 
