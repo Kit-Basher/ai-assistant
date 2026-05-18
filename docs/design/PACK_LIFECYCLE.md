@@ -8,6 +8,8 @@ Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/p
 
 `agent/packs/lifecycle_actions.py` performs gated lifecycle continuations. It accepts a `PackLifecycleResult`, validates that the requested action matches the current state, and then calls an existing safe handler for exactly one transition. It refuses mismatched states, blocked/removed packs, missing handlers, and attempts to skip directly across review, enablement, configuration, or permission gates.
 
+`agent/packs/managed_adapter_invocation.py` invokes approved core-owned managed adapters after lifecycle gates are complete. It uses a generic operation registry, still verifies `usable=true` before adapter work, and returns the lifecycle state, missing gate, and next safe step instead of attempting access when the pack is not usable.
+
 ## Lifecycle States
 
 - `missing`: no installed, discovered, or scaffold candidate is currently usable.
@@ -65,3 +67,9 @@ Each confirmation advances at most one gate:
 - `usable` + `use_if_usable`: use only through the approved managed adapter/runtime path.
 
 The action controller does not add arbitrary external code execution, OAuth, browser scraping, transcript fetching, network fetching, or private file reads. Local-file permission remains metadata-only until a later explicitly scoped adapter implementation reads or indexes content.
+
+## Managed Adapter Invocation
+
+Invocation is separate from lifecycle continuation. Lifecycle says whether a pack has passed gates; lifecycle actions move one gate at a time; managed adapter invocation performs approved core adapter operations only after the pack is usable.
+
+Current generic operations are `validate_grant`, `describe_capability`, and `dry_run`. `local_file_import` is only the first minimal adapter implementation behind that generic contract. Its `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not parse Google Takeout, search history, fetch transcripts, upload data, or store an index.

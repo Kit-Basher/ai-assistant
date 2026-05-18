@@ -16,9 +16,11 @@ Missing capability flow must not dead-end. The assistant should tell the user wh
 
 The intended lifecycle is discover -> preview -> scaffold/create -> quarantine -> inspect -> approve -> configure -> permission -> enable -> use. A pack is usable only after the relevant approval, enablement, configuration, and permission gates are complete.
 
-## Phase 3 Contract
+## Adapter Declaration Contract
 
-The first enabled adapter is `local_file_import`.
+Managed adapters are reusable core-owned execution surfaces. A pack can declare that it needs an adapter, but the pack does not supply executable code for that adapter. The runtime validates the declaration, permission/configuration state, and requested operation before any adapter work happens.
+
+The first minimal adapter implementation is `local_file_import`. It exists to exercise the generic contract; it is not the product goal and is not a bundled skill.
 
 Packs may declare:
 
@@ -41,6 +43,20 @@ The runtime rejects unknown or disabled adapter kinds, network access for `local
 When a generated pack needs local-file access, chat asks the user for a local path. A provided path first renders a permission preview: what data would be accessed, what would be stored, what is blocked, and that raw content is not logged or added to support context.
 
 In this phase, confirming the preview records grant metadata only. The assistant validates path metadata after confirmation: exists, is a file, extension is allowed, and size is within the declared limit. It does not parse, index, upload, or execute anything.
+
+## Invocation Flow
+
+`agent/packs/managed_adapter_invocation.py` invokes approved core-owned adapters only after `PackLifecycleService` reports `usable=true`.
+
+The invocation module exposes a generic managed-adapter operation registry. Operations are named by contract, not by skill:
+
+- `validate_grant`: confirm a matching metadata grant exists and matches the pack declaration.
+- `describe_capability`: return redacted capability/grant metadata and privacy notes.
+- `dry_run`: re-check safe metadata for the declared adapter without completing the content task.
+
+For `local_file_import`, `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not read, parse, index, or search file contents.
+
+The invocation layer does not load generated handlers, run subprocesses, install dependencies, fetch network data, scrape browsers, request OAuth, parse Google Takeout, fetch transcripts, or index private file contents. Adding a future adapter or operation requires a core implementation, registry entry, review, and tests.
 
 ## Future Adapters
 

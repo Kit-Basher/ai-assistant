@@ -71,6 +71,7 @@ from agent.packs.managed_adapters import (
 )
 from agent.packs.lifecycle import PackLifecycleService, render_lifecycle_response
 from agent.packs.lifecycle_actions import PackLifecycleActionController
+from agent.packs.managed_adapter_invocation import ManagedAdapterInvocationRequest, ManagedAdapterInvoker
 from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
@@ -7075,6 +7076,69 @@ class Orchestrator:
                 "pack_name": pack_name,
                 "managed_adapters": normalized_adapters,
             }
+            if lifecycle.usable:
+                normalized_invocation_text = normalize_setup_text(text)
+                operation = (
+                    "dry_run"
+                    if self._looks_like_managed_adapter_execution_request(text)
+                    or any(token in normalized_invocation_text for token in ("use", "run", "start", "search", "find", "look through"))
+                    else "describe_capability"
+                )
+                invocation_request = ManagedAdapterInvocationRequest(
+                    pack_id=pack_id,
+                    canonical_id=str(row.get("canonical_id") or pack_id or "").strip() or None,
+                    pack_name=pack_name,
+                    adapter_kind=str(normalized_adapters[0].get("kind") or "").strip(),
+                    operation=operation,
+                    user_id=user_id,
+                    thread_id=self._active_thread_id_for_user(user_id),
+                    parameters={},
+                    dry_run=True,
+                )
+                invocation = ManagedAdapterInvoker().invoke(
+                    invocation_request,
+                    lifecycle=lifecycle_payload,
+                    pack=row,
+                    adapter_declarations=normalized_adapters,
+                    permission_grants=permission_grants,
+                )
+                message = (
+                    f"{invocation.summary} "
+                    "This confirms only the managed adapter dry-run/metadata path; it has not completed the requested content task."
+                ).strip()
+                return self._runtime_truth_response(
+                    text=message,
+                    route="action_tool",
+                    used_runtime_state=False,
+                    used_memory=bool(self._current_runtime_setup_state(user_id)),
+                    used_tools=["external_pack_lookup", "managed_adapter_invocation"],
+                    payload={
+                        "type": "managed_adapter_invocation",
+                        "summary": message,
+                        "pack_id": pack_id,
+                        "pack_name": pack_name,
+                        "lifecycle": lifecycle_payload,
+                        "invocation": invocation.to_dict(),
+                        "task_completed": False,
+                    },
+                )
+            if lifecycle_payload.get("state") != "needs_permission":
+                message = render_lifecycle_response(lifecycle_payload)
+                return self._runtime_truth_response(
+                    text=message,
+                    route="action_tool",
+                    used_runtime_state=False,
+                    used_memory=bool(self._current_runtime_setup_state(user_id)),
+                    used_tools=["external_pack_lookup"],
+                    payload={
+                        "type": "external_pack_lifecycle_status",
+                        "summary": message,
+                        "pack_id": pack_id,
+                        "pack_name": pack_name,
+                        "managed_adapters": normalized_adapters,
+                        "lifecycle": lifecycle_payload,
+                    },
+                )
             requested_path = extract_local_path(text)
             if requested_path:
                 return self._managed_adapter_path_request_response(user_id, text)
@@ -7482,12 +7546,6 @@ class Orchestrator:
         ).to_dict()
         if lifecycle.get("state") in {"generated_quarantined", "imported_for_review"}:
             self._queue_pack_review_approve_followup(user_id, pack=pack_row, lifecycle=lifecycle)
-        if managed_adapters:
-            self._pending_managed_adapter_requests[user_id] = {
-                "pack_id": str(pack_row.get("pack_id") or pack_row.get("canonical_id") or canonical_pack.get("id") or "").strip(),
-                "pack_name": pack_name,
-                "managed_adapters": managed_adapters,
-            }
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
