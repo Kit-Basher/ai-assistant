@@ -14,6 +14,8 @@ Online external pack sources are hostile by default. GitHub, public registries, 
 
 Imported external pack documents are untrusted guidance. They must not become system, developer, or runtime instructions, and prompt-injection attempts in primary instruction files must block import or force a manual rewrite path.
 
+Support and diagnostics must retain only minimal external-pack audit metadata. Removed pack records should preserve identity, hashes, risk state, and lifecycle history without raw imported documents, private local paths, or credential-bearing source URLs.
+
 Codex, development agents, and the repo control plane are not part of the normal runtime user workflow. They may help build or verify this project, but a normal user should not need a developer to manually build every new skill.
 
 ## External Pack Lifecycle Contract

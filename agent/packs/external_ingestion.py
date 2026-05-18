@@ -1537,6 +1537,8 @@ class ExternalPackIngestor:
             or self._first_paragraph(skill_body)
             or f"Imported external pack from {quarantined_path.name}."
         )
+        if any(str(flag).startswith("prompt_injection_") for flag in risk_report.flags):
+            description = "Imported pack guidance was blocked because primary text contained prompt-injection patterns."
         pack_id = _slugify(str(combined_meta.get("id") or name or quarantined_path.name))
         pack_type = {
             CLASS_PORTABLE_TEXT_SKILL: PACK_TYPE_SKILL,

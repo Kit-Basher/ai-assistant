@@ -37,6 +37,8 @@ Approved source policy is not content trust. Catalog listings are validated with
 
 Imported pack documents are untrusted guidance, never assistant authority. Normalized imported `SKILL.md` and prompt material are wrapped with an internal warning that runtime/system policy wins over pack text. Strong prompt-injection patterns in primary instruction files, including requests to ignore system/developer instructions, leak secrets, auto-approve/auto-enable, run shell or dependency installs, or disable safety gates, block the import and require manual rewrite/review.
 
+Removed pack tombstones keep minimal audit metadata only. They retain pack identity, hashes/fingerprints, risk flags, review state, and removal reason, but not full imported guidance text. Support bundles and diagnostic payloads must redact imported pack documents, raw catalog entries, raw manifests, private local paths, and credential-bearing source URLs.
+
 The assistant must not say an external pack can perform a task until `PackLifecycleService` returns `usable=true`. Before that, responses must name the missing gate and the next safe step: preview, create review candidate, inspect, approve, configure, request permission, enable, or use.
 
 Generated and external packs must not run arbitrary generated code. Managed adapters are the safety boundary for useful external behavior.

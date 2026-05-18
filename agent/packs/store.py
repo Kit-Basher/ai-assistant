@@ -6,9 +6,11 @@ import sqlite3
 import threading
 import time
 import shutil
+import hashlib
 from pathlib import Path
 from typing import Any
 
+from agent.llm.support import sanitize_support_payload
 from agent.packs.diffing import build_pack_diff, build_pack_version_ref
 from agent.packs.manifest import PackManifest, compute_permissions_hash, normalize_permissions
 from agent.state_transitions import (
@@ -214,6 +216,23 @@ class PackStore:
             return bool(normalized and normalized in self._external_pack_removal_cache())
 
     @staticmethod
+    def _sanitize_external_pack_blob(value: dict[str, Any]) -> dict[str, Any]:
+        sanitized = sanitize_support_payload(value, key_hint="external_pack_record")
+        return sanitized if isinstance(sanitized, dict) else {}
+
+    @staticmethod
+    def _removed_skill_text_audit(skill_text: str) -> dict[str, Any] | None:
+        text = str(skill_text or "")
+        if not text.strip():
+            return None
+        return {
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "bytes": len(text.encode("utf-8")),
+            "stored": False,
+            "redaction": "full imported guidance removed from tombstone",
+        }
+
+    @staticmethod
     def _external_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
         if row is None:
             return None
@@ -262,7 +281,7 @@ class PackStore:
             "source": canonical.get("source") if isinstance(canonical.get("source"), dict) else {},
             "quarantine_path": str(row["quarantine_path"] or "").strip() or None,
             "normalized_path": str(row["normalized_path"] or "").strip() or None,
-            "canonical_pack": canonical,
+            "canonical_pack": PackStore._sanitize_external_pack_blob(canonical),
             "risk_report": risk,
             "review_envelope": review,
             "change_summary": review.get("change_summary") if isinstance(review.get("change_summary"), dict) else {},
@@ -386,7 +405,7 @@ class PackStore:
             review = {}
         return {
             "pack_id": str(row["pack_id"]),
-            "canonical_pack": canonical if isinstance(canonical, dict) else {},
+            "canonical_pack": self._sanitize_external_pack_blob(canonical if isinstance(canonical, dict) else {}),
             "risk_report": risk if isinstance(risk, dict) else {},
             "review_envelope": review if isinstance(review, dict) else {},
             "skill_text": str(row["skill_text"] or "").strip() or None,
@@ -584,10 +603,11 @@ class PackStore:
             self._mark_external_pack_removed(pack_id)
         removal_payload = {
             "pack_id": str(current.get("pack_id") or pack_id),
-            "canonical_json": canonical_pack,
+            "canonical_json": self._sanitize_external_pack_blob(canonical_pack),
             "risk_json": risk_report,
             "review_json": review_envelope,
-            "skill_text": skill_text or None,
+            "skill_text": None,
+            "skill_text_audit": self._removed_skill_text_audit(skill_text),
             "normalized_path": str(current.get("normalized_path") or "").strip() or None,
             "quarantine_path": str(current.get("quarantine_path") or "").strip() or None,
             "removed_by": str(removed_by or "").strip() or "loopback_operator",
@@ -617,10 +637,18 @@ class PackStore:
                     """,
                     (
                         removal_payload["pack_id"],
-                        json.dumps(canonical_pack, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(removal_payload["canonical_json"], ensure_ascii=True, sort_keys=True, separators=(",", ":")),
                         json.dumps(risk_report, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                        json.dumps(review_envelope, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
-                        skill_text or None,
+                        json.dumps(
+                            {
+                                **review_envelope,
+                                "removed_skill_text": removal_payload["skill_text_audit"],
+                            },
+                            ensure_ascii=True,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ),
+                        None,
                         removal_payload["normalized_path"],
                         removal_payload["quarantine_path"],
                         removal_payload["removed_by"],

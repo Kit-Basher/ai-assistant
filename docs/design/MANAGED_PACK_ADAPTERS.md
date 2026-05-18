@@ -16,6 +16,8 @@ Trusted source policy only allows discovery or quarantine fetch. Catalog entries
 
 Imported `SKILL.md`, README, and reference files are guidance only. They are wrapped as untrusted imported guidance during normalization, and prompt-injection language that tries to override policy, leak secrets, self-approve, install dependencies, execute shell commands, or disable safety checks blocks the pack or forces manual rewrite.
 
+Diagnostics and support bundles must not dump raw imported pack content or private source data. Removed-pack records keep hashes and audit metadata, source URLs are sanitized, and managed-adapter diagnostics may include adapter kinds but not private parameter values or imported document bodies.
+
 Missing capability flow must not dead-end. The assistant should tell the user what is missing and the next safe step: preview a discovered pack, preview a scaffold, create a review-only candidate, or explain why the capability is blocked.
 
 The intended lifecycle is discover -> preview -> scaffold/create -> quarantine -> inspect -> approve -> configure -> permission -> enable -> use. A pack is usable only after the relevant approval, enablement, configuration, and permission gates are complete.

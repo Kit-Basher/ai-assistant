@@ -19,8 +19,10 @@ _SECRET_KEY_HINTS = {
     "token",
 }
 _URL_FIELD_HINTS = {"base_url", "url", "endpoint"}
+_PATH_FIELD_HINTS = {"path", "source_path", "normalized_path", "quarantine_path", "raw_archive_path", "selected_path"}
 _REDACTED_VALUE = "[REDACTED]"
 _PRIVATE_HISTORY_PATH_RE = re.compile(r"(?:~|/).{0,180}(?:watch-history|youtube-history|history).{0,80}\.(?:json|html)", re.IGNORECASE)
+_LOCAL_PRIVATE_PATH_RE = re.compile(r"(?:(?:~|/home/[^/\s\"'<>]+|/Users/[^/\s\"'<>]+)/(?:[^,\s\"'<>]){0,240})")
 _IMPORTED_PACK_TEXT_KEYS = {
     "skill_text",
     "skill_md",
@@ -29,7 +31,49 @@ _IMPORTED_PACK_TEXT_KEYS = {
     "imported_guidance",
     "imported_pack_guidance",
     "source_skill_text",
+    "raw_catalog_entry",
+    "raw_manifest",
 }
+_SAFE_EXTERNAL_PACK_KEYS = {
+    "pack_id",
+    "canonical_id",
+    "content_hash",
+    "source_fingerprint",
+    "source_key",
+    "name",
+    "version",
+    "type",
+    "classification",
+    "status",
+    "trust",
+    "risk_score",
+    "risk_level",
+    "risk_flags",
+    "hard_block_reasons",
+    "review_required",
+    "non_executable",
+    "enabled",
+    "permissions",
+    "capabilities",
+    "components",
+    "assets",
+    "pack_identity",
+    "trust_anchor",
+    "source",
+    "source_history",
+    "versions",
+    "risk_report",
+    "review_envelope",
+    "audit",
+    "adaptation",
+    "runtime",
+    "removed_by",
+    "reason",
+    "removed_at",
+    "updated_at",
+    "installed_at",
+}
+_SECRET_QUERY_KEYS = {"token", "key", "api_key", "access_token", "auth", "signature", "sig"}
 
 _PROVIDER_CAUSE_ORDER = {
     "provider_not_found": 0,
@@ -224,7 +268,7 @@ def _sanitize_url(raw: str) -> str:
     safe_query_pairs: list[tuple[str, str]] = []
     for raw_key, raw_value in query_pairs:
         key = str(raw_key)
-        if _looks_secret_key(key):
+        if _looks_secret_key(key) or key.lower() in _SECRET_QUERY_KEYS:
             safe_query_pairs.append((key, _REDACTED_VALUE))
         else:
             safe_query_pairs.append((key, sanitize_notification_text(str(raw_value))))
@@ -241,6 +285,8 @@ def _sanitize_string(value: str, *, key_hint: str = "") -> str:
         return "[REDACTED_IMPORTED_PACK_TEXT]"
     if hint in _URL_FIELD_HINTS or hint.endswith("_url"):
         return _sanitize_url(value)
+    if hint in _PATH_FIELD_HINTS or hint.endswith("_path"):
+        return _LOCAL_PRIVATE_PATH_RE.sub("<redacted-local-path>", _PRIVATE_HISTORY_PATH_RE.sub("<redacted-local-history-path>", sanitize_notification_text(value)))
     cleaned = sanitize_notification_text(value)
     lowered = cleaned.lower()
     if "secrets.enc" in lowered or "secret_store" in lowered:
@@ -248,11 +294,40 @@ def _sanitize_string(value: str, *, key_hint: str = "") -> str:
     return _PRIVATE_HISTORY_PATH_RE.sub("<redacted-local-history-path>", cleaned)
 
 
+def _sanitize_external_pack_payload(value: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {}
+    for key in sorted(set(value.keys()) & _SAFE_EXTERNAL_PACK_KEYS):
+        item = value.get(key)
+        if key == "permissions" and isinstance(item, dict):
+            output[key] = {
+                "requested": sanitize_support_payload(item.get("requested"), key_hint="permissions_requested"),
+                "granted": sanitize_support_payload(item.get("granted"), key_hint="permissions_granted"),
+                "managed_adapters": [
+                    {"kind": str(row.get("kind") or "").strip()}
+                    for row in item.get("managed_adapters", [])
+                    if isinstance(row, dict) and str(row.get("kind") or "").strip()
+                ],
+            }
+            continue
+        output[key] = sanitize_support_payload(item, key_hint=key)
+    if "pack_id" not in output and "id" in value:
+        output["pack_id"] = sanitize_support_payload(value.get("id"), key_hint="pack_id")
+    return output
+
+
 def sanitize_support_payload(value: Any, *, key_hint: str = "") -> Any:
     if isinstance(value, dict):
+        hint = str(key_hint or "").strip().lower()
+        if hint in {"external_pack", "external_pack_record", "canonical_pack"} or (
+            {"pack_id", "classification", "status"} <= {str(key) for key in value.keys()}
+        ):
+            return _sanitize_external_pack_payload(value)
         output: dict[str, Any] = {}
         for raw_key in sorted(value.keys(), key=lambda item: str(item)):
             key = str(raw_key)
+            if key.strip().lower() in _IMPORTED_PACK_TEXT_KEYS:
+                output[key] = "[REDACTED_IMPORTED_PACK_TEXT]"
+                continue
             item = value.get(raw_key)
             if _looks_secret_key(key):
                 output[key] = _REDACTED_VALUE
