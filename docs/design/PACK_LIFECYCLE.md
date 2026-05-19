@@ -81,3 +81,9 @@ The action controller does not add arbitrary external code execution, OAuth, bro
 Invocation is separate from lifecycle continuation. Lifecycle says whether a pack has passed gates; lifecycle actions move one gate at a time; managed adapter invocation performs approved core adapter operations only after the pack is usable.
 
 Current generic operations are `validate_grant`, `describe_capability`, and `dry_run`. `local_file_import` is only the first minimal adapter implementation behind that generic contract. Its `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not parse Google Takeout, search history, fetch transcripts, upload data, or store an index.
+
+## Safety Meta-Smoke
+
+`scripts/external_pack_safety_smoke.py` is the focused regression guard for hostile external-pack intake. It creates temporary malicious fixtures and checks the major gates together: remote source trust, strict catalog schema, archive extraction hardening, prompt-injection handling, lifecycle/managed-adapter gates, and support/tombstone redaction.
+
+Run this smoke before expanding online skill ecosystem support. Passing it does not make external content trusted; it only confirms the current hostile-by-default intake chain still blocks the known regression classes.
