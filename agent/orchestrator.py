@@ -81,6 +81,7 @@ from agent.packs.managed_adapter_invocation import ManagedAdapterInvocationReque
 from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
+from agent.packs.source_approval import SourceApprovalController
 from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
@@ -7411,6 +7412,16 @@ class Orchestrator:
                 "scaffold_preview": acquisition.scaffold_preview,
                 "source_leads": [dict(row) for row in acquisition.source_leads],
                 "lead_search": acquisition.lead_search,
+                "capability_gap_rescue": {
+                    "candidate_packs": (
+                        [dict(acquisition.candidate_pack)]
+                        if isinstance(acquisition.candidate_pack, dict)
+                        else []
+                    ),
+                    "missing_capability": acquisition.detected_capability,
+                    "preview_required": acquisition.source_status == "trusted_catalog_candidate",
+                    "install_allowed_initially": False,
+                },
             },
         )
 
@@ -8100,11 +8111,36 @@ class Orchestrator:
                 used_tools=["pack_acquisition"],
                 payload={"type": "source_approval_preview", "ok": False, "summary": message},
             )
-        lines = [
-            "Source approval preview for untrusted search leads.",
-            "This workflow is not implemented as a mutation yet. I did not fetch pages, download archives, import packs, approve sources, enable packs, or grant permissions.",
-            "Before any future fetch/import, a source approval flow must record explicit trust for a source id and then still send fetched content through quarantine and review.",
-        ]
+        controller = SourceApprovalController(pack_registry_discovery=self._pack_registry_discovery())
+        preview = controller.preview(leads[0]).to_dict()
+        if bool(preview.get("ok")):
+            pending_id = str(uuid.uuid4())
+            now_epoch = int(time.time())
+            self._memory_runtime.add_pending_item(
+                user_id,
+                {
+                    "pending_id": pending_id,
+                    "kind": "followup",
+                    "origin_tool": "pack_source_approval_confirm",
+                    "question": "Record source approval for this untrusted lead?",
+                    "options": ["yes", "no"],
+                    "created_at": now_epoch,
+                    "expires_at": now_epoch + 600,
+                    "thread_id": self._active_thread_id_for_user(user_id),
+                    "status": PENDING_STATUS_READY_TO_RESUME,
+                    "context": {
+                        "approval_preview": preview,
+                        "source_leads": leads,
+                        "lifecycle_action": "source_approval_record",
+                    },
+                },
+            )
+        lines = [str(preview.get("user_message") or "Source approval preview for untrusted search leads.").strip()]
+        if bool(preview.get("ok")):
+            lines.append(f"Proposed source id: {preview.get('source_id')}. Source kind: {preview.get('source_kind')}.")
+            lines.append("Say yes to record source approval only, or no to cancel.")
+        else:
+            lines.append("No source approval was recorded. No content was fetched, downloaded, imported, installed, approved, enabled, or granted permissions.")
         for index, lead in enumerate(leads[:5], start=1):
             title = str(lead.get("title") or "Untitled lead").strip()
             url = str(lead.get("url") or "").strip()
@@ -8121,10 +8157,48 @@ class Orchestrator:
             used_tools=["pack_acquisition"],
             payload={
                 "type": "source_approval_preview",
-                "ok": True,
+                "ok": bool(preview.get("ok")),
                 "summary": message,
+                "approval_preview": preview,
                 "source_leads": leads,
                 "blocked_from_fetch": True,
+                "fetch_import_install": False,
+            },
+        )
+
+    def _source_approval_confirm_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        preview = context.get("approval_preview") if isinstance(context.get("approval_preview"), dict) else {}
+        if not preview:
+            message = "I cannot record source approval because the approval preview is missing. No source was fetched or imported."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["pack_acquisition"],
+                payload={"type": "source_approval", "ok": False, "summary": message},
+            )
+        result = SourceApprovalController(pack_registry_discovery=self._pack_registry_discovery()).approve(
+            preview,
+            changed_by="assistant_source_approval",
+        )
+        message = result.user_message
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["pack_acquisition"],
+            payload={
+                "type": "source_approval",
+                "ok": bool(result.ok),
+                "summary": message,
+                "result": result.to_dict(),
+                "did_fetch": False,
+                "did_import": False,
+                "did_install": False,
+                "next_step": "preview_fetch_into_quarantine" if result.ok else "source_approval_blocked",
             },
         )
 
@@ -17754,6 +17828,15 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I will not start source approval for those untrusted leads.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_source_approval_confirm":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._source_approval_confirm_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not approve that source. No content was fetched or imported.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_scaffold_preview":
                     if followup_intent in {"accept", "details"}:
                         refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="scaffold_preview")

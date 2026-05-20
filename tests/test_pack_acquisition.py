@@ -390,8 +390,53 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         _body, text = self._post_chat("yes")
 
         self.assertIn("source approval preview", text.lower())
-        self.assertIn("not implemented", text.lower())
-        self.assertIn("did not fetch", text.lower())
+        self.assertIn("source is still untrusted", text.lower())
+        self.assertIn("no pages were fetched", text.lower())
+        self.assertIn("say yes to record source approval only", text.lower())
+        self.assertFalse(self.runtime.pack_store.list_external_packs())
+
+    def test_second_yes_after_source_approval_preview_records_approval_only(self) -> None:
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener({"results": [{"title": "Lead", "url": "https://example.com/pack.zip"}]}),
+        )
+        self._post_chat("add a capability for analyzing plant watering")
+        self._post_chat("yes")
+        body, text = self._post_chat("yes")
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+        result = setup.get("result") if isinstance(setup.get("result"), dict) else {}
+
+        self.assertIn("source approval", text.lower())
+        self.assertIn("no pack was fetched", text.lower())
+        self.assertIn("preview/fetch into quarantine", text.lower())
+        self.assertFalse(result.get("did_fetch"))
+        self.assertFalse(result.get("did_import"))
+        self.assertFalse(result.get("did_install"))
+        self.assertFalse(self.runtime.pack_store.list_external_packs())
+
+    def test_no_after_source_approval_preview_cancels_without_fetch(self) -> None:
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener({"results": [{"title": "Lead", "url": "https://example.com/pack.zip"}]}),
+        )
+        self._post_chat("add a capability for analyzing plant watering")
+        self._post_chat("yes")
+        _body, text = self._post_chat("no")
+
+        self.assertIn("did not approve that source", text.lower())
+        self.assertIn("no content was fetched", text.lower())
         self.assertFalse(self.runtime.pack_store.list_external_packs())
 
 

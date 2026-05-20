@@ -475,9 +475,9 @@ class PackAcquisitionCoordinator:
             name = _clean(candidate.get("name")) or "a candidate pack"
             source_name = _clean(candidate.get("source_name") or candidate.get("source_id")) or "an approved catalog source"
             return (
-                f"I do not have {label} as an active capability yet. I searched approved/trusted catalog sources only and found {name} in {source_name}. "
+                f"I do not have {label} as an active capability yet. I searched the approved starter catalog sources and other approved/trusted catalog sources only, and found {name} in {source_name}. "
                 f"Current lifecycle state: {lifecycle.get('state')}. It is not installed or usable yet. "
-                f"Next safe step: {next_label or 'show the preview before import'}. Say yes to continue this one step."
+                f"Next safe step: {next_label or 'show the preview before import'}. Say yes to preview it. This continues one gate only."
             )
         if source_status == "source_trust_required":
             source = _first_source_error(source_errors)

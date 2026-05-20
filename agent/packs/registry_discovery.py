@@ -131,6 +131,9 @@ _POLICY_WRITE_FIELDS = {
     "cache_ttl_seconds",
     "max_results",
     "notes",
+    "approved_by_user",
+    "approved_at",
+    "approval_provenance",
 }
 _SOURCE_WRITE_FIELDS = {
     "source_id",
@@ -1136,6 +1139,12 @@ class PackRegistryDiscoveryService:
                     raise ValueError("invalid_max_results")
             if key == "notes" and value is not None and not isinstance(value, str):
                 raise ValueError("invalid_notes")
+            if key == "approved_by_user" and not isinstance(value, bool):
+                raise ValueError("invalid_approved_by_user")
+            if key == "approved_at" and value is not None and not isinstance(value, str):
+                raise ValueError("invalid_approved_at")
+            if key == "approval_provenance" and value is not None and not isinstance(value, dict):
+                raise ValueError("invalid_approval_provenance")
 
     def _load_policy(self) -> RegistryDiscoveryPolicy:
         raw, _ = self._read_policy_document()
