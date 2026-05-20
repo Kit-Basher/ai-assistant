@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,8 @@ from agent.packs.managed_adapter_invocation import OP_DESCRIBE_CAPABILITY, OP_DR
 from agent.packs.managed_adapters import ADAPTER_LOCAL_FILE_IMPORT
 from agent.packs.registry_discovery import PackRegistryDiscoveryService
 from agent.packs.store import PackStore
+from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
+from tests.test_safe_web_search import _FakeOpener
 from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _assistant_text, _config
 
 
@@ -43,10 +46,18 @@ class TestPackAcquisitionCoordinator(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
-    def _coordinator(self, discovery: Any | None = None) -> PackAcquisitionCoordinator:
+    def _coordinator(
+        self,
+        discovery: Any | None = None,
+        *,
+        web_search_handler: Any | None = None,
+        search_status_handler: Any | None = None,
+    ) -> PackAcquisitionCoordinator:
         return PackAcquisitionCoordinator(
             pack_store=self.store,
             pack_registry_discovery=discovery or self.discovery,
+            web_search_handler=web_search_handler,
+            search_status_handler=search_status_handler,
         )
 
     def _record_pack(self, *, with_adapter: bool = True) -> dict[str, Any]:
@@ -129,6 +140,61 @@ class TestPackAcquisitionCoordinator(unittest.TestCase):
         self.assertIsInstance(result.scaffold_preview, dict)
         self.assertFalse(result.scaffold_preview["creates_files"])
         self.assertFalse(result.scaffold_preview["executes_code"])
+
+    def test_no_trusted_candidate_with_search_disabled_uses_scaffold_fallback(self) -> None:
+        result = self._coordinator(
+            search_status_handler=lambda: {"available": False, "enabled": False, "reason": "search_disabled"}
+        ).acquire(AcquisitionRequest(text="add a capability for analyzing plant watering", requested_capability="plant_watering_analysis"))
+
+        assert result is not None
+        self.assertEqual("no_candidate_scaffold_available", result.source_status)
+        self.assertEqual("scaffold_preview", result.next_step.action if result.next_step else None)
+        self.assertFalse(result.source_leads)
+        self.assertEqual("search_disabled", (result.search_status or {}).get("reason"))
+
+    def test_no_trusted_candidate_with_search_available_shows_untrusted_source_leads(self) -> None:
+        calls: list[dict[str, Any]] = []
+
+        def search(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+            calls.append(dict(payload))
+            return True, {
+                "ok": True,
+                "results": [
+                    {
+                        "title": "Possible pack",
+                        "url": "https://github.com/example/plant-pack",
+                        "snippet": "Search metadata only.",
+                        "engine": "mock",
+                    }
+                ],
+            }
+
+        result = self._coordinator(
+            web_search_handler=search,
+            search_status_handler=lambda: {"available": True, "enabled": True, "provider": "searxng"},
+        ).acquire(AcquisitionRequest(text="add a capability for analyzing plant watering", requested_capability="plant_watering_analysis"))
+
+        assert result is not None
+        self.assertEqual("untrusted_source_leads", result.source_status)
+        self.assertEqual("source_approval_preview", result.next_step.action if result.next_step else None)
+        self.assertEqual("source_approval_required", result.blocked_reason)
+        self.assertEqual(1, len(result.source_leads))
+        self.assertEqual("github_repo", result.source_leads[0]["suspected_source_kind"])
+        self.assertIn("not trusted", result.user_message.lower())
+        self.assertIn("cannot be fetched/imported", result.user_message.lower())
+        self.assertEqual(1, len(calls))
+        self.assertEqual([], self.store.list_external_packs())
+
+    def test_trusted_catalog_candidates_take_priority_over_search_leads(self) -> None:
+        calls: list[dict[str, Any]] = []
+        result = self._coordinator(
+            web_search_handler=lambda payload: (calls.append(dict(payload)) or (True, {"ok": True, "results": []})),
+            search_status_handler=lambda: {"available": True, "enabled": True, "provider": "searxng"},
+        ).acquire(AcquisitionRequest(text="install a skill that lets you browse"))
+
+        assert result is not None
+        self.assertEqual("trusted_catalog_candidate", result.source_status)
+        self.assertEqual([], calls)
 
     def test_yes_continues_one_acquisition_gate_only(self) -> None:
         first = self._coordinator().acquire(AcquisitionRequest(text="install a skill that lets you browse"))
@@ -273,6 +339,60 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertEqual("action_tool", meta.get("route"))
         self.assertIn("pack_acquisition", meta.get("used_tools") or [])
         self.assertNotIn("likely cause:", text.lower())
+
+    def test_no_catalog_capability_with_mocked_search_returns_untrusted_leads(self) -> None:
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener(
+                {
+                    "results": [
+                        {
+                            "title": "Possible external pack",
+                            "url": "https://github.com/example/custom-pack",
+                            "content": "Untrusted search metadata.",
+                            "engine": "mock",
+                        }
+                    ]
+                }
+            ),
+        )
+        body, text = self._post_chat("add a capability for analyzing plant watering")
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+        acquisition = setup.get("acquisition") if isinstance(setup.get("acquisition"), dict) else {}
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("pack_acquisition", meta.get("used_tools") or [])
+        self.assertEqual("untrusted_source_leads", acquisition.get("source_status"))
+        self.assertIn("untrusted source leads", text.lower())
+        self.assertIn("cannot be fetched/imported", text.lower())
+        self.assertIn("source approval", text.lower())
+        self.assertFalse(self.runtime.pack_store.list_external_packs())
+
+    def test_yes_after_source_leads_does_not_fetch_or_import(self) -> None:
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener({"results": [{"title": "Lead", "url": "https://example.com/pack.zip"}]}),
+        )
+        self._post_chat("add a capability for analyzing plant watering")
+        _body, text = self._post_chat("yes")
+
+        self.assertIn("source approval preview", text.lower())
+        self.assertIn("not implemented", text.lower())
+        self.assertIn("did not fetch", text.lower())
+        self.assertFalse(self.runtime.pack_store.list_external_packs())
 
 
 if __name__ == "__main__":

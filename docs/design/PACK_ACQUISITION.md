@@ -8,7 +8,8 @@ The coordinator wraps the existing safety services:
 
 - capability detection and recommendation identify the requested capability and search approved/trusted catalog sources only.
 - registry discovery supplies catalog candidates and source trust status.
-- scaffold preview/create supplies review-only generated text candidates when no trusted catalog candidate exists.
+- safe web search may supply untrusted source leads when approved/trusted catalogs have no candidate and search is available.
+- scaffold preview/create supplies review-only generated text candidates when no trusted catalog candidate or source lead path is available.
 - `PackLifecycleService` reports current state, missing gate, and next safe step.
 - `PackLifecycleActionController` advances exactly one confirmed gate at a time.
 - `ManagedAdapterInvoker` invokes approved core-owned adapter operations only after lifecycle returns `usable=true`.
@@ -21,6 +22,7 @@ Allowed v1 outcomes:
 
 - trusted catalog candidate found: show preview before fetch/import.
 - remote source untrusted: stop at the source-trust gate and explain that approval is required before fetch/import.
+- safe web-search leads found: show untrusted source leads only. Leads are not source approval, are not trusted, and cannot be fetched/imported until an explicit source approval flow exists and is completed.
 - no candidate found: offer a preview-only scaffold path.
 - imported for review: ask for review/approval.
 - approved but disabled: ask to enable.
@@ -32,5 +34,7 @@ Each confirmation advances one gate only. Repeated `yes` must not skip approval,
 ## Safety Boundaries
 
 Remote content remains hostile even when a source is approved. Source trust only permits preview/fetch into quarantine. Catalog metadata, archives, manifests, README, and `SKILL.md` content remain untrusted until normalized and reviewed.
+
+Safe web-search lead discovery is metadata-only. Result URLs, titles, snippets, and engine/source labels are untrusted search metadata. The assistant must not fetch result pages, download archives, call `/packs/install`, import packs, approve sources, enable packs, or infer safety from GitHub or any other domain. Leads only point to a future source approval gate.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.

@@ -31,12 +31,22 @@ The native search adapter:
 - does not run JavaScript or browser automation
 - does not download files
 - does not install or import external packs
-- does not integrate with pack acquisition yet
 - does not trust search results
 
 This means web search can help find general information metadata, but it is not a webpage reader, crawler, downloader, or external skill-pack installer.
 
+## External Pack Source Leads
+
+When approved/trusted external-pack catalogs have no candidate, pack acquisition may use `safe_web_search` to find possible source leads. These leads are still only untrusted metadata. Lead discovery:
+
+- does not fetch pages
+- does not download files or archives
+- does not install or import external packs
+- does not approve sources
+- does not trust GitHub or any other domain by name
+
+A lead can only point to a later source approval review. Source approval is still required before any future fetch/import path, and fetched content must still go through quarantine and review.
+
 ## Status
 
 Use `/search/status` or ask the assistant “what is your search status?” to check configuration. If search is disabled or missing `SEARXNG_BASE_URL`, the assistant should explain the missing requirement and show the next safe setup step without claiming search works.
-

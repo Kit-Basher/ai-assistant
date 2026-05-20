@@ -55,7 +55,12 @@ from agent.packs.capability_recommendation import (
     recommend_packs_for_capability,
     render_pack_capability_response,
 )
-from agent.packs.acquisition import AcquisitionRequest, AcquisitionResult, PackAcquisitionCoordinator
+from agent.packs.acquisition import (
+    AcquisitionRequest,
+    AcquisitionResult,
+    PackAcquisitionCoordinator,
+    looks_like_generic_external_capability_request,
+)
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.managed_adapters import (
     ADAPTER_LOCAL_FILE_IMPORT,
@@ -7364,16 +7369,21 @@ class Orchestrator:
 
     def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         gap = classify_capability_gap_request(text)
-        if str(gap.get("request_kind") or "").strip().lower() != "capability":
+        generic_capability_request = looks_like_generic_external_capability_request(text)
+        if str(gap.get("request_kind") or "").strip().lower() != "capability" and not generic_capability_request:
             return None
         need = detect_pack_capability_need(text)
-        if need is None:
+        if need is None and not generic_capability_request:
             return None
         coordinator = self._pack_acquisition_coordinator()
         acquisition = coordinator.acquire(
             AcquisitionRequest(
                 text=text,
-                requested_capability=str(need.get("capability") or "").strip().lower() or None,
+                requested_capability=(
+                    str(need.get("capability") or "").strip().lower() or None
+                    if isinstance(need, dict)
+                    else None
+                ),
                 user_id=user_id,
                 thread_id=self._active_thread_id_for_user(user_id),
             )
@@ -7399,6 +7409,8 @@ class Orchestrator:
                 "missing_gate": acquisition.missing_gate,
                 "next_step": acquisition.next_step.to_dict() if acquisition.next_step is not None else None,
                 "scaffold_preview": acquisition.scaffold_preview,
+                "source_leads": [dict(row) for row in acquisition.source_leads],
+                "lead_search": acquisition.lead_search,
             },
         )
 
@@ -7406,6 +7418,12 @@ class Orchestrator:
         return PackAcquisitionCoordinator(
             pack_store=self._pack_store,
             pack_registry_discovery=self._pack_registry_discovery(),
+            web_search_handler=self._web_search_handler,
+            search_status_handler=(
+                self._chat_runtime_adapter.search_status
+                if callable(getattr(self._chat_runtime_adapter, "search_status", None))
+                else None
+            ),
         )
 
     def _queue_pack_acquisition_next_step(self, user_id: str, acquisition: AcquisitionResult) -> None:
@@ -7448,6 +7466,33 @@ class Orchestrator:
             preview = context.get("scaffold_preview") if isinstance(context.get("scaffold_preview"), dict) else acquisition.scaffold_preview
             if isinstance(preview, dict):
                 self._queue_capability_scaffold_followup(user_id, message=acquisition.user_message, preview=preview)
+            return
+        if action == "source_approval_preview":
+            leads = context.get("source_leads") if isinstance(context.get("source_leads"), list) else list(acquisition.source_leads)
+            if leads:
+                pending_id = str(uuid.uuid4())
+                now_epoch = int(time.time())
+                self._memory_runtime.add_pending_item(
+                    user_id,
+                    {
+                        "pending_id": pending_id,
+                        "kind": "followup",
+                        "origin_tool": "pack_acquisition_source_leads",
+                        "question": acquisition.user_message,
+                        "options": ["yes", "no"],
+                        "created_at": now_epoch,
+                        "expires_at": now_epoch + 600,
+                        "thread_id": self._active_thread_id_for_user(user_id),
+                        "status": PENDING_STATUS_READY_TO_RESUME,
+                        "context": {
+                            "capability": str(context.get("capability") or acquisition.detected_capability or "").strip(),
+                            "source_leads": [dict(row) for row in leads if isinstance(row, dict)],
+                            "lead_search": context.get("lead_search") if isinstance(context.get("lead_search"), dict) else acquisition.lead_search,
+                            "lifecycle": dict(lifecycle or acquisition.lifecycle),
+                            "lifecycle_action": "source_approval_preview",
+                        },
+                    },
+                )
             return
         if action == "review_approve":
             pack_id = str((acquisition.candidate_pack or {}).get("pack_id") or acquisition.lifecycle.get("pack_id") or "").strip()
@@ -8042,6 +8087,47 @@ class Orchestrator:
             },
         )
 
+    def _source_lead_approval_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        leads = [dict(row) for row in (context.get("source_leads") if isinstance(context.get("source_leads"), list) else []) if isinstance(row, dict)]
+        if not leads:
+            message = "I cannot show a source approval preview because the untrusted lead metadata is missing. No source was fetched or imported."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["pack_acquisition"],
+                payload={"type": "source_approval_preview", "ok": False, "summary": message},
+            )
+        lines = [
+            "Source approval preview for untrusted search leads.",
+            "This workflow is not implemented as a mutation yet. I did not fetch pages, download archives, import packs, approve sources, enable packs, or grant permissions.",
+            "Before any future fetch/import, a source approval flow must record explicit trust for a source id and then still send fetched content through quarantine and review.",
+        ]
+        for index, lead in enumerate(leads[:5], start=1):
+            title = str(lead.get("title") or "Untitled lead").strip()
+            url = str(lead.get("url") or "").strip()
+            kind = str(lead.get("suspected_source_kind") or "generic_web_result").strip()
+            lines.append(f"{index}. {title} [{kind}]")
+            if url:
+                lines.append(f"   {url}")
+        message = "\n".join(lines)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["pack_acquisition"],
+            payload={
+                "type": "source_approval_preview",
+                "ok": True,
+                "summary": message,
+                "source_leads": leads,
+                "blocked_from_fetch": True,
+            },
+        )
+
     def _capability_gap_import_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
         context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
         install_handoff = context.get("install_handoff") if isinstance(context.get("install_handoff"), dict) else {}
@@ -8353,6 +8439,7 @@ class Orchestrator:
                 "lifecycle_state": acquisition.lifecycle_state,
                 "missing_gate": acquisition.missing_gate,
                 "next_step": acquisition.next_step.to_dict() if acquisition.next_step is not None else None,
+                "source_leads": [dict(row) for row in acquisition.source_leads],
             },
         )
 
@@ -17658,6 +17745,15 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I cancelled the pack preview.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_acquisition_source_leads":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._source_lead_approval_preview_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I will not start source approval for those untrusted leads.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_scaffold_preview":
                     if followup_intent in {"accept", "details"}:
                         refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="scaffold_preview")

@@ -19,6 +19,7 @@ from agent.packs.managed_adapter_invocation import (
     OP_DRY_RUN,
 )
 from agent.packs.scaffolding import build_scaffold_preview
+from agent.packs.source_leads import SourceLeadSearchResult, build_source_leads_from_safe_search
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,9 @@ class AcquisitionResult:
     scaffold_preview: dict[str, Any] | None = None
     action_result: dict[str, Any] | None = None
     invocation_result: dict[str, Any] | None = None
+    source_leads: tuple[dict[str, Any], ...] = ()
+    lead_search: dict[str, Any] | None = None
+    search_status: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -88,6 +92,9 @@ class AcquisitionResult:
             "scaffold_preview": dict(self.scaffold_preview) if isinstance(self.scaffold_preview, dict) else None,
             "action_result": dict(self.action_result) if isinstance(self.action_result, dict) else None,
             "invocation_result": dict(self.invocation_result) if isinstance(self.invocation_result, dict) else None,
+            "source_leads": [dict(row) for row in self.source_leads],
+            "lead_search": dict(self.lead_search) if isinstance(self.lead_search, dict) else None,
+            "search_status": dict(self.search_status) if isinstance(self.search_status, dict) else None,
         }
 
 
@@ -111,6 +118,8 @@ class PackAcquisitionCoordinator:
         action_controller: PackLifecycleActionController | None = None,
         action_handlers: dict[str, Handler] | None = None,
         managed_adapter_invoker: ManagedAdapterInvoker | None = None,
+        web_search_handler: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
+        search_status_handler: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self.pack_store = pack_store
         self.pack_registry_discovery = pack_registry_discovery
@@ -122,6 +131,8 @@ class PackAcquisitionCoordinator:
         self.managed_adapter_invoker = managed_adapter_invoker or ManagedAdapterInvoker(
             lifecycle_service=self.lifecycle_service
         )
+        self.web_search_handler = web_search_handler
+        self.search_status_handler = search_status_handler
 
     def acquire(self, request: AcquisitionRequest) -> AcquisitionResult | None:
         capability = _detect_capability(request)
@@ -261,6 +272,61 @@ class PackAcquisitionCoordinator:
             lifecycle = self.lifecycle_service.evaluate(capability=capability).to_dict()
             source_status = "source_trust_required"
         else:
+            lead_search = self._search_source_leads(request=request, capability=capability)
+            if lead_search is not None and lead_search.leads:
+                lifecycle = self.lifecycle_service.evaluate(capability=capability).to_dict()
+                source_status = "untrusted_source_leads"
+                source_leads = tuple(lead.to_dict() for lead in lead_search.leads)
+                next_step = AcquisitionNextStep(
+                    action="source_approval_preview",
+                    label="Review untrusted source leads before any source approval",
+                    gate="source_trust",
+                    requires_confirmation=True,
+                    pending_context={
+                        "capability": capability,
+                        "origin_tool": "pack_acquisition_source_leads",
+                        "source_leads": [dict(row) for row in source_leads],
+                        "lead_search": lead_search.to_dict(),
+                        "lifecycle": dict(lifecycle),
+                        "lifecycle_action": "source_approval_preview",
+                    },
+                )
+                message = self._render_user_message(
+                    capability=capability,
+                    recommendation=recommendation,
+                    source_status=source_status,
+                    candidate=None,
+                    scaffold=None,
+                    lifecycle=lifecycle,
+                    source_errors=source_errors,
+                    source_leads=source_leads,
+                )
+                return AcquisitionResult(
+                    requested_capability=request.requested_capability,
+                    detected_capability=capability,
+                    source_status=source_status,
+                    candidate_pack=None,
+                    lifecycle_state=_clean(lifecycle.get("state")) or None,
+                    missing_gate=_clean(lifecycle.get("missing_gate")) or None,
+                    next_step=next_step,
+                    requires_confirmation=True,
+                    user_message=message,
+                    safe_actions=(
+                        "search_approved_catalogs_only",
+                        "safe_web_search_source_leads",
+                        "no_fetch",
+                        "no_import",
+                        "source_approval_required",
+                    ),
+                    blocked_reason="source_approval_required",
+                    lifecycle=lifecycle,
+                    recommendation=recommendation,
+                    source_leads=source_leads,
+                    lead_search=lead_search.to_dict(),
+                    search_status=lead_search.search_status if isinstance(lead_search.search_status, dict) else None,
+                )
+            if isinstance(lead_search, SourceLeadSearchResult) and isinstance(lead_search.search_status, dict):
+                recommendation = {**recommendation, "search_status": dict(lead_search.search_status)}
             if scaffold is None:
                 scaffold = build_scaffold_preview(capability, user_goal=request.text) or _generic_scaffold_preview(
                     capability,
@@ -299,7 +365,46 @@ class PackAcquisitionCoordinator:
             lifecycle=lifecycle,
             recommendation=recommendation,
             scaffold_preview=scaffold,
+            search_status=(
+                recommendation.get("search_status") if isinstance(recommendation.get("search_status"), dict) else None
+            ),
         )
+
+    def _search_source_leads(self, *, request: AcquisitionRequest, capability: str) -> SourceLeadSearchResult | None:
+        status = (
+            self.search_status_handler()
+            if callable(self.search_status_handler)
+            else {"available": False, "reason": "search_unavailable"}
+        )
+        if isinstance(status, dict) and not bool(status.get("available", False)):
+            return SourceLeadSearchResult(
+                ok=False,
+                leads=(),
+                searched=False,
+                reason=str(status.get("reason") or "search_unavailable"),
+                search_status=dict(status),
+            )
+        if not callable(self.web_search_handler):
+            return SourceLeadSearchResult(
+                ok=False,
+                leads=(),
+                searched=False,
+                reason="search_unavailable",
+                search_status=dict(status) if isinstance(status, dict) else None,
+            )
+        ok, payload = self.web_search_handler({"query": _source_lead_query(request.text, capability), "max_results": 5})
+        body = dict(payload) if isinstance(payload, dict) else {}
+        body.setdefault("ok", bool(ok))
+        result = build_source_leads_from_safe_search(body, limit=5)
+        if result.search_status is None and isinstance(status, dict):
+            return SourceLeadSearchResult(
+                ok=result.ok,
+                leads=result.leads,
+                searched=result.searched,
+                reason=result.reason,
+                search_status=dict(status),
+            )
+        return result
 
     def _pending_context_for(
         self,
@@ -362,6 +467,7 @@ class PackAcquisitionCoordinator:
         scaffold: dict[str, Any] | None,
         lifecycle: dict[str, Any],
         source_errors: list[dict[str, Any]],
+        source_leads: tuple[dict[str, Any], ...] = (),
     ) -> str:
         label = _clean(recommendation.get("capability_label") or capability.replace("_", " "))
         next_label = _clean((lifecycle.get("next_step") if isinstance(lifecycle.get("next_step"), dict) else {}).get("label"))
@@ -382,6 +488,25 @@ class PackAcquisitionCoordinator:
                 f"(source_id={source_id}, reason={reason}). Source approval/trust is required before fetch or import. "
                 "I will not fetch it, and GitHub or catalog metadata does not make it safe."
             )
+        if source_status == "untrusted_source_leads":
+            lines = [
+                (
+                    f"I do not have {label} as an active capability yet. I did not find a trusted catalog pack, "
+                    "but safe web search found untrusted source leads. These are not trusted and cannot be fetched/imported until you approve a source."
+                ),
+                "Search results are metadata only; I did not open pages, download archives, import packs, approve, enable, or grant permissions.",
+            ]
+            for index, lead in enumerate(source_leads[:5], start=1):
+                title = _clean(lead.get("title")) or "Untitled lead"
+                url = _clean(lead.get("url"))
+                kind = _clean(lead.get("suspected_source_kind")) or "generic_web_result"
+                lines.append(f"{index}. {title} [{kind}]")
+                if url:
+                    lines.append(f"   {url}")
+            lines.append(
+                "Next safe step: source approval preview. Say yes to review what source approval would require; I will not fetch or import anything."
+            )
+            return "\n".join(lines)
         if isinstance(scaffold, dict):
             title = _clean(scaffold.get("title")) or f"{label} scaffold"
             return (
@@ -405,7 +530,25 @@ def _detect_capability(request: AcquisitionRequest) -> str | None:
     assessment = classify_capability_gap_request(request.text)
     if str(assessment.get("request_kind") or "").strip().lower() == "capability":
         return _clean(assessment.get("capability")) or _generic_capability_from_text(request.text)
+    if looks_like_generic_external_capability_request(request.text):
+        return _generic_capability_from_text(request.text)
     return None
+
+
+def looks_like_generic_external_capability_request(text: str | None) -> bool:
+    cleaned = " ".join(str(text or "").strip().lower().split())
+    if not cleaned:
+        return False
+    prefixes = (
+        "add a capability for ",
+        "add capability for ",
+        "add a skill for ",
+        "install a skill for ",
+        "install a skill that ",
+        "create a skill for ",
+        "create a skill that ",
+    )
+    return any(cleaned.startswith(prefix) and len(cleaned) > len(prefix) for prefix in prefixes)
 
 
 def _generic_capability_from_text(text: str | None) -> str | None:
@@ -418,6 +561,13 @@ def _generic_capability_from_text(text: str | None) -> str | None:
         return "email_access"
     digest = hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:8]
     return f"custom_capability_{digest}"
+
+
+def _source_lead_query(text: str | None, capability: str) -> str:
+    cleaned = _clean(text)
+    if cleaned:
+        return f"{cleaned} external skill pack"
+    return f"{capability.replace('_', ' ')} external skill pack"
 
 
 def _generic_scaffold_preview(capability: str, *, label: str, user_goal: str | None) -> dict[str, Any]:
