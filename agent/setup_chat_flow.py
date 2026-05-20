@@ -1187,6 +1187,33 @@ def _looks_like_model_scout_discovery_query(normalized: str) -> bool:
     )
 
 
+def _looks_like_safe_web_search_request(normalized: str) -> bool:
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not working:
+        return False
+    explicit_prefixes = (
+        "search the web for ",
+        "search web for ",
+        "web search for ",
+        "search online for ",
+        "look up online ",
+        "look this up online ",
+        "look that up online ",
+        "find online ",
+    )
+    if any(working.startswith(prefix) and len(working) > len(prefix) for prefix in explicit_prefixes):
+        return True
+    if working.startswith("look up ") and " online" in working:
+        return True
+    if working.startswith("find ") and (" on the web" in working or " online" in working):
+        return True
+    return bool(
+        re.search(r"\b(search|look up|find)\b", working)
+        and re.search(r"\b(web|internet|online)\b", working)
+        and len(working.split()) >= 4
+    )
+
+
 def _model_inventory_scope(normalized: str) -> str | None:
     normalized_space = str(normalized or "").replace("/", " ")
     if (
@@ -1790,6 +1817,13 @@ def classify_runtime_chat_route(
         return {
             **setup_intent,
             "route": "action_tool",
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
+    if _looks_like_safe_web_search_request(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safe_web_search",
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }

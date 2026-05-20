@@ -297,6 +297,11 @@ class Config:
     llm_autopilot_ledger_max_items: int = 400
     safe_mode_enabled: bool = False
     safe_mode_chat_model: str | None = None
+    search_enabled: bool = False
+    search_provider: str = "searxng"
+    searxng_base_url: str | None = None
+    search_timeout_seconds: float = 5.0
+    search_max_results: int = 5
     assistant_name: str | None = None
     user_name: str | None = None
     control_dir: str | None = None
@@ -813,6 +818,17 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         "on",
     }
     safe_mode_chat_model = os.getenv("AGENT_SAFE_MODE_CHAT_MODEL", "").strip() or None
+    search_enabled = os.getenv("SEARCH_ENABLED", "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+    search_provider = os.getenv("SEARCH_PROVIDER", "searxng").strip().lower() or "searxng"
+    searxng_base_url = os.getenv("SEARXNG_BASE_URL", "").strip() or None
+    search_timeout_seconds = float(os.getenv("SEARCH_TIMEOUT_SECONDS", "5") or 5)
+    search_max_results = int(os.getenv("SEARCH_MAX_RESULTS", "5") or 5)
     assistant_name = os.getenv("AGENT_ASSISTANT_NAME", "").strip() or None
     user_name = os.getenv("AGENT_USER_NAME", "").strip() or None
     control_dir = os.getenv("AGENT_CONTROL_DIR", "").strip() or None
@@ -926,6 +942,12 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         raise RuntimeError("LLM_AUTOPILOT_CHURN_RECENT_LIMIT must be >= 1.")
     if llm_autopilot_ledger_max_items < 1:
         raise RuntimeError("LLM_AUTOPILOT_LEDGER_MAX_ITEMS must be >= 1.")
+    if search_provider != "searxng":
+        raise RuntimeError("SEARCH_PROVIDER must be searxng.")
+    if search_timeout_seconds <= 0:
+        raise RuntimeError("SEARCH_TIMEOUT_SECONDS must be > 0.")
+    if search_max_results < 1:
+        raise RuntimeError("SEARCH_MAX_RESULTS must be >= 1.")
 
     return Config(
         telegram_bot_token=telegram_bot_token,
@@ -1053,6 +1075,11 @@ def load_config(*, require_telegram_token: bool = True) -> Config:
         llm_autopilot_ledger_max_items=llm_autopilot_ledger_max_items,
         safe_mode_enabled=safe_mode_enabled,
         safe_mode_chat_model=safe_mode_chat_model,
+        search_enabled=search_enabled,
+        search_provider=search_provider,
+        searxng_base_url=searxng_base_url,
+        search_timeout_seconds=search_timeout_seconds,
+        search_max_results=search_max_results,
         assistant_name=assistant_name,
         user_name=user_name,
         control_dir=str(control_dir_path),

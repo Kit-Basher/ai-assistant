@@ -99,6 +99,7 @@ from agent.public_chat import (
 )
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
+from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
 from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
@@ -600,6 +601,7 @@ class AgentRuntime:
         self.version_source = build_info.version_source
         self.git_commit = build_info.git_commit
         self._runtime_events = RuntimeEventRecorder(runtime_id=self.runtime_id, max_events=100)
+        self._safe_web_search_client: SafeWebSearchClient | None = None
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -8737,6 +8739,7 @@ class AgentRuntime:
                     chat_runtime_adapter=self,
                     semantic_memory_service=self._semantic_memory_service,
                     pack_install_handler=self.packs_install,
+                    web_search_handler=self.search_query,
                 )
             else:
                 self._orchestrator.llm_client = self._router
@@ -10671,7 +10674,26 @@ class AgentRuntime:
             "timeout_seconds": self._router.policy.default_timeout_seconds,
             "secret_storage": self.secret_store.backend_name,
             "runtime_instance": self.runtime_instance,
+            "search": self.search_status(),
         }
+
+    def _safe_web_search(self) -> SafeWebSearchClient:
+        if self._safe_web_search_client is None:
+            self._safe_web_search_client = SafeWebSearchClient(SafeWebSearchConfig.from_runtime_config(self.config))
+        return self._safe_web_search_client
+
+    def search_status(self) -> dict[str, Any]:
+        return self._safe_web_search().status()
+
+    def search_query(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        query = str((payload or {}).get("query") or "").strip()
+        max_results_raw = (payload or {}).get("max_results")
+        try:
+            max_results = int(max_results_raw) if max_results_raw is not None else None
+        except (TypeError, ValueError):
+            max_results = None
+        result = self._safe_web_search().search(query, max_results=max_results)
+        return bool(result.ok), result.to_dict()
 
     def update_config(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         if "routing_mode" not in payload:
@@ -21156,6 +21178,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/telegram/status":
                 self._send_json(200, self.runtime.telegram_status())
                 return
+            if path == "/search/status":
+                self._send_json(200, self.runtime.search_status())
+                return
             if path in {"/model", "/llm/model"}:
                 self._send_json(200, self.runtime.model_status())
                 return
@@ -21440,6 +21465,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if json_error is not None:
                 status_code, response = self._json_request_error_response(path=path, payload=payload, json_error=json_error)
                 self._send_json(status_code, response)
+                return
+            if path == "/search/query":
+                ok, body = self.runtime.search_query(payload)
+                self._send_json(200 if ok else 400, body)
                 return
             if path in {"/chat", "/ask"}:
                 trace_id = self._request_trace_id(payload)

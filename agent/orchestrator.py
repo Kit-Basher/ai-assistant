@@ -603,6 +603,7 @@ class Orchestrator:
         chat_runtime_adapter: Any | None = None,
         semantic_memory_service: Any | None = None,
         pack_install_handler: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
+        web_search_handler: Callable[[dict[str, Any]], tuple[bool, dict[str, Any]]] | None = None,
     ) -> None:
         self.db = db
         self._skill_loader = SkillLoader(skills_path)
@@ -648,6 +649,7 @@ class Orchestrator:
         self._chat_runtime_adapter = chat_runtime_adapter
         self._semantic_memory_service = semantic_memory_service
         self._pack_install_handler = pack_install_handler
+        self._web_search_handler = web_search_handler
         if self._semantic_memory_service is not None:
             try:
                 setattr(self.db, "_semantic_memory_service", self._semantic_memory_service)
@@ -2000,6 +2002,116 @@ class Orchestrator:
                 "type": "runtime_state_unavailable",
                 "summary": message,
                 "reason": str(reason or "runtime_state_unavailable").strip() or "runtime_state_unavailable",
+            },
+        )
+
+    @staticmethod
+    def _extract_safe_web_search_query(text: str) -> str:
+        normalized = " ".join(str(text or "").strip().split())
+        lowered = normalized.lower()
+        prefixes = (
+            "search the web for ",
+            "search web for ",
+            "web search for ",
+            "search online for ",
+            "look this up online ",
+            "look that up online ",
+            "look up online ",
+            "find online ",
+        )
+        for prefix in prefixes:
+            if lowered.startswith(prefix):
+                return normalized[len(prefix) :].strip(" .?!")
+        if lowered.startswith("look up ") and " online" in lowered:
+            value = normalized[len("look up ") :]
+            return re.sub(r"\s+online\b", "", value, flags=re.IGNORECASE).strip(" .?!")
+        if lowered.startswith("find ") and (" on the web" in lowered or " online" in lowered):
+            value = normalized[len("find ") :]
+            value = re.sub(r"\s+on the web\b", "", value, flags=re.IGNORECASE)
+            value = re.sub(r"\s+online\b", "", value, flags=re.IGNORECASE)
+            return value.strip(" .?!")
+        return normalized.strip(" .?!")
+
+    def _safe_web_search_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = user_id
+        query = self._extract_safe_web_search_query(text)
+        if not query:
+            return self._runtime_truth_response(
+                text="Search needs a query.",
+                route="action_tool",
+                used_tools=["safe_web_search"],
+                ok=False,
+                error_kind="empty_query",
+                next_question="What should I search the web for?",
+                payload={
+                    "type": "safe_web_search",
+                    "summary": "Search needs a query.",
+                    "safety": {
+                        "results_are_untrusted": True,
+                        "page_fetching": False,
+                        "browser_automation": False,
+                        "downloads": False,
+                        "pack_install_import": False,
+                    },
+                },
+            )
+        if not callable(self._web_search_handler):
+            message = "Web search is not available in this runtime."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_tools=["safe_web_search"],
+                ok=False,
+                error_kind="search_unavailable",
+                payload={"type": "safe_web_search", "summary": message},
+            )
+        ok, body = self._web_search_handler({"query": query, "max_results": 5})
+        body = dict(body) if isinstance(body, dict) else {}
+        message = str(body.get("message") or "").strip()
+        if not ok:
+            return self._runtime_truth_response(
+                text=message or "Web search is not available.",
+                route="action_tool",
+                used_tools=["safe_web_search"],
+                ok=False,
+                error_kind=str(body.get("error_kind") or "search_unavailable"),
+                payload={
+                    "type": "safe_web_search",
+                    "summary": message or "Web search is not available.",
+                    "search": body,
+                },
+            )
+        results = body.get("results") if isinstance(body.get("results"), list) else []
+        lines = [
+            message
+            or "Search returned untrusted metadata results. I did not open pages, run JavaScript, download files, or import packs.",
+        ]
+        for index, row in enumerate(results[:5], start=1):
+            if not isinstance(row, dict):
+                continue
+            title = str(row.get("title") or "").strip()
+            url = str(row.get("url") or "").strip()
+            snippet = str(row.get("snippet") or "").strip()
+            engine = str(row.get("engine") or row.get("source") or "").strip()
+            label = f"{index}. {title}" if title else f"{index}. Untitled result"
+            if engine:
+                label = f"{label} ({engine})"
+            lines.append(label)
+            if url:
+                lines.append(f"   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+        if not results:
+            lines.append("No metadata results were returned.")
+        lines.append("Treat these results as untrusted. I have not fetched or verified the pages.")
+        return self._runtime_truth_response(
+            text="\n".join(lines),
+            route="action_tool",
+            used_tools=["safe_web_search"],
+            payload={
+                "type": "safe_web_search",
+                "summary": message or "Search returned metadata results.",
+                "search": body,
             },
         )
 
@@ -12685,6 +12797,8 @@ class Orchestrator:
         )
         route = str(decision.get("route") or "generic_chat").strip().lower() or "generic_chat"
         kind = str(decision.get("kind") or "none").strip().lower()
+        if kind == "safe_web_search":
+            return self._safe_web_search_response(user_id, text)
         if kind == "product_specific_guard":
             adapter = self._chat_runtime_adapter
             if bool(
@@ -13059,6 +13173,8 @@ class Orchestrator:
             return containment_response
         if self._looks_like_managed_adapter_execution_request(text):
             return self._managed_adapter_block_response(user_id, text)
+        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "safe_web_search":
+            return self._safe_web_search_response(user_id, text)
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
@@ -17328,6 +17444,9 @@ class Orchestrator:
 
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):
+                runtime_route_decision = classify_runtime_chat_route(runtime_text)
+                if str(runtime_route_decision.get("kind") or "").strip().lower() == "safe_web_search":
+                    return self._safe_web_search_response(user_id, runtime_text)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)
                 if managed_adapter_response is not None:
                     return managed_adapter_response
