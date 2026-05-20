@@ -9,6 +9,8 @@ from urllib.parse import urlencode, urljoin, urlparse
 from urllib.request import Request, build_opener
 from urllib.error import HTTPError, URLError
 
+from agent.search.search_setup_ux import setup_hint_for_search_failure
+
 
 SUPPORTED_PROVIDER = "searxng"
 DEFAULT_TIMEOUT_SECONDS = 5.0
@@ -79,6 +81,7 @@ class SafeWebSearchResponse:
     error_kind: str | None = None
     untrusted: bool = True
     redactions_applied: bool = False
+    setup_hint: dict[str, Any] | None = None
     safety: dict[str, Any] = field(
         default_factory=lambda: {
             "results_are_untrusted": True,
@@ -229,6 +232,13 @@ class SafeWebSearchClient:
             error_kind=error_kind,
             query_redacted=query_redacted,
             redactions_applied=redactions_applied,
+            setup_hint=setup_hint_for_search_failure(
+                {
+                    "error_kind": error_kind,
+                    "enabled": bool(self.config.enabled),
+                    "provider": str(self.config.provider or SUPPORTED_PROVIDER).strip().lower() or SUPPORTED_PROVIDER,
+                }
+            ),
         )
 
     def _bounded_max_results(self, requested: int | None) -> int:
@@ -294,4 +304,3 @@ class SafeWebSearchClient:
         except ValueError:
             return False
         return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
-

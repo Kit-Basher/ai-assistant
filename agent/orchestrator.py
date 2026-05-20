@@ -129,6 +129,7 @@ from agent.setup_chat_flow import (
     classify_runtime_chat_route,
     normalize_setup_text,
 )
+from agent.search.search_setup_ux import build_search_setup_ux, render_search_setup_ux
 from agent.persona import normalize_persona_text
 from agent.public_chat import build_no_llm_public_message, build_public_sentence_text, normalize_public_assistant_text
 from agent.skills.system_health_analyzer import build_system_health_report
@@ -2069,6 +2070,10 @@ class Orchestrator:
         body = dict(body) if isinstance(body, dict) else {}
         message = str(body.get("message") or "").strip()
         if not ok:
+            setup_hint = body.get("setup_hint") if isinstance(body.get("setup_hint"), dict) else None
+            if setup_hint:
+                rendered_hint = render_search_setup_ux(setup_hint)
+                message = f"{message or 'Web search is not available.'}\n\n{rendered_hint}"
             return self._runtime_truth_response(
                 text=message or "Web search is not available.",
                 route="action_tool",
@@ -2112,6 +2117,50 @@ class Orchestrator:
                 "type": "safe_web_search",
                 "summary": message or "Search returned metadata results.",
                 "search": body,
+            },
+        )
+
+    def _safe_web_search_status_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = (user_id, text)
+        status_payload: dict[str, Any]
+        if not callable(self._web_search_handler):
+            status_payload = {
+                "enabled": False,
+                "available": False,
+                "provider": "searxng",
+                "endpoint_configured": False,
+                "reason": "search_unavailable",
+            }
+        else:
+            adapter = self._chat_runtime_adapter
+            if callable(getattr(adapter, "search_status", None)):
+                status_payload = dict(adapter.search_status())
+            else:
+                ok, query_payload = self._web_search_handler({"query": "", "max_results": 1})
+                _ = ok
+                status_payload = {
+                    "enabled": bool(query_payload.get("enabled", False)) if isinstance(query_payload, dict) else False,
+                    "available": False,
+                    "provider": str((query_payload or {}).get("provider") or "searxng")
+                    if isinstance(query_payload, dict)
+                    else "searxng",
+                    "endpoint_configured": False,
+                    "reason": str((query_payload or {}).get("error_kind") or "search_unavailable")
+                    if isinstance(query_payload, dict)
+                    else "search_unavailable",
+                }
+        ux = build_search_setup_ux(status_payload)
+        return self._runtime_truth_response(
+            text=render_search_setup_ux(status_payload),
+            route="action_tool",
+            used_tools=["safe_web_search"],
+            ok=bool(ux.available),
+            error_kind=None if ux.available else str(status_payload.get("reason") or "search_unavailable"),
+            payload={
+                "type": "safe_web_search_status",
+                "summary": ux.message,
+                "search_status": status_payload,
+                "setup_ux": ux.to_dict(),
             },
         )
 
@@ -12797,6 +12846,8 @@ class Orchestrator:
         )
         route = str(decision.get("route") or "generic_chat").strip().lower() or "generic_chat"
         kind = str(decision.get("kind") or "none").strip().lower()
+        if kind == "safe_web_search_status":
+            return self._safe_web_search_status_response(user_id, text)
         if kind == "safe_web_search":
             return self._safe_web_search_response(user_id, text)
         if kind == "product_specific_guard":
@@ -13173,7 +13224,10 @@ class Orchestrator:
             return containment_response
         if self._looks_like_managed_adapter_execution_request(text):
             return self._managed_adapter_block_response(user_id, text)
-        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "safe_web_search":
+        search_route_kind = str(classify_runtime_chat_route(text).get("kind") or "").strip().lower()
+        if search_route_kind == "safe_web_search_status":
+            return self._safe_web_search_status_response(user_id, text)
+        if search_route_kind == "safe_web_search":
             return self._safe_web_search_response(user_id, text)
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
@@ -17445,7 +17499,10 @@ class Orchestrator:
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):
                 runtime_route_decision = classify_runtime_chat_route(runtime_text)
-                if str(runtime_route_decision.get("kind") or "").strip().lower() == "safe_web_search":
+                runtime_route_kind = str(runtime_route_decision.get("kind") or "").strip().lower()
+                if runtime_route_kind == "safe_web_search_status":
+                    return self._safe_web_search_status_response(user_id, runtime_text)
+                if runtime_route_kind == "safe_web_search":
                     return self._safe_web_search_response(user_id, runtime_text)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)
                 if managed_adapter_response is not None:

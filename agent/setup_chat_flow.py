@@ -1214,6 +1214,37 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
     )
 
 
+def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not working:
+        return False
+    if "searxng" in working and any(phrase in working for phrase in ("set up", "setup", "configure", "status", "enabled")):
+        return True
+    explicit = (
+        "is web search enabled",
+        "is search configured",
+        "how do i set up web search",
+        "how do i setup web search",
+        "how do i configure web search",
+        "how do i set up searxng",
+        "how do i setup searxng",
+        "why can't you search the internet",
+        "why cant you search the internet",
+        "why can t you search the internet",
+        "can you search online",
+        "what is your search status",
+        "what's your search status",
+        "web search status",
+        "search status",
+    )
+    if any(phrase in working for phrase in explicit):
+        return True
+    return bool(
+        re.search(r"\b(web search|search|internet search)\b", working)
+        and any(token in working for token in ("enabled", "configured", "setup", "status", "unavailable", "disabled"))
+    )
+
+
 def _model_inventory_scope(normalized: str) -> str | None:
     normalized_space = str(normalized or "").replace("/", " ")
     if (
@@ -1817,6 +1848,13 @@ def classify_runtime_chat_route(
         return {
             **setup_intent,
             "route": "action_tool",
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
+    if _looks_like_safe_web_search_status_request(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safe_web_search_status",
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }
