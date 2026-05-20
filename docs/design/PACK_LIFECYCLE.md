@@ -6,6 +6,8 @@ Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/p
 
 `agent/packs/lifecycle.py` is the runtime source of truth for whether an external or generated pack can be used. It does not create files, install packs, approve packs, enable packs, grant permissions, execute code, or fetch data. It only evaluates observed facts and returns the current state, missing gate, and next safe assistant step.
 
+`agent/packs/acquisition.py` is the assistant-facing workflow for missing capability requests. It searches approved/trusted catalog sources only, reports source-trust blockers, offers preview-only scaffold fallbacks, and hands each next step to lifecycle actions without skipping gates. See [`docs/design/PACK_ACQUISITION.md`](/home/c/personal-agent/docs/design/PACK_ACQUISITION.md).
+
 `agent/packs/lifecycle_actions.py` performs gated lifecycle continuations. It accepts a `PackLifecycleResult`, validates that the requested action matches the current state, and then calls an existing safe handler for exactly one transition. It refuses mismatched states, blocked/removed packs, missing handlers, and attempts to skip directly across review, enablement, configuration, or permission gates.
 
 `agent/packs/managed_adapter_invocation.py` invokes approved core-owned managed adapters after lifecycle gates are complete. It uses a generic operation registry, still verifies `usable=true` before adapter work, and returns the lifecycle state, missing gate, and next safe step instead of attempting access when the pack is not usable.

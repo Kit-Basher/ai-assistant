@@ -55,6 +55,7 @@ from agent.packs.capability_recommendation import (
     recommend_packs_for_capability,
     render_pack_capability_response,
 )
+from agent.packs.acquisition import AcquisitionRequest, AcquisitionResult, PackAcquisitionCoordinator
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.managed_adapters import (
     ADAPTER_LOCAL_FILE_IMPORT,
@@ -7207,55 +7208,97 @@ class Orchestrator:
         need = detect_pack_capability_need(text)
         if need is None:
             return None
-        recommendation = recommend_packs_for_capability(
-            text,
-            pack_store=self._pack_store,
-            pack_registry_discovery=self._pack_registry_discovery(),
-            capability=str(need.get("capability") or "").strip().lower() or None,
+        coordinator = self._pack_acquisition_coordinator()
+        acquisition = coordinator.acquire(
+            AcquisitionRequest(
+                text=text,
+                requested_capability=str(need.get("capability") or "").strip().lower() or None,
+                user_id=user_id,
+                thread_id=self._active_thread_id_for_user(user_id),
+            )
         )
-        if recommendation is None:
+        if acquisition is None:
             return None
-        rendered_recommendation = dict(recommendation)
-        rendered_recommendation["classification"] = gap.get("classification")
-        rendered_recommendation["proposal_summary"] = gap.get("proposal_summary")
-        rendered_recommendation["helper_name"] = gap.get("helper_name")
-        message = render_pack_capability_response(rendered_recommendation)
-        rescue = build_capability_gap_rescue(
-            text=text,
-            assessment=gap,
-            recommendation=recommendation,
-            fallback=str(recommendation.get("fallback") or ""),
-            source_errors=(
-                [dict(row) for row in recommendation.get("source_errors") if isinstance(row, dict)]
-                if isinstance(recommendation.get("source_errors"), list)
-                else []
-            ),
-            proposal_summary=str(gap.get("proposal_summary") or "").strip() or None,
-            helper_name=str(gap.get("helper_name") or "").strip() or None,
-        )
-        scaffold_preview = recommendation.get("scaffold_preview") if isinstance(recommendation.get("scaffold_preview"), dict) else None
-        if scaffold_preview is not None:
-            self._queue_capability_scaffold_followup(user_id, message=message, preview=scaffold_preview)
-        self._queue_capability_preview_followup(user_id, message=message, rescue=rescue)
+        message = acquisition.user_message
+        self._queue_pack_acquisition_next_step(user_id, acquisition)
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
             used_runtime_state=False,
             used_memory=bool(self._current_runtime_setup_state(user_id)),
-            used_tools=["pack_capability_recommendation"],
+            used_tools=["pack_acquisition"],
             payload={
-                "type": "pack_capability_recommendation",
+                "type": "pack_acquisition",
                 "summary": message,
-                "recommendation": recommendation,
+                "acquisition": acquisition.to_dict(),
                 "classification": gap.get("classification"),
-                "capability_required": recommendation.get("capability_required"),
-                "comparison_mode": recommendation.get("comparison_mode"),
-                "fallback": recommendation.get("fallback"),
-                "next_step": recommendation.get("next_step"),
-                "scaffold_preview": scaffold_preview,
-                "capability_gap_rescue": rescue,
+                "capability_required": acquisition.detected_capability,
+                "source_status": acquisition.source_status,
+                "lifecycle_state": acquisition.lifecycle_state,
+                "missing_gate": acquisition.missing_gate,
+                "next_step": acquisition.next_step.to_dict() if acquisition.next_step is not None else None,
+                "scaffold_preview": acquisition.scaffold_preview,
             },
         )
+
+    def _pack_acquisition_coordinator(self) -> PackAcquisitionCoordinator:
+        return PackAcquisitionCoordinator(
+            pack_store=self._pack_store,
+            pack_registry_discovery=self._pack_registry_discovery(),
+        )
+
+    def _queue_pack_acquisition_next_step(self, user_id: str, acquisition: AcquisitionResult) -> None:
+        next_step = acquisition.next_step
+        if next_step is None or not next_step.requires_confirmation:
+            return
+        action = str(next_step.action or "").strip().lower()
+        context = dict(next_step.pending_context)
+        lifecycle = context.get("lifecycle") if isinstance(context.get("lifecycle"), dict) else acquisition.lifecycle
+        if action == "preview":
+            candidate = context.get("candidate_pack") if isinstance(context.get("candidate_pack"), dict) else acquisition.candidate_pack or {}
+            source_id = str(context.get("source_id") or candidate.get("source_id") or "").strip()
+            remote_id = str(context.get("remote_id") or candidate.get("remote_id") or "").strip()
+            if source_id and remote_id:
+                pending_id = str(uuid.uuid4())
+                now_epoch = int(time.time())
+                self._memory_runtime.add_pending_item(
+                    user_id,
+                    {
+                        "pending_id": pending_id,
+                        "kind": "followup",
+                        "origin_tool": "capability_gap_preview",
+                        "question": acquisition.user_message,
+                        "options": ["yes", "no"],
+                        "created_at": now_epoch,
+                        "expires_at": now_epoch + 600,
+                        "thread_id": self._active_thread_id_for_user(user_id),
+                        "status": PENDING_STATUS_READY_TO_RESUME,
+                        "context": {
+                            "source_id": source_id,
+                            "remote_id": remote_id,
+                            "pack_name": str(context.get("name") or candidate.get("name") or "").strip() or None,
+                            "lifecycle": dict(lifecycle or {}),
+                            "lifecycle_action": "preview",
+                        },
+                    },
+                )
+            return
+        if action == "scaffold_preview":
+            preview = context.get("scaffold_preview") if isinstance(context.get("scaffold_preview"), dict) else acquisition.scaffold_preview
+            if isinstance(preview, dict):
+                self._queue_capability_scaffold_followup(user_id, message=acquisition.user_message, preview=preview)
+            return
+        if action == "review_approve":
+            pack_id = str((acquisition.candidate_pack or {}).get("pack_id") or acquisition.lifecycle.get("pack_id") or "").strip()
+            pack = self._pack_store.get_external_pack(pack_id) if pack_id else None
+            if isinstance(pack, dict):
+                self._queue_pack_review_approve_followup(user_id, pack=pack, lifecycle=dict(lifecycle or acquisition.lifecycle))
+            return
+        if action == "enable":
+            pack_id = str((acquisition.candidate_pack or {}).get("pack_id") or acquisition.lifecycle.get("pack_id") or "").strip()
+            pack = self._pack_store.get_external_pack(pack_id) if pack_id else None
+            if isinstance(pack, dict):
+                self._queue_pack_enable_followup(user_id, pack=pack, lifecycle=dict(lifecycle or acquisition.lifecycle))
 
     def _capability_gap_followup_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
         payload = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
@@ -8117,67 +8160,38 @@ class Orchestrator:
         )
 
     def _capability_gap_planning_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
-        plan = build_capability_gap_response(
-            text,
-            pack_store=self._pack_store,
-            pack_registry_discovery=self._pack_registry_discovery(),
-        )
-        if plan is None:
+        assessment = classify_capability_gap_request(text)
+        if str(assessment.get("request_kind") or "").strip().lower() != "capability":
             return None
-        message = str(plan.get("summary") or "").strip()
-        if not message:
-            return None
-        rescue = plan.get("capability_gap_rescue") if isinstance(plan.get("capability_gap_rescue"), dict) else {}
-        preview_actions = [
-            action
-            for action in (rescue.get("candidate_actions") if isinstance(rescue.get("candidate_actions"), list) else [])
-            if isinstance(action, dict) and str(action.get("action") or "").strip().lower() == "show_preview"
-        ]
-        if preview_actions:
-            self._queue_capability_preview_followup(user_id, message=message, rescue=rescue)
-        elif isinstance(plan.get("recommendation"), dict) and isinstance(plan["recommendation"].get("scaffold_preview"), dict):
-            self._queue_capability_scaffold_followup(
-                user_id,
-                message=message,
-                preview=plan["recommendation"]["scaffold_preview"],
+        coordinator = self._pack_acquisition_coordinator()
+        acquisition = coordinator.acquire(
+            AcquisitionRequest(
+                text=text,
+                requested_capability=str(assessment.get("capability") or "").strip().lower() or None,
+                user_id=user_id,
+                thread_id=self._active_thread_id_for_user(user_id),
             )
-        elif str(plan.get("fallback") or "").strip().lower() == "propose_new_capability":
-            pending_id = str(uuid.uuid4())
-            now_epoch = int(time.time())
-            pending_payload = {
-                "pending_id": pending_id,
-                "kind": "followup",
-                "origin_tool": "capability_gap_plan",
-                "question": message,
-                "options": ["yes", "no"],
-                "created_at": now_epoch,
-                "expires_at": now_epoch + 600,
-                "thread_id": self._active_thread_id_for_user(user_id),
-                "status": PENDING_STATUS_READY_TO_RESUME,
-                "context": {
-                    "helper_name": str(plan.get("helper_name") or "").strip() or None,
-                    "proposal_summary": str(plan.get("proposal_summary") or "").strip() or None,
-                    "capability_label": str(plan.get("capability_label") or "").strip() or None,
-                    "detected_from": str(plan.get("detected_from") or "").strip() or None,
-                },
-            }
-            self._memory_runtime.add_pending_item(user_id, pending_payload)
+        )
+        if acquisition is None:
+            return None
+        message = acquisition.user_message
+        self._queue_pack_acquisition_next_step(user_id, acquisition)
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
             used_runtime_state=False,
             used_memory=bool(self._current_runtime_setup_state(user_id)),
-            used_tools=["capability_gap_planning"],
+            used_tools=["pack_acquisition"],
             payload={
-                "type": "capability_gap_plan",
+                "type": "pack_acquisition",
                 "summary": message,
-                "plan": plan,
-                "classification": plan.get("classification"),
-                "capability_required": plan.get("capability_required"),
-                "capability_label": plan.get("capability_label"),
-                "fallback": plan.get("fallback"),
-                "next_step": plan.get("next_step"),
-                "capability_gap_rescue": rescue or plan.get("capability_gap_rescue"),
+                "acquisition": acquisition.to_dict(),
+                "classification": assessment.get("classification"),
+                "capability_required": acquisition.detected_capability,
+                "source_status": acquisition.source_status,
+                "lifecycle_state": acquisition.lifecycle_state,
+                "missing_gate": acquisition.missing_gate,
+                "next_step": acquisition.next_step.to_dict() if acquisition.next_step is not None else None,
             },
         )
 

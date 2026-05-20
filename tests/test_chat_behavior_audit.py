@@ -130,7 +130,7 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 _status, body, text = self._assert_grounded_reply(prompt)
                 meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
                 self.assertEqual("action_tool", meta.get("route"))
-                self.assertIn("pack_capability_recommendation", meta.get("used_tools") or [])
+                self.assertIn("pack_acquisition", meta.get("used_tools") or [])
                 lowered = text.lower()
                 self.assertIn("browser", lowered)
                 self.assertIn("preview", lowered)
