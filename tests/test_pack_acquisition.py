@@ -317,6 +317,31 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         body = json.loads(handler.body.decode("utf-8", errors="replace"))
         return body, _assistant_text(body)
 
+    def _import_pack_for_review_via_source_lead(self, *, url: str = "https://example.com/pack.zip") -> tuple[dict[str, Any], str]:
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener({"results": [{"title": "Lead", "url": url}]}),
+        )
+        archive = _zip_bytes({"repo-main/SKILL.md": b"# Remote Skill\n\nUse as untrusted guidance.\n"})
+        self._post_chat("add a capability for analyzing plant watering")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        with mock.patch(
+            "agent.packs.external_ingestion.RemotePackFetcher",
+            return_value=__import__("agent.packs.remote_fetch", fromlist=["RemotePackFetcher"]).RemotePackFetcher(
+                self.runtime.pack_store.external_storage_root(),
+                opener=_RemoteFakeOpener({url: _FakeResponse(archive, url=url, content_length=len(archive))}),
+            ),
+        ):
+            return self._post_chat("yes")
+
     def test_browser_skill_requests_use_acquisition_coordinator(self) -> None:
         for prompt in ("install a skill that lets you browse", "add capability for reading webpages"):
             with self.subTest(prompt=prompt):
@@ -458,7 +483,13 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("imported", text.lower())
         self.assertIn("for review only", text.lower())
         self.assertIn("no pack was approved", text.lower())
+        self.assertIn("not approved", text.lower())
+        self.assertIn("not enabled", text.lower())
+        self.assertIn("no permissions granted", text.lower())
+        self.assertIn("not usable yet", text.lower())
+        self.assertIn("next safe step: review/approval", text.lower())
         self.assertTrue(result.get("imported_for_review"))
+        self.assertIsInstance(setup.get("review_state"), dict)
         self.assertFalse(result.get("did_approve"))
         self.assertFalse(result.get("did_enable"))
         self.assertFalse(result.get("did_grant_permissions"))
@@ -468,6 +499,33 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
         trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
         self.assertEqual("unreviewed", trust.get("local_review_status"))
+
+    def test_review_state_prompt_after_import_reports_not_usable(self) -> None:
+        self._import_pack_for_review_via_source_lead()
+
+        body, text = self._post_chat("is that pack safe yet")
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("external_pack_review_state", meta.get("used_tools") or [])
+        self.assertIn("not approved", text.lower())
+        self.assertIn("not enabled", text.lower())
+        self.assertIn("not usable yet", text.lower())
+        self.assertIn("next safe step: review/approval", text.lower())
+        self.assertFalse(setup.get("did_approve"))
+        self.assertFalse(setup.get("did_enable"))
+        self.assertFalse(setup.get("did_grant_permissions"))
+        self.assertFalse(setup.get("did_use_pack"))
+
+    def test_can_i_use_pack_now_after_import_names_review_gate(self) -> None:
+        self._import_pack_for_review_via_source_lead()
+
+        _body, text = self._post_chat("can I use that pack now")
+
+        self.assertIn("not usable yet", text.lower())
+        self.assertIn("not approved", text.lower())
+        self.assertIn("review/approval", text.lower())
 
     def test_no_after_fetch_preview_cancels_without_fetch(self) -> None:
         self.runtime.config = replace(

@@ -83,6 +83,7 @@ from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.source_approval import SourceApprovalController
 from agent.packs.source_fetch_preview import SourceFetchController
+from agent.packs.review_state_ux import build_pack_review_state_summary, render_pack_review_state
 from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
@@ -6628,13 +6629,16 @@ class Orchestrator:
         )
 
     def _direct_standalone_assistant_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
-        _ = user_id
         if self._direct_resource_status_question(text):
             return self._operational_status_response(user_id, text, "operational_observe")
         if self._direct_runtime_health_question(text):
             return self._runtime_status_response("runtime_status")
         if self._open_app_requested(text):
             return self._open_app_response()
+        if self._looks_like_pack_review_state_prompt(text):
+            response = self._pack_review_state_response(user_id)
+            if response is not None:
+                return response
         if self._direct_setup_question(text):
             return self._setup_explanation_response(
                 used_memory=bool(self._current_runtime_setup_state(user_id))
@@ -6644,6 +6648,72 @@ class Orchestrator:
         if self._direct_frustration_diagnostic_question(text):
             return self._assistant_self_diagnostics_response(text)
         return None
+
+    @staticmethod
+    def _looks_like_pack_review_state_prompt(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        exact_phrases = (
+            "show review state",
+            "show the review state",
+            "what did you import",
+            "what was imported",
+            "is that pack safe yet",
+            "is this pack safe yet",
+            "can i use that pack now",
+            "can i use this pack now",
+            "is that pack usable",
+            "is this pack usable",
+        )
+        if any(phrase in normalized for phrase in exact_phrases):
+            return True
+        return bool(("pack" in normalized or "import" in normalized) and "review state" in normalized)
+
+    def _latest_external_pack_for_review_state(self, user_id: str) -> dict[str, Any] | None:
+        thread_id = self._active_thread_id_for_user(user_id)
+        pending_items = self._memory_runtime.list_pending_items(user_id, thread_id=thread_id, include_expired=False)
+        review_pending = [
+            row
+            for row in pending_items
+            if isinstance(row, dict) and str(row.get("origin_tool") or "") == "pack_lifecycle_review_approve"
+        ]
+        review_pending.sort(key=lambda row: (int(row.get("created_at") or 0), str(row.get("pending_id") or "")), reverse=True)
+        for pending in review_pending:
+            context = pending.get("context") if isinstance(pending.get("context"), dict) else {}
+            pack_id = str(context.get("pack_id") or "").strip()
+            if pack_id:
+                pack = self._pack_store.get_external_pack(pack_id)
+                if isinstance(pack, dict):
+                    return pack
+        packs = self._pack_store.list_external_packs()
+        packs.sort(key=lambda row: (int(row.get("updated_at") or 0), int(row.get("installed_at") or 0), str(row.get("pack_id") or "")), reverse=True)
+        return packs[0] if packs else None
+
+    def _pack_review_state_response(self, user_id: str) -> OrchestratorResponse | None:
+        pack = self._latest_external_pack_for_review_state(user_id)
+        if not isinstance(pack, dict):
+            return None
+        grants = list_adapter_grants(self._pack_store.external_storage_root())
+        lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=grants).to_dict()
+        summary = build_pack_review_state_summary(pack, permission_grants=grants, lifecycle=lifecycle)
+        message = render_pack_review_state(pack, permission_grants=grants, lifecycle=lifecycle)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["external_pack_review_state"],
+            payload={
+                "type": "external_pack_review_state",
+                "summary": message,
+                "review_state": summary.to_dict(),
+                "lifecycle": lifecycle,
+                "did_approve": False,
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+                "next_step": (lifecycle.get("next_step") or {}).get("action") or "review_approve",
+            },
+        )
 
     def _open_app_response(self) -> OrchestratorResponse:
         message = (
@@ -7004,6 +7074,10 @@ class Orchestrator:
         )
 
     def _external_pack_knowledge_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if self._looks_like_pack_review_state_prompt(text):
+            response = self._pack_review_state_response(user_id)
+            if response is not None:
+                return response
         query_tokens = self._external_pack_query_tokens(text)
         if not query_tokens:
             return None
@@ -8281,11 +8355,18 @@ class Orchestrator:
             pack_store=self._pack_store,
             pack_registry_discovery=self._pack_registry_discovery(),
         ).fetch_import_for_review(preview)
-        if result.ok and isinstance(result.pack, dict):
+        lifecycle: dict[str, Any] | None = None
+        review_state: dict[str, Any] | None = None
+        message = result.user_message
+        if isinstance(result.pack, dict):
             lifecycle = PackLifecycleService().evaluate(imported_pack=result.pack, permission_grants=[]).to_dict()
+            review_summary = build_pack_review_state_summary(result.pack, permission_grants=[], lifecycle=lifecycle)
+            review_state = review_summary.to_dict()
+            message = f"{result.user_message}\n\n{render_pack_review_state(result.pack, permission_grants=[], lifecycle=lifecycle)}"
+        if result.ok and isinstance(result.pack, dict) and lifecycle is not None:
             self._queue_pack_review_approve_followup(user_id, pack=result.pack, lifecycle=lifecycle)
         return self._runtime_truth_response(
-            text=result.user_message,
+            text=message,
             route="action_tool",
             used_runtime_state=False,
             used_memory=bool(self._current_runtime_setup_state(user_id)),
@@ -8293,8 +8374,9 @@ class Orchestrator:
             payload={
                 "type": "source_fetch_import",
                 "ok": bool(result.ok),
-                "summary": result.user_message,
+                "summary": message,
                 "result": result.to_dict(),
+                "review_state": review_state,
                 "did_approve": False,
                 "did_enable": False,
                 "did_grant_permissions": False,

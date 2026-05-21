@@ -24,7 +24,7 @@ Allowed v1 outcomes:
 - remote source untrusted: stop at the source-trust gate and explain that approval is required before fetch/import.
 - safe web-search leads found: show untrusted source leads only. Leads are not source approval, are not trusted, and cannot be fetched/imported until the separate source approval gate is completed.
 - source approval preview confirmed: record explicit trust for the source id only, then stop. Source approval does not approve pack content and does not fetch, download, import, install, approve, enable, configure, grant permissions, or use a pack.
-- approved source fetch confirmed: fetch into quarantine and import for review only, then stop. Quarantine fetch/import does not approve, enable, configure, grant permissions, or use a pack; review approval remains the next gate.
+- approved source fetch confirmed: fetch into quarantine and import for review only, then stop. The assistant must show the imported pack review state before any approval continuation. Quarantine fetch/import does not approve, enable, configure, grant permissions, or use a pack; review approval remains the next gate.
 - no candidate found: offer a preview-only scaffold path.
 - imported for review: ask for review/approval.
 - approved but disabled: ask to enable.
@@ -42,5 +42,7 @@ Safe web-search lead discovery is metadata-only. Result URLs, titles, snippets, 
 Source approval is explicit user trust for a source id, not trust in the content. It may record a source catalog/policy entry that permits a future fetch or preview into quarantine, but fetched content remains hostile and must still pass catalog/source policy, quarantine, normalization, inspection, review approval, enablement, configuration, permissions, and managed-adapter gates before use.
 
 Quarantine fetch/import-for-review is a separate gate after source approval. The assistant may fetch only from an approved source id through the existing hostile remote-fetch and `ExternalPackIngestor` paths. A successful fetch creates a review-only external pack candidate with no approval, no enablement, no configuration, no permission grant, and no use.
+
+After any import-for-review result, the assistant must render a bounded review-state summary before asking for approval. That summary may include pack identity, lifecycle state, local review status, enabled=false, permissions/grants status, managed-adapter kinds, risk flags, import status, and safe source/provenance metadata. It must not expose raw `SKILL.md`, README, manifests, catalog listings, prompt text, secrets, private paths, or long hostile strings. Review state is not content trust; it is a truthfulness checkpoint that tells the user why the pack is still not usable and names the next safe gate as review/approval.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.
