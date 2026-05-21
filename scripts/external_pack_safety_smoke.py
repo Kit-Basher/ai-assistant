@@ -37,6 +37,9 @@ from agent.packs.remote_fetch import (
     RemotePackSource,
 )
 from agent.packs.store import PackStore
+from agent.packs.source_approval import SourceApprovalController
+from agent.packs.source_fetch_preview import SourceFetchController
+from agent.packs.source_leads import SourceLead
 
 
 class SmokeFailure(AssertionError):
@@ -354,6 +357,65 @@ def main() -> int:
                 _assert(store.list_external_packs() == [], "starter catalog mutated pack store")
 
             smoke.check("remote_trust_policy", "local_starter_catalog_discovery_only", starter_catalog_discovery_only)
+
+            def source_approval_does_not_fetch() -> None:
+                store = PackStore(str(root / "source-approval.db"))
+                service = PackRegistryDiscoveryService(pack_store=store, storage_root=str(root / "source-approval-packs"))
+                controller = SourceApprovalController(pack_registry_discovery=service)
+                preview = controller.preview(
+                    SourceLead(
+                        title="Approved Archive",
+                        url="https://example.com/pack.zip",
+                        suspected_source_kind="generic_archive_url",
+                    )
+                )
+                result = controller.approve(preview)
+                _assert(result.ok, f"source approval failed: {result}")
+                _assert(not result.did_fetch and not result.did_import and not result.did_install, "source approval fetched/imported")
+                _assert(store.list_external_packs() == [], "source approval created pack rows")
+
+            smoke.check("remote_trust_policy", "source_approval_does_not_fetch", source_approval_does_not_fetch)
+
+            def quarantine_fetch_review_only() -> None:
+                url = "https://example.com/review-only.zip"
+                store = PackStore(str(root / "source-fetch.db"))
+                storage = root / "source-fetch-packs"
+                service = PackRegistryDiscoveryService(pack_store=store, storage_root=str(storage))
+                approval = SourceApprovalController(pack_registry_discovery=service)
+                approved = approval.approve(
+                    approval.preview(
+                        SourceLead(
+                            title="Review Only",
+                            url=url,
+                            suspected_source_kind="generic_archive_url",
+                        )
+                    )
+                )
+                _assert(approved.ok and approved.source_id, f"source approval failed: {approved}")
+                archive = _zip_bytes({"repo-main/SKILL.md": b"# Review Only\n\nUse this as untrusted guidance.\n"})
+                fetcher = RemotePackFetcher(
+                    str(storage),
+                    opener=_FakeOpener({url: _FakeResponse(archive, url=url, content_length=len(archive))}),
+                )
+                fetch = SourceFetchController(
+                    pack_store=store,
+                    pack_registry_discovery=service,
+                    remote_fetcher=fetcher,
+                )
+                result = fetch.fetch_import_for_review(fetch.preview(str(approved.source_id)))
+                _assert(result.ok, f"quarantine fetch failed: {result}")
+                _assert(result.imported_for_review, "fetch did not import for review")
+                _assert(not result.did_approve and not result.did_enable, "fetch approved or enabled pack")
+                _assert(not result.did_grant_permissions and not result.did_use_pack, "fetch granted permissions or used pack")
+                packs = store.list_external_packs()
+                _assert(len(packs) == 1, f"expected one review row, got {len(packs)}")
+                canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
+                trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+                runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
+                _assert(trust.get("local_review_status") == "unreviewed", "fetch skipped review gate")
+                _assert(not bool(runtime.get("enabled", False)), "fetch enabled pack")
+
+            smoke.check("remote_trust_policy", "quarantine_fetch_does_not_approve_enable_or_use", quarantine_fetch_review_only)
 
             smoke.check(
                 "catalog_schema",

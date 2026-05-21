@@ -82,6 +82,7 @@ from agent.packs.scaffolding import create_generated_scaffold_source, render_sca
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
 from agent.packs.source_approval import SourceApprovalController
+from agent.packs.source_fetch_preview import SourceFetchController
 from agent.packs.store import PackStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
@@ -8184,6 +8185,28 @@ class Orchestrator:
             changed_by="assistant_source_approval",
         )
         message = result.user_message
+        if result.ok and result.source_id:
+            pending_id = str(uuid.uuid4())
+            now_epoch = int(time.time())
+            self._memory_runtime.add_pending_item(
+                user_id,
+                {
+                    "pending_id": pending_id,
+                    "kind": "followup",
+                    "origin_tool": "pack_source_fetch_preview",
+                    "question": "Next safe step is preview/fetch into quarantine. Say yes to preview it.",
+                    "options": ["yes", "no"],
+                    "created_at": now_epoch,
+                    "expires_at": now_epoch + 600,
+                    "thread_id": self._active_thread_id_for_user(user_id),
+                    "status": PENDING_STATUS_READY_TO_RESUME,
+                    "context": {
+                        "source_id": result.source_id,
+                        "source_kind": result.source_kind,
+                        "lifecycle_action": "source_fetch_preview",
+                    },
+                },
+            )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -8199,6 +8222,84 @@ class Orchestrator:
                 "did_import": False,
                 "did_install": False,
                 "next_step": "preview_fetch_into_quarantine" if result.ok else "source_approval_blocked",
+            },
+        )
+
+    def _source_fetch_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        source_id = str(context.get("source_id") or "").strip()
+        preview = SourceFetchController(
+            pack_store=self._pack_store,
+            pack_registry_discovery=self._pack_registry_discovery(),
+        ).preview(source_id)
+        if preview.ok:
+            pending_id = str(uuid.uuid4())
+            now_epoch = int(time.time())
+            self._memory_runtime.add_pending_item(
+                user_id,
+                {
+                    "pending_id": pending_id,
+                    "kind": "followup",
+                    "origin_tool": "pack_source_fetch_confirm",
+                    "question": "Fetch this approved source into quarantine and import for review only?",
+                    "options": ["yes", "no"],
+                    "created_at": now_epoch,
+                    "expires_at": now_epoch + 600,
+                    "thread_id": self._active_thread_id_for_user(user_id),
+                    "status": PENDING_STATUS_READY_TO_RESUME,
+                    "context": {
+                        "fetch_preview": preview.to_dict(),
+                        "source_id": source_id,
+                        "lifecycle_action": "source_fetch_import_for_review",
+                    },
+                },
+            )
+        return self._runtime_truth_response(
+            text=preview.user_message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["pack_acquisition"],
+            payload={
+                "type": "source_fetch_preview",
+                "ok": bool(preview.ok),
+                "summary": preview.user_message,
+                "fetch_preview": preview.to_dict(),
+                "did_fetch": False,
+                "did_import": False,
+                "did_approve": False,
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+            },
+        )
+
+    def _source_fetch_confirm_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        preview = context.get("fetch_preview") if isinstance(context.get("fetch_preview"), dict) else {}
+        result = SourceFetchController(
+            pack_store=self._pack_store,
+            pack_registry_discovery=self._pack_registry_discovery(),
+        ).fetch_import_for_review(preview)
+        if result.ok and isinstance(result.pack, dict):
+            lifecycle = PackLifecycleService().evaluate(imported_pack=result.pack, permission_grants=[]).to_dict()
+            self._queue_pack_review_approve_followup(user_id, pack=result.pack, lifecycle=lifecycle)
+        return self._runtime_truth_response(
+            text=result.user_message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["pack_acquisition"],
+            payload={
+                "type": "source_fetch_import",
+                "ok": bool(result.ok),
+                "summary": result.user_message,
+                "result": result.to_dict(),
+                "did_approve": False,
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+                "next_step": result.next_step or "review_approve",
             },
         )
 
@@ -17837,6 +17938,24 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I did not approve that source. No content was fetched or imported.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_source_fetch_preview":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._source_fetch_preview_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not preview quarantine fetch for that source.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_source_fetch_confirm":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._source_fetch_confirm_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not fetch that source. No content was downloaded or imported.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_scaffold_preview":
                     if followup_intent in {"accept", "details"}:
                         refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="scaffold_preview")

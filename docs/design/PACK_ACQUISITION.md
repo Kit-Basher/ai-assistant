@@ -24,6 +24,7 @@ Allowed v1 outcomes:
 - remote source untrusted: stop at the source-trust gate and explain that approval is required before fetch/import.
 - safe web-search leads found: show untrusted source leads only. Leads are not source approval, are not trusted, and cannot be fetched/imported until the separate source approval gate is completed.
 - source approval preview confirmed: record explicit trust for the source id only, then stop. Source approval does not approve pack content and does not fetch, download, import, install, approve, enable, configure, grant permissions, or use a pack.
+- approved source fetch confirmed: fetch into quarantine and import for review only, then stop. Quarantine fetch/import does not approve, enable, configure, grant permissions, or use a pack; review approval remains the next gate.
 - no candidate found: offer a preview-only scaffold path.
 - imported for review: ask for review/approval.
 - approved but disabled: ask to enable.
@@ -39,5 +40,7 @@ Remote content remains hostile even when a source is approved. Source trust only
 Safe web-search lead discovery is metadata-only. Result URLs, titles, snippets, and engine/source labels are untrusted search metadata. The assistant must not fetch result pages, download archives, call `/packs/install`, import packs, enable packs, or infer safety from GitHub or any other domain. Leads only point to the separate source approval gate.
 
 Source approval is explicit user trust for a source id, not trust in the content. It may record a source catalog/policy entry that permits a future fetch or preview into quarantine, but fetched content remains hostile and must still pass catalog/source policy, quarantine, normalization, inspection, review approval, enablement, configuration, permissions, and managed-adapter gates before use.
+
+Quarantine fetch/import-for-review is a separate gate after source approval. The assistant may fetch only from an approved source id through the existing hostile remote-fetch and `ExternalPackIngestor` paths. A successful fetch creates a review-only external pack candidate with no approval, no enablement, no configuration, no permission grant, and no use.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.

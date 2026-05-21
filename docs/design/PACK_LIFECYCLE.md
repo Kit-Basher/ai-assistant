@@ -10,6 +10,8 @@ Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/p
 
 `agent/packs/source_approval.py` records explicit user trust for a source lead discovered through safe web-search metadata. Source approval is one gate only: it may create/update a source catalog and policy record, but it does not fetch, download, import, install, approve, enable, configure, grant permissions, or use a pack.
 
+`agent/packs/source_fetch_preview.py` handles the next gate after source approval: previewing and, after a separate confirmation, fetching an approved source into quarantine and importing it as a review-only candidate. It does not approve, enable, configure, grant permissions, use, or invoke the fetched pack.
+
 `agent/packs/lifecycle_actions.py` performs gated lifecycle continuations. It accepts a `PackLifecycleResult`, validates that the requested action matches the current state, and then calls an existing safe handler for exactly one transition. It refuses mismatched states, blocked/removed packs, missing handlers, and attempts to skip directly across review, enablement, configuration, or permission gates.
 
 `agent/packs/managed_adapter_invocation.py` invokes approved core-owned managed adapters after lifecycle gates are complete. It uses a generic operation registry, still verifies `usable=true` before adapter work, and returns the lifecycle state, missing gate, and next safe step instead of attempting access when the pack is not usable.
@@ -38,6 +40,8 @@ External packs are never bundled native abilities. Starter catalogs are discover
 Remote external pack sources are hostile by default. GitHub repositories, GitHub archives, generic archive URLs, and online registries require explicit source policy or source approval before fetch/import. GitHub is not trusted by default, and a local starter catalog entry does not make a remote URL trusted.
 
 Safe web-search source leads remain untrusted until explicit source approval records a source id. Even after source approval, the content is still hostile; approval only permits a future fetch/preview into quarantine.
+
+Quarantine fetch/import-for-review is separate from source approval and separate from pack review approval. It may create an imported candidate row, but that row remains unreviewed and disabled. The next safe step after a successful import is review/approval.
 
 Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is treated as untrusted metadata. Archive fetches land in quarantine only, and extraction blocks traversal, symlinks, special files, hidden files, nested archives, executable bits, duplicate paths, oversized files, excessive member counts, excessive expansion, and unsafe post-write containment before normalization/scanning can proceed.
 

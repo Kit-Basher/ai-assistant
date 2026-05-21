@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from agent.packs.store import PackStore
 from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
 from tests.test_safe_web_search import _FakeOpener
 from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _assistant_text, _config
+from tests.test_remote_pack_fetch import _FakeOpener as _RemoteFakeOpener, _FakeResponse, _zip_bytes
 
 
 def _adapter_spec() -> dict[str, Any]:
@@ -418,6 +420,74 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertFalse(result.get("did_fetch"))
         self.assertFalse(result.get("did_import"))
         self.assertFalse(result.get("did_install"))
+        self.assertFalse(self.runtime.pack_store.list_external_packs())
+
+    def test_source_approval_then_fetch_preview_then_imports_for_review_only(self) -> None:
+        url = "https://example.com/pack.zip"
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener({"results": [{"title": "Lead", "url": url}]}),
+        )
+        archive = _zip_bytes({"repo-main/SKILL.md": b"# Remote Skill\n\nUse as untrusted guidance.\n"})
+
+        self._post_chat("add a capability for analyzing plant watering")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        _preview_body, preview_text = self._post_chat("yes")
+        self.assertIn("fetch preview", preview_text.lower())
+        self.assertIn("content remains hostile", preview_text.lower())
+        self.assertFalse(self.runtime.pack_store.list_external_packs())
+
+        with mock.patch(
+            "agent.packs.external_ingestion.RemotePackFetcher",
+            return_value=__import__("agent.packs.remote_fetch", fromlist=["RemotePackFetcher"]).RemotePackFetcher(
+                self.runtime.pack_store.external_storage_root(),
+                opener=_RemoteFakeOpener({url: _FakeResponse(archive, url=url, content_length=len(archive))}),
+            ),
+        ):
+            body, text = self._post_chat("yes")
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+        result = setup.get("result") if isinstance(setup.get("result"), dict) else {}
+
+        self.assertIn("imported", text.lower())
+        self.assertIn("for review only", text.lower())
+        self.assertIn("no pack was approved", text.lower())
+        self.assertTrue(result.get("imported_for_review"))
+        self.assertFalse(result.get("did_approve"))
+        self.assertFalse(result.get("did_enable"))
+        self.assertFalse(result.get("did_grant_permissions"))
+        self.assertFalse(result.get("did_use_pack"))
+        packs = self.runtime.pack_store.list_external_packs()
+        self.assertEqual(1, len(packs))
+        canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
+        trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+        self.assertEqual("unreviewed", trust.get("local_review_status"))
+
+    def test_no_after_fetch_preview_cancels_without_fetch(self) -> None:
+        self.runtime.config = replace(
+            self.runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        self.runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=_FakeOpener({"results": [{"title": "Lead", "url": "https://example.com/pack.zip"}]}),
+        )
+        self._post_chat("add a capability for analyzing plant watering")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        _body, text = self._post_chat("no")
+
+        self.assertIn("did not fetch", text.lower())
+        self.assertIn("no content was downloaded", text.lower())
         self.assertFalse(self.runtime.pack_store.list_external_packs())
 
     def test_no_after_source_approval_preview_cancels_without_fetch(self) -> None:
