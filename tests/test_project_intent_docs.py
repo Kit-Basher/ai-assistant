@@ -26,3 +26,17 @@ def test_project_status_is_snapshot_not_sole_source_of_truth() -> None:
     text = (REPO_ROOT / "PROJECT_STATUS.md").read_text(encoding="utf-8").lower()
     assert "not the sole" in text
     assert "treat it as the source of truth" not in text
+
+
+def test_external_pack_format_doc_exists_and_states_safety_contract() -> None:
+    path = REPO_ROOT / "docs" / "design" / "EXTERNAL_PACK_FORMAT.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "SKILL.md" in text
+    assert "metadata.json" in text
+    assert "manifest.json" in text
+    assert "permissions.json" in text
+    lowered = text.lower()
+    assert "no arbitrary code execution" in lowered
+    assert "source trust is not content trust" in lowered
+    assert "managed adapters" in lowered

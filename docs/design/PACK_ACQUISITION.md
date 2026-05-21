@@ -4,6 +4,8 @@ Status: current assistant-facing workflow.
 
 `agent/packs/acquisition.py` is the assistant-facing coordinator for external skill acquisition after a user asks for a missing capability. It does not make external packs native abilities and does not bypass source trust, preview, quarantine, review, approval, enablement, configuration, permission, or managed-adapter gates.
 
+Canonical package shape: [`docs/design/EXTERNAL_PACK_FORMAT.md`](/home/c/personal-agent/docs/design/EXTERNAL_PACK_FORMAT.md).
+
 The coordinator wraps the existing safety services:
 
 - capability detection and recommendation identify the requested capability and search approved/trusted catalog sources only.

@@ -3,6 +3,7 @@
 Status: current runtime direction.
 
 Product intent: [`docs/product/PROJECT_INTENT.md`](/home/c/personal-agent/docs/product/PROJECT_INTENT.md).
+Canonical external pack format: [`docs/design/EXTERNAL_PACK_FORMAT.md`](/home/c/personal-agent/docs/design/EXTERNAL_PACK_FORMAT.md).
 
 `agent/packs/lifecycle.py` is the runtime source of truth for whether an external or generated pack can be used. It does not create files, install packs, approve packs, enable packs, grant permissions, execute code, or fetch data. It only evaluates observed facts and returns the current state, missing gate, and next safe assistant step.
 
