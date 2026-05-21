@@ -134,6 +134,9 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 lowered = text.lower()
                 self.assertIn("browser", lowered)
                 self.assertIn("preview", lowered)
+                self.assertIn("not installed or usable", lowered)
+                self.assertIn("approved catalog", lowered)
+                self.assertNotIn("approved starter catalog sources and other approved/trusted catalog sources only", lowered)
                 self.assertNotIn("apt-get", lowered)
                 self.assertNotIn("install a using", lowered)
                 self.assertNotIn("which model do you want me to acquire", lowered)
@@ -172,6 +175,39 @@ class TestChatBehaviorAudit(unittest.TestCase):
         )
         self.assertNotIn("setup looks okay", lowered)
         self.assertNotIn("other local chat models", lowered)
+
+    def test_vague_do_it_uses_actionable_clarification(self) -> None:
+        _status, body, text = self._assert_grounded_reply("do it")
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        lowered = text.lower()
+        self.assertEqual("assistant_clarification", meta.get("route"))
+        self.assertIn("i don’t have a current action to continue", lowered)
+        self.assertIn("check runtime status", lowered)
+        self.assertNotEqual("i’m not sure.", lowered.strip())
+
+    def test_stale_yes_uses_actionable_clarification(self) -> None:
+        _status, body, text = self._assert_grounded_reply("yes")
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        lowered = text.lower()
+        self.assertEqual("assistant_clarification", meta.get("route"))
+        self.assertIn("current action", lowered)
+        self.assertNotIn("i couldn't complete that yet", lowered)
+
+    def test_setup_first_line_is_concise(self) -> None:
+        _status, _body, text = self._assert_grounded_reply("is setup complete")
+        first = text.splitlines()[0]
+        self.assertLessEqual(len(first), 180)
+        self.assertNotIn("other local chat models", first.lower())
+
+    def test_capabilities_mentions_search_and_skill_acquisition(self) -> None:
+        _status, body, text = self._assert_grounded_reply("what can you help me with right now")
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        lowered = text.lower()
+        self.assertEqual("assistant_capabilities", meta.get("route"))
+        self.assertIn("safe web search", lowered)
+        self.assertIn("external skill acquisition", lowered)
+        self.assertIn("source approval", lowered)
+        self.assertIn("quarantine", lowered)
 
     def test_resource_prompts_after_operational_status_route_to_operational_status(self) -> None:
         prompts = (

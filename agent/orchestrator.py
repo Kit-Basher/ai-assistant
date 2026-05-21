@@ -2484,11 +2484,23 @@ class Orchestrator:
             },
             {
                 "key": "pack_suggestions",
-                "title": "Pack suggestions",
-                "summary": "I can tell you when a task needs a missing capability and point to a relevant pack preview without auto-installing it.",
+                "title": "External skill acquisition",
+                "summary": (
+                    "I can handle missing capabilities through approved catalog search, untrusted source leads, source approval, "
+                    "quarantine import, review state, and approval/enable/permission gates."
+                ),
                 "available": True,
             },
         ]
+        search_status = self._safe_web_search_capability_summary()
+        areas.append(
+            {
+                "key": "safe_web_search",
+                "title": "Safe web search",
+                "summary": search_status,
+                "available": "metadata search is configured" in search_status.lower(),
+            }
+        )
         if truth is not None:
             target_truth = (
                 truth.chat_target_truth()
@@ -2567,7 +2579,7 @@ class Orchestrator:
                     current_target_summary = str(row.get("summary") or "").strip()
                     break
             brief_parts = [
-                "I can help inspect this system, check runtime and model status, read and update local memory, and point out when a task needs an extra pack.",
+                "I can check runtime/model status, setup, system resources, local memory, safe web search status, and external skill acquisition gates.",
             ]
             if current_target_summary:
                 brief_parts.append(current_target_summary)
@@ -2601,6 +2613,25 @@ class Orchestrator:
                 "agent_layer_prompt": agent_layer_prompt,
             },
         )
+
+    def _safe_web_search_capability_summary(self) -> str:
+        adapter = self._chat_runtime_adapter
+        if callable(getattr(adapter, "search_status", None)):
+            try:
+                status = dict(adapter.search_status())
+            except Exception:
+                status = {}
+        else:
+            status = {}
+        enabled = bool(status.get("enabled", False))
+        available = bool(status.get("available", False))
+        endpoint_configured = bool(status.get("endpoint_configured", False))
+        provider = str(status.get("provider") or "searxng").strip() or "searxng"
+        if enabled and available:
+            return f"Native {provider} metadata search is configured; results remain untrusted and I do not fetch pages."
+        if enabled and not endpoint_configured:
+            return f"Search is enabled but missing its {provider} endpoint; I can show setup guidance."
+        return "Search is disabled or unavailable; I can explain how to configure SearXNG safely."
 
     def _assistant_frontdoor_engaged(self, text: str) -> bool:
         adapter = self._chat_runtime_adapter
@@ -6648,6 +6679,91 @@ class Orchestrator:
         if self._direct_frustration_diagnostic_question(text):
             return self._assistant_self_diagnostics_response(text)
         return None
+
+    @staticmethod
+    def _looks_like_vague_continuation_prompt(text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        return normalized in {"do it", "continue", "yes", "y", "1"}
+
+    def _active_action_pending_summary(self, user_id: str) -> str | None:
+        thread_id = self._active_thread_id_for_user(user_id)
+        rows = self._memory_runtime.list_pending_items(user_id, thread_id=thread_id, include_expired=False)
+        actionable_origins = {
+            "compare_now",
+            "capability_gap_plan",
+            "capability_gap_preview",
+            "pack_acquisition_source_leads",
+            "pack_source_approval_confirm",
+            "pack_source_fetch_preview",
+            "pack_source_fetch_confirm",
+            "capability_scaffold_preview",
+            "capability_scaffold_create",
+            "managed_adapter_permission_grant",
+            "capability_gap_import",
+            "pack_lifecycle_review_approve",
+            "pack_lifecycle_enable",
+        }
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            kind = str(row.get("kind") or "").strip().lower()
+            origin = str(row.get("origin_tool") or "").strip()
+            if kind == "confirmation" or origin in actionable_origins:
+                candidates.append(row)
+        if not candidates:
+            return None
+        candidates.sort(key=lambda row: (int(row.get("created_at") or 0), str(row.get("pending_id") or "")), reverse=True)
+        selected = candidates[0]
+        origin = str(selected.get("origin_tool") or "").strip()
+        context = selected.get("context") if isinstance(selected.get("context"), dict) else {}
+        origin_labels = {
+            "capability_gap_preview": "preview the candidate pack",
+            "pack_acquisition_source_leads": "review untrusted source leads",
+            "pack_source_approval_confirm": "record source approval only",
+            "pack_source_fetch_preview": "preview quarantine fetch",
+            "pack_source_fetch_confirm": "fetch into quarantine for review only",
+            "capability_scaffold_preview": "preview the scaffold",
+            "capability_scaffold_create": "create a review-only scaffold candidate",
+            "managed_adapter_permission_grant": "record a metadata-only adapter grant",
+            "capability_gap_import": "import the pack for review only",
+            "pack_lifecycle_review_approve": "record review approval",
+            "pack_lifecycle_enable": "enable the approved pack",
+        }
+        question = origin_labels.get(origin, "")
+        pack_name = str(context.get("pack_name") or "").strip()
+        if question and pack_name:
+            question = f"{question} for {pack_name}"
+        if not question:
+            question = str(selected.get("question") or "").strip()
+        if not question:
+            action = str(context.get("lifecycle_action") or selected.get("origin_tool") or "pending action").strip()
+            question = action.replace("_", " ")
+        return " ".join(question.split())[:240] or None
+
+    def _vague_continuation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if not self._looks_like_vague_continuation_prompt(text):
+            return None
+        normalized = normalize_setup_text(text).replace("/", " ")
+        pending_summary = self._active_action_pending_summary(user_id)
+        if pending_summary and normalized == "yes":
+            return None
+        if pending_summary:
+            message = f"I was waiting to confirm: {pending_summary}. Say yes to continue that, or no to cancel."
+        else:
+            message = "I don’t have a current action to continue. Tell me what you want me to do next, or ask me to check runtime status."
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            next_question=message,
+            payload={
+                "type": "assistant_continuation_clarification",
+                "summary": message,
+                "has_pending_action": bool(pending_summary),
+            },
+        )
 
     @staticmethod
     def _looks_like_pack_review_state_prompt(text: str) -> bool:
@@ -12674,7 +12790,7 @@ class Orchestrator:
         ]
 
         if setup_state == "ready" and active_model:
-            message = f"Setup looks okay right now. Chat is using {active_model} on {provider_label}."
+            message = f"Setup is complete. Chat is using {active_model} on {provider_label}."
             if active_provider == "ollama" and provider_health_status == "ok":
                 message = f"{message.rstrip('.')} Ollama is reachable."
             elif active_provider:
@@ -12682,7 +12798,7 @@ class Orchestrator:
             if other_local_rows:
                 preview = self._inventory_preview(other_local_rows, limit=4)
                 if preview:
-                    message = f"{message.rstrip('.')} Other local chat models I can see are {preview}."
+                    message = f"{message}\nOther local chat models I can see: {preview}."
             ok = True
         elif setup_state == "attention" and active_model and active_provider:
             if attention_kind == "provider_down":
@@ -17865,6 +17981,9 @@ class Orchestrator:
                     return self._operational_status_response(user_id, runtime_text, "operational_observe")
                 if self._vague_fix_it_prompt(runtime_text):
                     return self._vague_fix_it_response()
+                vague_continuation_response = self._vague_continuation_response(user_id, runtime_text)
+                if vague_continuation_response is not None:
+                    return vague_continuation_response
                 if self._standalone_open_chat_prompt(runtime_text):
                     if "what should i ask you next" in normalize_setup_text(runtime_text).replace("/", " "):
                         return self._assistant_capabilities_response(runtime_text)
@@ -17942,10 +18061,21 @@ class Orchestrator:
                 ):
                     return self._bootstrap_no_chat_response()
                 if str(self._last_offer_topic.get(user_id) or "").strip() != "brief_offer":
-                    return self._continuity_error_response(
-                        title="❌ No resumable work is active.",
-                        failure_code="no_resumable_work",
-                        next_action="Ask \"what are we doing?\" or start a new request.",
+                    message = (
+                        "I don’t have a current action to continue. "
+                        "Tell me what you want me to do next, or ask me to check runtime status."
+                    )
+                    return self._runtime_truth_response(
+                        text=message,
+                        route="assistant_clarification",
+                        used_runtime_state=False,
+                        used_memory=bool(self._current_runtime_setup_state(user_id)),
+                        next_question=message,
+                        payload={
+                            "type": "assistant_continuation_clarification",
+                            "summary": message,
+                            "reason": "no_resumable_work",
+                        },
                     )
             if followup_type == "match":
                 pending_item = followup.get("pending_item") if isinstance(followup.get("pending_item"), dict) else {}
@@ -18110,10 +18240,22 @@ class Orchestrator:
                         if not pending_action:
                             if pending_id:
                                 self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
-                            return self._continuity_error_response(
-                                title="❌ Confirmation target is no longer available.",
-                                failure_code="resumable_missing",
-                                next_action="Re-run the action you want to confirm.",
+                            message = (
+                                "I don’t have a current action to continue. "
+                                "The previous confirmation target is no longer available. "
+                                "Tell me what you want me to do next, or ask me to check runtime status."
+                            )
+                            return self._runtime_truth_response(
+                                text=message,
+                                route="assistant_clarification",
+                                used_runtime_state=False,
+                                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                                next_question=message,
+                                payload={
+                                    "type": "assistant_continuation_clarification",
+                                    "summary": message,
+                                    "reason": "resumable_missing",
+                                },
                             )
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)

@@ -21,9 +21,12 @@ class TestPromptRegressionPack(unittest.TestCase):
             self.assertGreaterEqual(float(result.get("confidence") or 0.0), 0.45)
 
     def test_public_text_fallback_is_not_terse_done(self) -> None:
-        text = normalize_public_assistant_text("", fallback="I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.")
+        text = normalize_public_assistant_text(
+            "",
+            fallback="I don’t have a current action to continue. Tell me what you want me to do next, or ask me to check runtime status.",
+        )
         self.assertNotEqual("Done.", text)
-        self.assertIn("try rephrasing", text.lower())
+        self.assertIn("check runtime status", text.lower())
 
 
 if __name__ == "__main__":

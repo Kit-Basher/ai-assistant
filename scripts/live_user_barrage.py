@@ -36,7 +36,7 @@ DIAGNOSTIC_READY_MARKERS = (
     "i'm here and ready to help",
     "i’m here and ready to help",
 )
-WHOLE_ANSWER_FORBIDDEN = {"ok", "done."}
+WHOLE_ANSWER_FORBIDDEN = {"ok", "done.", "i'm not sure.", "i’m not sure."}
 LOW_VALUE_MARKERS = (
     "i can help with that",
     "i'd be happy to",
@@ -44,6 +44,13 @@ LOW_VALUE_MARKERS = (
     "happy to help",
     "what can i do for you",
     "what would you like me to do",
+)
+GENERIC_FAILURE_MARKERS = (
+    "i couldn't complete that yet",
+    "i couldn’t complete that yet",
+)
+INTERNAL_PACK_ACQUISITION_MARKERS = (
+    "approved starter catalog sources and other approved/trusted catalog sources only",
 )
 STALE_CONTEXT_MARKERS = (
     "i was following",
@@ -285,6 +292,17 @@ def classify_quality_response(
     if text.lower() in WHOLE_ANSWER_FORBIDDEN or any(marker in lowered for marker in LOW_VALUE_MARKERS):
         likely_low_value_response = True
         warnings.append("likely low-value non-actionable response")
+    if any(marker in lowered for marker in GENERIC_FAILURE_MARKERS):
+        if not any(token in lowered for token in ("pending action", "confirmation target", "error", "reason:", "failure_code")):
+            likely_low_value_response = True
+            warnings.append("likely low-value generic failure without named pending action or error kind")
+    if "try rephrasing" in lowered:
+        likely_low_value_response = True
+        warnings.append("likely low-value generic try-rephrasing fallback")
+    if case.category == "skill_install" and any(marker in lowered for marker in INTERNAL_PACK_ACQUISITION_MARKERS):
+        warnings.append("overly internal pack-acquisition wording")
+    if case.category == "app_setup" and route == "setup_flow" and len(line) > 180:
+        warnings.append("setup/status first line is too long")
     if runtime_healthy and any(marker in lowered for marker in MODEL_UNAVAILABLE_MARKERS):
         likely_contradiction = True
         warnings.append("likely contradiction with healthy runtime/model status")

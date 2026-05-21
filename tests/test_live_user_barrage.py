@@ -31,6 +31,7 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
         self.assertIn("empty response", self._classify("open_chat", "hello", ""))
         self.assertIn("stale whole-answer placeholder", self._classify("open_chat", "do it", "OK"))
         self.assertIn("stale whole-answer placeholder", self._classify("open_chat", "do it", "Done."))
+        self.assertIn("stale whole-answer placeholder", self._classify("vague", "do it", "I’m not sure."))
 
     def test_rejects_internal_leaks(self) -> None:
         cases = {
@@ -91,6 +92,40 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
         classify_barrage_response(PromptCase("open_chat", "give me a concise checklist for testing this app"), response)
         self.assertTrue(response["likely_low_value_response"])
         self.assertTrue(any("low-value" in warning for warning in response["quality_warnings"]))
+
+    def test_quality_flags_generic_failure_and_internal_pack_wording(self) -> None:
+        response = {
+            "text": "I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.",
+            "first_line": "I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.",
+            "route": "generic_chat",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        classify_barrage_response(PromptCase("vague", "yes"), response)
+        self.assertTrue(response["likely_low_value_response"])
+        self.assertTrue(any("generic failure" in warning for warning in response["quality_warnings"]))
+
+        skill_response = {
+            "text": "I searched the approved starter catalog sources and other approved/trusted catalog sources only, and found Browser.",
+            "first_line": "I searched the approved starter catalog sources and other approved/trusted catalog sources only, and found Browser.",
+            "route": "action_tool",
+            "used_llm": False,
+            "used_runtime_state": False,
+        }
+        classify_barrage_response(PromptCase("skill_install", "install a skill that lets you browse"), skill_response)
+        self.assertTrue(any("overly internal" in warning for warning in skill_response["quality_warnings"]))
+
+    def test_quality_flags_long_setup_first_line(self) -> None:
+        long_line = "Setup looks okay right now. " + ("Other local chat models are available. " * 8)
+        response = {
+            "text": long_line,
+            "first_line": long_line,
+            "route": "setup_flow",
+            "used_llm": False,
+            "used_runtime_state": True,
+        }
+        classify_barrage_response(PromptCase("app_setup", "is setup complete"), response)
+        self.assertTrue(any("first line is too long" in warning for warning in response["quality_warnings"]))
 
     def test_quality_flags_runtime_contradiction_when_ready_is_healthy(self) -> None:
         response = {

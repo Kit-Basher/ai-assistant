@@ -473,11 +473,10 @@ class PackAcquisitionCoordinator:
         next_label = _clean((lifecycle.get("next_step") if isinstance(lifecycle.get("next_step"), dict) else {}).get("label"))
         if source_status == "trusted_catalog_candidate" and isinstance(candidate, dict):
             name = _clean(candidate.get("name")) or "a candidate pack"
-            source_name = _clean(candidate.get("source_name") or candidate.get("source_id")) or "an approved catalog source"
             return (
-                f"I do not have {label} as an active capability yet. I searched the approved starter catalog sources and other approved/trusted catalog sources only, and found {name} in {source_name}. "
-                f"Current lifecycle state: {lifecycle.get('state')}. It is not installed or usable yet. "
-                f"Next safe step: {next_label or 'show the preview before import'}. Say yes to preview it. This continues one gate only."
+                f"I don’t have {label} active yet. I found {name} in the approved catalog. "
+                "It is not installed or usable yet. "
+                "Next safe step: preview it. Say yes to preview. This continues one gate only."
             )
         if source_status == "source_trust_required":
             source = _first_source_error(source_errors)

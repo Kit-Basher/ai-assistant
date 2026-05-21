@@ -81,7 +81,7 @@ def serialize_orchestrator_chat_response(
     generic_fallback_reason = str(response_data.get("generic_fallback_reason") or "").strip() or None
     assistant_text = normalize_public_assistant_text(
         response.text,
-        fallback="I couldn't complete that yet. Please try rephrasing or ask me to run a quick runtime check.",
+        fallback="I don’t have a current action to continue. Tell me what you want me to do next, or ask me to check runtime status.",
     )
     ok = bool(response_data.get("ok", True))
 
