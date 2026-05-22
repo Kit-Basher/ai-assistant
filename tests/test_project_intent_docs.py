@@ -40,3 +40,14 @@ def test_external_pack_format_doc_exists_and_states_safety_contract() -> None:
     assert "no arbitrary code execution" in lowered
     assert "source trust is not content trust" in lowered
     assert "managed adapters" in lowered
+
+
+def test_current_checkpoint_doc_exists_and_names_quality_baseline() -> None:
+    path = REPO_ROOT / "docs" / "operator" / "CURRENT_CHECKPOINT.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "34ed8c1" in text
+    assert "external_pack_safety_smoke" in text
+    lowered = text.lower()
+    assert "source trust is not content trust" in lowered
+    assert "no arbitrary external code execution" in lowered

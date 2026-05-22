@@ -3,6 +3,7 @@
 ## Source Priority
 
 - Product intent: `docs/product/PROJECT_INTENT.md`
+- Current checkpoint: `docs/operator/CURRENT_CHECKPOINT.md`
 - Product-facing overview: `README.md`
 - Product/runtime contract: `PRODUCT_RUNTIME_SPEC.md`
 - Current branch status snapshot: `PROJECT_STATUS.md`
