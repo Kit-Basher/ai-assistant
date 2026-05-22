@@ -28,7 +28,7 @@ Allowed v1 outcomes:
 - source approval preview confirmed: record explicit trust for the source id only, then stop. Source approval does not approve pack content and does not fetch, download, import, install, approve, enable, configure, grant permissions, or use a pack.
 - approved source fetch confirmed: fetch into quarantine and import for review only, then stop. The assistant must show the imported pack review state before any approval continuation. Quarantine fetch/import does not approve, enable, configure, grant permissions, or use a pack; review approval remains the next gate.
 - no candidate found: offer a preview-only scaffold path.
-- imported for review: ask for review/approval.
+- imported for review: show review state, then show a review-approval preview before any approval mutation.
 - approved but disabled: ask to enable.
 - enabled but missing config/permission: ask for that exact gate.
 - usable: invoke only supported managed-adapter operations.
@@ -46,5 +46,7 @@ Source approval is explicit user trust for a source id, not trust in the content
 Quarantine fetch/import-for-review is a separate gate after source approval. The assistant may fetch only from an approved source id through the existing hostile remote-fetch and `ExternalPackIngestor` paths. A successful fetch creates a review-only external pack candidate with no approval, no enablement, no configuration, no permission grant, and no use.
 
 After any import-for-review result, the assistant must render a bounded review-state summary before asking for approval. That summary may include pack identity, lifecycle state, local review status, enabled=false, permissions/grants status, managed-adapter kinds, risk flags, import status, and safe source/provenance metadata. It must not expose raw `SKILL.md`, README, manifests, catalog listings, prompt text, secrets, private paths, or long hostile strings. Review state is not content trust; it is a truthfulness checkpoint that tells the user why the pack is still not usable and names the next safe gate as review/approval.
+
+Review approval continuation is also one gate only. After the review state, the next `yes` shows a review-approval preview and does not mutate approval. A second `yes` records review approval only. It does not enable the pack, configure it, grant permissions, execute code, invoke managed adapters, or use the pack. After approval, the assistant reports the current lifecycle state and names the next safe gate, normally enablement.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import partial
@@ -6701,6 +6702,7 @@ class Orchestrator:
             "managed_adapter_permission_grant",
             "capability_gap_import",
             "pack_lifecycle_review_approve",
+            "pack_lifecycle_review_approve_confirm",
             "pack_lifecycle_enable",
         }
         candidates: list[dict[str, Any]] = []
@@ -6727,7 +6729,8 @@ class Orchestrator:
             "capability_scaffold_create": "create a review-only scaffold candidate",
             "managed_adapter_permission_grant": "record a metadata-only adapter grant",
             "capability_gap_import": "import the pack for review only",
-            "pack_lifecycle_review_approve": "record review approval",
+            "pack_lifecycle_review_approve": "preview review approval",
+            "pack_lifecycle_review_approve_confirm": "record review approval only",
             "pack_lifecycle_enable": "enable the approved pack",
         }
         question = origin_labels.get(origin, "")
@@ -6777,8 +6780,13 @@ class Orchestrator:
             "is this pack safe yet",
             "can i use that pack now",
             "can i use this pack now",
+            "can i use it now",
             "is that pack usable",
             "is this pack usable",
+            "is it enabled",
+            "did you approve it",
+            "what is the next step",
+            "what's the next step",
         )
         if any(phrase in normalized for phrase in exact_phrases):
             return True
@@ -6790,7 +6798,9 @@ class Orchestrator:
         review_pending = [
             row
             for row in pending_items
-            if isinstance(row, dict) and str(row.get("origin_tool") or "") == "pack_lifecycle_review_approve"
+            if isinstance(row, dict)
+            and str(row.get("origin_tool") or "")
+            in {"pack_lifecycle_review_approve", "pack_lifecycle_review_approve_confirm"}
         ]
         review_pending.sort(key=lambda row: (int(row.get("created_at") or 0), str(row.get("pending_id") or "")), reverse=True)
         for pending in review_pending:
@@ -7069,7 +7079,10 @@ class Orchestrator:
         )
 
     def _queue_managed_adapter_permission_followup(self, user_id: str, *, request: Any) -> None:
-        self._abort_pending_by_origin(user_id, {"pack_lifecycle_review_approve", "pack_lifecycle_enable"})
+        self._abort_pending_by_origin(
+            user_id,
+            {"pack_lifecycle_review_approve", "pack_lifecycle_review_approve_confirm", "pack_lifecycle_enable"},
+        )
         pending_id = str(uuid.uuid4())
         now_epoch = int(time.time())
         lifecycle = PackLifecycleService().evaluate(
@@ -8088,6 +8101,39 @@ class Orchestrator:
             },
         )
 
+    def _queue_pack_review_approve_confirm_followup(
+        self,
+        user_id: str,
+        *,
+        pack: dict[str, Any],
+        lifecycle: dict[str, Any],
+    ) -> None:
+        pack_id = str(pack.get("pack_id") or pack.get("canonical_id") or lifecycle.get("pack_id") or lifecycle.get("canonical_id") or "").strip()
+        if not pack_id:
+            return
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "pack_lifecycle_review_approve_confirm",
+                "question": "Record review approval for this external pack candidate only?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "pack_id": pack_id,
+                    "pack_name": str(pack.get("name") or lifecycle.get("pack_name") or "the pack").strip(),
+                    "lifecycle": dict(lifecycle),
+                    "lifecycle_action": "review_approve",
+                },
+            },
+        )
+
     def _queue_pack_enable_followup(self, user_id: str, *, pack: dict[str, Any], lifecycle: dict[str, Any]) -> None:
         pack_id = str(pack.get("pack_id") or pack.get("canonical_id") or lifecycle.get("pack_id") or lifecycle.get("canonical_id") or "").strip()
         if not pack_id:
@@ -8115,6 +8161,81 @@ class Orchestrator:
             },
         )
 
+    @staticmethod
+    def _preview_review_approved_pack(pack: dict[str, Any]) -> dict[str, Any]:
+        preview_pack = copy.deepcopy(pack)
+        canonical = preview_pack.get("canonical_pack") if isinstance(preview_pack.get("canonical_pack"), dict) else {}
+        trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+        canonical["trust_anchor"] = {**trust, "local_review_status": "approved"}
+        preview_pack["canonical_pack"] = canonical
+        return preview_pack
+
+    def _pack_lifecycle_review_approve_preview_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="review_approve")
+        if refusal is not None:
+            return refusal
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        pack_id = str(context.get("pack_id") or "").strip()
+        pack = self._pack_store.get_external_pack(pack_id)
+        if not isinstance(pack, dict):
+            message = "I could not show the review approval preview because the review candidate is no longer available. No pack was approved, enabled, granted permissions, or used."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["pack_lifecycle_action"],
+                payload={
+                    "type": "pack_lifecycle_action",
+                    "ok": False,
+                    "action": "review_approve_preview",
+                    "summary": message,
+                    "did_approve": False,
+                    "did_enable": False,
+                    "did_grant_permissions": False,
+                    "did_use_pack": False,
+                },
+            )
+        grants = list_adapter_grants(self._pack_store.external_storage_root())
+        lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=grants).to_dict()
+        preview_pack = self._preview_review_approved_pack(pack)
+        lifecycle_after_approval = PackLifecycleService().evaluate(imported_pack=preview_pack, permission_grants=grants).to_dict()
+        review_state = build_pack_review_state_summary(pack, permission_grants=grants, lifecycle=lifecycle).to_dict()
+        review_state_text = render_pack_review_state(pack, permission_grants=grants, lifecycle=lifecycle)
+        name = str(pack.get("name") or lifecycle.get("pack_name") or "the pack").strip()
+        next_label = (lifecycle_after_approval.get("next_step") or {}).get("label") or "enable the pack in a separate step"
+        message = (
+            f"Review approval preview for {name}.\n\n"
+            f"{review_state_text}\n\n"
+            "Review approval is not enablement. Review approval is not a permission grant. "
+            "Review approval does not execute code or use the pack. "
+            f"If you confirm, I will record review approval only; the pack will remain disabled and unusable until later gates pass. "
+            f"Next safe step after approval: {next_label}. Say yes to record review approval only, or no to cancel."
+        )
+        self._queue_pack_review_approve_confirm_followup(user_id, pack=pack, lifecycle=lifecycle)
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["pack_lifecycle_action"],
+            payload={
+                "type": "pack_lifecycle_action",
+                "ok": True,
+                "action": "review_approve_preview",
+                "summary": message,
+                "pack": pack,
+                "review_state": review_state,
+                "lifecycle": lifecycle,
+                "lifecycle_after_approval_preview": lifecycle_after_approval,
+                "did_approve": False,
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+                "executes_code": False,
+            },
+        )
+
     def _pack_lifecycle_review_approve_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
         refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="review_approve")
         if refusal is not None:
@@ -8136,14 +8257,17 @@ class Orchestrator:
                 used_tools=["pack_lifecycle_action"],
                 payload={"type": "pack_lifecycle_action", "ok": False, "action": "review_approve", "summary": message},
             )
-        lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=list_adapter_grants(self._pack_store.external_storage_root())).to_dict()
-        if (lifecycle.get("next_step") or {}).get("action") == "enable":
-            self._queue_pack_enable_followup(user_id, pack=pack, lifecycle=lifecycle)
+        lifecycle = PackLifecycleService().evaluate(
+            imported_pack=pack,
+            permission_grants=list_adapter_grants(self._pack_store.external_storage_root()),
+        ).to_dict()
         name = str(pack.get("name") or lifecycle.get("pack_name") or "The pack").strip()
+        next_label = (lifecycle.get("next_step") or {}).get("label") or "enable the pack in a separate step"
         message = (
-            f"I recorded review approval for {name}. Current state: {lifecycle.get('state')}. "
+            f"Review approval recorded for {name}. Current state: {lifecycle.get('state')}. "
+            "The pack is still not enabled. No permissions were granted. I did not execute or use the pack. "
             "It is not usable until enablement, configuration, and permission gates are complete. "
-            f"Next safe step: {(lifecycle.get('next_step') or {}).get('label') or 'enable the pack'}."
+            f"Next safe step: {next_label}."
         )
         return self._runtime_truth_response(
             text=message,
@@ -8151,7 +8275,22 @@ class Orchestrator:
             used_runtime_state=False,
             used_memory=bool(self._current_runtime_setup_state(user_id)),
             used_tools=["pack_lifecycle_action"],
-            payload={"type": "pack_lifecycle_action", "ok": True, "action": "review_approve", "summary": message, "pack": pack, "lifecycle": lifecycle},
+            payload={
+                "type": "pack_lifecycle_action",
+                "ok": True,
+                "action": "review_approve",
+                "summary": message,
+                "pack": pack,
+                "lifecycle": lifecycle,
+                "did_approve": True,
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+                "permissions_granted": [],
+                "enabled": False,
+                "usable": bool(lifecycle.get("usable")),
+                "executes_code": False,
+            },
         )
 
     def _pack_lifecycle_enable_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
@@ -18217,6 +18356,15 @@ class Orchestrator:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I did not import that pack.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_lifecycle_review_approve":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._pack_lifecycle_review_approve_preview_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not approve that pack.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "pack_lifecycle_review_approve_confirm":
                     if followup_intent in {"accept", "details"}:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)

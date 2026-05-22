@@ -5370,20 +5370,27 @@ class TestOrchestrator(unittest.TestCase):
         created_payload = created.data.get("runtime_payload") if isinstance(created.data.get("runtime_payload"), dict) else {}
         self.assertEqual("imported_for_review", (created_payload.get("lifecycle") or {}).get("state"))
 
+        approval_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], approval_preview.data["used_tools"])
+        preview_payload = approval_preview.data.get("runtime_payload") if isinstance(approval_preview.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("review_approve_preview", preview_payload.get("action"))
+        self.assertFalse(preview_payload.get("did_approve"))
+        self.assertIn("review approval is not enablement", approval_preview.text.lower())
+
         approved = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
         approved_payload = approved.data.get("runtime_payload") if isinstance(approved.data.get("runtime_payload"), dict) else {}
         self.assertEqual("review_approve", approved_payload.get("action"))
         self.assertEqual("approved", (approved_payload.get("lifecycle") or {}).get("state"))
-        self.assertIn("not usable until enablement", approved.text.lower())
+        self.assertTrue(approved_payload.get("did_approve"))
+        self.assertFalse(approved_payload.get("did_enable"))
+        self.assertFalse(approved_payload.get("did_grant_permissions"))
+        self.assertFalse(approved_payload.get("did_use_pack"))
+        self.assertIn("still not enabled", approved.text.lower())
 
-        enabled = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
-        enabled_payload = enabled.data.get("runtime_payload") if isinstance(enabled.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("enable", enabled_payload.get("action"))
-        self.assertEqual("needs_permission", (enabled_payload.get("lifecycle") or {}).get("state"))
-        self.assertFalse((enabled_payload.get("lifecycle") or {}).get("usable"))
-        self.assertIn("permission", enabled.text.lower())
+        repeat = orchestrator.handle_message("yes", "user1")
+        self.assertEqual("assistant_clarification", repeat.data["route"])
+        self.assertIn("current action", repeat.text.lower())
 
     def test_usable_external_pack_invokes_managed_adapter_dry_run(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")

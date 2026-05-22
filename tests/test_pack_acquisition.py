@@ -527,6 +527,68 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("not approved", text.lower())
         self.assertIn("review/approval", text.lower())
 
+    def test_review_approval_preview_then_confirm_records_approval_only(self) -> None:
+        self._import_pack_for_review_via_source_lead()
+
+        preview_body, preview_text = self._post_chat("yes")
+        preview_meta = preview_body.get("meta") if isinstance(preview_body.get("meta"), dict) else {}
+        preview_payload = preview_body.get("setup") if isinstance(preview_body.get("setup"), dict) else {}
+
+        self.assertIn("pack_lifecycle_action", preview_meta.get("used_tools") or [])
+        self.assertEqual("review_approve_preview", preview_payload.get("action"))
+        self.assertIn("review approval preview", preview_text.lower())
+        self.assertIn("review approval is not enablement", preview_text.lower())
+        self.assertIn("review approval is not a permission grant", preview_text.lower())
+        self.assertIn("does not execute code", preview_text.lower())
+        self.assertIn("not enabled", preview_text.lower())
+        self.assertIn("no permissions granted", preview_text.lower())
+        self.assertFalse(preview_payload.get("did_approve"))
+        self.assertFalse(preview_payload.get("did_enable"))
+        self.assertFalse(preview_payload.get("did_grant_permissions"))
+        self.assertFalse(preview_payload.get("did_use_pack"))
+        packs = self.runtime.pack_store.list_external_packs()
+        canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
+        trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+        self.assertEqual("unreviewed", trust.get("local_review_status"))
+
+        approve_body, approve_text = self._post_chat("yes")
+        approve_payload = approve_body.get("setup") if isinstance(approve_body.get("setup"), dict) else {}
+
+        self.assertEqual("review_approve", approve_payload.get("action"))
+        self.assertIn("review approval recorded", approve_text.lower())
+        self.assertIn("still not enabled", approve_text.lower())
+        self.assertIn("no permissions were granted", approve_text.lower())
+        self.assertIn("did not execute or use", approve_text.lower())
+        self.assertTrue(approve_payload.get("did_approve"))
+        self.assertFalse(approve_payload.get("did_enable"))
+        self.assertFalse(approve_payload.get("did_grant_permissions"))
+        self.assertFalse(approve_payload.get("did_use_pack"))
+        self.assertFalse(approve_payload.get("enabled"))
+        self.assertFalse(approve_payload.get("usable"))
+        packs = self.runtime.pack_store.list_external_packs()
+        canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
+        trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+        self.assertEqual("approved", trust.get("local_review_status"))
+
+        repeat_body, repeat_text = self._post_chat("yes")
+        repeat_meta = repeat_body.get("meta") if isinstance(repeat_body.get("meta"), dict) else {}
+        self.assertEqual("assistant_clarification", repeat_meta.get("route"))
+        self.assertIn("current action", repeat_text.lower())
+        packs = self.runtime.pack_store.list_external_packs()
+        runtime = packs[0].get("runtime") if isinstance(packs[0].get("runtime"), dict) else {}
+        self.assertFalse(runtime.get("enabled"))
+
+    def test_can_i_use_it_now_after_review_approval_names_enable_gate(self) -> None:
+        self._import_pack_for_review_via_source_lead()
+        self._post_chat("yes")
+        self._post_chat("yes")
+
+        _body, text = self._post_chat("can I use it now")
+
+        self.assertIn("not enabled", text.lower())
+        self.assertIn("not usable", text.lower())
+        self.assertIn("enable", text.lower())
+
     def test_no_after_fetch_preview_cancels_without_fetch(self) -> None:
         self.runtime.config = replace(
             self.runtime.config,
