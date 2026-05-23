@@ -570,13 +570,41 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
         self.assertEqual("approved", trust.get("local_review_status"))
 
+        enable_preview_body, enable_preview_text = self._post_chat("yes")
+        enable_preview_payload = enable_preview_body.get("setup") if isinstance(enable_preview_body.get("setup"), dict) else {}
+        self.assertEqual("enable_preview", enable_preview_payload.get("action"))
+        self.assertIn("enablement preview", enable_preview_text.lower())
+        self.assertIn("enablement is not a permission grant", enable_preview_text.lower())
+        self.assertIn("enablement does not execute code", enable_preview_text.lower())
+        self.assertIn("enablement does not invoke or use", enable_preview_text.lower())
+        self.assertFalse(enable_preview_payload.get("did_enable"))
+        self.assertFalse(enable_preview_payload.get("did_grant_permissions"))
+        self.assertFalse(enable_preview_payload.get("did_use_pack"))
+        packs = self.runtime.pack_store.list_external_packs()
+        canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
+        runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
+        self.assertFalse(runtime.get("enabled"))
+
+        enable_body, enable_text = self._post_chat("yes")
+        enable_payload = enable_body.get("setup") if isinstance(enable_body.get("setup"), dict) else {}
+        self.assertEqual("enable", enable_payload.get("action"))
+        self.assertIn("enablement recorded", enable_text.lower())
+        self.assertIn("no permissions were granted", enable_text.lower())
+        self.assertIn("no adapter was invoked", enable_text.lower())
+        self.assertIn("did not use the pack", enable_text.lower())
+        self.assertTrue(enable_payload.get("did_enable"))
+        self.assertFalse(enable_payload.get("did_grant_permissions"))
+        self.assertFalse(enable_payload.get("did_use_pack"))
+        self.assertTrue(enable_payload.get("usable"))
+        packs = self.runtime.pack_store.list_external_packs()
+        canonical = packs[0].get("canonical_pack") if isinstance(packs[0].get("canonical_pack"), dict) else {}
+        runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
+        self.assertTrue(runtime.get("enabled"))
+
         repeat_body, repeat_text = self._post_chat("yes")
         repeat_meta = repeat_body.get("meta") if isinstance(repeat_body.get("meta"), dict) else {}
         self.assertEqual("assistant_clarification", repeat_meta.get("route"))
         self.assertIn("current action", repeat_text.lower())
-        packs = self.runtime.pack_store.list_external_packs()
-        runtime = packs[0].get("runtime") if isinstance(packs[0].get("runtime"), dict) else {}
-        self.assertFalse(runtime.get("enabled"))
 
     def test_can_i_use_it_now_after_review_approval_names_enable_gate(self) -> None:
         self._import_pack_for_review_via_source_lead()
@@ -588,6 +616,22 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("not enabled", text.lower())
         self.assertIn("not usable", text.lower())
         self.assertIn("enable", text.lower())
+
+    def test_direct_prompts_after_enablement_report_lifecycle_truth(self) -> None:
+        self._import_pack_for_review_via_source_lead()
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+
+        _body, use_text = self._post_chat("can I use it now?")
+        self.assertIn("enabled: true", use_text.lower())
+        self.assertIn("usable", use_text.lower())
+        self.assertIn("usable now", use_text.lower())
+
+        _body, permission_text = self._post_chat("did you grant permissions?")
+        self.assertIn("no permissions granted", permission_text.lower())
+        self.assertIn("usable", permission_text.lower())
 
     def test_no_after_fetch_preview_cancels_without_fetch(self) -> None:
         self.runtime.config = replace(

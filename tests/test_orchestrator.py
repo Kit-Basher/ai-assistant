@@ -5388,8 +5388,25 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(approved_payload.get("did_use_pack"))
         self.assertIn("still not enabled", approved.text.lower())
 
+        enable_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
+        enable_preview_payload = enable_preview.data.get("runtime_payload") if isinstance(enable_preview.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("enable_preview", enable_preview_payload.get("action"))
+        self.assertFalse(enable_preview_payload.get("did_enable"))
+        self.assertIn("enablement is not a permission grant", enable_preview.text.lower())
+
+        enabled = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
+        enabled_payload = enabled.data.get("runtime_payload") if isinstance(enabled.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("enable", enabled_payload.get("action"))
+        self.assertTrue(enabled_payload.get("did_enable"))
+        self.assertFalse(enabled_payload.get("did_grant_permissions"))
+        self.assertFalse(enabled_payload.get("did_use_pack"))
+        self.assertEqual("needs_permission", (enabled_payload.get("lifecycle") or {}).get("state"))
+        self.assertIn("permission", enabled.text.lower())
+
         repeat = orchestrator.handle_message("yes", "user1")
-        self.assertEqual("assistant_clarification", repeat.data["route"])
+        self.assertIn(repeat.data["route"], {"assistant_clarification", "generic_chat"})
         self.assertIn("current action", repeat.text.lower())
 
     def test_usable_external_pack_invokes_managed_adapter_dry_run(self) -> None:

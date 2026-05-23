@@ -135,7 +135,7 @@ def _render_lines(summary: PackReviewStateSummary) -> list[str]:
     lines.extend(
         [
             f"Manual review required: {'yes' if summary.manual_review_required else 'no'}",
-            "Not usable yet.",
+            "Usable now." if summary.usable else "Not usable yet.",
             f"Next safe step: {summary.next_safe_step or 'review/approval'}",
         ]
     )

@@ -29,7 +29,7 @@ Allowed v1 outcomes:
 - approved source fetch confirmed: fetch into quarantine and import for review only, then stop. The assistant must show the imported pack review state before any approval continuation. Quarantine fetch/import does not approve, enable, configure, grant permissions, or use a pack; review approval remains the next gate.
 - no candidate found: offer a preview-only scaffold path.
 - imported for review: show review state, then show a review-approval preview before any approval mutation.
-- approved but disabled: ask to enable.
+- approved but disabled: show an enablement preview before any enablement mutation.
 - enabled but missing config/permission: ask for that exact gate.
 - usable: invoke only supported managed-adapter operations.
 
@@ -48,5 +48,7 @@ Quarantine fetch/import-for-review is a separate gate after source approval. The
 After any import-for-review result, the assistant must render a bounded review-state summary before asking for approval. That summary may include pack identity, lifecycle state, local review status, enabled=false, permissions/grants status, managed-adapter kinds, risk flags, import status, and safe source/provenance metadata. It must not expose raw `SKILL.md`, README, manifests, catalog listings, prompt text, secrets, private paths, or long hostile strings. Review state is not content trust; it is a truthfulness checkpoint that tells the user why the pack is still not usable and names the next safe gate as review/approval.
 
 Review approval continuation is also one gate only. After the review state, the next `yes` shows a review-approval preview and does not mutate approval. A second `yes` records review approval only. It does not enable the pack, configure it, grant permissions, execute code, invoke managed adapters, or use the pack. After approval, the assistant reports the current lifecycle state and names the next safe gate, normally enablement.
+
+Enablement continuation follows the same preview-before-mutation rule. After review approval, the assistant may queue enablement only when `PackLifecycleService` says enablement is next. The first `yes` shows an enablement preview and does not mutate state. A second `yes` records enablement only. It does not configure adapters, grant permissions, invoke managed adapters, execute code, or use the pack. After enablement, the assistant reports the next lifecycle gate: configuration, permission, or ready-to-use state. Ready-to-use still does not mean automatic invocation.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.

@@ -48,6 +48,8 @@ Quarantine fetch/import-for-review is separate from source approval and separate
 
 Review approval is its own explicit gate after review state is shown. The first confirmation after review state shows a review-approval preview with the pack identity, lifecycle state, local review status, risk summary, requested managed adapters, enabled=false, and no permissions granted. Only a second confirmation records review approval. Review approval does not enable the pack, grant permissions, execute code, or use the pack. The next gate after approval is whatever `PackLifecycleService` reports, usually enablement.
 
+Enablement is also a separate explicit gate after review approval. The first confirmation after approval shows an enablement preview with review status, enabled=false, requested managed adapters or permissions, and the lifecycle state expected after enablement. Only the next confirmation records enablement. Enablement does not configure adapters, grant permissions, execute code, invoke managed adapters, or use the pack. Configuration and managed-adapter permission gates remain separate, and even a pack that becomes `usable=true` after enablement is not invoked automatically.
+
 Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is treated as untrusted metadata. Archive fetches land in quarantine only, and extraction blocks traversal, symlinks, special files, hidden files, nested archives, executable bits, duplicate paths, oversized files, excessive member counts, excessive expansion, and unsafe post-write containment before normalization/scanning can proceed.
 
 Imported pack documents are untrusted guidance, never assistant authority. Normalized imported `SKILL.md` and prompt material are wrapped with an internal warning that runtime/system policy wins over pack text. Strong prompt-injection patterns in primary instruction files, including requests to ignore system/developer instructions, leak secrets, auto-approve/auto-enable, run shell or dependency installs, or disable safety gates, block the import and require manual rewrite/review.
@@ -66,7 +68,7 @@ Generated and external packs must not run arbitrary generated code. Managed adap
 - `scaffold_previewed`: create a text-only review candidate in quarantine.
 - `generated_quarantined`: inspect the quarantined candidate.
 - `imported_for_review`: show review-approval preview, then record review approval only after a second confirmation.
-- `approved`: enable.
+- `approved`: show enablement preview, then record enablement only after a second confirmation.
 - `needs_configuration`: collect required configuration.
 - `needs_permission`: preview and request managed-adapter permission.
 - `usable`: use the approved runtime path.
@@ -83,7 +85,7 @@ Each confirmation advances at most one gate:
 - `previewed` + `import_for_review`: import into quarantine/review only.
 - `scaffold_previewed` + `create_review_candidate`: create a generated text-only candidate only.
 - `imported_for_review` + `review_approve`: show review-approval preview first; only the following explicit confirmation records approval, and approval still does not enable, grant permissions, execute code, or use the pack.
-- `approved` + `enable`: enable only; configuration and permission may still be required.
+- `approved` + `enable`: show enablement preview first; only the following explicit confirmation records enablement, and enablement still does not configure, grant permissions, execute code, invoke adapters, or use the pack.
 - `needs_configuration` + `request_configuration`: ask for missing configuration.
 - `needs_permission` + `request_permission`: show permission requirements or path request.
 - permission preview + confirmation: record metadata-only grant.
