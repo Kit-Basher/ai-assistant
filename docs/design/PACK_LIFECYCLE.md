@@ -50,6 +50,8 @@ Review approval is its own explicit gate after review state is shown. The first 
 
 Enablement is also a separate explicit gate after review approval. The first confirmation after approval shows an enablement preview with review status, enabled=false, requested managed adapters or permissions, and the lifecycle state expected after enablement. Only the next confirmation records enablement. Enablement does not configure adapters, grant permissions, execute code, invoke managed adapters, or use the pack. Configuration and managed-adapter permission gates remain separate, and even a pack that becomes `usable=true` after enablement is not invoked automatically.
 
+Configuration and permission are separate from enablement. For managed adapters, the assistant first shows the permission/configuration requirement, including adapter kind, scope, allowed file types, whether a local path is involved, and the remaining lifecycle gate. A later scoped grant preview is required before recording metadata/config. Recording a permission/configuration grant does not execute code, invoke a managed adapter, read or parse private files, or use the pack. If the lifecycle becomes `usable=true` after the grant, the assistant reports readiness and asks for the next specific input or action instead of running automatically.
+
 Approved source policy is not content trust. Catalog listings are validated with a strict schema, unknown or execution-implying fields are rejected, remote URLs must be HTTPS, local catalog paths must stay inside approved catalog roots, and catalog prose is treated as untrusted metadata. Archive fetches land in quarantine only, and extraction blocks traversal, symlinks, special files, hidden files, nested archives, executable bits, duplicate paths, oversized files, excessive member counts, excessive expansion, and unsafe post-write containment before normalization/scanning can proceed.
 
 Imported pack documents are untrusted guidance, never assistant authority. Normalized imported `SKILL.md` and prompt material are wrapped with an internal warning that runtime/system policy wins over pack text. Strong prompt-injection patterns in primary instruction files, including requests to ignore system/developer instructions, leak secrets, auto-approve/auto-enable, run shell or dependency installs, or disable safety gates, block the import and require manual rewrite/review.
@@ -69,8 +71,8 @@ Generated and external packs must not run arbitrary generated code. Managed adap
 - `generated_quarantined`: inspect the quarantined candidate.
 - `imported_for_review`: show review-approval preview, then record review approval only after a second confirmation.
 - `approved`: show enablement preview, then record enablement only after a second confirmation.
-- `needs_configuration`: collect required configuration.
-- `needs_permission`: preview and request managed-adapter permission.
+- `needs_configuration`: preview and collect required configuration only.
+- `needs_permission`: preview managed-adapter permission/configuration requirements, then preview and record scoped metadata/config only after explicit confirmation.
 - `usable`: use the approved runtime path.
 - `blocked`: inspect blocker; do not enable or use.
 - `disabled` or `removed`: re-enable only through the approved lifecycle, or discover/import again.
@@ -86,10 +88,10 @@ Each confirmation advances at most one gate:
 - `scaffold_previewed` + `create_review_candidate`: create a generated text-only candidate only.
 - `imported_for_review` + `review_approve`: show review-approval preview first; only the following explicit confirmation records approval, and approval still does not enable, grant permissions, execute code, or use the pack.
 - `approved` + `enable`: show enablement preview first; only the following explicit confirmation records enablement, and enablement still does not configure, grant permissions, execute code, invoke adapters, or use the pack.
-- `needs_configuration` + `request_configuration`: ask for missing configuration.
-- `needs_permission` + `request_permission`: show permission requirements or path request.
-- permission preview + confirmation: record metadata-only grant.
-- `usable` + `use_if_usable`: use only through the approved managed adapter/runtime path.
+- `needs_configuration` + `request_configuration`: preview missing configuration and collect it as a separate gate.
+- `needs_permission` + `request_permission`: show permission requirements or path request; no grant is recorded.
+- permission preview + confirmation: record metadata/config only; do not invoke adapters or use the pack.
+- `usable` + `use_if_usable`: use only through a later explicit managed adapter/runtime action.
 
 The action controller does not add arbitrary external code execution, OAuth, browser scraping, transcript fetching, network fetching, or private file reads. Local-file permission remains metadata-only until a later explicitly scoped adapter implementation reads or indexes content.
 

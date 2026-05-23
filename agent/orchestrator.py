@@ -78,7 +78,6 @@ from agent.packs.managed_adapters import (
 )
 from agent.packs.lifecycle import PackLifecycleService, render_lifecycle_response
 from agent.packs.lifecycle_actions import PackLifecycleActionController
-from agent.packs.managed_adapter_invocation import ManagedAdapterInvocationRequest, ManagedAdapterInvoker
 from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
 from agent.packs.policy import PackPermissionDenied, enforce_iface_allowed
 from agent.packs.remote_fetch import ALLOWED_REMOTE_KINDS
@@ -6699,6 +6698,7 @@ class Orchestrator:
             "pack_source_fetch_confirm",
             "capability_scaffold_preview",
             "capability_scaffold_create",
+            "managed_adapter_permission_request",
             "managed_adapter_permission_grant",
             "capability_gap_import",
             "pack_lifecycle_review_approve",
@@ -6728,6 +6728,7 @@ class Orchestrator:
             "pack_source_fetch_confirm": "fetch into quarantine for review only",
             "capability_scaffold_preview": "preview the scaffold",
             "capability_scaffold_create": "create a review-only scaffold candidate",
+            "managed_adapter_permission_request": "preview managed adapter permission requirements",
             "managed_adapter_permission_grant": "record a metadata-only adapter grant",
             "capability_gap_import": "import the pack for review only",
             "pack_lifecycle_review_approve": "preview review approval",
@@ -6783,6 +6784,8 @@ class Orchestrator:
             "can i use that pack now",
             "can i use this pack now",
             "can i use it now",
+            "use it now",
+            "use the pack now",
             "is that pack usable",
             "is this pack usable",
             "is it enabled",
@@ -6831,6 +6834,11 @@ class Orchestrator:
         lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=grants).to_dict()
         summary = build_pack_review_state_summary(pack, permission_grants=grants, lifecycle=lifecycle)
         message = render_pack_review_state(pack, permission_grants=grants, lifecycle=lifecycle)
+        if lifecycle.get("usable"):
+            message = (
+                f"{message}\n"
+                "I did not invoke or use the pack automatically. Tell me the specific input, file, or action you want next."
+            )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -7071,7 +7079,11 @@ class Orchestrator:
             requested_path=requested_path,
         )
         self._queue_managed_adapter_permission_followup(user_id, request=request)
-        message = render_permission_preview(request)
+        message = (
+            f"{render_permission_preview(request)} "
+            "Permission grant does not execute code. Permission grant does not invoke or use the pack. "
+            "Permission grant is metadata/config only."
+        )
         return self._runtime_truth_response(
             text=message,
             route="action_tool",
@@ -7087,6 +7099,41 @@ class Orchestrator:
             },
         )
 
+    def _queue_managed_adapter_permission_request_followup(
+        self,
+        user_id: str,
+        *,
+        pack: dict[str, Any],
+        lifecycle: dict[str, Any],
+        managed_adapters: list[dict[str, Any]],
+    ) -> None:
+        pack_id = str(pack.get("pack_id") or pack.get("canonical_id") or lifecycle.get("pack_id") or lifecycle.get("canonical_id") or "").strip()
+        if not pack_id or not managed_adapters:
+            return
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "managed_adapter_permission_request",
+                "question": "Preview the next managed adapter permission/configuration gate?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "pack_id": pack_id,
+                    "pack_name": str(pack.get("name") or lifecycle.get("pack_name") or "the pack").strip(),
+                    "managed_adapters": [dict(row) for row in managed_adapters if isinstance(row, dict)],
+                    "lifecycle": dict(lifecycle),
+                    "lifecycle_action": "request_permission",
+                },
+            },
+        )
+
     def _queue_managed_adapter_permission_followup(self, user_id: str, *, request: Any) -> None:
         self._abort_pending_by_origin(
             user_id,
@@ -7095,6 +7142,7 @@ class Orchestrator:
                 "pack_lifecycle_review_approve_confirm",
                 "pack_lifecycle_enable",
                 "pack_lifecycle_enable_confirm",
+                "managed_adapter_permission_request",
             },
         )
         pending_id = str(uuid.uuid4())
@@ -7132,6 +7180,84 @@ class Orchestrator:
                     "lifecycle": lifecycle,
                     "lifecycle_action": "record_permission_grant",
                 },
+            },
+        )
+
+    def _managed_adapter_permission_request_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="request_permission")
+        if refusal is not None:
+            return refusal
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        pack_id = str(context.get("pack_id") or "").strip()
+        pack_name = str(context.get("pack_name") or "This pack").strip()
+        adapter_rows = context.get("managed_adapters") if isinstance(context.get("managed_adapters"), list) else []
+        adapter_row = next(
+            (row for row in adapter_rows if isinstance(row, dict) and str(row.get("kind") or "").strip().lower() == ADAPTER_LOCAL_FILE_IMPORT),
+            adapter_rows[0] if adapter_rows and isinstance(adapter_rows[0], dict) else None,
+        )
+        if not isinstance(adapter_row, dict):
+            message = f"{pack_name} does not have a valid managed adapter request to preview. No permission was granted and no pack was used."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission"],
+                payload={
+                    "type": "managed_adapter_permission",
+                    "ok": False,
+                    "summary": message,
+                    "did_grant_permissions": False,
+                    "did_invoke_adapter": False,
+                    "did_use_pack": False,
+                    "executes_code": False,
+                },
+            )
+        ok, errors, adapter = validate_managed_adapter_spec(adapter_row)
+        if not ok:
+            message = f"{pack_name} has an invalid managed adapter declaration and needs review before use: {', '.join(errors)}."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission"],
+                payload={"type": "managed_adapter_permission", "ok": False, "errors": errors, "summary": message},
+            )
+        self._pending_managed_adapter_requests[user_id] = {
+            "pack_id": pack_id,
+            "pack_name": pack_name,
+            "managed_adapters": [adapter.to_dict()],
+        }
+        extensions = ", ".join(adapter.allowed_extensions) or "none"
+        message = (
+            f"Permission/configuration preview for {pack_name}. Pack id: {pack_id}. "
+            f"Lifecycle state: needs_permission. Enabled: true. Requested adapter: {adapter.kind}. "
+            f"Requested scope: {adapter.path_policy}. Allowed file types: {extensions}. "
+            "A local path is required, but no path has been granted yet. "
+            "Permission grant does not execute code. Permission grant does not invoke or use the pack. "
+            "Permission grant is metadata/config only. "
+            "Give me the local file path to preview the exact grant; I will not read or parse the file."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["managed_adapter_permission"],
+            payload={
+                "type": "managed_adapter_permission_request",
+                "ok": True,
+                "summary": message,
+                "pack_id": pack_id,
+                "pack_name": pack_name,
+                "adapter": adapter.to_dict(),
+                "lifecycle": context.get("lifecycle") if isinstance(context.get("lifecycle"), dict) else {},
+                "did_grant_permissions": False,
+                "did_invoke_adapter": False,
+                "did_use_pack": False,
+                "executes_code": False,
+                "reads_file": False,
             },
         )
 
@@ -7193,9 +7319,31 @@ class Orchestrator:
         grant = create_metadata_only_grant(request=request, state=GRANT_GRANTED, path_metadata=path_metadata)
         grant_payload = record_adapter_grant(self._pack_store.external_storage_root(), grant)
         self._pending_managed_adapter_requests.pop(user_id, None)
+        pack = self._pack_store.get_external_pack(request.pack_id)
+        lifecycle = PackLifecycleService().evaluate(
+            imported_pack=pack if isinstance(pack, dict) else {
+                "pack_id": request.pack_id,
+                "name": request.pack_name,
+                "approved": True,
+                "enabled": True,
+                "canonical_pack": {
+                    "display_name": request.pack_name,
+                    "pack_identity": {"canonical_id": request.pack_id},
+                    "managed_adapters": [request.adapter.to_dict()],
+                    "runtime": {"enabled": True},
+                    "trust_anchor": {"local_review_status": "approved"},
+                },
+            },
+            permission_grants=list_adapter_grants(self._pack_store.external_storage_root()),
+        ).to_dict()
+        if lifecycle.get("usable"):
+            next_text = "It is usable according to lifecycle gates, but I did not invoke or use it. Tell me the specific input or action you want next."
+        else:
+            next_text = f"Next safe step: {(lifecycle.get('next_step') or {}).get('label') or 'continue the lifecycle gate reported by the pack service'}."
         message = (
-            f"I recorded a metadata-only local-file grant for {pack_name}. "
-            "The pack is still review-only: it is not approved, not enabled, cannot execute code, and I did not read or parse the file."
+            f"Permission/configuration recorded for {pack_name}. Current state: {lifecycle.get('state')}. "
+            "This is metadata/config only: no adapter was invoked, no pack was used, no code was executed, and I did not read or parse the file. "
+            f"{next_text}"
         )
         return self._runtime_truth_response(
             text=message,
@@ -7208,11 +7356,16 @@ class Orchestrator:
                 "ok": True,
                 "summary": message,
                 "grant": grant_payload,
-                "approved": False,
-                "enabled": False,
+                "lifecycle": lifecycle,
+                "approved": True,
+                "enabled": True,
                 "permissions_granted": [],
+                "did_grant_permissions": True,
+                "did_invoke_adapter": False,
+                "did_use_pack": False,
                 "executes_code": False,
                 "reads_file": False,
+                "usable": bool(lifecycle.get("usable")),
             },
         )
 
@@ -7463,48 +7616,24 @@ class Orchestrator:
                 "managed_adapters": normalized_adapters,
             }
             if lifecycle.usable:
-                normalized_invocation_text = normalize_setup_text(text)
-                operation = (
-                    "dry_run"
-                    if self._looks_like_managed_adapter_execution_request(text)
-                    or any(token in normalized_invocation_text for token in ("use", "run", "start", "search", "find", "look through"))
-                    else "describe_capability"
-                )
-                invocation_request = ManagedAdapterInvocationRequest(
-                    pack_id=pack_id,
-                    canonical_id=str(row.get("canonical_id") or pack_id or "").strip() or None,
-                    pack_name=pack_name,
-                    adapter_kind=str(normalized_adapters[0].get("kind") or "").strip(),
-                    operation=operation,
-                    user_id=user_id,
-                    thread_id=self._active_thread_id_for_user(user_id),
-                    parameters={},
-                    dry_run=True,
-                )
-                invocation = ManagedAdapterInvoker().invoke(
-                    invocation_request,
-                    lifecycle=lifecycle_payload,
-                    pack=row,
-                    adapter_declarations=normalized_adapters,
-                    permission_grants=permission_grants,
-                )
                 message = (
-                    f"{invocation.summary} "
-                    "This confirms only the managed adapter dry-run/metadata path; it has not completed the requested content task."
+                    f"{pack_name} is enabled and usable according to lifecycle gates. "
+                    "I did not invoke or use it automatically. Tell me the specific input, file, or action you want next."
                 ).strip()
                 return self._runtime_truth_response(
                     text=message,
                     route="action_tool",
                     used_runtime_state=False,
                     used_memory=bool(self._current_runtime_setup_state(user_id)),
-                    used_tools=["external_pack_lookup", "managed_adapter_invocation"],
+                    used_tools=["external_pack_lookup"],
                     payload={
-                        "type": "managed_adapter_invocation",
+                        "type": "external_pack_lifecycle_status",
                         "summary": message,
                         "pack_id": pack_id,
                         "pack_name": pack_name,
                         "lifecycle": lifecycle_payload,
-                        "invocation": invocation.to_dict(),
+                        "did_invoke_adapter": False,
+                        "did_use_pack": False,
                         "task_completed": False,
                     },
                 )
@@ -8455,6 +8584,12 @@ class Orchestrator:
                 "pack_name": name,
                 "managed_adapters": managed_adapters,
             }
+            self._queue_managed_adapter_permission_request_followup(
+                user_id,
+                pack=pack,
+                lifecycle=lifecycle,
+                managed_adapters=managed_adapters,
+            )
         next_label = (lifecycle.get("next_step") or {}).get("label") or "check usable state"
         if lifecycle.get("usable"):
             state_text = "It is usable according to lifecycle gates, but I did not invoke or use it automatically."
@@ -18496,6 +18631,15 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I did not record that managed adapter grant.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "managed_adapter_permission_request":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._managed_adapter_permission_request_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not continue to the managed adapter permission gate.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_import":
                     if followup_intent in {"accept", "details"}:
                         refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="import_for_review")

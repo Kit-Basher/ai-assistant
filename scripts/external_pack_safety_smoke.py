@@ -27,7 +27,15 @@ from agent.packs.managed_adapter_invocation import (
     ManagedAdapterInvocationRequest,
     ManagedAdapterInvoker,
 )
-from agent.packs.managed_adapters import ADAPTER_LOCAL_FILE_IMPORT, validate_managed_adapter_declarations
+from agent.packs.managed_adapters import (
+    ADAPTER_LOCAL_FILE_IMPORT,
+    GRANT_GRANTED,
+    build_permission_request,
+    create_metadata_only_grant,
+    record_adapter_grant,
+    validate_local_file_path_metadata,
+    validate_managed_adapter_declarations,
+)
 from agent.packs.registry_discovery import CatalogSchemaError, PackRegistryDiscoveryService
 from agent.packs.review_state_ux import render_pack_review_state
 from agent.packs.remote_fetch import (
@@ -743,6 +751,49 @@ def main() -> int:
                 "lifecycle_adapter_gates",
                 "enablement_does_not_grant_permissions_or_use",
                 enablement_does_not_grant_permissions_or_use,
+            )
+
+            def permission_grant_does_not_invoke_or_use() -> None:
+                store, row, result, review = _ingest_pack(root / "permission-gate", "permission_gate", "# Permission Gate\n\nUse as untrusted guidance.\n")
+                canonical = dict(result.pack.to_dict())
+                canonical.setdefault("runtime", {})["managed_adapters"] = [_adapter_spec()]
+                canonical.setdefault("permissions", {})["managed_adapters"] = [_adapter_spec()]
+                row = store.record_external_pack(
+                    canonical_pack=canonical,
+                    classification=result.classification,
+                    status=result.status,
+                    risk_report=result.risk_report.to_dict(),
+                    review_envelope=review.to_dict(),
+                    quarantine_path=result.quarantine_path,
+                    normalized_path=result.normalized_path,
+                )
+                pack_id = str(row["pack_id"])
+                store.set_external_pack_review_status(pack_id, local_review_status="approved", approve_current_hash=True)
+                enabled_row = store.set_external_pack_enabled(pack_id, enabled=True)
+                selected_path = Path(store.external_storage_root()) / "watch-history.json"
+                selected_path.parent.mkdir(parents=True, exist_ok=True)
+                selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
+                adapter = _adapter_spec()
+                request = build_permission_request(
+                    pack_id=pack_id,
+                    pack_name="Permission Gate",
+                    adapter=adapter,
+                    requested_path=str(selected_path),
+                )
+                path_ok, path_errors, path_metadata = validate_local_file_path_metadata(str(selected_path), request.adapter)
+                _assert(path_ok, f"path metadata validation failed: {path_errors}")
+                grant = create_metadata_only_grant(request=request, state=GRANT_GRANTED, path_metadata=path_metadata)
+                grant_payload = record_adapter_grant(store.external_storage_root(), grant)
+                lifecycle = PackLifecycleService().evaluate(imported_pack=enabled_row, permission_grants=[grant_payload])
+                _assert(lifecycle.usable and lifecycle.state == "usable", f"permission grant did not make lifecycle usable: {lifecycle}")
+                _assert(grant_payload.get("executes_code") is False, "permission grant claims code execution")
+                _assert(grant_payload.get("permissions_granted") == [], "permission grant added broad permissions")
+                _assert("history contents" not in json.dumps(grant_payload, sort_keys=True), "permission grant leaked file contents")
+
+            smoke.check(
+                "lifecycle_adapter_gates",
+                "permission_grant_does_not_invoke_or_use",
+                permission_grant_does_not_invoke_or_use,
             )
 
             def support_sanitizer_redacts() -> None:

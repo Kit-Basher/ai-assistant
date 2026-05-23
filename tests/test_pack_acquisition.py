@@ -633,6 +633,71 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("no permissions granted", permission_text.lower())
         self.assertIn("usable", permission_text.lower())
 
+    def test_permission_preview_confirm_records_grant_only(self) -> None:
+        self._post_chat("Look through my YouTube history and find the video about neurons differentiating during animal infancy.")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        self._post_chat("yes")
+        enabled_body, enabled_text = self._post_chat("yes")
+        enabled_payload = enabled_body.get("setup") if isinstance(enabled_body.get("setup"), dict) else {}
+        self.assertEqual("enable", enabled_payload.get("action"))
+        self.assertEqual("needs_permission", (enabled_payload.get("lifecycle") or {}).get("state"))
+        self.assertIn("next safe step", enabled_text.lower())
+
+        permission_body, permission_text = self._post_chat("yes")
+        permission_payload = permission_body.get("setup") if isinstance(permission_body.get("setup"), dict) else {}
+        self.assertEqual("managed_adapter_permission_request", permission_payload.get("type"))
+        self.assertIn("permission/configuration preview", permission_text.lower())
+        self.assertIn("requested adapter: local_file_import", permission_text.lower())
+        self.assertIn("requested scope: user_selected_file_only", permission_text.lower())
+        self.assertIn(".json", permission_text.lower())
+        self.assertIn("permission grant does not execute code", permission_text.lower())
+        self.assertIn("permission grant does not invoke or use the pack", permission_text.lower())
+        self.assertIn("metadata/config only", permission_text.lower())
+        self.assertFalse(permission_payload.get("did_grant_permissions"))
+        self.assertFalse(permission_payload.get("did_invoke_adapter"))
+        self.assertFalse(permission_payload.get("did_use_pack"))
+
+        selected_path = Path(self.runtime.pack_store.external_storage_root()) / "watch-history.json"
+        selected_path.parent.mkdir(parents=True, exist_ok=True)
+        selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
+        with mock.patch("pathlib.Path.read_text", side_effect=AssertionError("permission preview should not read files")):
+            path_body, path_text = self._post_chat(f"use {selected_path}")
+        path_payload = path_body.get("setup") if isinstance(path_body.get("setup"), dict) else {}
+        self.assertEqual("managed_adapter_permission_preview", path_payload.get("type"))
+        self.assertIn("<redacted-local-history-path>/watch-history.json", path_text)
+        self.assertIn("permission grant does not execute code", path_text.lower())
+        self.assertIn("permission grant does not invoke or use the pack", path_text.lower())
+        self.assertIn("i will not read or parse the file", path_text.lower())
+
+        grant_body, grant_text = self._post_chat("yes")
+        grant_payload = grant_body.get("setup") if isinstance(grant_body.get("setup"), dict) else {}
+        self.assertEqual("managed_adapter_permission_grant", grant_payload.get("type"))
+        self.assertIn("permission/configuration recorded", grant_text.lower())
+        self.assertIn("no adapter was invoked", grant_text.lower())
+        self.assertIn("no pack was used", grant_text.lower())
+        self.assertIn("no code was executed", grant_text.lower())
+        self.assertTrue(grant_payload.get("did_grant_permissions"))
+        self.assertFalse(grant_payload.get("did_invoke_adapter"))
+        self.assertFalse(grant_payload.get("did_use_pack"))
+        self.assertFalse(grant_payload.get("executes_code"))
+        self.assertFalse(grant_payload.get("reads_file"))
+        self.assertTrue(grant_payload.get("usable"))
+        self.assertEqual("usable", (grant_payload.get("lifecycle") or {}).get("state"))
+        self.assertNotIn("history contents", str(grant_payload))
+
+        repeat_body, repeat_text = self._post_chat("yes")
+        repeat_meta = repeat_body.get("meta") if isinstance(repeat_body.get("meta"), dict) else {}
+        self.assertEqual("assistant_clarification", repeat_meta.get("route"))
+        self.assertIn("current action", repeat_text.lower())
+
+        _body, use_text = self._post_chat("use it now")
+        self.assertIn("usable", use_text.lower())
+        self.assertIn("did not invoke or use", use_text.lower())
+        self.assertIn("specific input", use_text.lower())
+
     def test_no_after_fetch_preview_cancels_without_fetch(self) -> None:
         self.runtime.config = replace(
             self.runtime.config,

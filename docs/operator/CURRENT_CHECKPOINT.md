@@ -21,6 +21,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Review state is shown before review approval.
 - Review approval is previewed and explicitly confirmed before recording approval only.
 - Enablement is previewed and explicitly confirmed before recording enablement only.
+- Permission/configuration is previewed and explicitly confirmed before recording metadata/config only.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -38,7 +39,9 @@ missing capability
 → explicit review approval confirmation
 → enablement preview
 → explicit enablement confirmation
-→ configure/permission
+→ permission/configuration preview
+→ scoped grant preview
+→ explicit permission/configuration confirmation
 → managed adapter use only if `usable=true`
 
 ## Hard Safety Invariants
@@ -53,10 +56,12 @@ missing capability
 - No enablement during review approval.
 - No permission grant during enablement.
 - No permission grant unless explicitly confirmed.
+- No adapter invocation during permission/configuration grant.
 - Source trust is not content trust.
 - Review approval is not enablement.
 - Enablement is not permission grant.
 - Permission grant is not arbitrary code execution.
+- Permission grant is not adapter invocation or pack use.
 
 ## Required Proof Set
 
@@ -67,11 +72,11 @@ Run this after external-pack, search, acquisition, or routing changes:
 3. `python -u scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90 --strict-quality`
 4. `git status`
 
-`external_pack_safety_smoke` currently covers 29 hostile-intake and lifecycle gates. It proves hostile intake gates. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
+`external_pack_safety_smoke` currently covers 30 hostile-intake and lifecycle gates. It proves hostile intake gates. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
 
 ## Next Likely Work
 
 - Continue improving product UX/readability of barrage answers.
-- Implement careful configuration/permission continuation if not already complete.
+- Implement careful managed-adapter use/invocation continuation if not already complete.
 - Add more managed adapters only through core-owned safety boundaries.
 - Do not expand arbitrary plugin execution.

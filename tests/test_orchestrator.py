@@ -5167,7 +5167,7 @@ class TestOrchestrator(unittest.TestCase):
         orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
 
         first = orchestrator.handle_message("install a browser automation skill", "user1")
-        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], first.data["used_tools"])
         second = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["capability_gap_preview"], second.data["used_tools"])
         self.assertEqual([("local", "browser-helper")], discovery.preview_calls)
@@ -5277,7 +5277,7 @@ class TestOrchestrator(unittest.TestCase):
             "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
             "user1",
         )
-        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], first.data["used_tools"])
         before_generated = sorted(storage_root.glob("quarantine/generated-*"))
 
         second = orchestrator.handle_message("yes", "user1")
@@ -5317,17 +5317,33 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual([], normalized_manifest["permissions_granted"])
         canonical_pack = pack.get("canonical_pack") if isinstance(pack.get("canonical_pack"), dict) else {}
         adapters = canonical_pack.get("managed_adapters") if isinstance(canonical_pack.get("managed_adapters"), list) else []
+        if not adapters:
+            runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
+            adapters = runtime.get("managed_adapters") if isinstance(runtime.get("managed_adapters"), list) else []
+        if not adapters:
+            permissions = canonical_pack.get("permissions") if isinstance(canonical_pack.get("permissions"), dict) else {}
+            adapters = permissions.get("managed_adapters") if isinstance(permissions.get("managed_adapters"), list) else []
         self.assertEqual("local_file_import", adapters[0]["kind"])
         self.assertFalse(adapters[0]["network_allowed"])
         combined_source = "\n".join(path.read_text(encoding="utf-8") for path in source_path.iterdir() if path.is_file())
         self.assertNotIn("neurons differentiating", combined_source)
         self.assertEqual(0, len(llm.chat_calls))
 
+        review_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], review_preview.data["used_tools"])
+        self.assertIn("review approval preview", review_preview.text.lower())
         approved = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
+        self.assertIn("review approval recorded", approved.text.lower())
+        enable_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
+        self.assertIn("enablement preview", enable_preview.text.lower())
         enabled = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
         self.assertIn("needs_permission", enabled.text)
+        permission_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
+        self.assertIn("permission/configuration preview", permission_preview.text.lower())
 
         selected_path = storage_root / "watch-history.json"
         selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
@@ -5339,11 +5355,14 @@ class TestOrchestrator(unittest.TestCase):
 
         grant_response = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["managed_adapter_permission_grant"], grant_response.data["used_tools"])
-        self.assertIn("metadata-only local-file grant", grant_response.text)
+        self.assertIn("permission/configuration recorded", grant_response.text.lower())
         grant_payload = grant_response.data.get("runtime_payload") if isinstance(grant_response.data.get("runtime_payload"), dict) else {}
-        self.assertFalse(grant_payload.get("approved"))
-        self.assertFalse(grant_payload.get("enabled"))
+        self.assertTrue(grant_payload.get("approved"))
+        self.assertTrue(grant_payload.get("enabled"))
         self.assertEqual([], grant_payload.get("permissions_granted"))
+        self.assertTrue(grant_payload.get("did_grant_permissions"))
+        self.assertFalse(grant_payload.get("did_invoke_adapter"))
+        self.assertFalse(grant_payload.get("did_use_pack"))
         self.assertFalse(grant_payload.get("executes_code"))
         self.assertFalse(grant_payload.get("reads_file"))
         self.assertNotIn("history contents", str(grant_payload))
@@ -5405,9 +5424,10 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("needs_permission", (enabled_payload.get("lifecycle") or {}).get("state"))
         self.assertIn("permission", enabled.text.lower())
 
-        repeat = orchestrator.handle_message("yes", "user1")
-        self.assertIn(repeat.data["route"], {"assistant_clarification", "generic_chat"})
-        self.assertIn("current action", repeat.text.lower())
+        permission_preview = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
+        self.assertIn("permission/configuration preview", permission_preview.text.lower())
+        self.assertIn("permission grant does not invoke or use", permission_preview.text.lower())
 
     def test_usable_external_pack_invokes_managed_adapter_dry_run(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
