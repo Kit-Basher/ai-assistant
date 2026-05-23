@@ -91,7 +91,7 @@ Each confirmation advances at most one gate:
 - `needs_configuration` + `request_configuration`: preview missing configuration and collect it as a separate gate.
 - `needs_permission` + `request_permission`: show permission requirements or path request; no grant is recorded.
 - permission preview + confirmation: record metadata/config only; do not invoke adapters or use the pack.
-- `usable` + `use_if_usable`: use only through a later explicit managed adapter/runtime action.
+- `usable` + `use_if_usable`: show a managed adapter invocation preview first; only the following explicit confirmation runs the named core-owned adapter operation.
 
 The action controller does not add arbitrary external code execution, OAuth, browser scraping, transcript fetching, network fetching, or private file reads. Local-file permission remains metadata-only until a later explicitly scoped adapter implementation reads or indexes content.
 
@@ -99,7 +99,9 @@ The action controller does not add arbitrary external code execution, OAuth, bro
 
 Invocation is separate from lifecycle continuation. Lifecycle says whether a pack has passed gates; lifecycle actions move one gate at a time; managed adapter invocation performs approved core adapter operations only after the pack is usable.
 
-Current generic operations are `validate_grant`, `describe_capability`, and `dry_run`. `local_file_import` is only the first minimal adapter implementation behind that generic contract. Its `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not parse Google Takeout, search history, fetch transcripts, upload data, or store an index.
+Current generic operations are `validate_grant`, `describe_capability`, and `dry_run`. `local_file_import` is only the first minimal adapter implementation behind that generic contract. Its `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not read, parse, index, or search private file contents; it does not parse Google Takeout, search history, fetch transcripts, upload data, or store an index.
+
+Invocation is never automatic after permission grant. A user must ask for a specific adapter operation, the assistant must preview what will run, and only a follow-up confirmation runs that core-owned operation. If the user asks for content reading, searching, or indexing before a core-owned operation exists, the assistant must say that the pack is enabled and permissioned but that safe content-read/search operation is not implemented yet.
 
 ## Safety Meta-Smoke
 

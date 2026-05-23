@@ -698,6 +698,53 @@ class TestPackAcquisitionOrchestratorRegression(unittest.TestCase):
         self.assertIn("did not invoke or use", use_text.lower())
         self.assertIn("specific input", use_text.lower())
 
+        packs = self.runtime.pack_store.list_external_packs()
+        canonical = packs[0].get("canonical_pack") if packs and isinstance(packs[0].get("canonical_pack"), dict) else {}
+        pack_name = str(canonical.get("display_name") or canonical.get("name") or "YouTube History Search")
+        preview_body, preview_text = self._post_chat(f"dry run {pack_name}")
+        preview_payload = preview_body.get("setup") if isinstance(preview_body.get("setup"), dict) else {}
+        self.assertEqual("managed_adapter_invocation_preview", preview_payload.get("type"))
+        self.assertIn("managed adapter invocation preview", preview_text.lower())
+        self.assertIn("core-owned managed adapter", preview_text.lower())
+        self.assertIn("reads file contents: no", preview_text.lower())
+        self.assertFalse(preview_payload.get("did_invoke_adapter"))
+        self.assertFalse(preview_payload.get("did_use_pack"))
+
+        original_read_text = Path.read_text
+
+        def _guard_read_text(path_obj: Path, *args: Any, **kwargs: Any) -> str:
+            if Path(path_obj) == selected_path:
+                raise AssertionError("dry-run should not read private file contents")
+            return original_read_text(path_obj, *args, **kwargs)
+
+        with mock.patch("pathlib.Path.read_text", new=_guard_read_text):
+            invoke_body, invoke_text = self._post_chat("yes")
+        invoke_payload = invoke_body.get("setup") if isinstance(invoke_body.get("setup"), dict) else {}
+        invocation = invoke_payload.get("invocation") if isinstance(invoke_payload.get("invocation"), dict) else {}
+        self.assertEqual("managed_adapter_invocation", invoke_payload.get("type"))
+        self.assertEqual(OP_DRY_RUN, invocation.get("operation"))
+        self.assertTrue(invocation.get("ok"))
+        self.assertTrue(invoke_payload.get("did_invoke_adapter"))
+        self.assertFalse(invoke_payload.get("did_use_pack"))
+        self.assertFalse(invoke_payload.get("reads_file_contents"))
+        self.assertFalse(invoke_payload.get("writes_data"))
+        self.assertFalse(invoke_payload.get("executes_code"))
+        self.assertFalse(invoke_payload.get("task_completed"))
+        self.assertIn("external code executed: no", invoke_text.lower())
+        self.assertNotIn("history contents", str(invoke_payload))
+
+        repeat_body, repeat_text = self._post_chat("yes")
+        repeat_meta = repeat_body.get("meta") if isinstance(repeat_body.get("meta"), dict) else {}
+        self.assertEqual("assistant_clarification", repeat_meta.get("route"))
+        self.assertIn("current action", repeat_text.lower())
+
+        blocked_body, blocked_text = self._post_chat(f"read {pack_name} file now")
+        blocked_payload = blocked_body.get("setup") if isinstance(blocked_body.get("setup"), dict) else {}
+        self.assertEqual("managed_adapter_invocation_blocked", blocked_payload.get("type"))
+        self.assertIn("does not yet have a safe content-read/search operation", blocked_text)
+        self.assertFalse(blocked_payload.get("did_invoke_adapter"))
+        self.assertFalse(blocked_payload.get("did_use_pack"))
+
     def test_no_after_fetch_preview_cancels_without_fetch(self) -> None:
         self.runtime.config = replace(
             self.runtime.config,

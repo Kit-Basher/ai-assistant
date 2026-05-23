@@ -31,7 +31,7 @@ Allowed v1 outcomes:
 - imported for review: show review state, then show a review-approval preview before any approval mutation.
 - approved but disabled: show an enablement preview before any enablement mutation.
 - enabled but missing config/permission: ask for that exact gate.
-- usable: invoke only supported managed-adapter operations.
+- usable: ask for a specific managed-adapter operation, show an invocation preview, then invoke only after an explicit confirmation.
 
 Each confirmation advances one gate only. Repeated `yes` must not skip approval, enablement, configuration, permission, or use gates.
 
@@ -52,5 +52,7 @@ Review approval continuation is also one gate only. After the review state, the 
 Enablement continuation follows the same preview-before-mutation rule. After review approval, the assistant may queue enablement only when `PackLifecycleService` says enablement is next. The first `yes` shows an enablement preview and does not mutate state. A second `yes` records enablement only. It does not configure adapters, grant permissions, invoke managed adapters, execute code, or use the pack. After enablement, the assistant reports the next lifecycle gate: configuration, permission, or ready-to-use state. Ready-to-use still does not mean automatic invocation.
 
 Configuration and permission continuation is separate from enablement. If the enabled pack needs a managed-adapter permission, the assistant first previews the requirement: adapter kind, scope, allowed file types, whether a local path is needed, and the safety limits. A user-provided local path can then produce a scoped grant preview. Only the following confirmation records metadata/config. The grant does not invoke the adapter, use the pack, execute code, install dependencies, run shell commands, or read/parse private file contents. If the grant makes the pack usable, the assistant reports ready/usable and asks for the next specific input or action instead of running automatically.
+
+Managed adapter invocation is a later explicit action after usability. The assistant must preview the pack, adapter kind, operation, redacted grant scope, read/write behavior, and disabled execution channels before running anything. The first supported operation set is `validate_grant`, `describe_capability`, and `dry_run`; `local_file_import` v1 can validate metadata and dry-run the selected-file grant only. Content read, search, parse, or indexing behavior is not implemented until a future core-owned adapter operation adds it.
 
 External/generated packs must not run arbitrary code. They can request only approved managed adapters implemented in core runtime. V1 does not add internet-wide search, OAuth, browser scraping, transcript lookup, YouTube/browser parsing, dependency installs, `handler.py`, or arbitrary generated code execution.

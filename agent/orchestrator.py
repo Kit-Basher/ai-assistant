@@ -76,6 +76,14 @@ from agent.packs.managed_adapters import (
     validate_managed_adapter_declarations,
     validate_managed_adapter_spec,
 )
+from agent.packs.managed_adapter_invocation import (
+    OP_DESCRIBE_CAPABILITY,
+    OP_DRY_RUN,
+    OP_VALIDATE_GRANT,
+    ManagedAdapterInvocationRequest,
+    ManagedAdapterInvoker,
+    MANAGED_ADAPTER_OPERATION_REGISTRY,
+)
 from agent.packs.lifecycle import PackLifecycleService, render_lifecycle_response
 from agent.packs.lifecycle_actions import PackLifecycleActionController
 from agent.packs.scaffolding import create_generated_scaffold_source, render_scaffold_preview
@@ -6700,6 +6708,7 @@ class Orchestrator:
             "capability_scaffold_create",
             "managed_adapter_permission_request",
             "managed_adapter_permission_grant",
+            "managed_adapter_invocation_confirm",
             "capability_gap_import",
             "pack_lifecycle_review_approve",
             "pack_lifecycle_review_approve_confirm",
@@ -6730,6 +6739,7 @@ class Orchestrator:
             "capability_scaffold_create": "create a review-only scaffold candidate",
             "managed_adapter_permission_request": "preview managed adapter permission requirements",
             "managed_adapter_permission_grant": "record a metadata-only adapter grant",
+            "managed_adapter_invocation_confirm": "run the managed adapter operation",
             "capability_gap_import": "import the pack for review only",
             "pack_lifecycle_review_approve": "preview review approval",
             "pack_lifecycle_review_approve_confirm": "record review approval only",
@@ -6786,6 +6796,7 @@ class Orchestrator:
             "can i use it now",
             "use it now",
             "use the pack now",
+            "run it",
             "is that pack usable",
             "is this pack usable",
             "is it enabled",
@@ -7369,6 +7380,270 @@ class Orchestrator:
             },
         )
 
+    @staticmethod
+    def _managed_adapter_invocation_operation_from_text(text: str | None) -> str | None:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if any(phrase in normalized for phrase in ("dry run", "dry-run", "dryrun", "test access", "check access")):
+            return OP_DRY_RUN
+        if any(phrase in normalized for phrase in ("validate grant", "validate permission", "check grant", "check permission")):
+            return OP_VALIDATE_GRANT
+        if any(phrase in normalized for phrase in ("describe capability", "describe adapter", "what can it do")):
+            return OP_DESCRIBE_CAPABILITY
+        return None
+
+    @staticmethod
+    def _looks_like_unsupported_content_adapter_request(text: str | None) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        return any(token in normalized for token in ("search", "read", "parse", "index", "find", "look through"))
+
+    @staticmethod
+    def _matching_adapter_grant(
+        *,
+        pack_id: str | None,
+        canonical_id: str | None,
+        adapter_kind: str,
+        permission_grants: list[dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        pack_ids = {str(pack_id or "").strip(), str(canonical_id or "").strip()}
+        pack_ids.discard("")
+        for row in permission_grants:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("adapter_kind") or "").strip() != adapter_kind:
+                continue
+            if str(row.get("state") or "").strip() != GRANT_GRANTED:
+                continue
+            if pack_ids and str(row.get("pack_id") or "").strip() not in pack_ids:
+                continue
+            return dict(row)
+        return None
+
+    def _queue_managed_adapter_invocation_confirm_followup(
+        self,
+        user_id: str,
+        *,
+        request: ManagedAdapterInvocationRequest,
+        pack: dict[str, Any],
+        lifecycle: dict[str, Any],
+        adapter_declarations: list[dict[str, Any]],
+        permission_grants: list[dict[str, Any]],
+    ) -> None:
+        pending_id = str(uuid.uuid4())
+        now_epoch = int(time.time())
+        self._memory_runtime.add_pending_item(
+            user_id,
+            {
+                "pending_id": pending_id,
+                "kind": "followup",
+                "origin_tool": "managed_adapter_invocation_confirm",
+                "question": "Run this core-owned managed adapter operation?",
+                "options": ["yes", "no"],
+                "created_at": now_epoch,
+                "expires_at": now_epoch + 600,
+                "thread_id": self._active_thread_id_for_user(user_id),
+                "status": PENDING_STATUS_READY_TO_RESUME,
+                "context": {
+                    "invocation_request": request.to_dict(),
+                    "pack_id": str(pack.get("pack_id") or pack.get("canonical_id") or "").strip(),
+                    "pack_name": str(request.pack_name or "the pack").strip(),
+                    "adapter_declarations": [dict(row) for row in adapter_declarations if isinstance(row, dict)],
+                    "permission_grants": [dict(row) for row in permission_grants if isinstance(row, dict)],
+                    "lifecycle": dict(lifecycle),
+                    "lifecycle_action": "use_if_usable",
+                },
+            },
+        )
+
+    def _managed_adapter_invocation_preview_response(
+        self,
+        user_id: str,
+        *,
+        text: str,
+        pack: dict[str, Any],
+        lifecycle: dict[str, Any],
+        adapter_declarations: list[dict[str, Any]],
+        permission_grants: list[dict[str, Any]],
+    ) -> OrchestratorResponse:
+        pack_id = str(pack.get("pack_id") or "").strip()
+        canonical_id = str(pack.get("canonical_id") or pack_id).strip()
+        pack_name = self._external_pack_display_name(str(pack.get("name") or lifecycle.get("pack_name") or "External pack"))
+        adapter_kind = str((adapter_declarations[0] if adapter_declarations else {}).get("kind") or "").strip()
+        operation = self._managed_adapter_invocation_operation_from_text(text)
+        if operation is None and self._looks_like_unsupported_content_adapter_request(text):
+            message = (
+                f"{pack_name} is enabled and permissioned, but this adapter does not yet have a safe content-read/search operation. "
+                "I can only validate or dry-run the grant right now."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["external_pack_lookup"],
+                payload={
+                    "type": "managed_adapter_invocation_blocked",
+                    "summary": message,
+                    "pack_id": pack_id,
+                    "pack_name": pack_name,
+                    "lifecycle": lifecycle,
+                    "task_completed": False,
+                    "did_invoke_adapter": False,
+                    "did_use_pack": False,
+                    "reason": "content_read_search_not_implemented",
+                },
+            )
+        if operation is None:
+            message = (
+                f"{pack_name} is enabled and usable according to lifecycle gates. "
+                "Tell me the specific adapter operation to run: validate grant, describe capability, or dry run. "
+                "I will preview it before running anything."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["external_pack_lookup"],
+                payload={
+                    "type": "external_pack_lifecycle_status",
+                    "summary": message,
+                    "pack_id": pack_id,
+                    "pack_name": pack_name,
+                    "lifecycle": lifecycle,
+                    "did_invoke_adapter": False,
+                    "did_use_pack": False,
+                    "task_completed": False,
+                },
+            )
+        grant = self._matching_adapter_grant(
+            pack_id=pack_id,
+            canonical_id=canonical_id,
+            adapter_kind=adapter_kind,
+            permission_grants=permission_grants,
+        )
+        operation_row = (MANAGED_ADAPTER_OPERATION_REGISTRY.get(adapter_kind) or {}).get(operation)
+        request = ManagedAdapterInvocationRequest(
+            pack_id=pack_id,
+            canonical_id=canonical_id,
+            pack_name=pack_name,
+            adapter_kind=adapter_kind,
+            operation=operation,
+            user_id=user_id,
+            thread_id=self._active_thread_id_for_user(user_id),
+            parameters={},
+            permission_grant_id=str((grant or {}).get("grant_id") or "").strip() or None,
+            grant_evidence=dict(grant or {}),
+            dry_run=True,
+        )
+        grant_meta = grant.get("path_metadata") if isinstance(grant, dict) and isinstance(grant.get("path_metadata"), dict) else {}
+        path_text = str((grant or {}).get("granted_path_redacted") or grant_meta.get("path_redacted") or "redacted or unavailable")
+        reads = bool(operation_row.reads_content) if operation_row else False
+        writes = bool(operation_row.writes_content) if operation_row else False
+        message = (
+            f"Managed adapter invocation preview for {pack_name}. Pack id: {pack_id}. Canonical id: {canonical_id}. "
+            f"Adapter: {adapter_kind}. Operation: {operation}. Granted scope/path: {path_text}. "
+            f"Reads file contents: {'yes' if reads else 'no'}. Writes data: {'yes' if writes else 'no'}. "
+            "Network allowed: no. Subprocess/shell allowed: no. External code execution allowed: no. "
+            "This uses a core-owned managed adapter, not pack code. External pack instructions remain untrusted. "
+            "Say yes to run this adapter operation, or no to cancel."
+        )
+        self._queue_managed_adapter_invocation_confirm_followup(
+            user_id,
+            request=request,
+            pack=pack,
+            lifecycle=lifecycle,
+            adapter_declarations=adapter_declarations,
+            permission_grants=permission_grants,
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["external_pack_lookup", "managed_adapter_invocation_preview"],
+            payload={
+                "type": "managed_adapter_invocation_preview",
+                "summary": message,
+                "request": request.to_dict(),
+                "pack_id": pack_id,
+                "pack_name": pack_name,
+                "lifecycle": lifecycle,
+                "reads_file_contents": reads,
+                "writes_data": writes,
+                "network_allowed": False,
+                "subprocess_allowed": False,
+                "shell_allowed": False,
+                "executes_code": False,
+                "did_invoke_adapter": False,
+                "did_use_pack": False,
+                "task_completed": False,
+            },
+        )
+
+    def _managed_adapter_invocation_confirm_response(self, user_id: str, pending_item: dict[str, Any]) -> OrchestratorResponse:
+        context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+        request_payload = context.get("invocation_request") if isinstance(context.get("invocation_request"), dict) else {}
+        request = ManagedAdapterInvocationRequest(
+            pack_id=str(request_payload.get("pack_id") or "").strip() or None,
+            canonical_id=str(request_payload.get("canonical_id") or "").strip() or None,
+            pack_name=str(request_payload.get("pack_name") or "External pack").strip(),
+            adapter_kind=str(request_payload.get("adapter_kind") or "").strip(),
+            operation=str(request_payload.get("operation") or "").strip(),
+            user_id=user_id,
+            thread_id=self._active_thread_id_for_user(user_id),
+            parameters=request_payload.get("parameters") if isinstance(request_payload.get("parameters"), dict) else {},
+            permission_grant_id=str(request_payload.get("permission_grant_id") or "").strip() or None,
+            grant_evidence=request_payload.get("grant_evidence") if isinstance(request_payload.get("grant_evidence"), dict) else {},
+            dry_run=bool(request_payload.get("dry_run", True)),
+        )
+        pack = self._pack_store.get_external_pack(str(context.get("pack_id") or request.pack_id or ""))
+        adapter_declarations = context.get("adapter_declarations") if isinstance(context.get("adapter_declarations"), list) else []
+        permission_grants = list_adapter_grants(self._pack_store.external_storage_root())
+        lifecycle = PackLifecycleService().evaluate(
+            imported_pack=pack if isinstance(pack, dict) else None,
+            permission_grants=permission_grants,
+        ).to_dict()
+        invocation = ManagedAdapterInvoker().invoke(
+            request,
+            lifecycle=lifecycle,
+            pack=pack if isinstance(pack, dict) else None,
+            adapter_declarations=[dict(row) for row in adapter_declarations if isinstance(row, dict)],
+            permission_grants=permission_grants,
+        )
+        if invocation.ok:
+            outcome = "completed"
+        else:
+            outcome = "blocked"
+        message = (
+            f"Managed adapter operation {outcome}: {invocation.summary} "
+            "Read file contents: no. Wrote data: no. External code executed: no. Shell/network/subprocess: no. "
+            "Task completed: no; this operation only validated the safe adapter path. "
+            "Next safe step: ask for a future supported content operation if you need actual file search/read behavior."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["managed_adapter_invocation"],
+            payload={
+                "type": "managed_adapter_invocation",
+                "summary": message,
+                "request": request.to_dict(),
+                "invocation": invocation.to_dict(),
+                "lifecycle": lifecycle,
+                "did_invoke_adapter": bool(invocation.ok),
+                "did_use_pack": False,
+                "reads_file_contents": False,
+                "writes_data": False,
+                "executes_code": False,
+                "shell_allowed": False,
+                "network_allowed": False,
+                "subprocess_allowed": False,
+                "task_completed": False,
+            },
+        )
+
     def _external_pack_knowledge_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         if self._looks_like_pack_review_state_prompt(text):
             response = self._pack_review_state_response(user_id)
@@ -7378,6 +7653,8 @@ class Orchestrator:
         if not query_tokens:
             return None
         normalized_query = normalize_setup_text(text).replace("/", " ")
+        normalized_query_for_names = normalized_query.replace("-", " ").replace("_", " ")
+        explicit_adapter_invocation_request = self._managed_adapter_invocation_operation_from_text(text) is not None
         removed_packs = self._pack_store.list_external_pack_removals()
         packs = self._pack_store.list_external_packs()
         pack_name_candidates: list[str] = []
@@ -7414,7 +7691,11 @@ class Orchestrator:
                 "remove pack",
                 "external pack",
             )
-        ) and not any(name.lower() in normalized_query for name in pack_name_candidates if name):
+        ) and not explicit_adapter_invocation_request and not any(
+            normalize_setup_text(name).replace("/", " ").replace("-", " ").replace("_", " ") in normalized_query_for_names
+            for name in pack_name_candidates
+            if name
+        ):
             return None
         removed_best: dict[str, Any] | None = None
         removed_best_score = 0.0
@@ -7465,7 +7746,7 @@ class Orchestrator:
                 if part
             ).lower()
             score = 0.0
-            if pack_name and pack_name.lower() in normalized_query:
+            if pack_name and normalize_setup_text(pack_name).replace("/", " ").replace("-", " ").replace("_", " ") in normalized_query_for_names:
                 score += 1.0
             score += min(0.4, 0.1 * sum(1 for token in query_tokens if token in corpus))
             if score > removed_best_score:
@@ -7497,7 +7778,7 @@ class Orchestrator:
                 },
             )
         best: dict[str, Any] | None = None
-        best_score = 0.0
+        best_score = -1.0 if explicit_adapter_invocation_request else 0.0
         for row in packs:
             if not isinstance(row, dict):
                 continue
@@ -7551,7 +7832,7 @@ class Orchestrator:
             if not corpus:
                 continue
             score = 0.0
-            if pack_name and pack_name.lower() in normalized_query:
+            if pack_name and normalize_setup_text(pack_name).replace("/", " ").replace("-", " ").replace("_", " ") in normalized_query_for_names:
                 score += 0.75
             if summary and any(token in summary.lower() for token in query_tokens):
                 score += 0.18
@@ -7566,7 +7847,7 @@ class Orchestrator:
                     "summary": summary,
                     "score": score,
                 }
-        if best is None or best_score < 0.22:
+        if best is None or (best_score < 0.22 and not explicit_adapter_invocation_request):
             return None
         row = best["row"]
         review_envelope = row.get("review_envelope") if isinstance(row.get("review_envelope"), dict) else {}
@@ -7616,26 +7897,13 @@ class Orchestrator:
                 "managed_adapters": normalized_adapters,
             }
             if lifecycle.usable:
-                message = (
-                    f"{pack_name} is enabled and usable according to lifecycle gates. "
-                    "I did not invoke or use it automatically. Tell me the specific input, file, or action you want next."
-                ).strip()
-                return self._runtime_truth_response(
-                    text=message,
-                    route="action_tool",
-                    used_runtime_state=False,
-                    used_memory=bool(self._current_runtime_setup_state(user_id)),
-                    used_tools=["external_pack_lookup"],
-                    payload={
-                        "type": "external_pack_lifecycle_status",
-                        "summary": message,
-                        "pack_id": pack_id,
-                        "pack_name": pack_name,
-                        "lifecycle": lifecycle_payload,
-                        "did_invoke_adapter": False,
-                        "did_use_pack": False,
-                        "task_completed": False,
-                    },
+                return self._managed_adapter_invocation_preview_response(
+                    user_id,
+                    text=text,
+                    pack=row,
+                    lifecycle=lifecycle_payload,
+                    adapter_declarations=normalized_adapters,
+                    permission_grants=permission_grants,
                 )
             if lifecycle_payload.get("state") != "needs_permission":
                 message = render_lifecycle_response(lifecycle_payload)
@@ -7716,6 +7984,9 @@ class Orchestrator:
         return discovery
 
     def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        external_pack_response = self._external_pack_knowledge_response(user_id, text)
+        if external_pack_response is not None:
+            return external_pack_response
         gap = classify_capability_gap_request(text)
         generic_capability_request = looks_like_generic_external_capability_request(text)
         if str(gap.get("request_kind") or "").strip().lower() != "capability" and not generic_capability_request:
@@ -9207,6 +9478,9 @@ class Orchestrator:
         )
 
     def _capability_gap_planning_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        external_pack_response = self._external_pack_knowledge_response(user_id, text)
+        if external_pack_response is not None:
+            return external_pack_response
         assessment = classify_capability_gap_request(text)
         if str(assessment.get("request_kind") or "").strip().lower() != "capability":
             return None
@@ -13819,6 +14093,10 @@ class Orchestrator:
             return self._operational_status_response(user_id, text, kind)
         if kind == "assistant_capabilities":
             return self._assistant_capabilities_response(text)
+        if kind in {"pack_capability_recommendation", "capability_gap_plan"}:
+            external_pack_response = self._external_pack_knowledge_response(user_id, text)
+            if external_pack_response is not None:
+                return external_pack_response
         if kind == "pack_capability_recommendation":
             return self._pack_capability_recommendation_response(user_id, text)
         if kind == "capability_gap_plan":
@@ -18640,6 +18918,15 @@ class Orchestrator:
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
                         return OrchestratorResponse("Okay — I did not continue to the managed adapter permission gate.")
+                if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "managed_adapter_invocation_confirm":
+                    if followup_intent in {"accept", "details"}:
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
+                        return self._managed_adapter_invocation_confirm_response(user_id, pending_item)
+                    if followup_intent == "decline":
+                        if pending_id:
+                            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
+                        return OrchestratorResponse("Okay — I did not run that managed adapter operation.")
                 if pending_kind == "followup" and str(pending_item.get("origin_tool") or "") == "capability_gap_import":
                     if followup_intent in {"accept", "details"}:
                         refusal = self._pack_lifecycle_pending_refusal(user_id, pending_item, expected_action="import_for_review")

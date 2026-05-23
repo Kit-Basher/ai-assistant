@@ -52,7 +52,7 @@ In this phase, confirming the preview records grant metadata only. The assistant
 
 ## Invocation Flow
 
-`agent/packs/managed_adapter_invocation.py` invokes approved core-owned adapters only after `PackLifecycleService` reports `usable=true`.
+`agent/packs/managed_adapter_invocation.py` invokes approved core-owned adapters only after `PackLifecycleService` reports `usable=true` and the user has confirmed an invocation preview.
 
 The invocation module exposes a generic managed-adapter operation registry. Operations are named by contract, not by skill:
 
@@ -61,6 +61,8 @@ The invocation module exposes a generic managed-adapter operation registry. Oper
 - `dry_run`: re-check safe metadata for the declared adapter without completing the content task.
 
 For `local_file_import`, `dry_run` confirms the selected file still exists and still matches extension/size policy. It does not read, parse, index, or search file contents.
+
+Invocation is not automatic after permission grant. The assistant must ask for a specific operation or infer a safe operation from an explicit user request, show a preview, and then wait for confirmation. Requests to read, search, parse, or index local file contents must be blocked truthfully until a future core-owned operation implements that behavior.
 
 The invocation layer does not load generated handlers, run subprocesses, install dependencies, fetch network data, scrape browsers, request OAuth, parse Google Takeout, fetch transcripts, or index private file contents. Adding a future adapter or operation requires a core implementation, registry entry, review, and tests.
 

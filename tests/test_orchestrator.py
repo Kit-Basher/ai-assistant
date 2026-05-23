@@ -5429,7 +5429,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("permission/configuration preview", permission_preview.text.lower())
         self.assertIn("permission grant does not invoke or use", permission_preview.text.lower())
 
-    def test_usable_external_pack_invokes_managed_adapter_dry_run(self) -> None:
+    def test_usable_external_pack_previews_then_invokes_managed_adapter_dry_run(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         orchestrator = Orchestrator(
             db=self.db,
@@ -5505,20 +5505,120 @@ class TestOrchestrator(unittest.TestCase):
                 raise AssertionError("invocation must not read file contents")
             return original_read_text(path_obj, *args, **kwargs)
 
+        response = orchestrator.handle_message("use Generic Local Import", "user1")
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual(["external_pack_lookup"], response.data["used_tools"])
+        self.assertIn("specific adapter operation", response.text.lower())
+        self.assertFalse(payload.get("did_invoke_adapter"))
+
+        preview = orchestrator.handle_message("dry run Generic Local Import", "user1")
+        preview_payload = preview.data.get("runtime_payload") if isinstance(preview.data.get("runtime_payload"), dict) else {}
+        self.assertEqual(["external_pack_lookup", "managed_adapter_invocation_preview"], preview.data["used_tools"])
+        self.assertEqual("managed_adapter_invocation_preview", preview_payload.get("type"))
+        self.assertIn("managed adapter invocation preview", preview.text.lower())
+        self.assertIn("core-owned managed adapter", preview.text.lower())
+        self.assertIn("external pack instructions remain untrusted", preview.text.lower())
+        self.assertFalse(preview_payload.get("did_invoke_adapter"))
+        self.assertFalse(preview_payload.get("did_use_pack"))
+        self.assertFalse(preview_payload.get("reads_file_contents"))
+        self.assertFalse(preview_payload.get("executes_code"))
+
         with patch("pathlib.Path.read_text", new=_guard_read):
-            response = orchestrator.handle_message("use Generic Local Import", "user1")
+            response = orchestrator.handle_message("yes", "user1")
 
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         invocation = payload.get("invocation") if isinstance(payload.get("invocation"), dict) else {}
-        self.assertEqual(["external_pack_lookup", "managed_adapter_invocation"], response.data["used_tools"])
+        self.assertEqual(["managed_adapter_invocation"], response.data["used_tools"])
         self.assertEqual("dry_run", invocation.get("operation"))
         self.assertTrue(invocation.get("ok"))
         self.assertTrue(invocation.get("did_work"))
+        self.assertTrue(payload.get("did_invoke_adapter"))
+        self.assertFalse(payload.get("did_use_pack"))
+        self.assertFalse(payload.get("reads_file_contents"))
+        self.assertFalse(payload.get("writes_data"))
+        self.assertFalse(payload.get("executes_code"))
+        self.assertFalse(payload.get("shell_allowed"))
+        self.assertFalse(payload.get("network_allowed"))
+        self.assertFalse(payload.get("subprocess_allowed"))
         self.assertFalse(payload.get("task_completed"))
-        self.assertIn("has not completed the requested content task", response.text)
+        self.assertIn("external code executed: no", response.text.lower())
+        self.assertIn("shell/network/subprocess: no", response.text.lower())
         self.assertIn("<redacted-local-history-path>/watch-history.json", str(invocation))
         self.assertNotIn(str(selected_path), str(payload))
         self.assertNotIn("history contents", str(payload))
+
+        repeat = orchestrator.handle_message("yes", "user1")
+        self.assertIn(repeat.data["route"], {"assistant_clarification", "generic_chat"})
+        self.assertIn("current action", repeat.text.lower())
+
+    def test_usable_external_pack_blocks_unsupported_content_search(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        storage_root = Path(orchestrator._pack_store.external_storage_root())  # noqa: SLF001
+        normalized_path = Path(self.tmpdir.name) / "generic_search_pack"
+        normalized_path.mkdir(parents=True, exist_ok=True)
+        (normalized_path / "SKILL.md").write_text("Generic Local Import\nUse for local import dry runs.\n", encoding="utf-8")
+        selected_path = storage_root / "watch-history.json"
+        selected_path.parent.mkdir(parents=True, exist_ok=True)
+        selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
+        adapter = ManagedAdapterSpec(
+            kind=ADAPTER_LOCAL_FILE_IMPORT,
+            purpose="Import one selected local file.",
+            allowed_extensions=(".json",),
+            max_file_size_mb=50,
+            path_policy="user_selected_file_only",
+            network_allowed=False,
+        )
+        pack = orchestrator._pack_store.record_external_pack(  # noqa: SLF001
+            canonical_pack={
+                "name": "Generic Local Import Search",
+                "display_name": "Generic Local Import Search",
+                "version": "0.1.0",
+                "pack_identity": {"canonical_id": "pack.generic.local-import-search", "content_hash": "hash-1"},
+                "capabilities": {"summary": "Generic local import dry run.", "declared": ["generic_local_import"]},
+                "managed_adapters": [adapter.to_dict()],
+                "runtime": {"managed_adapters": [adapter.to_dict()]},
+            },
+            classification="portable_text_skill",
+            status="normalized",
+            risk_report={},
+            review_envelope={"pack_name": "Generic Local Import Search"},
+            quarantine_path=str(normalized_path),
+            normalized_path=str(normalized_path),
+        )
+        pack = orchestrator._pack_store.set_external_pack_review_status(str(pack["pack_id"]), local_review_status="approved", approve_current_hash=True)  # noqa: SLF001
+        assert isinstance(pack, dict)
+        pack = orchestrator._pack_store.set_external_pack_enabled(str(pack["pack_id"]), enabled=True)  # noqa: SLF001
+        assert isinstance(pack, dict)
+        request = build_permission_request(pack_id=str(pack["pack_id"]), pack_name="Generic Local Import Search", adapter=adapter, requested_path=str(selected_path))
+        grant = create_metadata_only_grant(
+            request=request,
+            path_metadata={
+                "path_redacted": "<redacted-local-history-path>/watch-history.json",
+                "extension": ".json",
+                "exists": True,
+                "is_file": True,
+                "size_bytes": selected_path.stat().st_size,
+                "max_file_size_mb": 50,
+            },
+        )
+        record_adapter_grant(storage_root, grant)
+
+        response = orchestrator.handle_message("read Generic Local Import Search file now", "user1")
+
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("managed_adapter_invocation_blocked", payload.get("type"))
+        self.assertIn("does not yet have a safe content-read/search operation", response.text)
+        self.assertFalse(payload.get("did_invoke_adapter"))
+        self.assertFalse(payload.get("did_use_pack"))
+        self.assertFalse(payload.get("task_completed"))
 
     def test_non_usable_external_pack_reports_lifecycle_next_step(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
@@ -5549,6 +5649,7 @@ class TestOrchestrator(unittest.TestCase):
                 "pack_identity": {"canonical_id": "pack.generic.local-import-unapproved", "content_hash": "hash-1"},
                 "capabilities": {"summary": "Generic local import dry run.", "declared": ["generic_local_import"]},
                 "managed_adapters": [adapter.to_dict()],
+                "runtime": {"managed_adapters": [adapter.to_dict()]},
             },
             classification="portable_text_skill",
             status="normalized",
