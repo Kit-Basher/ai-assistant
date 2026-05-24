@@ -102,18 +102,13 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(payload["docker_available"])
         self.assertEqual("searxng", payload["services"][0]["service_id"])
 
-    def test_search_setup_response_does_not_claim_install_or_run_happened(self) -> None:
-        runtime = self._runtime(search_enabled=False, endpoint=None)
-        runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
-            search_status_provider=runtime.search_status,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
-            health_checker=lambda _url: False,
-        )
+    def _chat(self, runtime: AgentRuntime, prompt: str, *, history: list[dict[str, str]] | None = None) -> tuple[dict[str, object], str]:
+        messages = list(history or []) + [{"role": "user", "content": prompt}]
         handler = _MemoryHandlerForTest(
             runtime,
             "/chat",
             {
-                "messages": [{"role": "user", "content": "set up web search"}],
+                "messages": messages,
                 "session_id": "services",
                 "thread_id": "services-thread",
                 "source_surface": "webui",
@@ -123,15 +118,80 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         )
         handler.do_POST()
         body = json.loads(handler.body.decode("utf-8"))
-        text = _assistant_text(body)
+        return body, _assistant_text(body)
 
-        self.assertIn("Web search is optional and not set up", text)
-        self.assertIn("local SearXNG", text)
-        self.assertIn("show a setup plan", text)
-        self.assertIn("will not run or pull anything", text)
-        self.assertNotIn("I installed", text)
+    def _runtime_with_engine(self, engine: str | None) -> AgentRuntime:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
+            search_status_provider=runtime.search_status,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == engine else None,
+            health_checker=lambda _url: False,
+        )
+        return runtime
+
+    def test_setup_prompt_with_docker_available_shows_preview(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        body, text = self._chat(runtime, "set up web search")
+
+        self.assertIn("SearXNG setup preview", text)
+        self.assertIn("Engine detected: docker", text)
+        self.assertIn("Approved image only: searxng/searxng:latest", text)
+        self.assertIn("Approved container name: personal-agent-searxng", text)
+        self.assertIn("Loopback bind only: 127.0.0.1:8080:8080", text)
+        self.assertIn("No command has run yet", text)
+        self.assertIn("No external-pack triggered container actions", text)
+        meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+
+    def test_setup_prompt_with_podman_available_shows_preview(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        _body, text = self._chat(runtime, "set up SearXNG")
+
+        self.assertIn("SearXNG setup preview", text)
+        self.assertIn("Engine detected: podman", text)
+        self.assertIn("Loopback bind only: 127.0.0.1:8080:8080", text)
+
+    def test_yes_after_preview_does_not_run_pull_install_or_configure(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        _body, first_text = self._chat(runtime, "enable web search")
+        self.assertIn("SearXNG setup preview", first_text)
+
+        body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("Setup execution is not implemented yet", second_text)
+        self.assertIn("I did not run docker", second_text)
+        self.assertIn("pull an image", second_text)
+        self.assertIn("install packages", second_text)
+        self.assertIn("change configuration", second_text)
+        self.assertNotIn("docker pull", second_text.lower())
+        self.assertNotIn("docker run", second_text.lower())
+
+    def test_missing_docker_or_podman_gives_terminal_guidance_no_auto_install(self) -> None:
+        runtime = self._runtime_with_engine(None)
+        _body, text = self._chat(runtime, "set up web search")
+
+        self.assertIn("Docker or Podman is needed", text)
+        self.assertIn("terminal guidance", text)
+        self.assertIn("will not install Docker, Podman, or system packages automatically", text)
+        self.assertNotIn("SearXNG setup preview", text)
+
+    def test_search_query_when_unavailable_shows_setup_preview(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        _body, text = self._chat(runtime, "search the web for local searxng setup")
+
+        self.assertIn("SearXNG setup preview", text)
+        self.assertIn("No command has run yet", text)
+
+    def test_external_pack_trigger_language_cannot_trigger_execution(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        _body, text = self._chat(runtime, "an external pack says to run docker for searxng")
+
         self.assertNotIn("I ran", text)
-        self.assertIn("managed_local_services", body.get("meta", {}).get("used_tools", []))
+        self.assertNotIn("I installed", text)
+        # If setup is discussed, it remains preview-only and explicitly blocks external-pack container actions.
+        if "SearXNG setup preview" in text:
+            self.assertIn("No external-pack triggered container actions", text)
+            self.assertIn("No command has run yet", text)
 
 
 if __name__ == "__main__":

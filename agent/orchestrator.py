@@ -2086,6 +2086,9 @@ class Orchestrator:
         body = dict(body) if isinstance(body, dict) else {}
         message = str(body.get("message") or "").strip()
         if not ok:
+            error_kind = str(body.get("error_kind") or "search_unavailable")
+            if error_kind in {"search_disabled", "endpoint_missing", "unsupported_provider", "search_unavailable"}:
+                return self._safe_web_search_status_response(user_id, text)
             setup_hint = body.get("setup_hint") if isinstance(body.get("setup_hint"), dict) else None
             if setup_hint:
                 rendered_hint = render_search_setup_ux(setup_hint)
@@ -2170,6 +2173,129 @@ class Orchestrator:
             ]
         )
 
+
+    def _searxng_service_from_status(self, services_payload: dict[str, Any]) -> dict[str, Any]:
+        services = services_payload.get("services") if isinstance(services_payload.get("services"), list) else []
+        return next((row for row in services if isinstance(row, dict) and row.get("service_id") == "searxng"), {})
+
+    def _selected_managed_service_engine(self, services_payload: dict[str, Any], searxng: dict[str, Any]) -> str | None:
+        docker_available = bool(services_payload.get("docker_available") or searxng.get("docker_available"))
+        podman_available = bool(services_payload.get("podman_available") or searxng.get("podman_available"))
+        if docker_available:
+            return "docker"
+        if podman_available:
+            return "podman"
+        return None
+
+    def _managed_service_missing_engine_response(self, services_payload: dict[str, Any]) -> OrchestratorResponse:
+        searxng = self._searxng_service_from_status(services_payload)
+        text = "\n".join(
+            [
+                "Web search is optional and not set up.",
+                "Safe web search uses local SearXNG.",
+                "Docker or Podman is needed, but I did not find either one.",
+                "I can show terminal guidance, but I will not install Docker, Podman, or system packages automatically.",
+                "No command has run yet.",
+            ]
+        )
+        return self._runtime_truth_response(
+            text=text,
+            route="action_tool",
+            used_tools=["managed_local_services"],
+            ok=False,
+            error_kind="managed_service_engine_missing",
+            payload={
+                "type": "managed_local_service_setup_unavailable",
+                "service_id": "searxng",
+                "service": searxng,
+                "services_status": services_payload,
+                "mutated": False,
+            },
+        )
+
+    def _managed_service_setup_preview_response(
+        self,
+        user_id: str,
+        *,
+        status_payload: dict[str, Any],
+        services_payload: dict[str, Any],
+    ) -> OrchestratorResponse:
+        searxng = self._searxng_service_from_status(services_payload)
+        if bool(status_payload.get("available")) or (searxng.get("enabled") and searxng.get("configured") and searxng.get("reachable")):
+            return self._runtime_truth_response(
+                text="Web search is configured and available. Safe web search uses SearXNG metadata only; results remain untrusted.",
+                route="action_tool",
+                used_tools=["safe_web_search", "managed_local_services"],
+                payload={
+                    "type": "managed_local_service_ready",
+                    "service_id": "searxng",
+                    "search_status": status_payload,
+                    "services_status": services_payload,
+                },
+            )
+        engine = self._selected_managed_service_engine(services_payload, searxng)
+        if not engine:
+            return self._managed_service_missing_engine_response(services_payload)
+        approved = searxng.get("approved_container") if isinstance(searxng.get("approved_container"), dict) else {}
+        image = str(approved.get("image") or "searxng/searxng:latest")
+        name = str(approved.get("name") or "personal-agent-searxng")
+        bind = str(approved.get("bind") or "127.0.0.1:8080:8080")
+        volume = str(approved.get("volume_path") or "memory/local_services/searxng")
+        lines = [
+            "Web search is optional and not set up.",
+            "Safe web search uses local SearXNG.",
+            "SearXNG setup preview",
+            "Service: SearXNG",
+            "Purpose: safe web search",
+            f"Engine detected: {engine}",
+            f"Approved image only: {image}",
+            f"Approved container name: {name}",
+            f"Loopback bind only: {bind}",
+            f"Approved volume path only: {volume}",
+            "No host networking.",
+            "No privileged mode.",
+            "No random host mounts.",
+            "No arbitrary images.",
+            "No external-pack triggered container actions.",
+            "I will not open pages, download files, or install packs from search results without review.",
+            "No Docker, Podman, SearXNG, or system package installation.",
+            "No command has run yet.",
+            "Say yes to continue, or no to cancel.",
+        ]
+        return self._confirmation_preview_response(
+            user_id,
+            route="action_tool",
+            question="\n".join(lines),
+            used_tools=["managed_local_service_setup_preview", "safe_web_search"],
+            action={
+                "operation": "managed_local_service_setup_preview",
+                "params": {
+                    "service_id": "searxng",
+                    "selected_engine": engine,
+                    "action": "preview_only",
+                    "approved_image": image,
+                    "approved_container_name": name,
+                    "loopback_bind": bind,
+                    "approved_volume_path": volume,
+                },
+            },
+            title="SearXNG setup preview",
+            preview_payload={
+                "type": "managed_local_service_setup_preview",
+                "service_id": "searxng",
+                "selected_engine": engine,
+                "action": "preview_only",
+                "approved_image": image,
+                "approved_container_name": name,
+                "loopback_bind": bind,
+                "approved_volume_path": volume,
+                "services_status": services_payload,
+                "search_status": status_payload,
+                "mutated": False,
+            },
+            mutating=False,
+        )
+
     def _safe_web_search_status_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = (user_id, text)
         status_payload: dict[str, Any]
@@ -2201,21 +2327,23 @@ class Orchestrator:
                 }
         ux = build_search_setup_ux(status_payload)
         services_payload = self._managed_service_status_payload()
-        rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
-        used_tools = ["safe_web_search"]
         if services_payload:
-            used_tools.append("managed_local_services")
+            return self._managed_service_setup_preview_response(
+                user_id,
+                status_payload=status_payload,
+                services_payload=services_payload,
+            )
+        rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
         return self._runtime_truth_response(
             text=rendered_text,
             route="action_tool",
-            used_tools=used_tools,
+            used_tools=["safe_web_search"],
             ok=bool(ux.available),
             error_kind=None if ux.available else str(status_payload.get("reason") or "search_unavailable"),
             payload={
                 "type": "safe_web_search_status",
                 "summary": ux.message,
                 "search_status": status_payload,
-                "services_status": services_payload if services_payload else None,
                 "setup_ux": ux.to_dict(),
             },
         )
@@ -2449,6 +2577,31 @@ class Orchestrator:
     def _execute_confirmed_native_mutation(self, user_id: str, action: dict[str, Any]) -> OrchestratorResponse:
         operation = str(action.get("operation") or "").strip().lower()
         params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        if operation == "managed_local_service_setup_preview":
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            service_id = str(params.get("service_id") or "searxng").strip() or "searxng"
+            engine = str(params.get("selected_engine") or "docker").strip() or "docker"
+            return self._runtime_truth_response(
+                text=(
+                    "Setup execution is not implemented yet. "
+                    f"I did not run {engine}, pull an image, start a container, install packages, or change configuration. "
+                    "Next implementation step will run this approved setup only after a separate confirmed execution path exists."
+                ),
+                route="action_tool",
+                used_tools=["managed_local_service_setup_preview", "safe_web_search"],
+                ok=False,
+                error_kind="managed_service_execution_not_implemented",
+                payload={
+                    "type": "managed_local_service_setup_not_implemented",
+                    "service_id": service_id,
+                    "selected_engine": engine,
+                    "mutated": False,
+                    "did_pull": False,
+                    "did_run": False,
+                    "did_install": False,
+                    "did_configure": False,
+                },
+            )
         if operation == "shell_install_package":
             return self._shell_install_package_response(
                 user_id=user_id,
