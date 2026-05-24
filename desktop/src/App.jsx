@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import AdminPanel from "./components/AdminPanel";
+import BasicsTab from "./components/BasicsTab";
 import ChatExperience from "./components/ChatExperience";
 import DebugTab from "./components/DebugTab";
 import ModelScoutTab from "./components/ModelScoutTab";
@@ -156,22 +157,26 @@ const saveStoredChatId = (storageKey, value) => {
   }
 };
 
-const getInitialTheme = () => {
+const getSystemTheme = () => {
+  if (typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches) {
+    return "dark";
+  }
+  return "light";
+};
+
+const getInitialThemePreference = () => {
   if (typeof window === "undefined") {
-    return "light";
+    return "system";
   }
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-    if (stored === "light" || stored === "dark") {
+    if (stored === "light" || stored === "dark" || stored === "system") {
       return stored;
     }
   } catch (_error) {
     // Ignore storage failures and fall back to system preference.
   }
-  if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) {
-    return "dark";
-  }
-  return "light";
+  return "system";
 };
 
 const MODEL_SCOUT_PURPOSES = ["chat", "code", "organize", "story"];
@@ -241,9 +246,13 @@ const buildCanonicalScoutSuggestions = ({ checkPayload, providerRows }) => {
 };
 
 export default function App() {
-  const [theme, setTheme] = useState(getInitialTheme);
+  const [themePreference, setThemePreference] = useState(getInitialThemePreference);
+  const [theme, setTheme] = useState(() => {
+    const initialPreference = getInitialThemePreference();
+    return initialPreference === "system" ? getSystemTheme() : initialPreference;
+  });
   const [adminOpen, setAdminOpen] = useState(false);
-  const [adminTab, setAdminTab] = useState("setup");
+  const [adminTab, setAdminTab] = useState("basics");
   const [adminLoaded, setAdminLoaded] = useState(false);
   const [adminBusy, setAdminBusy] = useState(false);
   const [readyState, setReadyState] = useState(null);
@@ -256,6 +265,8 @@ export default function App() {
   const [defaultModel, setDefaultModel] = useState("");
   const [allowRemoteFallback, setAllowRemoteFallback] = useState(true);
   const [setupStatus, setSetupStatus] = useState("");
+  const [simpleSetupProviderId, setSimpleSetupProviderId] = useState("");
+  const [searchStatus, setSearchStatus] = useState(null);
 
   const [providerDrafts, setProviderDrafts] = useState({});
   const [providerSecrets, setProviderSecrets] = useState({});
@@ -282,21 +293,32 @@ export default function App() {
   });
 
   useEffect(() => {
+    const media = typeof window !== "undefined" ? window.matchMedia?.("(prefers-color-scheme: dark)") : null;
+    const applyTheme = () => {
+      setTheme(themePreference === "system" ? getSystemTheme() : themePreference);
+    };
+    applyTheme();
+    if (themePreference !== "system" || !media) return undefined;
+    media.addEventListener?.("change", applyTheme);
+    return () => media.removeEventListener?.("change", applyTheme);
+  }, [themePreference]);
+
+  useEffect(() => {
     if (typeof document !== "undefined") {
       document.documentElement.dataset.theme = theme;
       document.documentElement.style.colorScheme = theme;
     }
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+        window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
       } catch (_error) {
         // Ignore storage write failures; the selected theme still applies in memory.
       }
     }
-  }, [theme]);
+  }, [theme, themePreference]);
 
   const toggleTheme = () => {
-    setTheme((current) => (current === "dark" ? "light" : "dark"));
+    setThemePreference((current) => (current === "dark" ? "light" : "dark"));
   };
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramConfigured, setTelegramConfigured] = useState(false);
@@ -418,6 +440,7 @@ export default function App() {
         statePayload,
         packsStatePayload,
         telegramPayload,
+        searchStatusPayload,
         modelCheckPayload,
         modelLifecyclePayload,
         llmHealthPayload,
@@ -437,6 +460,7 @@ export default function App() {
         request("GET", "/state").catch(() => null),
         request("GET", "/packs/state").catch(() => null),
         request("GET", "/telegram/status").catch(() => null),
+        request("GET", "/search/status").catch(() => null),
         request("POST", "/llm/models/check", { purposes: MODEL_SCOUT_PURPOSES }).catch(() => null),
         request("GET", "/llm/models/lifecycle").catch(() => null),
         request("GET", "/llm/health").catch(() => null),
@@ -468,6 +492,9 @@ export default function App() {
       }
       if (telegramPayload && telegramPayload.ok) {
         setTelegramConfigured(telegramPayload.configured === true);
+      }
+      if (searchStatusPayload && searchStatusPayload.ok) {
+        setSearchStatus(searchStatusPayload);
       }
       const nextScoutStatus = buildCanonicalScoutStatus({
         checkPayload: modelCheckPayload,
@@ -535,6 +562,12 @@ export default function App() {
       } else if (activeProviderForModels && !providerRows.find((item) => item.id === activeProviderForModels)) {
         setActiveProviderForModels(providerRows[0]?.id || "");
       }
+      setSimpleSetupProviderId((current) => {
+        if (current && providerRows.some((item) => item.id === current)) {
+          return current;
+        }
+        return defaultsPayload.default_provider || providerRows[0]?.id || "";
+      });
 
       const supportTargetId = normalizeSupportTarget(supportDiagnoseTarget);
       const supportTargetExists = !!(
@@ -1000,6 +1033,34 @@ export default function App() {
       const detail = asErrorText(error);
       setProviderStatuses((prev) => ({ ...prev, [providerId]: `Test failed: ${detail}` }));
       appendLog({ endpoint: `/providers/${providerId}/test`, ok: false, detail });
+    }
+  };
+
+  const saveAndTestProviderKey = async (providerId) => {
+    if (!providerId) return;
+    const provider = providers.find((item) => item.id === providerId);
+    const key = (providerSecrets[providerId] || "").trim();
+    const hasSavedKey = provider?.api_key_source?.type && provider.api_key_source.type !== "none";
+    if (!key && !hasSavedKey && !provider?.local) {
+      setProviderStatuses((prev) => ({ ...prev, [providerId]: "Needs API key." }));
+      return;
+    }
+    setAddProviderBusy(true);
+    try {
+      if (key) {
+        await request("POST", `/providers/${providerId}/secret`, { api_key: key });
+        setProviderSecrets((prev) => ({ ...prev, [providerId]: "" }));
+      }
+      const preferredModel = models.find((model) => model.provider === providerId)?.id || null;
+      const result = await request("POST", `/providers/${providerId}/test`, { model: preferredModel });
+      setProviderStatuses((prev) => ({ ...prev, [providerId]: "Working" }));
+      appendLog({ endpoint: `/providers/${providerId}/test`, ok: true, detail: `${result.provider}/${result.model}` });
+      await refreshRuntimeState();
+    } catch (error) {
+      setProviderStatuses((prev) => ({ ...prev, [providerId]: "Could not connect" }));
+      appendLog({ endpoint: `/providers/${providerId}/test`, ok: false, detail: asErrorText(error) });
+    } finally {
+      setAddProviderBusy(false);
     }
   };
 
@@ -1719,8 +1780,46 @@ export default function App() {
 
   const adminSections = [
     {
+      id: "basics",
+      label: "Basics",
+      group: "Setup",
+      content: (
+        <BasicsTab
+          addProviderBusy={addProviderBusy}
+          chatStatus={chatStatus}
+          defaultModel={defaultModel}
+          defaultModelOptions={defaultModelOptions}
+          defaultProvider={defaultProvider}
+          onRefresh={() => {
+            void refreshRuntimeState({ includeAdmin: true });
+          }}
+          providerOptions={providerOptions}
+          providerSecrets={providerSecrets}
+          providerStatuses={providerStatuses}
+          providers={providers}
+          saveAndTestProviderKey={saveAndTestProviderKey}
+          saveDefaults={saveDefaults}
+          saveTelegramToken={saveTelegramToken}
+          searchStatus={searchStatus}
+          selectedProviderId={simpleSetupProviderId}
+          setDefaultModel={setDefaultModel}
+          setDefaultProvider={setDefaultProvider}
+          setProviderSecrets={setProviderSecrets}
+          setSelectedProviderId={setSimpleSetupProviderId}
+          setTelegramToken={setTelegramToken}
+          setThemePreference={setThemePreference}
+          telegramConfigured={telegramConfigured}
+          telegramStatus={telegramStatus}
+          telegramToken={telegramToken}
+          testTelegramToken={testTelegramToken}
+          themePreference={themePreference}
+        />
+      )
+    },
+    {
       id: "setup",
-      label: "Setup",
+      label: "Model defaults",
+      group: "Models",
       content: (
         <SetupTab
           allowRemoteFallback={allowRemoteFallback}
@@ -1744,17 +1843,20 @@ export default function App() {
     },
     {
       id: "state",
-      label: "State",
+      label: "Runtime state",
+      group: "Runtime details",
       content: <StateTab stateSnapshot={uiState} />
     },
     {
       id: "packs",
       label: "Packs",
+      group: "Packs",
       content: <PacksTab packsSnapshot={packsState} />
     },
     {
       id: "operations",
       label: "Operations",
+      group: "Developer/operator tools",
       content: (
         <OperationsTab
           autopilotBootstrapBusy={autopilotBootstrapBusy}
@@ -1831,7 +1933,8 @@ export default function App() {
     },
     {
       id: "providers",
-      label: "Providers",
+      label: "Provider details",
+      group: "Models",
       content: (
         <ProvidersTab
           activeProviderForModels={activeProviderForModels}
@@ -1869,7 +1972,8 @@ export default function App() {
     },
     {
       id: "telegram",
-      label: "Telegram",
+      label: "Telegram details",
+      group: "Developer/operator tools",
       content: (
         <TelegramTab
           saveTelegramToken={saveTelegramToken}
@@ -1884,6 +1988,7 @@ export default function App() {
     {
       id: "permissions",
       label: "Permissions",
+      group: "Developer/operator tools",
       content: (
         <PermissionsTab
           actions={MODELOPS_ACTIONS}
@@ -1900,6 +2005,7 @@ export default function App() {
     {
       id: "model_scout",
       label: "Model Scout",
+      group: "Models",
       content: (
         <ModelScoutTab
           modelScoutMessage={modelScoutMessage}
@@ -1913,6 +2019,7 @@ export default function App() {
     {
       id: "debug",
       label: "Logs",
+      group: "Diagnostics",
       content: <DebugTab logs={logs} />
     }
   ];

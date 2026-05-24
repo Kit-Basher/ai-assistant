@@ -13,6 +13,16 @@ export default function AdminPanel({
   if (!open) return null;
 
   const currentSection = sections.find((section) => section.id === activeSection) || sections[0] || null;
+  const basicSections = sections.filter((section) => section.group === "Setup" || section.id === "basics");
+  const advancedGroups = sections
+    .filter((section) => !basicSections.includes(section))
+    .reduce((groups, section) => {
+      const groupName = section.group || "Developer/operator tools";
+      return {
+        ...groups,
+        [groupName]: [...(groups[groupName] || []), section]
+      };
+    }, {});
 
   return (
     <div className="admin-overlay" onClick={onClose} role="presentation">
@@ -25,7 +35,7 @@ export default function AdminPanel({
           <div>
             <p className="product-kicker">Advanced</p>
             <h2>Admin tools</h2>
-            <p>Setup, diagnostics, provider controls, and operator-only workflows live here.</p>
+            <p>Start with Basics. Most users do not need the advanced operator panels.</p>
           </div>
           <div className="admin-header-actions">
             <span className={`status-pill status-pill-${status.tone}`}>{status.label}</span>
@@ -49,7 +59,8 @@ export default function AdminPanel({
 
         <div className="admin-body">
           <nav className="admin-nav">
-            {sections.map((section) => (
+            <p className="admin-nav-helper">Most users only need Basics. Advanced panels are for diagnostics and operator work.</p>
+            {basicSections.map((section) => (
               <button
                 className={section.id === currentSection?.id ? "active" : ""}
                 key={section.id}
@@ -59,6 +70,25 @@ export default function AdminPanel({
                 {section.label}
               </button>
             ))}
+            <div className="admin-advanced-groups">
+              {Object.entries(advancedGroups).map(([groupName, groupSections]) => (
+                <details key={groupName} open={groupSections.some((section) => section.id === currentSection?.id)}>
+                  <summary>{groupName}</summary>
+                  <div className="admin-nav-group-buttons">
+                    {groupSections.map((section) => (
+                      <button
+                        className={section.id === currentSection?.id ? "active" : ""}
+                        key={section.id}
+                        onClick={() => onSelectSection(section.id)}
+                        type="button"
+                      >
+                        {section.label}
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              ))}
+            </div>
           </nav>
 
           <div className="admin-content">

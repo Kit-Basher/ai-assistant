@@ -1104,6 +1104,138 @@ button.button-danger:not(:disabled):hover {
   margin: 0;
 }
 
+
+.basics-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.setup-intro-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+  padding: 18px;
+}
+
+.setup-intro-card h2 {
+  margin: 0;
+  font-size: 1.5rem;
+}
+
+.setup-intro-card p:last-child {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.setup-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.setup-card {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+  padding: 16px;
+  display: grid;
+  gap: 10px;
+}
+
+.setup-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.setup-card h3 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.setup-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.setup-facts span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-soft);
+  color: var(--muted);
+  font-size: 0.78rem;
+  padding: 4px 8px;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft);
+  padding: 4px;
+}
+
+.segmented-control button {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+}
+
+.segmented-control button.active {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--active-text);
+}
+
+.assistant-help-text {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.admin-nav-helper {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.admin-advanced-groups {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.admin-advanced-groups details {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  padding: 8px;
+}
+
+.admin-advanced-groups summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.admin-nav-group-buttons {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+
 @media (max-width: 900px) {
   .chat-product-shell {
     padding: 18px 14px 24px;
@@ -1167,8 +1299,13 @@ button.button-danger:not(:disabled):hover {
   }
 
   .grid.two,
-  .grid.chat-layout {
+  .grid.chat-layout,
+  .setup-card-grid {
     grid-template-columns: 1fr;
+  }
+
+  .setup-intro-card {
+    flex-direction: column;
   }
 
   .provider-model-controls {
