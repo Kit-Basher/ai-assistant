@@ -20,21 +20,6 @@ function simpleProviderStatus(provider, statusText) {
   return { label: "Could not connect", tone: "down", detail: "Save and test to check this provider." };
 }
 
-function searchSummary(searchStatus) {
-  if (searchStatus?.available) {
-    return {
-      label: "Web search is ready",
-      tone: "ok",
-      detail: "Safe web search uses SearXNG."
-    };
-  }
-  return {
-    label: "Web search is not set up",
-    tone: "attention",
-    detail: "Safe web search uses SearXNG. Set SEARCH_ENABLED=1 and SEARXNG_BASE_URL, then check again."
-  };
-}
-
 function runtimeSummary(status) {
   if (status?.ready) {
     return { label: "Running", tone: "ok", detail: status.description || "The local assistant is reachable." };
@@ -53,7 +38,6 @@ export default function BasicsTab({
   defaultModel,
   defaultModelOptions,
   defaultProvider,
-  onCheckWebSearch,
   onRefresh,
   providerOptions,
   providerSecrets,
@@ -62,7 +46,6 @@ export default function BasicsTab({
   saveAndTestProviderKey,
   saveDefaults,
   saveTelegramToken,
-  searchStatus,
   selectedProviderId,
   setDefaultModel,
   setDefaultProvider,
@@ -83,7 +66,6 @@ export default function BasicsTab({
   const selectedProviderStatus = simpleProviderStatus(selectedProvider, providerStatuses[selectedProvider?.id] || "");
   const selectedProviderKey = selectedProvider?.id ? providerSecrets[selectedProvider.id] || "" : "";
   const selectedProviderHasSavedKey = selectedProvider?.api_key_source?.type && selectedProvider.api_key_source.type !== "none";
-  const search = searchSummary(searchStatus);
   const runtime = runtimeSummary(chatStatus);
 
   return (
@@ -201,24 +183,6 @@ export default function BasicsTab({
               Test Telegram
             </button>
           </div>
-        </article>
-
-        <article className="setup-card">
-          <div className="setup-card-head">
-            <h3>Web search</h3>
-            <StatusBadge tone={search.tone}>{search.label}</StatusBadge>
-          </div>
-          <p className="help-text">{search.detail}</p>
-          <div className="setup-facts">
-            <span>SearXNG: {searchStatus?.endpoint_configured ? "configured" : "needs URL"}</span>
-            <span>{searchStatus?.enabled ? "Enabled" : "Disabled"}</span>
-          </div>
-          <details className="setup-command">
-            <summary>Show setup command</summary>
-            <code>SEARCH_ENABLED=1 SEARCH_PROVIDER=searxng SEARXNG_BASE_URL=http://127.0.0.1:8080</code>
-          </details>
-          <button onClick={onCheckWebSearch} type="button">Check web search</button>
-          <p className="help-text">Search results are treated as untrusted summaries. The assistant will not open pages, download files, or install packs from search results without review.</p>
         </article>
 
         <article className="setup-card">

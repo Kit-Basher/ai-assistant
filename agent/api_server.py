@@ -100,6 +100,7 @@ from agent.public_chat import (
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
+from agent.services.managed_local_services import ManagedLocalServiceDetector
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
 from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
@@ -602,6 +603,7 @@ class AgentRuntime:
         self.git_commit = build_info.git_commit
         self._runtime_events = RuntimeEventRecorder(runtime_id=self.runtime_id, max_events=100)
         self._safe_web_search_client: SafeWebSearchClient | None = None
+        self._managed_local_services: ManagedLocalServiceDetector | None = None
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -10684,6 +10686,14 @@ class AgentRuntime:
 
     def search_status(self) -> dict[str, Any]:
         return self._safe_web_search().status()
+
+    def managed_services_status(self) -> dict[str, Any]:
+        if self._managed_local_services is None:
+            self._managed_local_services = ManagedLocalServiceDetector(
+                search_status_provider=self.search_status,
+                searxng_url_provider=lambda: self.config.searxng_base_url,
+            )
+        return self._managed_local_services.status()
 
     def search_query(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         query = str((payload or {}).get("query") or "").strip()
@@ -21180,6 +21190,9 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/search/status":
                 self._send_json(200, self.runtime.search_status())
+                return
+            if path == "/services/status":
+                self._send_json(200, self.runtime.managed_services_status())
                 return
             if path in {"/model", "/llm/model"}:
                 self._send_json(200, self.runtime.model_status())

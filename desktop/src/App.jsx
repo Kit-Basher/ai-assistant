@@ -6,6 +6,7 @@ import DebugTab from "./components/DebugTab";
 import ModelScoutTab from "./components/ModelScoutTab";
 import PacksTab from "./components/PacksTab";
 import OperationsTab from "./components/OperationsTab";
+import OptionalCapabilitiesTab from "./components/OptionalCapabilitiesTab";
 import PermissionsTab from "./components/PermissionsTab";
 import ProvidersTab from "./components/ProvidersTab";
 import SetupTab from "./components/SetupTab";
@@ -267,6 +268,7 @@ export default function App() {
   const [setupStatus, setSetupStatus] = useState("");
   const [simpleSetupProviderId, setSimpleSetupProviderId] = useState("");
   const [searchStatus, setSearchStatus] = useState(null);
+  const [servicesStatus, setServicesStatus] = useState(null);
   const [showAdvancedDefaultModels, setShowAdvancedDefaultModels] = useState(false);
   const [showUnavailableDefaultModels, setShowUnavailableDefaultModels] = useState(false);
 
@@ -443,6 +445,7 @@ export default function App() {
         packsStatePayload,
         telegramPayload,
         searchStatusPayload,
+        servicesStatusPayload,
         modelCheckPayload,
         modelLifecyclePayload,
         llmHealthPayload,
@@ -463,6 +466,7 @@ export default function App() {
         request("GET", "/packs/state").catch(() => null),
         request("GET", "/telegram/status").catch(() => null),
         request("GET", "/search/status").catch(() => null),
+        request("GET", "/services/status").catch(() => null),
         request("POST", "/llm/models/check", { purposes: MODEL_SCOUT_PURPOSES }).catch(() => null),
         request("GET", "/llm/models/lifecycle").catch(() => null),
         request("GET", "/llm/health").catch(() => null),
@@ -497,6 +501,9 @@ export default function App() {
       }
       if (searchStatusPayload && searchStatusPayload.ok) {
         setSearchStatus(searchStatusPayload);
+      }
+      if (servicesStatusPayload && servicesStatusPayload.ok) {
+        setServicesStatus(servicesStatusPayload);
       }
       const nextScoutStatus = buildCanonicalScoutStatus({
         checkPayload: modelCheckPayload,
@@ -1824,9 +1831,6 @@ export default function App() {
           defaultModel={defaultModel}
           defaultModelOptions={defaultModelOptions}
           defaultProvider={defaultProvider}
-          onCheckWebSearch={() => {
-            void refreshRuntimeState({ includeAdmin: true });
-          }}
           onRefresh={() => {
             void refreshRuntimeState({ includeAdmin: true });
           }}
@@ -1837,7 +1841,6 @@ export default function App() {
           saveAndTestProviderKey={saveAndTestProviderKey}
           saveDefaults={saveDefaults}
           saveTelegramToken={saveTelegramToken}
-          searchStatus={searchStatus}
           selectedProviderId={simpleSetupProviderId}
           setDefaultModel={setDefaultModel}
           setDefaultProvider={setDefaultProvider}
@@ -1879,6 +1882,20 @@ export default function App() {
           setupStatus={setupStatus}
           showAdvancedModels={showAdvancedDefaultModels}
           showUnavailableModels={showUnavailableDefaultModels}
+        />
+      )
+    },
+
+    {
+      id: "optional_capabilities",
+      label: "Optional capabilities",
+      group: "Runtime details",
+      content: (
+        <OptionalCapabilitiesTab
+          onRefresh={() => {
+            void refreshRuntimeState({ includeAdmin: true });
+          }}
+          servicesStatus={servicesStatus}
         />
       )
     },

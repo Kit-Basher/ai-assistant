@@ -148,16 +148,16 @@ class TestSearchSetupChatUX(unittest.TestCase):
 
         self.assertEqual("action_tool", meta.get("route"))
         self.assertIn("safe_web_search", meta.get("used_tools", []))
-        self.assertIn("Web search is disabled", text)
-        self.assertIn("SEARCH_ENABLED=1", text)
-        self.assertIn("SEARXNG_BASE_URL", text)
+        self.assertIn("Web search is optional and not set up", text)
+        self.assertIn("Safe web search uses local SearXNG", text)
+        self.assertRegex(text, r"Docker|Podman")
         self.assertNotIn("search works", text.lower())
 
     def test_endpoint_missing_chat_status_prompt_names_endpoint(self) -> None:
         _body, text = self._chat(self._runtime(search_enabled=True, endpoint=None), "what is your search status?")
 
-        self.assertIn("SearXNG endpoint is missing", text)
-        self.assertIn("SEARXNG_BASE_URL", text)
+        self.assertIn("Safe web search uses local SearXNG", text)
+        self.assertIn("not set up", text)
         self.assertNotIn("configured and available", text)
 
     def test_configured_chat_status_prompt_reminds_untrusted_metadata_only(self) -> None:
@@ -176,7 +176,7 @@ class TestSearchSetupChatUX(unittest.TestCase):
             "search the web for SearXNG setup",
         )
 
-        self.assertIn("SEARXNG_BASE_URL", text)
-        self.assertIn("Next safe setup step", text)
-        self.assertIn("metadata only", text)
+        self.assertIn("Web search is optional and not set up", text)
+        self.assertIn("Safe web search uses local SearXNG", text)
+        self.assertIn("will not open pages", text)
 

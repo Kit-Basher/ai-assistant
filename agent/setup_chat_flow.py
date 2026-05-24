@@ -1226,6 +1226,10 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
         "how do i set up web search",
         "how do i setup web search",
         "how do i configure web search",
+        "set up web search",
+        "setup web search",
+        "enable web search",
+        "check web search",
         "how do i set up searxng",
         "how do i setup searxng",
         "why can't you search the internet",
@@ -1241,7 +1245,7 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
         return True
     return bool(
         re.search(r"\b(web search|search|internet search)\b", working)
-        and any(token in working for token in ("enabled", "configured", "setup", "status", "unavailable", "disabled"))
+        and any(token in working for token in ("enable", "enabled", "configured", "setup", "status", "unavailable", "disabled", "check"))
     )
 
 

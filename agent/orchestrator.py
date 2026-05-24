@@ -2136,6 +2136,40 @@ class Orchestrator:
             },
         )
 
+
+    def _managed_service_status_payload(self) -> dict[str, Any]:
+        adapter = self._chat_runtime_adapter
+        if callable(getattr(adapter, "managed_services_status", None)):
+            try:
+                payload = adapter.managed_services_status()
+                return dict(payload) if isinstance(payload, dict) else {}
+            except Exception:
+                return {}
+        return {}
+
+    def _render_web_search_service_setup_ux(self, status_payload: dict[str, Any], services_payload: dict[str, Any]) -> str:
+        if bool(status_payload.get("available", False)):
+            return render_search_setup_ux(status_payload)
+        services = services_payload.get("services") if isinstance(services_payload.get("services"), list) else []
+        searxng = next((row for row in services if isinstance(row, dict) and row.get("service_id") == "searxng"), {})
+        docker_available = bool(services_payload.get("docker_available") or searxng.get("docker_available"))
+        podman_available = bool(services_payload.get("podman_available") or searxng.get("podman_available"))
+        engine_line = "Docker is available." if docker_available else "Podman is available." if podman_available else "Docker or Podman was not found."
+        next_line = (
+            "I can show a setup plan next; I will not run or pull anything without confirmation."
+            if docker_available or podman_available
+            else "Docker or Podman is needed. I can show terminal guidance, but I will not install system software automatically."
+        )
+        return "\n".join(
+            [
+                "Web search is optional and not set up.",
+                "Safe web search uses local SearXNG.",
+                engine_line,
+                next_line,
+                "Search results are treated as untrusted summaries. I will not open pages, download files, or install packs from search results without review.",
+            ]
+        )
+
     def _safe_web_search_status_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = (user_id, text)
         status_payload: dict[str, Any]
@@ -2166,16 +2200,22 @@ class Orchestrator:
                     else "search_unavailable",
                 }
         ux = build_search_setup_ux(status_payload)
+        services_payload = self._managed_service_status_payload()
+        rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
+        used_tools = ["safe_web_search"]
+        if services_payload:
+            used_tools.append("managed_local_services")
         return self._runtime_truth_response(
-            text=render_search_setup_ux(status_payload),
+            text=rendered_text,
             route="action_tool",
-            used_tools=["safe_web_search"],
+            used_tools=used_tools,
             ok=bool(ux.available),
             error_kind=None if ux.available else str(status_payload.get("reason") or "search_unavailable"),
             payload={
                 "type": "safe_web_search_status",
                 "summary": ux.message,
                 "search_status": status_payload,
+                "services_status": services_payload if services_payload else None,
                 "setup_ux": ux.to_dict(),
             },
         )
