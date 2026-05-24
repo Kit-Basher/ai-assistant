@@ -51,3 +51,21 @@ def test_current_checkpoint_doc_exists_and_names_quality_baseline() -> None:
     lowered = text.lower()
     assert "source trust is not content trust" in lowered
     assert "no arbitrary external code execution" in lowered
+
+
+def test_managed_local_services_and_docker_helper_docs_state_safety_boundaries() -> None:
+    local_services = REPO_ROOT / "docs" / "design" / "MANAGED_LOCAL_SERVICES.md"
+    docker_helper = REPO_ROOT / "docs" / "design" / "DOCKER_HELPER_SKILL_PACK.md"
+    assert local_services.is_file()
+    assert docker_helper.is_file()
+
+    local_text = local_services.read_text(encoding="utf-8").lower()
+    helper_text = docker_helper.read_text(encoding="utf-8").lower()
+    combined = f"{local_text}\n{helper_text}"
+
+    assert "arbitrary docker commands" in combined
+    assert "approved image" in local_text
+    assert "approved services" in helper_text or "approved service" in helper_text
+    assert "not the docker executor" in helper_text
+    assert "external packs cannot trigger docker actions" in local_text or "external packs must not request container execution directly" in local_text
+    assert "dockerfile builds from untrusted" in combined

@@ -51,6 +51,8 @@ The current implemented adapter contract starts with `local_file_import`: user-s
 
 Future adapters must be explicitly implemented, documented, reviewed, tested, and gated before any external or generated pack can use them.
 
+Managed local services are a future native-runtime direction for approved optional dependencies such as SearXNG. Docker helper packs must remain separate from native Docker control: packs may guide or request approved managed-service actions, but only core runtime code may preview, confirm, and run bounded container operations.
+
 ## User Experience Rule
 
 The assistant should say what is true now, what is missing, what is blocked, and what the next safe step is. It should never describe external packs as active abilities until the relevant pack is imported, approved, configured, permissioned, enabled, and usable.
