@@ -474,9 +474,8 @@ class PackAcquisitionCoordinator:
         if source_status == "trusted_catalog_candidate" and isinstance(candidate, dict):
             name = _clean(candidate.get("name")) or "a candidate pack"
             return (
-                f"I don’t have {label} active yet. I found {name} in the approved catalog. "
-                "It is not installed or usable yet. "
-                "Next safe step: preview it. Say yes to preview. This continues one gate only."
+                f"I don’t have that skill active yet. I found a candidate called {name} in the approved catalog. "
+                "It is not installed or usable yet. Next safe step: preview it. Say yes to preview it safely."
             )
         if source_status == "source_trust_required":
             source = _first_source_error(source_errors)
@@ -507,11 +506,11 @@ class PackAcquisitionCoordinator:
             )
             return "\n".join(lines)
         if isinstance(scaffold, dict):
-            title = _clean(scaffold.get("title")) or f"{label} scaffold"
+            title = _clean(scaffold.get("title")) or f"{label} draft skill"
             return (
-                f"I do not have {label} as an active capability yet, and I did not find a trusted catalog pack ready to preview. "
-                f"The next safe step is a preview-only {title}. It will not create files, install packs, approve, enable, grant permissions, fetch network data, or execute code. "
-                "Say yes to preview the scaffold."
+                f"I do not have {label} active yet, and I did not find a trusted catalog skill ready to preview. "
+                f"I can create a draft skill for review called {title}. It will not read files, install anything, connect to Google, or run code. "
+                "Say yes to preview it safely."
             )
         return (
             f"I do not have {label} as a usable external capability yet. "

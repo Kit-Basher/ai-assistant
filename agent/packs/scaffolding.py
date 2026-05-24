@@ -33,8 +33,8 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
 
     title = "YouTube History Search"
     summary = (
-        "A preview-only local skill scaffold for searching a user-provided Google Takeout "
-        "YouTube watch-history export, building a local index, and helping identify likely videos."
+        "A draft local skill for reviewing how a future safe adapter could work with a user-selected "
+        "Google Takeout YouTube watch-history export."
     )
     proposed_skill_doc = "\n\n".join(
         [
@@ -42,7 +42,7 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
             "## Purpose\nSearch a local, user-provided YouTube watch-history export without uploading private history.",
             "## When to Use\nUse when the user wants to find a previously watched YouTube video from their own history.",
             "## Inputs\nA local Google Takeout watch-history file selected by the user in a future create/import phase.",
-            "## Behavior\nParse local Takeout data, build a local searchable index, rank likely videos by title, channel, URL, and timestamps, and present evidence without logging raw history.",
+            "## Behavior\nCurrent safe runtime can validate a selected Takeout file grant and dry-run access only. Future core-owned adapter operations would be required before reading, parsing, indexing, or searching history contents.",
             "## Constraints\nNo OAuth in v1. No browser scraping in v1. No transcript fetching in v1. No uploads of watch history. No video or audio downloads.",
             "## Privacy\nRaw watch-history rows, full URLs, account identifiers, and search terms from the export must be excluded from logs and support context by default.",
             "## Example Prompts\n- Find a YouTube video I watched about a specific topic.\n- Search my local Takeout history for a video from a channel or time period.",
@@ -124,7 +124,7 @@ def build_scaffold_preview(capability: str | None, *, user_goal: str | None = No
         "permissions_requested": permissions_requested,
         "privacy_notes": privacy_notes,
         "blocked_actions": blocked_actions,
-        "next_step": "After preview, a later confirmation can create a text-only review candidate in quarantine; permission grants remain metadata-only in this phase.",
+        "next_step": "After preview, a later confirmation can create a text-only review draft. Permission only records the selected file choice in this phase.",
         "creates_files": False,
         "executes_code": False,
     }
@@ -200,34 +200,25 @@ def create_generated_scaffold_source(preview: dict[str, Any], *, storage_root: s
 
 def render_scaffold_offer(preview: dict[str, Any] | None) -> str:
     if not isinstance(preview, dict):
-        return "That capability is not installed yet. Say yes to preview a safe scaffold."
+        return "That skill is not active yet. Say yes to preview a safe draft skill."
     title = str(preview.get("title") or "skill scaffold").strip()
-    summary = str(preview.get("summary") or "").strip()
     return (
-        f"I do not have private YouTube history access installed yet, so I cannot read or search your history today. "
-        f"I also should not treat browser automation planning as the solution for this, because it would not safely access your private watch history. "
-        f"I can preview a local {title} scaffold instead. {summary} "
-        "Say yes to preview the scaffold."
+        "I do not have private YouTube history access active yet, so I cannot read or search your history today. "
+        "Browser automation would not safely solve private watch-history access. "
+        f"I can preview a safe draft skill called {title}. Say yes to preview it."
     ).strip()
 
 
 def render_scaffold_preview(preview: dict[str, Any] | None) -> str:
     if not isinstance(preview, dict):
-        return "I cannot show that scaffold preview because the preview data is missing. No files were created."
-    title = str(preview.get("title") or "Skill Scaffold").strip()
-    summary = str(preview.get("summary") or "").strip()
+        return "I cannot show that draft skill preview because the preview data is missing. No files were created."
+    title = str(preview.get("title") or "Draft Skill").strip()
     files = preview.get("files_to_create") if isinstance(preview.get("files_to_create"), list) else []
-    privacy = preview.get("privacy_notes") if isinstance(preview.get("privacy_notes"), list) else []
-    blocked = preview.get("blocked_actions") if isinstance(preview.get("blocked_actions"), list) else []
     file_names = ", ".join(str(row.get("path") if isinstance(row, dict) else row).strip() for row in files if str(row.get("path") if isinstance(row, dict) else row).strip())
-    privacy_text = "; ".join(str(item).strip() for item in privacy if str(item).strip())
-    blocked_text = "; ".join(str(item).strip() for item in blocked if str(item).strip())
-    next_step = str(preview.get("next_step") or "").strip()
     return (
-        f"Scaffold preview for {title}: {summary} "
-        f"Would create later: {file_names or 'SKILL.md and metadata.json'}. "
-        f"Privacy: {privacy_text}. "
-        f"Deferred or blocked: {blocked_text}. "
-        f"{next_step} No files were created, no pack was installed, and no code was executed. "
-        "Say yes to create a review-only scaffolded pack candidate."
+        f"I can create a draft skill for review: {title}. "
+        "This will not read your history yet. It will not install, run code, or connect to Google. "
+        "The current safe runtime can only validate a selected file grant or dry-run access; it cannot read, parse, index, or search the file contents yet. "
+        f"If you continue, the review draft would include {file_names or 'SKILL.md and metadata.json'}. "
+        "No files were created yet, and no code was executed. Say yes to create the review draft."
     ).strip()

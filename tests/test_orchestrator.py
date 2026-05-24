@@ -5394,7 +5394,8 @@ class TestOrchestrator(unittest.TestCase):
         preview_payload = approval_preview.data.get("runtime_payload") if isinstance(approval_preview.data.get("runtime_payload"), dict) else {}
         self.assertEqual("review_approve_preview", preview_payload.get("action"))
         self.assertFalse(preview_payload.get("did_approve"))
-        self.assertIn("review approval is not enablement", approval_preview.text.lower())
+        self.assertIn("does not turn the skill on", approval_preview.text.lower())
+        self.assertIn("grant file permission", approval_preview.text.lower())
 
         approved = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
@@ -5405,14 +5406,14 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(approved_payload.get("did_enable"))
         self.assertFalse(approved_payload.get("did_grant_permissions"))
         self.assertFalse(approved_payload.get("did_use_pack"))
-        self.assertIn("still not enabled", approved.text.lower())
+        self.assertIn("still not turned on", approved.text.lower())
 
         enable_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
         enable_preview_payload = enable_preview.data.get("runtime_payload") if isinstance(enable_preview.data.get("runtime_payload"), dict) else {}
         self.assertEqual("enable_preview", enable_preview_payload.get("action"))
         self.assertFalse(enable_preview_payload.get("did_enable"))
-        self.assertIn("enablement is not a permission grant", enable_preview.text.lower())
+        self.assertIn("will not grant file permission", enable_preview.text.lower())
 
         enabled = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
@@ -5426,8 +5427,9 @@ class TestOrchestrator(unittest.TestCase):
 
         permission_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
-        self.assertIn("permission/configuration preview", permission_preview.text.lower())
-        self.assertIn("permission grant does not invoke or use", permission_preview.text.lower())
+        self.assertIn("needs your permission to use one selected file", permission_preview.text.lower())
+        self.assertIn("will not run code", permission_preview.text.lower())
+        self.assertIn("read the file yet", permission_preview.text.lower())
 
     def test_usable_external_pack_previews_then_invokes_managed_adapter_dry_run(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")

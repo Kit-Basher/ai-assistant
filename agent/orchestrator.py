@@ -6733,18 +6733,18 @@ class Orchestrator:
             "capability_gap_preview": "preview the candidate pack",
             "pack_acquisition_source_leads": "review untrusted source leads",
             "pack_source_approval_confirm": "record source approval only",
-            "pack_source_fetch_preview": "preview quarantine fetch",
-            "pack_source_fetch_confirm": "fetch into quarantine for review only",
-            "capability_scaffold_preview": "preview the scaffold",
-            "capability_scaffold_create": "create a review-only scaffold candidate",
-            "managed_adapter_permission_request": "preview managed adapter permission requirements",
-            "managed_adapter_permission_grant": "record a metadata-only adapter grant",
-            "managed_adapter_invocation_confirm": "run the managed adapter operation",
-            "capability_gap_import": "import the pack for review only",
+            "pack_source_fetch_preview": "preview safe fetch for review",
+            "pack_source_fetch_confirm": "fetch into review safely",
+            "capability_scaffold_preview": "preview the draft skill",
+            "capability_scaffold_create": "create a review draft",
+            "managed_adapter_permission_request": "preview selected-file permission",
+            "managed_adapter_permission_grant": "record the selected-file permission only",
+            "managed_adapter_invocation_confirm": "run the safe adapter check",
+            "capability_gap_import": "import the skill for review only",
             "pack_lifecycle_review_approve": "preview review approval",
-            "pack_lifecycle_review_approve_confirm": "record review approval only",
-            "pack_lifecycle_enable": "preview enablement",
-            "pack_lifecycle_enable_confirm": "record enablement only",
+            "pack_lifecycle_review_approve_confirm": "approve this draft for the next setup step",
+            "pack_lifecycle_enable": "preview turning this approved skill on",
+            "pack_lifecycle_enable_confirm": "turn this approved skill on",
         }
         question = origin_labels.get(origin, "")
         pack_name = str(context.get("pack_name") or "").strip()
@@ -7072,8 +7072,8 @@ class Orchestrator:
             )
         if not requested_path:
             message = (
-                f"{pack_name} needs permission to import a local Google Takeout history file. "
-                "Give me the local path if you want to grant local-file access."
+                f"{pack_name} needs permission to use one local Google Takeout history file. "
+                "Give me the local path if you want to preview that file permission. I will not read the file yet."
             )
             return self._runtime_truth_response(
                 text=message,
@@ -7092,8 +7092,7 @@ class Orchestrator:
         self._queue_managed_adapter_permission_followup(user_id, request=request)
         message = (
             f"{render_permission_preview(request)} "
-            "Permission grant does not execute code. Permission grant does not invoke or use the pack. "
-            "Permission grant is metadata/config only."
+            "This will not run code, read the file, or use the skill yet. It only records your selected file for the next review step."
         )
         return self._runtime_truth_response(
             text=message,
@@ -7129,7 +7128,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "followup",
                 "origin_tool": "managed_adapter_permission_request",
-                "question": "Preview the next managed adapter permission/configuration gate?",
+                "question": "Preview allowing this skill to use a selected file?",
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": now_epoch + 600,
@@ -7180,7 +7179,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "followup",
                 "origin_tool": "managed_adapter_permission_grant",
-                "question": "Record this managed adapter grant metadata?",
+                "question": "Record this selected-file permission?",
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": now_epoch + 600,
@@ -7242,13 +7241,10 @@ class Orchestrator:
         }
         extensions = ", ".join(adapter.allowed_extensions) or "none"
         message = (
-            f"Permission/configuration preview for {pack_name}. Pack id: {pack_id}. "
-            f"Lifecycle state: needs_permission. Enabled: true. Requested adapter: {adapter.kind}. "
-            f"Requested scope: {adapter.path_policy}. Allowed file types: {extensions}. "
-            "A local path is required, but no path has been granted yet. "
-            "Permission grant does not execute code. Permission grant does not invoke or use the pack. "
-            "Permission grant is metadata/config only. "
-            "Give me the local file path to preview the exact grant; I will not read or parse the file."
+            f"{pack_name} is turned on, but it still needs your permission to use one selected file. "
+            f"Allowed file types: {extensions}. Scope: {adapter.path_policy}. "
+            "This permission will not run code, use the skill, connect to the network, or read the file yet. "
+            "Give me the local file path to preview the exact permission."
         )
         return self._runtime_truth_response(
             text=message,
@@ -7348,12 +7344,12 @@ class Orchestrator:
             permission_grants=list_adapter_grants(self._pack_store.external_storage_root()),
         ).to_dict()
         if lifecycle.get("usable"):
-            next_text = "It is usable according to lifecycle gates, but I did not invoke or use it. Tell me the specific input or action you want next."
+            next_text = "It is ready for a safe adapter check, but I did not run or use it. Tell me the specific check or action you want next."
         else:
-            next_text = f"Next safe step: {(lifecycle.get('next_step') or {}).get('label') or 'continue the lifecycle gate reported by the pack service'}."
+            next_text = f"Next review step: {(lifecycle.get('next_step') or {}).get('label') or 'continue setup'}."
         message = (
-            f"Permission/configuration recorded for {pack_name}. Current state: {lifecycle.get('state')}. "
-            "This is metadata/config only: no adapter was invoked, no pack was used, no code was executed, and I did not read or parse the file. "
+            f"Selected-file permission recorded for {pack_name}. "
+            "I did not read or parse the file, run code, run an adapter, or use the skill. "
             f"{next_text}"
         )
         return self._runtime_truth_response(
@@ -7494,8 +7490,8 @@ class Orchestrator:
             )
         if operation is None:
             message = (
-                f"{pack_name} is enabled and usable according to lifecycle gates. "
-                "Tell me the specific adapter operation to run: validate grant, describe capability, or dry run. "
+                f"{pack_name} is turned on and ready for a safe adapter check. "
+                "Tell me the specific check to run: validate grant, describe capability, or dry run. "
                 "I will preview it before running anything."
             )
             return self._runtime_truth_response(
@@ -7540,12 +7536,11 @@ class Orchestrator:
         reads = bool(operation_row.reads_content) if operation_row else False
         writes = bool(operation_row.writes_content) if operation_row else False
         message = (
-            f"Managed adapter invocation preview for {pack_name}. Pack id: {pack_id}. Canonical id: {canonical_id}. "
-            f"Adapter: {adapter_kind}. Operation: {operation}. Granted scope/path: {path_text}. "
-            f"Reads file contents: {'yes' if reads else 'no'}. Writes data: {'yes' if writes else 'no'}. "
-            "Network allowed: no. Subprocess/shell allowed: no. External code execution allowed: no. "
-            "This uses a core-owned managed adapter, not pack code. External pack instructions remain untrusted. "
-            "Say yes to run this adapter operation, or no to cancel."
+            f"Safe check preview for {pack_name}: run {operation}. "
+            f"Selected file: {path_text}. Reads file contents: {'yes' if reads else 'no'}. Writes data: {'yes' if writes else 'no'}. "
+            "No network, browser, OAuth, shell, subprocess, or external pack code is allowed. "
+            "This uses the agent's built-in safe adapter, not code from the skill. "
+            "Say yes to run this safe check, or no to cancel."
         )
         self._queue_managed_adapter_invocation_confirm_followup(
             user_id,
@@ -7615,10 +7610,10 @@ class Orchestrator:
         else:
             outcome = "blocked"
         message = (
-            f"Managed adapter operation {outcome}: {invocation.summary} "
+            f"Safe adapter check {outcome}: {invocation.summary} "
             "Read file contents: no. Wrote data: no. External code executed: no. Shell/network/subprocess: no. "
-            "Task completed: no; this operation only validated the safe adapter path. "
-            "Next safe step: ask for a future supported content operation if you need actual file search/read behavior."
+            "Task completed: no; this check only verified safe access rules. "
+            "To actually read or search file contents, a future core-owned adapter operation is still needed."
         )
         return self._runtime_truth_response(
             text=message,
@@ -8313,7 +8308,7 @@ class Orchestrator:
                     "pending_id": pending_id,
                     "kind": "followup",
                     "origin_tool": "capability_scaffold_create",
-                    "question": "Create this review-only scaffolded pack candidate?",
+                "question": "Create this draft skill for review?",
                     "options": ["yes", "no"],
                     "created_at": now_epoch,
                     "expires_at": now_epoch + 600,
@@ -8348,7 +8343,7 @@ class Orchestrator:
         context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
         preview = context.get("scaffold_preview") if isinstance(context.get("scaffold_preview"), dict) else {}
         if not preview:
-            message = "I cannot create that scaffold candidate because the preview data is missing. No pack was installed."
+            message = "I cannot create that draft skill because the preview data is missing. No skill was installed."
             return self._runtime_truth_response(
                 text=message,
                 route="action_tool",
@@ -8390,7 +8385,7 @@ class Orchestrator:
                 normalized_path=normalization_result.normalized_path,
             )
         except Exception as exc:
-            message = "I could not create the scaffold candidate for review. No pack was enabled or executed."
+            message = "I could not create the draft skill for review. No skill was enabled or run."
             return self._runtime_truth_response(
                 text=message,
                 route="action_tool",
@@ -8404,13 +8399,13 @@ class Orchestrator:
                     "error": exc.__class__.__name__,
                 },
             )
-        pack_name = str(pack_row.get("name") or preview.get("title") or "the scaffolded pack").strip()
+        pack_name = str(pack_row.get("name") or preview.get("title") or "the draft skill").strip()
         canonical_pack = pack_row.get("canonical_pack") if isinstance(pack_row.get("canonical_pack"), dict) else {}
         message = (
-            f"I created a review-only scaffolded pack candidate: {pack_name}. "
-            "It is not enabled and cannot access your files yet. "
-            "It has not been approved, has no granted permissions, and no code was executed. "
-            "Next step: review/approve/import path. If you want to use it later, give me a local Google Takeout history file path to preview a managed local-file permission grant."
+            f"I created a draft skill for review: {pack_name}. "
+            "It is not usable yet, not turned on, and cannot access your files. "
+            "No permissions were granted and no code was run. "
+            "Next review step: approve the draft before turning it on."
         )
         managed_adapters = self._external_pack_managed_adapters(pack_row)
         try:
@@ -8500,7 +8495,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "followup",
                 "origin_tool": "pack_lifecycle_review_approve",
-                "question": "Review and approve this external pack candidate?",
+                "question": "Review and approve this draft skill?",
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": now_epoch + 600,
@@ -8533,7 +8528,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "followup",
                 "origin_tool": "pack_lifecycle_review_approve_confirm",
-                "question": "Record review approval for this external pack candidate only?",
+                "question": "Approve this draft for the next setup step?",
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": now_epoch + 600,
@@ -8560,7 +8555,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "followup",
                 "origin_tool": "pack_lifecycle_enable",
-                "question": "Enable this approved external pack?",
+                "question": "Turn this approved skill on?",
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": now_epoch + 600,
@@ -8587,7 +8582,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "followup",
                 "origin_tool": "pack_lifecycle_enable_confirm",
-                "question": "Record enablement for this approved external pack only?",
+                "question": "Turn this approved skill on only?",
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": now_epoch + 600,
@@ -8672,12 +8667,10 @@ class Orchestrator:
         name = str(pack.get("name") or lifecycle.get("pack_name") or "the pack").strip()
         next_label = (lifecycle_after_approval.get("next_step") or {}).get("label") or "enable the pack in a separate step"
         message = (
-            f"Review approval preview for {name}.\n\n"
+            f"Review preview for {name}.\n\n"
             f"{review_state_text}\n\n"
-            "Review approval is not enablement. Review approval is not a permission grant. "
-            "Review approval does not execute code or use the pack. "
-            f"If you confirm, I will record review approval only; the pack will remain disabled and unusable until later gates pass. "
-            f"Next safe step after approval: {next_label}. Say yes to record review approval only, or no to cancel."
+            "Approving this draft only lets it move to the next setup step. It does not turn the skill on, grant file permission, run code, or use the skill. "
+            f"After approval, the next review step is: {next_label}. Say yes to approve the draft, or no to cancel."
         )
         self._queue_pack_review_approve_confirm_followup(user_id, pack=pack, lifecycle=lifecycle)
         return self._runtime_truth_response(
@@ -8733,10 +8726,9 @@ class Orchestrator:
         name = str(pack.get("name") or lifecycle.get("pack_name") or "The pack").strip()
         next_label = (lifecycle.get("next_step") or {}).get("label") or "enable the pack in a separate step"
         message = (
-            f"Review approval recorded for {name}. Current state: {lifecycle.get('state')}. "
-            "The pack is still not enabled. No permissions were granted. I did not execute or use the pack. "
-            "It is not usable until enablement, configuration, and permission gates are complete. "
-            f"Next safe step: {next_label}."
+            f"Draft approved for {name}. It is still not turned on. "
+            "No permissions were granted, no code ran, and I did not use the skill. "
+            f"Next review step: {next_label}."
         )
         return self._runtime_truth_response(
             text=message,
@@ -8799,11 +8791,9 @@ class Orchestrator:
         next_label = (lifecycle_after_enable.get("next_step") or {}).get("label") or "check usable state"
         adapters = self._managed_adapter_summary(pack)
         message = (
-            f"Enablement preview for {name}. Pack id: {pack_id}. Canonical id: {canonical_id}. "
-            f"Review status: {review_status}. Enabled: false. Managed adapters requested: {adapters}. "
-            "Enablement is not a permission grant. Enablement does not execute code. Enablement does not invoke or use the pack. "
-            f"After enablement, lifecycle would be {lifecycle_after_enable.get('state')}; next safe step: {next_label}. "
-            "Say yes to record enablement only, or no to cancel."
+            f"Turn-on preview for {name}. Review status: {review_status}. Currently turned on: false. "
+            f"Requested safe adapters: {adapters}. Turning it on will not grant file permission, run code, or use the skill. "
+            f"After this, the next review step is: {next_label}. Say yes to turn it on, or no to cancel."
         )
         self._queue_pack_enable_confirm_followup(user_id, pack=pack, lifecycle=lifecycle)
         return self._runtime_truth_response(
@@ -8863,12 +8853,12 @@ class Orchestrator:
             )
         next_label = (lifecycle.get("next_step") or {}).get("label") or "check usable state"
         if lifecycle.get("usable"):
-            state_text = "It is usable according to lifecycle gates, but I did not invoke or use it automatically."
+            state_text = "It is ready for a safe adapter check, but I did not run or use it automatically."
         else:
-            state_text = str(lifecycle.get("user_message_summary") or "Later lifecycle gates are still required before use.").strip()
+            state_text = str(lifecycle.get("user_message_summary") or "More setup is still required before use.").strip()
         message = (
-            f"Enablement recorded for {name}. Current state: {lifecycle.get('state')}. "
-            "No permissions were granted. No adapter was invoked. I did not use the pack. "
+            f"{name} is turned on. "
+            "No permissions were granted, no adapter ran, and I did not use the skill. "
             f"{state_text} Next safe step: {next_label}."
         ).strip()
         return self._runtime_truth_response(
