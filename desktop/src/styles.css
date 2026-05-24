@@ -1105,6 +1105,45 @@ button.button-danger:not(:disabled):hover {
 }
 
 
+.setup-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.setup-command {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--panel-soft);
+  padding: 8px 10px;
+}
+
+.setup-command summary,
+.operator-details summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.setup-command code {
+  display: block;
+  margin-top: 8px;
+  overflow-wrap: anywhere;
+  color: var(--text);
+}
+
+.operator-details {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft);
+  padding: 10px;
+}
+
+.operator-details[open] {
+  display: grid;
+  gap: 10px;
+}
+
 .basics-layout {
   display: grid;
   gap: 16px;

@@ -267,6 +267,8 @@ export default function App() {
   const [setupStatus, setSetupStatus] = useState("");
   const [simpleSetupProviderId, setSimpleSetupProviderId] = useState("");
   const [searchStatus, setSearchStatus] = useState(null);
+  const [showAdvancedDefaultModels, setShowAdvancedDefaultModels] = useState(false);
+  const [showUnavailableDefaultModels, setShowUnavailableDefaultModels] = useState(false);
 
   const [providerDrafts, setProviderDrafts] = useState({});
   const [providerSecrets, setProviderSecrets] = useState({});
@@ -681,10 +683,42 @@ export default function App() {
   }, [autopilotToast]);
 
   const providerOptions = useMemo(() => providers.map((item) => item.id), [providers]);
-  const defaultModelOptions = useMemo(
+  const isChatCapableModel = (model) => {
+    const capabilities = Array.isArray(model?.capabilities) ? model.capabilities.map((item) => String(item).toLowerCase()) : [];
+    if (capabilities.length === 0) return true;
+    return capabilities.includes("chat") || capabilities.includes("tools") || capabilities.includes("json");
+  };
+  const isAvailableModel = (model) => model?.available === true && model?.routable !== false && healthStatus(model) !== "down";
+  const baseDefaultModelOptions = useMemo(
     () => models.filter((item) => !defaultProvider || item.provider === defaultProvider),
     [models, defaultProvider]
   );
+  const defaultModelOptions = useMemo(() => {
+    const filtered = baseDefaultModelOptions.filter((model) => {
+      const keepAdvanced = showAdvancedDefaultModels || isChatCapableModel(model) || model.id === defaultModel;
+      const keepAvailability = showUnavailableDefaultModels || isAvailableModel(model) || model.id === defaultModel;
+      return keepAdvanced && keepAvailability;
+    });
+    return filtered.sort((a, b) => {
+      const aAvailable = isAvailableModel(a) ? 0 : 1;
+      const bAvailable = isAvailableModel(b) ? 0 : 1;
+      if (aAvailable !== bAvailable) return aAvailable - bAvailable;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
+  }, [baseDefaultModelOptions, defaultModel, showAdvancedDefaultModels, showUnavailableDefaultModels]);
+  const modelQuickViewRows = useMemo(() => {
+    const rows = models.filter((model) => {
+      const keepAdvanced = showAdvancedDefaultModels || isChatCapableModel(model);
+      const keepAvailability = showUnavailableDefaultModels || isAvailableModel(model);
+      return keepAdvanced && keepAvailability;
+    });
+    return rows.sort((a, b) => {
+      const aAvailable = isAvailableModel(a) ? 0 : 1;
+      const bAvailable = isAvailableModel(b) ? 0 : 1;
+      if (aAvailable !== bAvailable) return aAvailable - bAvailable;
+      return String(a.id || "").localeCompare(String(b.id || ""));
+    });
+  }, [models, showAdvancedDefaultModels, showUnavailableDefaultModels]);
   const providerRecommendations = useMemo(() => {
     const notes = [];
     providers.forEach((provider) => {
@@ -1790,6 +1824,9 @@ export default function App() {
           defaultModel={defaultModel}
           defaultModelOptions={defaultModelOptions}
           defaultProvider={defaultProvider}
+          onCheckWebSearch={() => {
+            void refreshRuntimeState({ includeAdmin: true });
+          }}
           onRefresh={() => {
             void refreshRuntimeState({ includeAdmin: true });
           }}
@@ -1826,7 +1863,7 @@ export default function App() {
           defaultModel={defaultModel}
           defaultModelOptions={defaultModelOptions}
           defaultProvider={defaultProvider}
-          models={models}
+          models={modelQuickViewRows}
           providerOptions={providerOptions}
           providerRecommendations={providerRecommendations}
           refreshModels={refreshModels}
@@ -1834,10 +1871,14 @@ export default function App() {
           routingModes={ROUTING_MODES}
           saveDefaults={saveDefaults}
           setAllowRemoteFallback={setAllowRemoteFallback}
+          setShowAdvancedModels={setShowAdvancedDefaultModels}
+          setShowUnavailableModels={setShowUnavailableDefaultModels}
           setDefaultModel={setDefaultModel}
           setDefaultProvider={setDefaultProvider}
           setRoutingMode={setRoutingMode}
           setupStatus={setupStatus}
+          showAdvancedModels={showAdvancedDefaultModels}
+          showUnavailableModels={showUnavailableDefaultModels}
         />
       )
     },

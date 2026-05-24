@@ -1,3 +1,4 @@
+import { useState } from "react";
 import DetailRow from "./DetailRow";
 
 export default function PermissionsTab({
@@ -10,13 +11,21 @@ export default function PermissionsTab({
   updatePermissionAction,
   updatePermissionConstraint
 }) {
+  const [showRawIds, setShowRawIds] = useState(false);
+
   return (
     <section className="grid two">
       <div className="card">
-        <h2>ModelOps Permissions</h2>
+        <h2>Permissions</h2>
         <p className="help-text">
-          Choose which automated actions may make changes. Raw ids are still shown for audit/debug work.
+          Most users do not need this. The assistant will ask before making changes.
         </p>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={showRawIds} onChange={(event) => setShowRawIds(event.target.checked)} />
+          Show raw IDs
+        </label>
+        <details className="operator-details">
+          <summary>Developer/operator permissions</summary>
         <label>
           Confirmation mode
           <select
@@ -39,7 +48,7 @@ export default function PermissionsTab({
               <span className="permission-option-copy">
                 <span className="permission-option-title">{action.label}</span>
                 <span className="permission-option-description">{action.description}</span>
-                <span className="permission-option-id">{action.id}</span>
+                {showRawIds ? <span className="permission-option-id">{action.id}</span> : null}
               </span>
             </label>
           ))}
@@ -62,7 +71,7 @@ export default function PermissionsTab({
             checked={permissionsConfig?.constraints?.allow_install_ollama === true}
             onChange={(event) => updatePermissionConstraint("allow_install_ollama", event.target.checked)}
           />
-          Allow installing Ollama automatically
+          Allow Ollama install only after confirmation
         </label>
 
         <label className="checkbox-row">
@@ -111,7 +120,8 @@ export default function PermissionsTab({
             Save Permissions
           </button>
         </div>
-        <p className="status-line">{permissionsStatus || "Default is deny for all ModelOps actions."}</p>
+        <p className="status-line">{permissionsStatus || "Default is deny for all operator actions."}</p>
+        </details>
       </div>
 
       <div className="card">

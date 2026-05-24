@@ -21,38 +21,17 @@ function simpleProviderStatus(provider, statusText) {
 }
 
 function searchSummary(searchStatus) {
-  if (!searchStatus) {
-    return {
-      label: "Not checked yet",
-      tone: "attention",
-      detail: "Open setup or refresh to check web search."
-    };
-  }
-  if (searchStatus.available) {
+  if (searchStatus?.available) {
     return {
       label: "Web search is ready",
       tone: "ok",
-      detail: "SearXNG is configured. Results are metadata only and untrusted."
-    };
-  }
-  if (searchStatus.reason === "endpoint_missing") {
-    return {
-      label: "SearXNG URL missing",
-      tone: "attention",
-      detail: "Set SEARXNG_BASE_URL to your SearXNG instance."
-    };
-  }
-  if (searchStatus.reason === "unsupported_provider") {
-    return {
-      label: "Provider unsupported",
-      tone: "down",
-      detail: "This runtime supports SEARCH_PROVIDER=searxng."
+      detail: "Safe web search uses SearXNG."
     };
   }
   return {
-    label: "Web search is off",
+    label: "Web search is not set up",
     tone: "attention",
-    detail: "Set SEARCH_ENABLED=1 and SEARXNG_BASE_URL to turn it on."
+    detail: "Safe web search uses SearXNG. Set SEARCH_ENABLED=1 and SEARXNG_BASE_URL, then check again."
   };
 }
 
@@ -74,6 +53,7 @@ export default function BasicsTab({
   defaultModel,
   defaultModelOptions,
   defaultProvider,
+  onCheckWebSearch,
   onRefresh,
   providerOptions,
   providerSecrets,
@@ -125,6 +105,7 @@ export default function BasicsTab({
               {defaultProvider && defaultModel ? "Selected" : "Choose model"}
             </StatusBadge>
           </div>
+          <p className="help-text">Current: {defaultProvider && defaultModel ? `${defaultProvider} / ${defaultModel}` : "not selected"}</p>
           <p className="help-text">Choose what the assistant should use for normal chat.</p>
           <label>
             Provider
@@ -229,11 +210,15 @@ export default function BasicsTab({
           </div>
           <p className="help-text">{search.detail}</p>
           <div className="setup-facts">
-            <span>SEARCH_ENABLED={searchStatus?.enabled ? "1" : "0"}</span>
-            <span>SEARCH_PROVIDER={searchStatus?.provider || "searxng"}</span>
-            <span>SearXNG URL: {searchStatus?.endpoint_configured ? "configured" : "missing"}</span>
+            <span>SearXNG: {searchStatus?.endpoint_configured ? "configured" : "needs URL"}</span>
+            <span>{searchStatus?.enabled ? "Enabled" : "Disabled"}</span>
           </div>
-          <p className="help-text">Search does not fetch pages, download files, or import packs.</p>
+          <details className="setup-command">
+            <summary>Show setup command</summary>
+            <code>SEARCH_ENABLED=1 SEARCH_PROVIDER=searxng SEARXNG_BASE_URL=http://127.0.0.1:8080</code>
+          </details>
+          <button onClick={onCheckWebSearch} type="button">Check web search</button>
+          <p className="help-text">Search results are treated as untrusted summaries. The assistant will not open pages, download files, or install packs from search results without review.</p>
         </article>
 
         <article className="setup-card">

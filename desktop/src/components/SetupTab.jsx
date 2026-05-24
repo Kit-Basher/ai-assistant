@@ -16,14 +16,19 @@ export default function SetupTab({
   setDefaultModel,
   setDefaultProvider,
   setRoutingMode,
-  setupStatus
+  setShowAdvancedModels,
+  setShowUnavailableModels,
+  setupStatus,
+  showAdvancedModels,
+  showUnavailableModels
 }) {
   return (
     <section className="grid two">
       <div className="card">
-        <h2>Routing Defaults</h2>
+        <h2>Chat model</h2>
+        <p className="help-text">Choose the provider and chat model used by default. Embedding-only and unavailable models are hidden unless you show them.</p>
         <label>
-          Routing mode
+          Chat routing mode
           <select value={routingMode} onChange={(event) => setRoutingMode(event.target.value)}>
             {routingModes.map((mode) => (
               <option key={mode} value={mode}>
@@ -34,7 +39,7 @@ export default function SetupTab({
         </label>
 
         <label>
-          Default provider
+          AI provider
           <select
             value={defaultProvider}
             onChange={(event) => {
@@ -52,7 +57,7 @@ export default function SetupTab({
         </label>
 
         <label>
-          Default model
+          Chat model
           <select value={defaultModel} onChange={(event) => setDefaultModel(event.target.value)}>
             <option value="">(none)</option>
             {defaultModelOptions.map((model) => (
@@ -69,20 +74,39 @@ export default function SetupTab({
             checked={allowRemoteFallback}
             onChange={(event) => setAllowRemoteFallback(event.target.checked)}
           />
-          Allow remote fallback when local candidates fail
+          Allow remote fallback if local chat models fail
         </label>
+
+        <div className="setup-filter-row">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={showAdvancedModels}
+              onChange={(event) => setShowAdvancedModels(event.target.checked)}
+            />
+            Show advanced models
+          </label>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={showUnavailableModels}
+              onChange={(event) => setShowUnavailableModels(event.target.checked)}
+            />
+            Show unavailable
+          </label>
+        </div>
 
         <div className="row-actions">
           <button className="button-primary" onClick={saveDefaults}>
-            Save Defaults
+            Save chat model
           </button>
-          <button onClick={refreshModels}>Refresh Models</button>
+          <button onClick={refreshModels}>Refresh models</button>
         </div>
         <p className="status-line">{setupStatus || "No pending changes."}</p>
       </div>
 
       <div className="card">
-        <h2>Model Quick View</h2>
+        <h2>Available models</h2>
         {providerRecommendations.length > 0 ? (
           <div className="recommendations">
             {providerRecommendations.map((note) => (
@@ -93,7 +117,7 @@ export default function SetupTab({
           </div>
         ) : null}
         <div className="model-list">
-          {models.length === 0 ? <p className="empty">No models loaded.</p> : null}
+          {models.length === 0 ? <p className="empty">No chat-ready models match the current filters.</p> : null}
           {models.map((model) => (
             <ModelStatusRow key={model.id} model={model} showLastError showProvider />
           ))}
