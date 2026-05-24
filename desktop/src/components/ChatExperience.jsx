@@ -171,8 +171,10 @@ export default function ChatExperience({
   onResetConversation,
   onSendMessage,
   onStarterPrompt,
+  onToggleTheme,
   status,
-  starterPrompts
+  starterPrompts,
+  theme
 }) {
   const transcriptEndRef = useRef(null);
 
@@ -189,6 +191,15 @@ export default function ChatExperience({
         </div>
         <div className="product-topbar-actions">
           <span className={`status-pill status-pill-${status.tone}`}>{status.label}</span>
+          <button
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            className="theme-toggle"
+            onClick={onToggleTheme}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+            type="button"
+          >
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
           <button className="admin-entry" onClick={onOpenAdmin} type="button">
             Advanced
           </button>

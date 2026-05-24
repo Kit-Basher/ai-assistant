@@ -4,9 +4,11 @@ export default function AdminPanel({
   onClose,
   onRefresh,
   onSelectSection,
+  onToggleTheme,
   open,
   sections,
-  status
+  status,
+  theme
 }) {
   if (!open) return null;
 
@@ -27,6 +29,15 @@ export default function AdminPanel({
           </div>
           <div className="admin-header-actions">
             <span className={`status-pill status-pill-${status.tone}`}>{status.label}</span>
+            <button
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              className="theme-toggle"
+              onClick={onToggleTheme}
+              title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+              type="button"
+            >
+              {theme === "dark" ? "Light" : "Dark"}
+            </button>
             <button onClick={onRefresh} type="button">
               Refresh
             </button>

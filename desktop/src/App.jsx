@@ -29,6 +29,7 @@ import {
 const ROUTING_MODES = ["auto", "prefer_cheap", "prefer_best", "prefer_local_lowest_cost_capable"];
 const CHAT_SESSION_STORAGE_KEY = "personal-agent-chat-session-id";
 const CHAT_THREAD_STORAGE_KEY = "personal-agent-chat-thread-id";
+const THEME_STORAGE_KEY = "personal-agent-ui-theme";
 const PROVIDER_PRESETS = {
   custom: {
     label: "Custom OpenAI-Compatible",
@@ -155,6 +156,24 @@ const saveStoredChatId = (storageKey, value) => {
   }
 };
 
+const getInitialTheme = () => {
+  if (typeof window === "undefined") {
+    return "light";
+  }
+  try {
+    const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (stored === "light" || stored === "dark") {
+      return stored;
+    }
+  } catch (_error) {
+    // Ignore storage failures and fall back to system preference.
+  }
+  if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) {
+    return "dark";
+  }
+  return "light";
+};
+
 const MODEL_SCOUT_PURPOSES = ["chat", "code", "organize", "story"];
 const MODEL_SCOUT_PURPOSE_LABELS = {
   chat: "chat",
@@ -222,6 +241,7 @@ const buildCanonicalScoutSuggestions = ({ checkPayload, providerRows }) => {
 };
 
 export default function App() {
+  const [theme, setTheme] = useState(getInitialTheme);
   const [adminOpen, setAdminOpen] = useState(false);
   const [adminTab, setAdminTab] = useState("setup");
   const [adminLoaded, setAdminLoaded] = useState(false);
@@ -260,6 +280,24 @@ export default function App() {
     model: "",
     capabilities: "chat,json,tools"
   });
+
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+    }
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+      } catch (_error) {
+        // Ignore storage write failures; the selected theme still applies in memory.
+      }
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((current) => (current === "dark" ? "light" : "dark"));
+  };
   const [telegramToken, setTelegramToken] = useState("");
   const [telegramConfigured, setTelegramConfigured] = useState(false);
   const [telegramStatus, setTelegramStatus] = useState("");
@@ -1893,8 +1931,10 @@ export default function App() {
         onResetConversation={resetConversation}
         onSendMessage={sendMessage}
         onStarterPrompt={sendMessage}
+        onToggleTheme={toggleTheme}
         starterPrompts={starterPrompts}
         status={chatStatus}
+        theme={theme}
       />
       <AdminPanel
         activeSection={adminTab}
@@ -1904,9 +1944,11 @@ export default function App() {
           void refreshRuntimeState({ includeAdmin: true });
         }}
         onSelectSection={setAdminTab}
+        onToggleTheme={toggleTheme}
         open={adminOpen}
         sections={adminSections}
         status={chatStatus}
+        theme={theme}
       />
     </>
   );
