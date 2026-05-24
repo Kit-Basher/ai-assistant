@@ -49,6 +49,7 @@ from agent.packs.store import PackStore
 from agent.packs.source_approval import SourceApprovalController
 from agent.packs.source_fetch_preview import SourceFetchController
 from agent.packs.source_leads import SourceLead
+from agent.services.managed_local_services import ManagedLocalServiceExecutor
 
 
 class SmokeFailure(AssertionError):
@@ -929,6 +930,113 @@ def main() -> int:
                 "lifecycle_adapter_gates",
                 "local_file_dry_run_does_not_read_contents",
                 local_file_dry_run_does_not_read_contents,
+            )
+
+
+            def managed_service_setup_rejects_tampered_plan() -> None:
+                calls: list[dict[str, Any]] = []
+
+                def runner(argv: list[str], **kwargs: Any):
+                    calls.append({"argv": argv, **kwargs})
+                    raise SmokeFailure("runner should not be called for tampered managed-service plan")
+
+                executor = ManagedLocalServiceExecutor(
+                    managed_root=root,
+                    command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+                    runner=runner,
+                    health_checker=lambda _url: True,
+                )
+                result = executor.execute_from_pending(
+                    {
+                        "service_id": "searxng",
+                        "selected_engine": "docker",
+                        "action": "preview_only",
+                        "approved_image": "evil/image:latest",
+                        "approved_container_name": "personal-agent-searxng",
+                        "loopback_bind": "127.0.0.1:8080:8080",
+                        "approved_volume_path": "memory/local_services/searxng",
+                    }
+                )
+                _assert(not result.ok, "tampered SearXNG plan was accepted")
+                _assert(result.blocked_reason == "managed_service_plan_tampered_approved_image", f"unexpected reason: {result.blocked_reason}")
+                _assert(not calls, "tampered plan reached subprocess runner")
+
+            smoke.check(
+                "managed_local_services",
+                "managed_service_setup_rejects_tampered_plan",
+                managed_service_setup_rejects_tampered_plan,
+            )
+
+            def managed_service_setup_uses_approved_loopback_only() -> None:
+                calls: list[dict[str, Any]] = []
+
+                def runner(argv: list[str], **kwargs: Any):
+                    calls.append({"argv": list(argv), **kwargs})
+                    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                executor = ManagedLocalServiceExecutor(
+                    managed_root=root,
+                    command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+                    runner=runner,
+                    health_checker=lambda url: url == "http://127.0.0.1:8080",
+                )
+                result = executor.execute_from_pending(
+                    {
+                        "service_id": "searxng",
+                        "selected_engine": "docker",
+                        "action": "preview_only",
+                        "approved_image": "searxng/searxng:latest",
+                        "approved_container_name": "personal-agent-searxng",
+                        "loopback_bind": "127.0.0.1:8080:8080",
+                        "approved_volume_path": "memory/local_services/searxng",
+                    }
+                )
+                _assert(result.ok and result.did_pull and result.did_run, f"approved setup did not complete in fake runner: {result}")
+                run_calls = [call for call in calls if len(call["argv"]) > 1 and call["argv"][1] == "run"]
+                _assert(len(run_calls) == 1, f"expected one run call: {calls}")
+                argv = run_calls[0]["argv"]
+                _assert("127.0.0.1:8080:8080" in argv, f"loopback bind missing: {argv}")
+                _assert("--privileged" not in argv and "--network" not in argv, f"unsafe docker flags present: {argv}")
+                _assert(run_calls[0].get("shell") is False, "managed service runner did not use shell=False")
+
+            smoke.check(
+                "managed_local_services",
+                "managed_service_setup_uses_approved_loopback_only",
+                managed_service_setup_uses_approved_loopback_only,
+            )
+
+            def managed_service_setup_no_shell_or_pack_trigger() -> None:
+                calls: list[dict[str, Any]] = []
+
+                def runner(argv: list[str], **kwargs: Any):
+                    calls.append({"argv": list(argv), **kwargs})
+                    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                executor = ManagedLocalServiceExecutor(
+                    managed_root=root,
+                    command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+                    runner=runner,
+                    health_checker=lambda _url: True,
+                )
+                result = executor.execute_from_pending(
+                    {
+                        "service_id": "searxng",
+                        "selected_engine": "docker",
+                        "action": "external_pack_triggered_container_action",
+                        "approved_image": "searxng/searxng:latest",
+                        "approved_container_name": "personal-agent-searxng",
+                        "loopback_bind": "127.0.0.1:8080:8080",
+                        "approved_volume_path": "memory/local_services/searxng",
+                    }
+                )
+                _assert(not result.ok, "external-pack style action was accepted")
+                _assert(result.blocked_reason == "managed_service_action_invalid", f"unexpected reason: {result.blocked_reason}")
+                _assert(not calls, "invalid action reached subprocess runner")
+
+            smoke.check(
+                "managed_local_services",
+                "managed_service_setup_no_shell_or_pack_trigger",
+                managed_service_setup_no_shell_or_pack_trigger,
             )
 
             def support_sanitizer_redacts() -> None:

@@ -2581,26 +2581,82 @@ class Orchestrator:
             params = action.get("params") if isinstance(action.get("params"), dict) else {}
             service_id = str(params.get("service_id") or "searxng").strip() or "searxng"
             engine = str(params.get("selected_engine") or "docker").strip() or "docker"
-            return self._runtime_truth_response(
-                text=(
-                    "Setup execution is not implemented yet. "
-                    f"I did not run {engine}, pull an image, start a container, install packages, or change configuration. "
-                    "Next implementation step will run this approved setup only after a separate confirmed execution path exists."
-                ),
-                route="action_tool",
-                used_tools=["managed_local_service_setup_preview", "safe_web_search"],
-                ok=False,
-                error_kind="managed_service_execution_not_implemented",
-                payload={
-                    "type": "managed_local_service_setup_not_implemented",
+            adapter = self._chat_runtime_adapter
+            if not callable(getattr(adapter, "execute_managed_service_setup", None)):
+                return self._runtime_truth_response(
+                    text=(
+                        "SearXNG setup could not run because the managed service executor is unavailable. "
+                        "I did not pull an image, start a container, install packages, or change configuration."
+                    ),
+                    route="action_tool",
+                    used_tools=["managed_local_service_setup_preview", "safe_web_search"],
+                    ok=False,
+                    error_kind="managed_service_executor_unavailable",
+                    payload={
+                        "type": "managed_local_service_setup_result",
+                        "service_id": service_id,
+                        "selected_engine": engine,
+                        "mutated": False,
+                        "did_pull": False,
+                        "did_run": False,
+                        "did_install": False,
+                        "did_configure": False,
+                    },
+                )
+            try:
+                result = adapter.execute_managed_service_setup(params)
+            except Exception as exc:  # noqa: BLE001 - user-facing safe failure.
+                result = {
+                    "ok": False,
                     "service_id": service_id,
                     "selected_engine": engine,
-                    "mutated": False,
+                    "blocked_reason": "managed_service_execution_error",
+                    "error": str(exc),
                     "did_pull": False,
                     "did_run": False,
                     "did_install": False,
                     "did_configure": False,
-                },
+                    "reachable": False,
+                }
+            ok = bool(result.get("ok"))
+            did_pull = bool(result.get("did_pull"))
+            did_run = bool(result.get("did_run"))
+            reachable = bool(result.get("reachable"))
+            blocked_reason = str(result.get("blocked_reason") or "").strip()
+            lines = [
+                "SearXNG setup finished." if ok else "SearXNG setup did not complete.",
+                f"Engine: {engine}",
+                f"Pulled approved image: {'yes' if did_pull else 'no'}.",
+                f"Started approved container: {'yes' if did_run else 'no'}.",
+                f"Reachable at http://127.0.0.1:8080: {'yes' if reachable else 'no'}.",
+                "I used only the approved SearXNG Docker/Podman plan; no arbitrary Docker commands ran.",
+                "No external pack code ran.",
+                "No host networking, privileged mode, random mounts, system package install, or config change was used.",
+            ]
+            if blocked_reason:
+                lines.append(f"Blocked or failed reason: {blocked_reason}.")
+            if ok:
+                lines.append("Next step: if web search is not already configured, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL=http://127.0.0.1:8080, then check search again.")
+            else:
+                lines.append("Next step: inspect the Docker/Podman error or container state, then ask me to check web search again.")
+            payload = dict(result) if isinstance(result, dict) else {}
+            payload.update(
+                {
+                    "type": "managed_local_service_setup_result",
+                    "service_id": service_id,
+                    "selected_engine": engine,
+                    "mutated": bool(did_pull or did_run),
+                    "did_install": False,
+                    "did_configure": False,
+                }
+            )
+            return self._runtime_truth_response(
+                text="\n".join(lines),
+                route="action_tool",
+                used_tools=["managed_local_service_setup", "safe_web_search"],
+                ok=ok,
+                error_kind=None if ok else (blocked_reason or "managed_service_setup_failed"),
+                payload=payload,
             )
         if operation == "shell_install_package":
             return self._shell_install_package_response(

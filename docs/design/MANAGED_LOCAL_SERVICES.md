@@ -1,6 +1,6 @@
 # Managed Local Services
 
-Managed local services are a future native runtime lane for optional dependencies that make Personal Agent more useful without turning the assistant into a general system administrator.
+Managed local services are a native runtime lane for optional dependencies that make Personal Agent more useful without turning the assistant into a general system administrator.
 
 ## Purpose
 
@@ -25,7 +25,7 @@ Allowed native service actions are limited to:
 - stop, restart, or remove Personal-Agent-managed service containers
 - update Personal Agent config or env only after confirmation, if an existing config flow safely supports it
 
-For SearXNG, an implementation should use a fixed Personal-Agent-managed container name, loopback-only bind, approved image reference, and bounded persistent volume location.
+For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, approved image reference, and bounded persistent volume location. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
 
 ## Blocked Actions
 
@@ -54,10 +54,11 @@ The intended user flow is one explicit step at a time:
 3. assistant detects Docker or Podman availability
 4. assistant shows a setup preview
 5. user explicitly confirms
-6. runtime runs the bounded approved command
-7. runtime health checks the local endpoint
-8. runtime saves or checks config if supported and confirmed
-9. assistant reports the result and the next safe step
+6. runtime revalidates the approved plan
+7. runtime runs only the bounded approved pull/run commands with `shell=False`
+8. runtime health checks the local endpoint
+9. runtime saves or checks config only if supported and separately confirmed
+10. assistant reports the result and the next safe step
 
 No step should silently perform the next one. Confirmation for a setup preview does not grant future arbitrary Docker control.
 
@@ -82,9 +83,25 @@ External or generated packs must not request container execution directly. If a 
 
 Managed local services complement managed adapters. Both are core-owned safety boundaries. Neither allows arbitrary external code execution.
 
-## Tests To Add Before Implementation
+## Implemented SearXNG Setup Contract
 
-Before implementing service actions, add tests that prove:
+The first mutating service action is confirm-gated SearXNG setup. It may only:
+
+- use detected `docker` or `podman`
+- pull `searxng/searxng:latest`
+- run container `personal-agent-searxng`
+- bind `127.0.0.1:8080:8080`
+- mount only the Personal-Agent-managed SearXNG volume
+- run detached
+- health check `http://127.0.0.1:8080`
+
+It must not update search config automatically. If SearXNG starts successfully but search is not configured, the assistant should tell the user to set `SEARCH_ENABLED=1` and `SEARXNG_BASE_URL=http://127.0.0.1:8080` or use a future separately confirmed config path.
+
+If the approved container name already exists, the conservative default is to stop and require manual inspection unless a future metadata inspection path proves safe reuse.
+
+## Required Tests
+
+Service action tests must prove:
 
 - unknown services are rejected
 - unknown images are rejected

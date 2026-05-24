@@ -100,7 +100,7 @@ from agent.public_chat import (
 from agent.setup_chat_flow import classify_runtime_chat_route
 from agent.safe_mode_ux import build_safe_mode_paused_message
 from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
-from agent.services.managed_local_services import ManagedLocalServiceDetector
+from agent.services.managed_local_services import ManagedLocalServiceDetector, ManagedLocalServiceExecutor
 from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
 from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
@@ -604,6 +604,7 @@ class AgentRuntime:
         self._runtime_events = RuntimeEventRecorder(runtime_id=self.runtime_id, max_events=100)
         self._safe_web_search_client: SafeWebSearchClient | None = None
         self._managed_local_services: ManagedLocalServiceDetector | None = None
+        self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -10694,6 +10695,11 @@ class AgentRuntime:
                 searxng_url_provider=lambda: self.config.searxng_base_url,
             )
         return self._managed_local_services.status()
+
+    def execute_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
+        if self._managed_local_service_executor is None:
+            self._managed_local_service_executor = ManagedLocalServiceExecutor(managed_root=Path(self.config.db_path).expanduser().resolve().parent)
+        return self._managed_local_service_executor.execute_from_pending(params).to_dict()
 
     def search_query(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         query = str((payload or {}).get("query") or "").strip()

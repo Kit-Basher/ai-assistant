@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 import shutil
+import subprocess
 import time
 from typing import Any, Callable
 import urllib.error
@@ -70,6 +72,282 @@ SEARXNG_SERVICE = ManagedServiceSpec(
 SERVICE_REGISTRY: dict[str, ManagedServiceSpec] = {
     SEARXNG_SERVICE.service_id: SEARXNG_SERVICE,
 }
+
+
+@dataclass(frozen=True)
+class ManagedLocalServiceSetupPlan:
+    service_id: str
+    engine: str
+    image: str
+    container_name: str
+    loopback_bind: str
+    host_volume_path: str
+    container_volume_path: str
+    health_url: str
+
+    def pull_argv(self) -> list[str]:
+        return [self.engine, "pull", self.image]
+
+    def existing_container_argv(self) -> list[str]:
+        return [
+            self.engine,
+            "ps",
+            "-a",
+            "--filter",
+            f"name=^/{self.container_name}$",
+            "--format",
+            "{{.Names}}",
+        ]
+
+    def run_argv(self) -> list[str]:
+        return [
+            self.engine,
+            "run",
+            "-d",
+            "--name",
+            self.container_name,
+            "-p",
+            self.loopback_bind,
+            "-v",
+            f"{self.host_volume_path}:{self.container_volume_path}",
+            self.image,
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "service_id": self.service_id,
+            "engine": self.engine,
+            "image": self.image,
+            "container_name": self.container_name,
+            "loopback_bind": self.loopback_bind,
+            "host_volume_path": self.host_volume_path,
+            "container_volume_path": self.container_volume_path,
+            "health_url": self.health_url,
+            "pull_argv": self.pull_argv(),
+            "run_argv": self.run_argv(),
+            "shell": False,
+        }
+
+
+@dataclass(frozen=True)
+class ManagedLocalServiceExecutionResult:
+    ok: bool
+    service_id: str
+    selected_engine: str
+    did_pull: bool = False
+    did_run: bool = False
+    did_install: bool = False
+    did_configure: bool = False
+    reachable: bool = False
+    blocked_reason: str | None = None
+    error: str | None = None
+    plan: ManagedLocalServiceSetupPlan | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "service_id": self.service_id,
+            "selected_engine": self.selected_engine,
+            "did_pull": self.did_pull,
+            "did_run": self.did_run,
+            "did_install": self.did_install,
+            "did_configure": self.did_configure,
+            "reachable": self.reachable,
+            "blocked_reason": self.blocked_reason,
+            "error": self.error,
+            "plan": self.plan.to_dict() if self.plan else None,
+            "shell": False,
+            "external_pack_triggered": False,
+        }
+
+
+class ManagedLocalServiceExecutor:
+    """Confirm-gated executor for approved core-owned local services only."""
+
+    def __init__(
+        self,
+        *,
+        managed_root: str | Path,
+        command_finder: Callable[[str], str | None] | None = None,
+        runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+        health_checker: Callable[[str], bool] | None = None,
+        timeout_seconds: float = 60.0,
+    ) -> None:
+        self._managed_root = Path(managed_root).expanduser().resolve()
+        self._command_finder = command_finder or shutil.which
+        self._runner = runner or subprocess.run
+        self._health_checker = health_checker
+        self._timeout_seconds = max(1.0, float(timeout_seconds or 60.0))
+
+    def build_searxng_setup_plan(self, *, selected_engine: str) -> ManagedLocalServiceSetupPlan:
+        engine = str(selected_engine or "").strip().lower()
+        spec = SERVICE_REGISTRY["searxng"]
+        volume = (self._managed_root / spec.approved_volume_path).resolve()
+        return ManagedLocalServiceSetupPlan(
+            service_id=spec.service_id,
+            engine=engine,
+            image=spec.approved_image,
+            container_name=spec.approved_container_name,
+            loopback_bind=spec.approved_loopback_bind,
+            host_volume_path=str(volume),
+            container_volume_path="/etc/searxng",
+            health_url=spec.default_local_url,
+        )
+
+    def build_plan_from_pending(self, params: dict[str, Any]) -> tuple[ManagedLocalServiceSetupPlan | None, str | None]:
+        service_id = str(params.get("service_id") or "").strip().lower()
+        if service_id != "searxng":
+            return None, "managed_service_unknown"
+        if str(params.get("action") or "").strip().lower() != "preview_only":
+            return None, "managed_service_action_invalid"
+        selected_engine = str(params.get("selected_engine") or "").strip().lower()
+        plan = self.build_searxng_setup_plan(selected_engine=selected_engine)
+        spec = SERVICE_REGISTRY["searxng"]
+        checks = {
+            "approved_image": spec.approved_image,
+            "approved_container_name": spec.approved_container_name,
+            "loopback_bind": spec.approved_loopback_bind,
+            "approved_volume_path": spec.approved_volume_path,
+        }
+        for key, expected in checks.items():
+            if str(params.get(key) or "").strip() != expected:
+                return None, f"managed_service_plan_tampered_{key}"
+        reason = self.validate_plan(plan)
+        if reason:
+            return None, reason
+        return plan, None
+
+    def validate_plan(self, plan: ManagedLocalServiceSetupPlan) -> str | None:
+        if plan.service_id != "searxng":
+            return "managed_service_unknown"
+        if plan.engine not in {"docker", "podman"}:
+            return "managed_service_engine_invalid"
+        if not self._command_finder(plan.engine):
+            return "managed_service_engine_missing"
+        spec = SERVICE_REGISTRY["searxng"]
+        if plan.image != spec.approved_image:
+            return "managed_service_image_not_approved"
+        if plan.container_name != spec.approved_container_name:
+            return "managed_service_container_not_approved"
+        if plan.loopback_bind != spec.approved_loopback_bind:
+            return "managed_service_bind_not_approved"
+        try:
+            host, host_port, container_port = plan.loopback_bind.split(":", 2)
+        except ValueError:
+            return "managed_service_bind_invalid"
+        if host != "127.0.0.1" or host_port != "8080" or container_port != "8080":
+            return "managed_service_bind_not_loopback"
+        host_volume = Path(plan.host_volume_path).expanduser().resolve()
+        approved_root = (self._managed_root / spec.approved_volume_path).resolve()
+        if host_volume != approved_root:
+            return "managed_service_volume_not_approved"
+        if plan.container_volume_path != "/etc/searxng":
+            return "managed_service_container_volume_not_approved"
+        return None
+
+    def execute_plan(self, plan: ManagedLocalServiceSetupPlan) -> ManagedLocalServiceExecutionResult:
+        reason = self.validate_plan(plan)
+        if reason:
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason=reason,
+                plan=plan,
+            )
+        try:
+            Path(plan.host_volume_path).mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_volume_create_failed",
+                error=str(exc),
+                plan=plan,
+            )
+        existing = self._run_fixed(plan.existing_container_argv())
+        if existing.returncode == 0 and plan.container_name in str(existing.stdout or "").splitlines():
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_container_already_exists",
+                error="A container with the approved name already exists; manual inspection is required before reuse.",
+                plan=plan,
+            )
+        pulled = self._run_fixed(plan.pull_argv())
+        if pulled.returncode != 0:
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_pull_failed",
+                error=self._short_process_error(pulled),
+                plan=plan,
+            )
+        ran = self._run_fixed(plan.run_argv())
+        if ran.returncode != 0:
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                did_pull=True,
+                blocked_reason="managed_service_run_failed",
+                error=self._short_process_error(ran),
+                plan=plan,
+            )
+        reachable = self._check_health(plan.health_url)
+        return ManagedLocalServiceExecutionResult(
+            ok=reachable,
+            service_id=plan.service_id,
+            selected_engine=plan.engine,
+            did_pull=True,
+            did_run=True,
+            reachable=reachable,
+            blocked_reason=None if reachable else "managed_service_health_check_failed",
+            plan=plan,
+        )
+
+    def execute_from_pending(self, params: dict[str, Any]) -> ManagedLocalServiceExecutionResult:
+        service_id = str(params.get("service_id") or "searxng").strip().lower() or "searxng"
+        engine = str(params.get("selected_engine") or "docker").strip().lower() or "docker"
+        plan, reason = self.build_plan_from_pending(params)
+        if reason or plan is None:
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=service_id,
+                selected_engine=engine,
+                blocked_reason=reason or "managed_service_plan_invalid",
+            )
+        return self.execute_plan(plan)
+
+    def _run_fixed(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return self._runner(
+            argv,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=self._timeout_seconds,
+        )
+
+    def _check_health(self, url: str) -> bool:
+        if callable(self._health_checker):
+            try:
+                return bool(self._health_checker(url))
+            except Exception:
+                return False
+        request = urllib.request.Request(url, method="GET", headers={"User-Agent": "personal-agent-managed-service/1"})
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:  # nosec B310 - fixed loopback URL after validation.
+                return 200 <= int(getattr(response, "status", 0) or 0) < 500
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _short_process_error(result: subprocess.CompletedProcess[str]) -> str:
+        text = str(result.stderr or result.stdout or "").strip()
+        return text[:500] if text else f"exit status {result.returncode}"
 
 
 def redact_service_url(url: str | None) -> str | None:
