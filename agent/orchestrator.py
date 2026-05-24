@@ -2237,29 +2237,72 @@ class Orchestrator:
         if not engine:
             return self._managed_service_missing_engine_response(services_payload)
         approved = searxng.get("approved_container") if isinstance(searxng.get("approved_container"), dict) else {}
-        image = str(approved.get("image") or "searxng/searxng:latest")
-        name = str(approved.get("name") or "personal-agent-searxng")
-        bind = str(approved.get("bind") or "127.0.0.1:8080:8080")
+        preview_payload_from_runtime: dict[str, Any] = {}
+        adapter = self._chat_runtime_adapter
+        if callable(getattr(adapter, "preview_managed_service_setup", None)):
+            try:
+                preview_payload_from_runtime = dict(adapter.preview_managed_service_setup({"service_id": "searxng", "selected_engine": engine}))
+            except Exception:
+                preview_payload_from_runtime = {}
+        if preview_payload_from_runtime and not bool(preview_payload_from_runtime.get("ok")):
+            blocked_reason = str(preview_payload_from_runtime.get("blocked_reason") or "managed_service_setup_unavailable")
+            if blocked_reason == "managed_service_approved_ports_occupied":
+                text = "\n".join(
+                    [
+                        "Web search is not set up.",
+                        "Both approved SearXNG ports, 8080 and 8888, are already in use.",
+                        "I did not pull an image or start a container.",
+                        "Free one of those ports, or choose a future approved port after review.",
+                    ]
+                )
+            else:
+                text = "\n".join(
+                    [
+                        "Web search is not set up.",
+                        "I cannot prepare the SearXNG setup plan right now.",
+                        f"Reason: {blocked_reason}.",
+                        "No command has run yet.",
+                    ]
+                )
+            return self._runtime_truth_response(
+                text=text,
+                route="action_tool",
+                used_tools=["managed_local_service_setup_preview", "safe_web_search"],
+                ok=False,
+                error_kind=blocked_reason,
+                payload={
+                    "type": "managed_local_service_setup_unavailable",
+                    "service_id": "searxng",
+                    "selected_engine": engine,
+                    "setup_preview": preview_payload_from_runtime,
+                    "services_status": services_payload,
+                    "search_status": status_payload,
+                    "mutated": False,
+                },
+            )
+        plan = preview_payload_from_runtime.get("plan") if isinstance(preview_payload_from_runtime.get("plan"), dict) else {}
+        image = str(plan.get("image") or approved.get("image") or "searxng/searxng:latest")
+        name = str(plan.get("container_name") or approved.get("name") or "personal-agent-searxng")
+        bind = str(plan.get("loopback_bind") or approved.get("bind") or "127.0.0.1:8080:8080")
         volume = str(approved.get("volume_path") or "memory/local_services/searxng")
+        health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
+        fallback_selected = bool(preview_payload_from_runtime.get("fallback_selected"))
+        if fallback_selected:
+            first_line = "Web search is not set up. I can set up SearXNG locally using Docker. It will run only on this computer. Port 8080 is busy, so I can use 8888 instead. Say yes to continue."
+        else:
+            first_line = "Web search is not set up. I can set up SearXNG locally using Docker. It will run only on this computer. Say yes to continue."
         lines = [
-            "Web search is optional and not set up.",
-            "Safe web search uses local SearXNG.",
-            "SearXNG setup preview",
-            "Service: SearXNG",
-            "Purpose: safe web search",
-            f"Engine detected: {engine}",
-            f"Approved image only: {image}",
-            f"Approved container name: {name}",
-            f"Loopback bind only: {bind}",
-            f"Approved volume path only: {volume}",
-            "No host networking.",
-            "No privileged mode.",
-            "No random host mounts.",
-            "No arbitrary images.",
-            "No external-pack triggered container actions.",
-            "I will not open pages, download files, or install packs from search results without review.",
-            "No Docker, Podman, SearXNG, or system package installation.",
+            first_line.replace("Docker", engine.capitalize()),
+            "Web search is optional and not set up. Safe web search uses local SearXNG.",
+            f"Approved image: {image}",
+            f"Approved container: {name}",
+            f"Loopback bind: {bind}",
+            f"Health check URL: {health_url}",
+            f"Managed volume: {volume}",
             "No command has run yet.",
+            "I will not open pages, download files, or install packs from search results without review.",
+            "I will not use host networking, privileged mode, arbitrary mounts, arbitrary images, Compose, Dockerfile builds, or external-pack-triggered container actions.",
+            "I will not install Docker/Podman or change search config automatically.",
             "Say yes to continue, or no to cancel.",
         ]
         return self._confirmation_preview_response(
@@ -2277,6 +2320,8 @@ class Orchestrator:
                     "approved_container_name": name,
                     "loopback_bind": bind,
                     "approved_volume_path": volume,
+                    "health_url": health_url,
+                    "fallback_selected": fallback_selected,
                 },
             },
             title="SearXNG setup preview",
@@ -2289,6 +2334,9 @@ class Orchestrator:
                 "approved_container_name": name,
                 "loopback_bind": bind,
                 "approved_volume_path": volume,
+                "health_url": health_url,
+                "fallback_selected": fallback_selected,
+                "setup_preview": preview_payload_from_runtime,
                 "services_status": services_payload,
                 "search_status": status_payload,
                 "mutated": False,
@@ -2623,22 +2671,28 @@ class Orchestrator:
             did_run = bool(result.get("did_run"))
             reachable = bool(result.get("reachable"))
             blocked_reason = str(result.get("blocked_reason") or "").strip()
+            plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
+            health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
             lines = [
                 "SearXNG setup finished." if ok else "SearXNG setup did not complete.",
                 f"Engine: {engine}",
                 f"Pulled approved image: {'yes' if did_pull else 'no'}.",
                 f"Started approved container: {'yes' if did_run else 'no'}.",
-                f"Reachable at http://127.0.0.1:8080: {'yes' if reachable else 'no'}.",
+                f"Reachable at {health_url}: {'yes' if reachable else 'no'}.",
                 "I used only the approved SearXNG Docker/Podman plan; no arbitrary Docker commands ran.",
                 "No external pack code ran.",
                 "No host networking, privileged mode, random mounts, system package install, or config change was used.",
             ]
-            if blocked_reason:
+            if blocked_reason == "managed_service_port_occupied":
+                lines.append(str(result.get("error") or "The approved port is already being used by another local app."))
+            elif blocked_reason == "managed_service_container_already_exists":
+                lines.append("A personal-agent-searxng container already exists, possibly from an earlier failed attempt. I did not remove it. Remove/recreate cleanup needs a separate confirmation, or manually inspect it with Docker/Podman.")
+            elif blocked_reason:
                 lines.append(f"Blocked or failed reason: {blocked_reason}.")
             if ok:
-                lines.append("Next step: if web search is not already configured, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL=http://127.0.0.1:8080, then check search again.")
+                lines.append(f"Next step: if web search is not already configured, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL={health_url}, then check search again.")
             else:
-                lines.append("Next step: inspect the Docker/Podman error or container state, then ask me to check web search again.")
+                lines.append("Next step: fix the reported port/container issue, then ask me to set up web search again.")
             payload = dict(result) if isinstance(result, dict) else {}
             payload.update(
                 {

@@ -945,6 +945,7 @@ def main() -> int:
                     command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
                     runner=runner,
                     health_checker=lambda _url: True,
+                    port_checker=lambda _port: True,
                 )
                 result = executor.execute_from_pending(
                     {
@@ -979,6 +980,7 @@ def main() -> int:
                     command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
                     runner=runner,
                     health_checker=lambda url: url == "http://127.0.0.1:8080",
+                    port_checker=lambda _port: True,
                 )
                 result = executor.execute_from_pending(
                     {
@@ -1017,6 +1019,7 @@ def main() -> int:
                     command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
                     runner=runner,
                     health_checker=lambda _url: True,
+                    port_checker=lambda _port: True,
                 )
                 result = executor.execute_from_pending(
                     {
@@ -1037,6 +1040,48 @@ def main() -> int:
                 "managed_local_services",
                 "managed_service_setup_no_shell_or_pack_trigger",
                 managed_service_setup_no_shell_or_pack_trigger,
+            )
+
+            def managed_service_setup_port_conflict_uses_approved_fallback() -> None:
+                calls: list[dict[str, Any]] = []
+
+                def runner(argv: list[str], **kwargs: Any):
+                    calls.append({"argv": list(argv), **kwargs})
+                    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+                executor = ManagedLocalServiceExecutor(
+                    managed_root=root,
+                    command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+                    runner=runner,
+                    health_checker=lambda url: url == "http://127.0.0.1:8888",
+                    port_checker=lambda port: port == 8888,
+                )
+                preview = executor.preview_setup_from_status(service_id="searxng", selected_engine="docker")
+                _assert(preview.get("fallback_selected") is True, f"fallback was not selected: {preview}")
+                _assert(preview.get("plan", {}).get("loopback_bind") == "127.0.0.1:8888:8080", f"bad fallback bind: {preview}")
+                result = executor.execute_from_pending(
+                    {
+                        "service_id": "searxng",
+                        "selected_engine": "docker",
+                        "action": "preview_only",
+                        "approved_image": "searxng/searxng:latest",
+                        "approved_container_name": "personal-agent-searxng",
+                        "loopback_bind": "127.0.0.1:8888:8080",
+                        "approved_volume_path": "memory/local_services/searxng",
+                    }
+                )
+                _assert(result.ok and result.did_run, f"fallback setup did not run with fake runner: {result}")
+                run_calls = [call for call in calls if len(call["argv"]) > 1 and call["argv"][1] == "run"]
+                _assert(run_calls, f"missing run call: {calls}")
+                argv = run_calls[0]["argv"]
+                _assert("127.0.0.1:8888:8080" in argv, f"fallback loopback bind missing: {argv}")
+                _assert("0.0.0.0:8888:8080" not in argv, f"public bind used: {argv}")
+                _assert(run_calls[0].get("shell") is False, "fallback runner did not use shell=False")
+
+            smoke.check(
+                "managed_local_services",
+                "managed_service_setup_port_conflict_uses_approved_fallback",
+                managed_service_setup_port_conflict_uses_approved_fallback,
             )
 
             def support_sanitizer_redacts() -> None:

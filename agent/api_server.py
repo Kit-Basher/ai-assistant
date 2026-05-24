@@ -10696,10 +10696,19 @@ class AgentRuntime:
             )
         return self._managed_local_services.status()
 
-    def execute_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _managed_service_executor(self) -> ManagedLocalServiceExecutor:
         if self._managed_local_service_executor is None:
             self._managed_local_service_executor = ManagedLocalServiceExecutor(managed_root=Path(self.config.db_path).expanduser().resolve().parent)
-        return self._managed_local_service_executor.execute_from_pending(params).to_dict()
+        return self._managed_local_service_executor
+
+    def preview_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._managed_service_executor().preview_setup_from_status(
+            service_id=str((params or {}).get("service_id") or "searxng"),
+            selected_engine=str((params or {}).get("selected_engine") or "docker"),
+        )
+
+    def execute_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._managed_service_executor().execute_from_pending(params).to_dict()
 
     def search_query(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         query = str((payload or {}).get("query") or "").strip()

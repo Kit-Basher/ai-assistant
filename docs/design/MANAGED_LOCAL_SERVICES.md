@@ -20,6 +20,7 @@ Allowed native service actions are limited to:
 - pull an approved image only
 - run an approved image only
 - bind service ports to `127.0.0.1` only
+- use approved fallback ports only after preflight detects a conflict
 - use fixed container names, fixed ports, and fixed volume paths
 - health check a local endpoint
 - stop, restart, or remove Personal-Agent-managed service containers
@@ -90,14 +91,17 @@ The first mutating service action is confirm-gated SearXNG setup. It may only:
 - use detected `docker` or `podman`
 - pull `searxng/searxng:latest`
 - run container `personal-agent-searxng`
-- bind `127.0.0.1:8080:8080`
+- prefer `127.0.0.1:8080:8080`
+- preflight port 8080 before pull/run
+- if 8080 is busy, offer only approved fallback `127.0.0.1:8888:8080`
+- if both 8080 and 8888 are busy, do not pull or run
 - mount only the Personal-Agent-managed SearXNG volume
 - run detached
 - health check `http://127.0.0.1:8080`
 
-It must not update search config automatically. If SearXNG starts successfully but search is not configured, the assistant should tell the user to set `SEARCH_ENABLED=1` and `SEARXNG_BASE_URL=http://127.0.0.1:8080` or use a future separately confirmed config path.
+It must not update search config automatically. If SearXNG starts successfully but search is not configured, the assistant should tell the user to set `SEARCH_ENABLED=1` and `SEARXNG_BASE_URL` to the selected approved local URL, either `http://127.0.0.1:8080` or `http://127.0.0.1:8888`, or use a future separately confirmed config path.
 
-If the approved container name already exists, the conservative default is to stop and require manual inspection unless a future metadata inspection path proves safe reuse.
+If the approved container name already exists, including a failed `Created` container from an earlier attempt, the conservative default is to stop and require manual inspection or a separate confirmed cleanup action. The runtime must not silently delete or recreate containers.
 
 ## Required Tests
 
@@ -106,6 +110,8 @@ Service action tests must prove:
 - unknown services are rejected
 - unknown images are rejected
 - non-loopback port binds are rejected
+- 8080 conflicts select only approved fallback 8888
+- both approved ports busy blocks pull/run
 - host networking is rejected
 - privileged mode is rejected
 - random host mounts are rejected

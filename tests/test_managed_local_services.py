@@ -90,6 +90,7 @@ class TestManagedLocalServices(unittest.TestCase):
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
         )
         params = {
             "service_id": "searxng",
@@ -117,12 +118,111 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertIn("searxng/searxng:latest", run_argv)
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
 
+    def test_executor_preview_uses_primary_or_fallback_port(self) -> None:
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda port: port == 8888,
+        )
+
+        preview = executor.preview_setup_from_status(service_id="searxng", selected_engine="docker")
+
+        self.assertTrue(preview["ok"])
+        self.assertTrue(preview["fallback_selected"])
+        self.assertTrue(preview["port_conflict"])
+        self.assertEqual("127.0.0.1:8888:8080", preview["plan"]["loopback_bind"])
+        self.assertEqual("http://127.0.0.1:8888", preview["plan"]["health_url"])
+
+    def test_executor_preview_blocks_when_both_approved_ports_busy(self) -> None:
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: False,
+        )
+
+        preview = executor.preview_setup_from_status(service_id="searxng", selected_engine="docker")
+
+        self.assertFalse(preview["ok"])
+        self.assertEqual("managed_service_approved_ports_occupied", preview["blocked_reason"])
+
+    def test_executor_fallback_run_uses_loopback_only(self) -> None:
+        runner = _FakeManagedServiceRunner()
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8888",
+            port_checker=lambda port: port == 8888,
+        )
+        params = {
+            "service_id": "searxng",
+            "selected_engine": "docker",
+            "action": "preview_only",
+            "approved_image": "searxng/searxng:latest",
+            "approved_container_name": "personal-agent-searxng",
+            "loopback_bind": "127.0.0.1:8888:8080",
+            "approved_volume_path": "memory/local_services/searxng",
+        }
+
+        result = executor.execute_from_pending(params)
+
+        self.assertTrue(result.ok)
+        run_argv = runner.calls[2]["argv"]
+        self.assertIn("127.0.0.1:8888:8080", run_argv)
+        self.assertNotIn("0.0.0.0:8888:8080", run_argv)
+        self.assertTrue(all(call.get("shell") is False for call in runner.calls))
+
+    def test_executor_rejects_tampered_fallback_bind(self) -> None:
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+        result = executor.execute_from_pending(
+            {
+                "service_id": "searxng",
+                "selected_engine": "docker",
+                "action": "preview_only",
+                "approved_image": "searxng/searxng:latest",
+                "approved_container_name": "personal-agent-searxng",
+                "loopback_bind": "0.0.0.0:8888:8080",
+                "approved_volume_path": "memory/local_services/searxng",
+            }
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_bind_not_approved", result.blocked_reason)
+
+    def test_executor_port_occupied_stops_before_pull(self) -> None:
+        runner = _FakeManagedServiceRunner()
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: False,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_port_occupied", result.blocked_reason)
+        self.assertTrue(result.port_conflict)
+        self.assertEqual([], runner.calls)
+
     def test_executor_rejects_tampered_pending_fields(self) -> None:
         executor = ManagedLocalServiceExecutor(
             managed_root=self.tmpdir.name,
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
             runner=_FakeManagedServiceRunner(),
             health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
         )
         base = {
             "service_id": "searxng",
@@ -143,7 +243,11 @@ class TestManagedLocalServices(unittest.TestCase):
             params[key] = value
             result = executor.execute_from_pending(params)
             self.assertFalse(result.ok, key)
-            self.assertIn("managed_service_plan_tampered", result.blocked_reason or "")
+            self.assertTrue(
+                (result.blocked_reason or "").startswith("managed_service_plan_tampered")
+                or result.blocked_reason == "managed_service_bind_not_approved",
+                result.blocked_reason,
+            )
 
     def test_executor_rejects_unknown_service_and_non_loopback_plan(self) -> None:
         executor = ManagedLocalServiceExecutor(
@@ -151,6 +255,7 @@ class TestManagedLocalServices(unittest.TestCase):
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
             runner=_FakeManagedServiceRunner(),
             health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
         )
         unknown = executor.execute_from_pending({"service_id": "other", "selected_engine": "docker"})
         self.assertFalse(unknown.ok)
@@ -167,6 +272,7 @@ class TestManagedLocalServices(unittest.TestCase):
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
             runner=runner,
             health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
         )
         plan = executor.build_searxng_setup_plan(selected_engine="docker")
         result = executor.execute_plan(plan)
@@ -185,6 +291,7 @@ class TestManagedLocalServices(unittest.TestCase):
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
             runner=runner,
             health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
         )
         result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
 
@@ -256,12 +363,20 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         body = json.loads(handler.body.decode("utf-8"))
         return body, _assistant_text(body)
 
-    def _runtime_with_engine(self, engine: str | None) -> AgentRuntime:
+    def _runtime_with_engine(self, engine: str | None, *, ports: dict[int, bool] | None = None, existing: bool = False) -> AgentRuntime:
         runtime = self._runtime(search_enabled=False, endpoint=None)
         runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
             search_status_provider=runtime.search_status,
             command_finder=lambda name: f"/usr/bin/{name}" if name == engine else None,
             health_checker=lambda _url: False,
+        )
+        port_map = ports if ports is not None else {8080: True, 8888: True}
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == engine else None,
+            runner=_FakeManagedServiceRunner(existing=existing),
+            health_checker=lambda url: url in {"http://127.0.0.1:8080", "http://127.0.0.1:8888"},
+            port_checker=lambda port: bool(port_map.get(port, False)),
         )
         return runtime
 
@@ -269,13 +384,13 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("docker")
         body, text = self._chat(runtime, "set up web search")
 
-        self.assertIn("SearXNG setup preview", text)
-        self.assertIn("Engine detected: docker", text)
-        self.assertIn("Approved image only: searxng/searxng:latest", text)
-        self.assertIn("Approved container name: personal-agent-searxng", text)
-        self.assertIn("Loopback bind only: 127.0.0.1:8080:8080", text)
+        self.assertIn("Web search is not set up", text)
+        self.assertIn("SearXNG", text)
+        self.assertIn("Approved image: searxng/searxng:latest", text)
+        self.assertIn("Approved container: personal-agent-searxng", text)
+        self.assertIn("Loopback bind: 127.0.0.1:8080:8080", text)
         self.assertIn("No command has run yet", text)
-        self.assertIn("No external-pack triggered container actions", text)
+        self.assertIn("external-pack-triggered container actions", text)
         meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
 
@@ -283,9 +398,9 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("podman")
         _body, text = self._chat(runtime, "set up SearXNG")
 
-        self.assertIn("SearXNG setup preview", text)
-        self.assertIn("Engine detected: podman", text)
-        self.assertIn("Loopback bind only: 127.0.0.1:8080:8080", text)
+        self.assertIn("SearXNG", text)
+        self.assertIn("using Podman", text)
+        self.assertIn("Loopback bind: 127.0.0.1:8080:8080", text)
 
     def test_yes_after_preview_runs_bounded_setup_without_configure_or_install(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -295,9 +410,10 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
         )
         _body, first_text = self._chat(runtime, "enable web search")
-        self.assertIn("SearXNG setup preview", first_text)
+        self.assertIn("Web search is not set up", first_text)
 
         body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
@@ -314,6 +430,35 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("docker install", rendered)
         self.assertNotIn("podman install", rendered)
 
+    def test_setup_prompt_with_port_conflict_offers_fallback(self) -> None:
+        runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: True})
+        _body, text = self._chat(runtime, "set up web search")
+
+        self.assertIn("Port 8080 is busy", text)
+        self.assertIn("use 8888 instead", text)
+        self.assertIn("Loopback bind: 127.0.0.1:8888:8080", text)
+        self.assertIn("It will run only on this computer", text)
+
+    def test_setup_prompt_with_both_ports_busy_does_not_queue_run(self) -> None:
+        runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: False})
+        body, text = self._chat(runtime, "set up web search")
+
+        self.assertIn("Both approved SearXNG ports, 8080 and 8888, are already in use", text)
+        self.assertIn("I did not pull an image or start a container", text)
+        meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
+        self.assertFalse(meta.get("requires_confirmation", False))
+
+    def test_existing_created_container_does_not_get_silently_removed(self) -> None:
+        runtime = self._runtime_with_engine("docker", existing=True)
+        _body, first_text = self._chat(runtime, "set up web search")
+        self.assertIn("Web search is not set up", first_text)
+
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "set up web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("container already exists", second_text)
+        self.assertIn("I did not remove it", second_text)
+        self.assertNotIn("removed", second_text.lower())
+
     def test_missing_docker_or_podman_gives_terminal_guidance_no_auto_install(self) -> None:
         runtime = self._runtime_with_engine(None)
         _body, text = self._chat(runtime, "set up web search")
@@ -327,7 +472,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("docker")
         _body, text = self._chat(runtime, "search the web for local searxng setup")
 
-        self.assertIn("SearXNG setup preview", text)
+        self.assertIn("Web search is not set up", text)
         self.assertIn("No command has run yet", text)
 
     def test_external_pack_trigger_language_cannot_trigger_execution(self) -> None:
@@ -337,8 +482,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("I ran", text)
         self.assertNotIn("I installed", text)
         # If setup is discussed, it remains preview-only and explicitly blocks external-pack container actions.
-        if "SearXNG setup preview" in text:
-            self.assertIn("No external-pack triggered container actions", text)
+        if "SearXNG" in text:
+            self.assertIn("external-pack-triggered container actions", text)
             self.assertIn("No command has run yet", text)
 
 
