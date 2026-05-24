@@ -43,6 +43,10 @@ class TestPackScaffolding(unittest.TestCase):
         rendered = render_scaffold_preview(preview)
         self.assertIn("No files were created", rendered)
         self.assertIn("no code was executed", rendered)
+        self.assertNotIn("building a local index", rendered.lower())
+        self.assertNotIn("scaffold", rendered.split(".", 1)[0].lower())
+        self.assertIn("cannot read, parse, index, or search the file contents yet", rendered)
+        self.assertIn("will not install, run code, or connect to Google", rendered)
 
     def test_create_generated_scaffold_source_writes_text_only_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
