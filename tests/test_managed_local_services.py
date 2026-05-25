@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -498,15 +499,15 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         body, text = self._chat(runtime, "set up web search")
 
         first_line = text.splitlines()[0]
-        self.assertIn("Web search needs one extra local component", first_line)
+        self.assertEqual("Web search is not set up yet.", first_line)
         self.assertNotIn("searxng/searxng", first_line)
         self.assertNotIn("127.0.0.1", first_line)
-        self.assertIn("SearXNG", text)
+        self.assertNotIn("SearXNG", text)
         self.assertNotIn("Approved image: searxng/searxng:latest", text)
         self.assertNotIn("Approved container: personal-agent-searxng", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
-        self.assertIn("No command has run yet", text)
-        self.assertIn("Technical setup details", text)
+        self.assertIn("in the background", text)
+        self.assertIn("ask me to stop it later", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertEqual("searxng/searxng:latest", setup.get("approved_image"))
         self.assertEqual("personal-agent-searxng", setup.get("approved_container_name"))
@@ -523,8 +524,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("podman")
         body, text = self._chat(runtime, "set up SearXNG")
 
-        self.assertIn("SearXNG", text)
-        self.assertIn("using Podman", text)
+        self.assertIn("Web search is not set up yet", text)
+        self.assertNotIn("using Podman", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
@@ -540,7 +541,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             port_checker=lambda _port: True,
         )
         _body, first_text = self._chat(runtime, "enable web search")
-        self.assertIn("Web search needs one extra local component", first_text)
+        self.assertIn("Web search is not set up yet", first_text)
 
         body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
@@ -556,6 +557,53 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         rendered = second_text.lower()
         self.assertNotIn("docker install", rendered)
         self.assertNotIn("podman install", rendered)
+
+    def test_expired_yes_returns_explicit_expiry_and_does_not_execute_setup(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner()
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "enable web search")
+        orchestrator = runtime.orchestrator()
+        pending = next(iter(orchestrator.confirmations._pending.values()))  # noqa: SLF001
+        pending.expires_at = int(time.time()) - 1
+        if isinstance(pending.action, dict):
+            pending.action["expires_at"] = pending.expires_at
+        orchestrator._memory_runtime.clear_expired_pending_items(pending.user_id, now_ts=int(time.time()) + 601)  # noqa: SLF001
+
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("confirmation expired", second_text)
+        self.assertIn("didn’t make any changes", second_text)
+        self.assertIn("SearXNG setup preview", second_text)
+        self.assertEqual([], runner.calls)
+
+    def test_telegram_style_delay_within_ttl_still_executes(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner()
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "enable web search")
+        orchestrator = runtime.orchestrator()
+        pending = next(iter(orchestrator.confirmations._pending.values()))  # noqa: SLF001
+        pending.expires_at = int(time.time()) + 60
+        if isinstance(pending.action, dict):
+            pending.action["expires_at"] = pending.expires_at
+
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("SearXNG setup finished", second_text)
+        self.assertTrue(runner.calls)
 
     def test_failed_setup_health_check_reports_owned_cleanup(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -582,7 +630,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: True})
         body, text = self._chat(runtime, "set up web search")
 
-        self.assertIn("Port 8080 is busy", text)
+        self.assertIn("Port 8080 is already being used", text)
         self.assertIn("use 8888 instead", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8888:8080", text)
         self.assertIn("It will run only on this computer", text)
@@ -601,7 +649,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
     def test_existing_created_container_does_not_get_silently_removed(self) -> None:
         runtime = self._runtime_with_engine("docker", existing=True)
         _body, first_text = self._chat(runtime, "set up web search")
-        self.assertIn("Web search needs one extra local component", first_text)
+        self.assertIn("Web search is not set up yet", first_text)
 
         _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "set up web search"}, {"role": "assistant", "content": first_text}])
 
@@ -613,7 +661,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine(None)
         _body, text = self._chat(runtime, "set up web search")
 
-        self.assertIn("Web search needs Docker or Podman", text)
+        self.assertIn("Web search needs one extra system tool first", text)
         self.assertIn("install command", text)
         self.assertIn("won’t install system software automatically", text)
         self.assertNotIn("SearXNG setup preview", text)
@@ -622,8 +670,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("docker")
         _body, text = self._chat(runtime, "search the web for local searxng setup")
 
-        self.assertIn("Web search needs one extra local component", text)
-        self.assertIn("No command has run yet", text)
+        self.assertIn("Web search is not set up yet", text)
+        self.assertIn("in the background", text)
 
     def test_external_pack_trigger_language_cannot_trigger_execution(self) -> None:
         runtime = self._runtime_with_engine("docker")

@@ -2193,8 +2193,8 @@ class Orchestrator:
         searxng = self._searxng_service_from_status(services_payload)
         text = "\n".join(
             [
-                "Web search needs Docker or Podman.",
-                "I can show the install command, but I won’t install system software automatically.",
+                "Web search needs one extra system tool first.",
+                "I can show you the install command, but I won’t install system software automatically.",
                 "No command has run yet.",
             ]
         )
@@ -2287,19 +2287,24 @@ class Orchestrator:
         volume = str(approved.get("volume_path") or "memory/local_services/searxng")
         health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
         fallback_selected = bool(preview_payload_from_runtime.get("fallback_selected"))
-        engine_label = engine.capitalize()
         if fallback_selected:
-            first_line = f"Web search needs one extra local component. I can set it up for you using {engine_label}, if {engine_label} is available. It will run only on this computer. Port 8080 is busy, so I can use 8888 instead. Say yes to continue."
+            lines = [
+                "Web search is not set up yet.",
+                "",
+                "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later.",
+                "",
+                "Port 8080 is already being used, so I’ll use 8888 instead.",
+                "",
+                "Say yes to continue, or no to cancel.",
+            ]
         else:
-            first_line = f"Web search needs one extra local component. I can set it up for you using {engine_label}, if {engine_label} is available. It will run only on this computer. Say yes to continue."
-        lines = [
-            first_line,
-            "Web search is optional and not set up. Safe web search uses local SearXNG.",
-            "No command has run yet.",
-            "I will not open pages, download files, or install packs from search results without review.",
-            "Technical setup details are available in Advanced/operator details.",
-            "Say yes to continue, or no to cancel.",
-        ]
+            lines = [
+                "Web search is not set up yet.",
+                "",
+                "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later.",
+                "",
+                "Say yes to continue, or no to cancel.",
+            ]
         return self._confirmation_preview_response(
             user_id,
             route="action_tool",
@@ -2498,15 +2503,20 @@ class Orchestrator:
         self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
         now_epoch = int(datetime.now(timezone.utc).timestamp())
         pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
+        expires_at = now_epoch + 600
         action_payload = {
             **dict(action),
             "kind": "native_mutation",
             "pending_id": pending_id,
+            "expires_at": expires_at,
+            "title": title,
         }
         pending = PendingAction(
             user_id=user_id,
             action=action_payload,
             message=question,
+            expires_at=expires_at,
+            title=title,
         )
         self.confirmations.set(pending)
         self._memory_runtime.add_pending_item(
@@ -2518,11 +2528,12 @@ class Orchestrator:
                 "question": question,
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
-                "expires_at": now_epoch + 600,
+                "expires_at": expires_at,
                 "thread_id": self._active_thread_id_for_user(user_id),
                 "status": PENDING_STATUS_WAITING_FOR_USER,
                 "context": {
                     "operation": str(action.get("operation") or "").strip() or None,
+                    "title": title,
                 },
             },
         )
@@ -2549,6 +2560,44 @@ class Orchestrator:
             next_question=question,
             payload=payload,
             skip_post_response_hooks=skip_post_response_hooks,
+        )
+
+    def _expired_confirmation_response(self, user_id: str, *, pending: PendingAction | None = None, pending_item: dict[str, Any] | None = None) -> OrchestratorResponse:
+        action_title = ""
+        if pending is not None:
+            action_title = str(pending.title or (pending.action if isinstance(pending.action, dict) else {}).get("title") or "").strip()
+        if not action_title and isinstance(pending_item, dict):
+            context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
+            action_title = str(context.get("title") or pending_item.get("question") or "").strip()
+        if pending is not None:
+            self.confirmations.pop(user_id)
+        pending_id = ""
+        if isinstance(pending_item, dict):
+            pending_id = str(pending_item.get("pending_id") or "").strip()
+        elif pending is not None and isinstance(pending.action, dict):
+            pending_id = str(pending.action.get("pending_id") or "").strip()
+        if pending_id:
+            self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_EXPIRED)
+        first = "That confirmation expired, so I didn’t make any changes."
+        if action_title:
+            first = f"That confirmation expired for {action_title}, so I didn’t make any changes."
+        message = f"{first} Ask me to set up web search again and I’ll show the plan."
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_runtime_state=False,
+            used_memory=True,
+            ok=False,
+            error_kind="pending_confirmation_expired",
+            next_question="Ask me to set up web search again and I’ll show the plan.",
+            payload={
+                "type": "assistant_continuation_clarification",
+                "summary": message,
+                "reason": "pending_confirmation_expired",
+                "expired_action": action_title or None,
+                "pending_id": pending_id or None,
+                "mutated": False,
+            },
         )
 
     def _diagnostics_capture_preview_response(
@@ -7198,6 +7247,19 @@ class Orchestrator:
             question = action.replace("_", " ")
         return " ".join(question.split())[:240] or None
 
+    def _recent_expired_confirmation_item(self, user_id: str) -> dict[str, Any] | None:
+        now_epoch = int(datetime.now(timezone.utc).timestamp())
+        rows = self._memory_runtime.list_pending_items(user_id, include_expired=True)
+        expired = [
+            row
+            for row in rows
+            if str(row.get("kind") or "").strip().lower() == "confirmation"
+            and str(row.get("status") or "").strip().upper() == PENDING_STATUS_EXPIRED
+            and 0 <= now_epoch - int(row.get("expires_at") or 0) <= 3600
+        ]
+        expired.sort(key=lambda row: (int(row.get("expires_at") or 0), int(row.get("created_at") or 0)), reverse=True)
+        return expired[0] if expired else None
+
     def _vague_continuation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
         if not self._looks_like_vague_continuation_prompt(text):
             return None
@@ -7208,6 +7270,13 @@ class Orchestrator:
         if pending_summary:
             message = f"I was waiting to confirm: {pending_summary}. Say yes to continue that, or no to cancel."
         else:
+            pending_confirmation = self.confirmations.get(user_id)
+            now_epoch = int(datetime.now(timezone.utc).timestamp())
+            if pending_confirmation is not None and int(pending_confirmation.expires_at or 0) <= now_epoch:
+                return self._expired_confirmation_response(user_id, pending=pending_confirmation)
+            expired_item = self._recent_expired_confirmation_item(user_id)
+            if expired_item is not None:
+                return self._expired_confirmation_response(user_id, pending_item=expired_item)
             message = "I don’t have a current action to continue. Tell me what you want me to do next, or ask me to check runtime status."
         return self._runtime_truth_response(
             text=message,
@@ -17058,8 +17127,12 @@ class Orchestrator:
                     "args": args,
                     "requested_permissions": requested_permissions,
                     "action_type": action_type,
+                    "expires_at": now_epoch + 600,
+                    "title": function_name or skill_name,
                 },
                 message="This will delete or overwrite data. Reply /confirm to proceed.",
+                expires_at=now_epoch + 600,
+                title=function_name or skill_name,
             )
             self.confirmations.set(pending)
             self._memory_runtime.add_pending_item(
@@ -19381,11 +19454,14 @@ class Orchestrator:
                     next_action="Reply with the exact question you want to continue.",
                 )
             if followup_type == "expired":
-                return self._continuity_error_response(
-                    title="❌ That pending step expired.",
-                    failure_code="pending_expired",
-                    next_action="Ask me to run it again.",
-                )
+                expired_rows = self._memory_runtime.list_pending_items(user_id, thread_id=thread_id, include_expired=True)
+                expired_rows = [
+                    row
+                    for row in expired_rows
+                    if str(row.get("status") or "").strip().upper() == PENDING_STATUS_EXPIRED
+                ]
+                expired_rows.sort(key=lambda row: (int(row.get("expires_at") or 0), int(row.get("created_at") or 0)), reverse=True)
+                return self._expired_confirmation_response(user_id, pending_item=expired_rows[0] if expired_rows else None)
             if followup_type == "none" and followup_reason == "no_pending":
                 normalized_followup_text = " ".join(str(text or "").strip().lower().split())
                 if (
@@ -19394,6 +19470,22 @@ class Orchestrator:
                     and not self._llm_chat_available()
                 ):
                     return self._bootstrap_no_chat_response()
+                if normalized_followup_text in {"yes", "yes please", "sure", "ok", "okay", "please", "continue", "do it"}:
+                    pending_confirmation = self.confirmations.get(user_id)
+                    now_epoch = int(datetime.now(timezone.utc).timestamp())
+                    if pending_confirmation is not None and int(pending_confirmation.expires_at or 0) <= now_epoch:
+                        return self._expired_confirmation_response(user_id, pending=pending_confirmation)
+                    expired_rows = self._memory_runtime.list_pending_items(user_id, include_expired=True)
+                    expired_rows = [
+                        row
+                        for row in expired_rows
+                        if str(row.get("kind") or "").strip().lower() == "confirmation"
+                        and str(row.get("status") or "").strip().upper() == PENDING_STATUS_EXPIRED
+                        and 0 <= now_epoch - int(row.get("expires_at") or 0) <= 3600
+                    ]
+                    expired_rows.sort(key=lambda row: (int(row.get("expires_at") or 0), int(row.get("created_at") or 0)), reverse=True)
+                    if expired_rows:
+                        return self._expired_confirmation_response(user_id, pending_item=expired_rows[0])
                 if str(self._last_offer_topic.get(user_id) or "").strip() != "brief_offer":
                     message = (
                         "I don’t have a current action to continue. "
@@ -19606,7 +19698,7 @@ class Orchestrator:
                         return OrchestratorResponse("Okay — I did not enable that pack.")
                 if pending_kind == "confirmation":
                     if followup_intent in {"accept", "details"}:
-                        pending_action = self.confirmations.pop(user_id)
+                        pending_action = self.confirmations.get(user_id)
                         if not pending_action:
                             if pending_id:
                                 self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_ABORTED)
@@ -19627,6 +19719,10 @@ class Orchestrator:
                                     "reason": "resumable_missing",
                                 },
                             )
+                        now_epoch = int(datetime.now(timezone.utc).timestamp())
+                        if int(pending_action.expires_at or pending_item.get("expires_at") or 0) <= now_epoch:
+                            return self._expired_confirmation_response(user_id, pending=pending_action, pending_item=pending_item)
+                        pending_action = self.confirmations.pop(user_id)
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
                         action = pending_action.action

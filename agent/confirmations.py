@@ -9,6 +9,8 @@ class PendingAction:
     user_id: str
     action: dict[str, Any]
     message: str
+    expires_at: int | None = None
+    title: str | None = None
 
 
 class ConfirmationStore:
@@ -20,6 +22,9 @@ class ConfirmationStore:
 
     def pop(self, user_id: str) -> PendingAction | None:
         return self._pending.pop(user_id, None)
+
+    def get(self, user_id: str) -> PendingAction | None:
+        return self._pending.get(user_id)
 
     def has(self, user_id: str) -> bool:
         return user_id in self._pending
