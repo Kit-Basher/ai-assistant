@@ -8744,8 +8744,12 @@ class AgentRuntime:
                     pack_install_handler=self.packs_install,
                     web_search_handler=self.search_query,
                 )
+                if hasattr(self, "_assistant_planner"):
+                    self._orchestrator._assistant_planner = self._assistant_planner  # noqa: SLF001
             else:
                 self._orchestrator.llm_client = self._router
+                if hasattr(self, "_assistant_planner"):
+                    self._orchestrator._assistant_planner = self._assistant_planner  # noqa: SLF001
                 self._orchestrator._semantic_memory_service = self._semantic_memory_service  # noqa: SLF001
                 try:
                     setattr(self._orchestrator.db, "_semantic_memory_service", self._semantic_memory_service)

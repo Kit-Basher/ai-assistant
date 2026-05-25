@@ -42,6 +42,7 @@ from agent.doctor import (
 from agent.runner import Runner
 from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
+from agent.assistant_planner import AssistantPlanner, AssistantPlan, validate_assistant_plan
 from agent.commands import parse_command, split_pipe_args
 from agent.confirmations import ConfirmationStore, PendingAction
 from agent.logging_utils import log_event, redact_payload
@@ -667,6 +668,7 @@ class Orchestrator:
         self._semantic_memory_service = semantic_memory_service
         self._pack_install_handler = pack_install_handler
         self._web_search_handler = web_search_handler
+        self._assistant_planner = AssistantPlanner()
         if self._semantic_memory_service is not None:
             try:
                 setattr(self.db, "_semantic_memory_service", self._semantic_memory_service)
@@ -14642,6 +14644,199 @@ class Orchestrator:
             return []
         return [{"role": "user", "content": fallback}]
 
+    def _planner_reject_response(self, plan: AssistantPlan) -> OrchestratorResponse:
+        errors = [str(item).strip() for item in plan.errors if str(item).strip()]
+        message = "I could not safely use that interpretation. Tell me what you want to do next in one sentence."
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_runtime_state=False,
+            used_llm=False,
+            used_tools=["assistant_planner"],
+            ok=False,
+            error_kind=plan.error_kind or "assistant_planner_rejected",
+            next_question="Tell me what you want to do next in one sentence.",
+            payload={
+                "type": "assistant_planner_rejected",
+                "summary": message,
+                "plan": plan.to_dict(),
+                "errors": errors,
+            },
+        )
+
+    def _merge_planner_metadata(self, response: OrchestratorResponse, plan: AssistantPlan) -> OrchestratorResponse:
+        data = self._response_data(response)
+        used_tools = ["assistant_planner"]
+        for item in data.get("used_tools") if isinstance(data.get("used_tools"), list) else []:
+            item_text = str(item).strip()
+            if item_text and item_text not in used_tools:
+                used_tools.append(item_text)
+        data["used_tools"] = used_tools
+        data["assistant_planner"] = plan.to_dict()
+        if plan.intent == "ask_agent":
+            data.setdefault("used_llm", bool(self._llm_chat_available()))
+        return OrchestratorResponse(response.text, data)
+
+    def _assistant_planner_safe_fallback_response(self, plan: AssistantPlan) -> OrchestratorResponse | None:
+        if plan.error_kind in {
+            "planner_llm_unavailable",
+            "planner_llm_failed",
+            "planner_invalid_json",
+            "planner_invalid_output",
+            "no_candidates",
+        }:
+            return None
+        if not plan.valid:
+            return self._planner_reject_response(plan)
+        if plan.intent != "clarify" and plan.confidence < 0.45:
+            message = "I need a little more detail before I can route that safely. What do you want me to do?"
+            return self._runtime_truth_response(
+                text=message,
+                route="assistant_clarification",
+                used_runtime_state=False,
+                used_llm=False,
+                used_tools=["assistant_planner"],
+                ok=False,
+                error_kind="assistant_planner_low_confidence",
+                next_question="What do you want me to do?",
+                payload={"type": "assistant_planner_low_confidence", "summary": message, "plan": plan.to_dict()},
+            )
+        return None
+
+    def _dispatch_assistant_agent_request(
+        self,
+        user_id: str,
+        text: str,
+        plan: AssistantPlan,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse:
+        request = plan.agent_request
+        capability = request.capability
+        action = request.action
+        goal_text = request.goal or text
+        if capability == "web_search":
+            if action in {"status", "setup"}:
+                return self._safe_web_search_status_response(user_id, goal_text)
+            if action == "query":
+                return self._safe_web_search_response(user_id, goal_text)
+        if capability == "external_skills":
+            response = self._pack_capability_recommendation_response(user_id, goal_text)
+            if response is not None:
+                return response
+            response = self._capability_gap_planning_response(user_id, goal_text)
+            if response is not None:
+                return response
+            message = "I do not have that skill active yet. I can look for an approved catalog candidate or offer a safe draft skill review step."
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=True,
+                used_tools=["pack_acquisition"],
+                payload={"type": "pack_acquisition", "summary": message, "capability_request": goal_text},
+            )
+        if capability == "telegram":
+            if action in {"status", "setup"}:
+                return self._runtime_status_response("telegram_status")
+        if capability == "chat_model":
+            if action == "status":
+                return self._current_model_response()
+            if action in {"setup", "diagnose"}:
+                return self._setup_explanation_response(used_memory=bool(self._current_runtime_setup_state(user_id)))
+        if capability == "local_models":
+            if action == "status":
+                return self._model_inventory_response(local_only=True)
+            if action in {"setup", "diagnose"}:
+                return self._model_acquire_response(user_id, goal_text)
+        if capability == "runtime_status":
+            if action == "status":
+                return self._runtime_status_response("runtime_status")
+            if action == "diagnose":
+                return self._operational_status_response(user_id, goal_text, "operational_agent_status")
+        if capability == "file_work":
+            if action in {"status", "preview"}:
+                message = "File work is available only through bounded file actions. Tell me the specific file path and whether you want me to inspect, list, or search it."
+                return self._runtime_truth_response(
+                    text=message,
+                    route="assistant_clarification",
+                    used_runtime_state=False,
+                    used_tools=["assistant_planner"],
+                    next_question="What file path and action should I use?",
+                    payload={"type": "file_work_clarification", "summary": message},
+                )
+            if action == "query":
+                response = self._handle_runtime_truth_chat(user_id, goal_text)
+                if response is not None:
+                    return response
+        return self._planner_reject_response(
+            validate_assistant_plan(
+                {
+                    "intent": "ask_agent",
+                    "agent_request": {"capability": capability, "action": action, "goal": goal_text},
+                    "confidence": plan.confidence,
+                    "user_facing_summary": plan.user_facing_summary,
+                }
+            )
+        )
+
+    def _assistant_planning_response(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        chat_context: dict[str, Any] | None = None,
+    ) -> OrchestratorResponse | None:
+        context = dict(chat_context) if isinstance(chat_context, dict) else {}
+        if bool(context.get("assistant_planner_skip")):
+            return None
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized or normalized.startswith("/"):
+            return None
+        # Pending confirmations and vague continuations are safety-critical deterministic flows.
+        if normalized in {"yes", "y", "no", "n", "do it", "continue", "1", "ok", "okay"}:
+            return None
+        planner = getattr(self, "_assistant_planner", None)
+        if not callable(getattr(planner, "plan", None)):
+            return None
+        try:
+            plan = planner.plan(
+                user_text=str(text or ""),
+                llm_client=self.llm_client,
+                context={
+                    "trace_id": str(context.get("trace_id") or "").strip() or f"planner-{uuid.uuid4().hex[:8]}",
+                    "source_surface": str(context.get("source_surface") or "orchestrator"),
+                },
+            )
+        except Exception:
+            return None
+        if not isinstance(plan, AssistantPlan):
+            plan = validate_assistant_plan(plan)
+        fallback = self._assistant_planner_safe_fallback_response(plan)
+        if fallback is not None:
+            return fallback
+        if not plan.usable:
+            return None
+        if plan.intent == "clarify":
+            message = plan.user_facing_summary or "What would you like me to do next?"
+            return self._runtime_truth_response(
+                text=message,
+                route="assistant_clarification",
+                used_runtime_state=False,
+                used_llm=True,
+                used_tools=["assistant_planner"],
+                next_question=message,
+                payload={"type": "assistant_planner_clarify", "summary": message, "plan": plan.to_dict()},
+            )
+        if plan.intent == "answer_directly":
+            direct_context = dict(context)
+            direct_context["assistant_planner_skip"] = True
+            response = self._llm_chat(user_id, text, chat_context=direct_context)
+            return self._merge_planner_metadata(response, plan)
+        if plan.intent == "ask_agent":
+            response = self._dispatch_assistant_agent_request(user_id, text, plan, chat_context=context)
+            return self._merge_planner_metadata(response, plan)
+        return self._planner_reject_response(plan)
+
     def _llm_chat(
         self,
         user_id: str,
@@ -18949,6 +19144,9 @@ class Orchestrator:
 
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):
+                planner_response = self._assistant_planning_response(user_id, runtime_text, chat_context=context)
+                if planner_response is not None:
+                    return planner_response
                 runtime_route_decision = classify_runtime_chat_route(runtime_text)
                 runtime_route_kind = str(runtime_route_decision.get("kind") or "").strip().lower()
                 if runtime_route_kind == "safe_web_search_status":

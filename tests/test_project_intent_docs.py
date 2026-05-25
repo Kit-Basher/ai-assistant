@@ -96,3 +96,14 @@ def test_basics_ui_uses_capability_cards_without_searxng_details() -> None:
     assert "SearXNG" not in text
     assert "127.0.0.1" not in text
     assert "searxng/searxng" not in text
+
+
+def test_assistant_agent_planning_doc_exists_and_draws_boundary() -> None:
+    path = REPO_ROOT / "docs" / "design" / "ASSISTANT_AGENT_PLANNING.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8").lower()
+    assert "assistant planner llm" in text
+    assert "deterministic code remains the safety" in text
+    assert "unknown capabilities or actions are rejected" in text
+    assert "cannot execute" in text
+    assert "yes/no pending confirmations" in text
