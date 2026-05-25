@@ -10,6 +10,7 @@ from pathlib import Path
 from agent.api_server import AgentRuntime
 from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig
 from agent.search.search_setup_ux import build_search_setup_ux, render_search_setup_ux
+from agent.services.managed_local_services import ManagedLocalServiceDetector, ManagedLocalServiceExecutor
 from agent.setup_chat_flow import classify_runtime_chat_route
 from tests.test_api_packs_endpoints import _config
 from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _assistant_text
@@ -123,7 +124,20 @@ class TestSearchSetupChatUX(unittest.TestCase):
             search_timeout_seconds=1.0,
             search_max_results=3,
         )
-        return AgentRuntime(config)
+        runtime = AgentRuntime(config)
+        runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
+            search_status_provider=runtime.search_status,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            health_checker=lambda _url: False,
+        )
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=lambda argv, **kwargs: None,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+        )
+        return runtime
 
     def _chat(self, runtime: AgentRuntime, prompt: str) -> tuple[dict[str, object], str]:
         handler = _MemoryHandlerForTest(
@@ -148,6 +162,7 @@ class TestSearchSetupChatUX(unittest.TestCase):
 
         self.assertEqual("action_tool", meta.get("route"))
         self.assertIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("Web search needs one extra local component", text)
         self.assertIn("Web search is optional and not set up", text)
         self.assertIn("Safe web search uses local SearXNG", text)
         self.assertRegex(text, r"Docker|Podman")
@@ -156,6 +171,7 @@ class TestSearchSetupChatUX(unittest.TestCase):
     def test_endpoint_missing_chat_status_prompt_names_endpoint(self) -> None:
         _body, text = self._chat(self._runtime(search_enabled=True, endpoint=None), "what is your search status?")
 
+        self.assertIn("Web search needs one extra local component", text)
         self.assertIn("Safe web search uses local SearXNG", text)
         self.assertIn("not set up", text)
         self.assertNotIn("configured and available", text)
@@ -176,6 +192,7 @@ class TestSearchSetupChatUX(unittest.TestCase):
             "search the web for SearXNG setup",
         )
 
+        self.assertIn("Web search needs one extra local component", text)
         self.assertIn("Web search is optional and not set up", text)
         self.assertIn("Safe web search uses local SearXNG", text)
         self.assertIn("will not open pages", text)

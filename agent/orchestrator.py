@@ -2191,10 +2191,8 @@ class Orchestrator:
         searxng = self._searxng_service_from_status(services_payload)
         text = "\n".join(
             [
-                "Web search is optional and not set up.",
-                "Safe web search uses local SearXNG.",
-                "Docker or Podman is needed, but I did not find either one.",
-                "I can show terminal guidance, but I will not install Docker, Podman, or system packages automatically.",
+                "Web search needs Docker or Podman.",
+                "I can show the install command, but I won’t install system software automatically.",
                 "No command has run yet.",
             ]
         )
@@ -2287,22 +2285,17 @@ class Orchestrator:
         volume = str(approved.get("volume_path") or "memory/local_services/searxng")
         health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
         fallback_selected = bool(preview_payload_from_runtime.get("fallback_selected"))
+        engine_label = engine.capitalize()
         if fallback_selected:
-            first_line = "Web search is not set up. I can set up SearXNG locally using Docker. It will run only on this computer. Port 8080 is busy, so I can use 8888 instead. Say yes to continue."
+            first_line = f"Web search needs one extra local component. I can set it up for you using {engine_label}, if {engine_label} is available. It will run only on this computer. Port 8080 is busy, so I can use 8888 instead. Say yes to continue."
         else:
-            first_line = "Web search is not set up. I can set up SearXNG locally using Docker. It will run only on this computer. Say yes to continue."
+            first_line = f"Web search needs one extra local component. I can set it up for you using {engine_label}, if {engine_label} is available. It will run only on this computer. Say yes to continue."
         lines = [
-            first_line.replace("Docker", engine.capitalize()),
+            first_line,
             "Web search is optional and not set up. Safe web search uses local SearXNG.",
-            f"Approved image: {image}",
-            f"Approved container: {name}",
-            f"Loopback bind: {bind}",
-            f"Health check URL: {health_url}",
-            f"Managed volume: {volume}",
             "No command has run yet.",
             "I will not open pages, download files, or install packs from search results without review.",
-            "I will not use host networking, privileged mode, arbitrary mounts, arbitrary images, Compose, Dockerfile builds, or external-pack-triggered container actions.",
-            "I will not install Docker/Podman or change search config automatically.",
+            "Technical setup details are available in Advanced/operator details.",
             "Say yes to continue, or no to cancel.",
         ]
         return self._confirmation_preview_response(

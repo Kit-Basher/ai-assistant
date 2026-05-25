@@ -1853,6 +1853,8 @@ export default function App() {
           telegramToken={telegramToken}
           testTelegramToken={testTelegramToken}
           themePreference={themePreference}
+          servicesStatus={servicesStatus}
+          packsState={packsState}
         />
       )
     },

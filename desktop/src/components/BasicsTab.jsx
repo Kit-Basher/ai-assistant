@@ -20,6 +20,52 @@ function simpleProviderStatus(provider, statusText) {
   return { label: "Could not connect", tone: "down", detail: "Save and test to check this provider." };
 }
 
+function capabilitySummaries({ defaultProvider, defaultModel, telegramConfigured, servicesStatus, packsState }) {
+  const services = Array.isArray(servicesStatus?.services) ? servicesStatus.services : [];
+  const web = services.find((service) => service?.service_id === "searxng") || null;
+  const dockerOrPodman = servicesStatus?.docker_available === true || servicesStatus?.podman_available === true;
+  const webReady = web?.enabled === true && web?.configured === true && web?.reachable === true;
+  const installedPacks = Array.isArray(packsState?.installed) ? packsState.installed : [];
+  const reviewPacks = Array.isArray(packsState?.needs_review) ? packsState.needs_review : [];
+  return [
+    {
+      title: "Chat",
+      label: defaultProvider && defaultModel ? "Ready" : "Needs setup",
+      tone: defaultProvider && defaultModel ? "ok" : "attention",
+      detail: defaultProvider && defaultModel ? "The assistant has a chat model selected." : "Choose a chat model to start normal conversations.",
+      ask: "Ask: check my model"
+    },
+    {
+      title: "Web search",
+      label: webReady ? "Ready" : dockerOrPodman ? "Can set up" : "Needs setup",
+      tone: webReady ? "ok" : "attention",
+      detail: webReady ? "The assistant can search web result summaries." : "Optional. Ask the assistant to set up web search when you need it.",
+      ask: "Ask: set up web search"
+    },
+    {
+      title: "Telegram",
+      label: telegramConfigured ? "Ready" : "Needs token",
+      tone: telegramConfigured ? "ok" : "attention",
+      detail: telegramConfigured ? "Telegram has a saved token." : "Optional. Add a bot token if you want Telegram chat.",
+      ask: "Ask: set up Telegram"
+    },
+    {
+      title: "Local models",
+      label: defaultProvider ? "Ready" : "Optional",
+      tone: defaultProvider ? "ok" : "attention",
+      detail: "Optional upgrades can add stronger local models later.",
+      ask: "Ask: help me improve local models"
+    },
+    {
+      title: "Skills",
+      label: reviewPacks.length ? "Needs review" : installedPacks.length ? "Ready" : "Can add safely",
+      tone: reviewPacks.length ? "attention" : "ok",
+      detail: "Extra skills use preview, review, approval, setup, and permission steps.",
+      ask: "Ask: add a skill for ..."
+    }
+  ];
+}
+
 function runtimeSummary(status) {
   if (status?.ready) {
     return { label: "Running", tone: "ok", detail: status.description || "The local assistant is reachable." };
@@ -57,7 +103,9 @@ export default function BasicsTab({
   telegramStatus,
   telegramToken,
   testTelegramToken,
-  themePreference
+  themePreference,
+  servicesStatus,
+  packsState
 }) {
   const selectedProvider = providers.find((provider) => provider.id === selectedProviderId)
     || providers.find((provider) => provider.id === defaultProvider)
@@ -67,6 +115,7 @@ export default function BasicsTab({
   const selectedProviderKey = selectedProvider?.id ? providerSecrets[selectedProvider.id] || "" : "";
   const selectedProviderHasSavedKey = selectedProvider?.api_key_source?.type && selectedProvider.api_key_source.type !== "none";
   const runtime = runtimeSummary(chatStatus);
+  const capabilities = capabilitySummaries({ defaultProvider, defaultModel, telegramConfigured, servicesStatus, packsState });
 
   return (
     <section className="basics-layout">
@@ -77,6 +126,19 @@ export default function BasicsTab({
           <p>Connect a chat model, Telegram, web search, and your preferred theme without opening operator tools.</p>
         </div>
         <button onClick={onRefresh} type="button">Refresh status</button>
+      </div>
+
+      <div className="capability-card-grid" aria-label="Capability setup summary">
+        {capabilities.map((capability) => (
+          <article className="setup-card capability-card" key={capability.title}>
+            <div className="setup-card-head">
+              <h3>{capability.title}</h3>
+              <StatusBadge tone={capability.tone}>{capability.label}</StatusBadge>
+            </div>
+            <p className="help-text">{capability.detail}</p>
+            <p className="assistant-help-text">{capability.ask}</p>
+          </article>
+        ))}
       </div>
 
       <div className="setup-card-grid">

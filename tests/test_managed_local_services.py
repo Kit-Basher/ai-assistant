@@ -384,23 +384,37 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("docker")
         body, text = self._chat(runtime, "set up web search")
 
-        self.assertIn("Web search is not set up", text)
+        first_line = text.splitlines()[0]
+        self.assertIn("Web search needs one extra local component", first_line)
+        self.assertNotIn("searxng/searxng", first_line)
+        self.assertNotIn("127.0.0.1", first_line)
         self.assertIn("SearXNG", text)
-        self.assertIn("Approved image: searxng/searxng:latest", text)
-        self.assertIn("Approved container: personal-agent-searxng", text)
-        self.assertIn("Loopback bind: 127.0.0.1:8080:8080", text)
+        self.assertNotIn("Approved image: searxng/searxng:latest", text)
+        self.assertNotIn("Approved container: personal-agent-searxng", text)
+        self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         self.assertIn("No command has run yet", text)
-        self.assertIn("external-pack-triggered container actions", text)
+        self.assertIn("Technical setup details", text)
+        setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
+        self.assertEqual("searxng/searxng:latest", setup.get("approved_image"))
+        self.assertEqual("personal-agent-searxng", setup.get("approved_container_name"))
+        self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
+        preview_plan = (setup.get("setup_preview") or {}).get("plan", {}) if isinstance(setup.get("setup_preview"), dict) else {}
+        self.assertEqual("searxng/searxng:latest", preview_plan.get("image"))
+        self.assertEqual("127.0.0.1:8080:8080", preview_plan.get("loopback_bind"))
+        blocked_actions = setup.get("services_status", {}).get("services", [{}])[0].get("blocked_actions", {})
+        self.assertIn("external_pack_triggered_container_action", blocked_actions)
         meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
 
     def test_setup_prompt_with_podman_available_shows_preview(self) -> None:
         runtime = self._runtime_with_engine("podman")
-        _body, text = self._chat(runtime, "set up SearXNG")
+        body, text = self._chat(runtime, "set up SearXNG")
 
         self.assertIn("SearXNG", text)
         self.assertIn("using Podman", text)
-        self.assertIn("Loopback bind: 127.0.0.1:8080:8080", text)
+        self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
+        setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
+        self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
 
     def test_yes_after_preview_runs_bounded_setup_without_configure_or_install(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -413,7 +427,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             port_checker=lambda _port: True,
         )
         _body, first_text = self._chat(runtime, "enable web search")
-        self.assertIn("Web search is not set up", first_text)
+        self.assertIn("Web search needs one extra local component", first_text)
 
         body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
@@ -432,12 +446,14 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
     def test_setup_prompt_with_port_conflict_offers_fallback(self) -> None:
         runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: True})
-        _body, text = self._chat(runtime, "set up web search")
+        body, text = self._chat(runtime, "set up web search")
 
         self.assertIn("Port 8080 is busy", text)
         self.assertIn("use 8888 instead", text)
-        self.assertIn("Loopback bind: 127.0.0.1:8888:8080", text)
+        self.assertNotIn("Loopback bind: 127.0.0.1:8888:8080", text)
         self.assertIn("It will run only on this computer", text)
+        setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
+        self.assertEqual("127.0.0.1:8888:8080", setup.get("loopback_bind"))
 
     def test_setup_prompt_with_both_ports_busy_does_not_queue_run(self) -> None:
         runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: False})
@@ -451,7 +467,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
     def test_existing_created_container_does_not_get_silently_removed(self) -> None:
         runtime = self._runtime_with_engine("docker", existing=True)
         _body, first_text = self._chat(runtime, "set up web search")
-        self.assertIn("Web search is not set up", first_text)
+        self.assertIn("Web search needs one extra local component", first_text)
 
         _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "set up web search"}, {"role": "assistant", "content": first_text}])
 
@@ -463,16 +479,16 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine(None)
         _body, text = self._chat(runtime, "set up web search")
 
-        self.assertIn("Docker or Podman is needed", text)
-        self.assertIn("terminal guidance", text)
-        self.assertIn("will not install Docker, Podman, or system packages automatically", text)
+        self.assertIn("Web search needs Docker or Podman", text)
+        self.assertIn("install command", text)
+        self.assertIn("won’t install system software automatically", text)
         self.assertNotIn("SearXNG setup preview", text)
 
     def test_search_query_when_unavailable_shows_setup_preview(self) -> None:
         runtime = self._runtime_with_engine("docker")
         _body, text = self._chat(runtime, "search the web for local searxng setup")
 
-        self.assertIn("Web search is not set up", text)
+        self.assertIn("Web search needs one extra local component", text)
         self.assertIn("No command has run yet", text)
 
     def test_external_pack_trigger_language_cannot_trigger_execution(self) -> None:
@@ -483,7 +499,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("I installed", text)
         # If setup is discussed, it remains preview-only and explicitly blocks external-pack container actions.
         if "SearXNG" in text:
-            self.assertIn("external-pack-triggered container actions", text)
+            self.assertIn("Technical setup details", text)
             self.assertIn("No command has run yet", text)
 
 

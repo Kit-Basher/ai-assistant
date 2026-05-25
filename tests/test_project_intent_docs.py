@@ -69,3 +69,30 @@ def test_managed_local_services_and_docker_helper_docs_state_safety_boundaries()
     assert "not the docker executor" in helper_text
     assert "external packs cannot trigger docker actions" in local_text or "external packs must not request container execution directly" in local_text
     assert "dockerfile builds from untrusted" in combined
+
+
+def test_capability_setup_ux_doc_exists_and_keeps_backends_optional() -> None:
+    path = REPO_ROOT / "docs" / "design" / "CAPABILITY_SETUP_UX.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "web search needs one extra local component" in lowered
+    assert "docker and llama.cpp are optional" in lowered
+    assert "preview -> confirm -> action" in lowered
+    assert "no silent system installs" in lowered
+    assert "technical details hidden" in lowered or "technical details remain" in lowered
+
+
+def test_basics_ui_uses_capability_cards_without_searxng_details() -> None:
+    path = REPO_ROOT / "desktop" / "src" / "components" / "BasicsTab.jsx"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    assert "Chat" in text
+    assert "Web search" in text
+    assert "Telegram" in text
+    assert "Local models" in text
+    assert "Skills" in text
+    assert "set up web search" in text
+    assert "SearXNG" not in text
+    assert "127.0.0.1" not in text
+    assert "searxng/searxng" not in text
