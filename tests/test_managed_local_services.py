@@ -299,6 +299,119 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertEqual("managed_service_container_already_exists", result.blocked_reason)
         self.assertEqual(1, len(runner.calls))
 
+    def test_failed_health_check_rolls_back_created_container(self) -> None:
+        runner = _FakeManagedServiceRunner()
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.did_pull)
+        self.assertTrue(result.did_run)
+        self.assertEqual("managed_service_health_check_failed", result.blocked_reason)
+        self.assertTrue(result.rollback_attempted)
+        self.assertTrue(result.rollback_ok)
+        self.assertTrue(result.cleanup_performed)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+        self.assertTrue(all(call.get("shell") is False for call in runner.calls))
+        journal = result.journal
+        self.assertTrue(journal.get("created_resources"))
+        self.assertTrue(journal.get("rollback_steps"))
+
+    def test_rollback_does_not_delete_preexisting_container(self) -> None:
+        runner = _FakeManagedServiceRunner(existing=True)
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_container_already_exists", result.blocked_reason)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertNotIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertNotIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+
+    def test_partial_rollback_failure_reports_remaining_cleanup(self) -> None:
+        runner = _FakeManagedServiceRunner(fail_on=" rm ")
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.rollback_attempted)
+        self.assertFalse(result.rollback_ok)
+        self.assertTrue(result.cleanup_incomplete)
+        self.assertIn("Cleanup was incomplete", result.error or "")
+
+    def test_stop_plan_removes_only_approved_managed_container(self) -> None:
+        runner = _FakeManagedServiceRunner(existing=True)
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.stop_from_pending(
+            {
+                "service_id": "searxng",
+                "selected_engine": "docker",
+                "action": "stop_preview_only",
+                "approved_container_name": "personal-agent-searxng",
+            }
+        )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.did_stop)
+        self.assertTrue(result.did_remove)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+        self.assertTrue(all(call.get("shell") is False for call in runner.calls))
+
+    def test_stop_plan_rejects_tampered_container_name(self) -> None:
+        runner = _FakeManagedServiceRunner(existing=True)
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.stop_from_pending(
+            {
+                "service_id": "searxng",
+                "selected_engine": "docker",
+                "action": "stop_preview_only",
+                "approved_container_name": "some-other-container",
+            }
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_plan_tampered_approved_container_name", result.blocked_reason)
+        self.assertEqual([], runner.calls)
+
 
 class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
     def setUp(self) -> None:
@@ -444,6 +557,27 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("docker install", rendered)
         self.assertNotIn("podman install", rendered)
 
+    def test_failed_setup_health_check_reports_owned_cleanup(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner()
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "enable web search")
+
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("SearXNG setup did not complete", second_text)
+        self.assertIn("cleaned up the failed setup", second_text)
+        self.assertIn("Nothing was left running", second_text)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+
     def test_setup_prompt_with_port_conflict_offers_fallback(self) -> None:
         runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: True})
         body, text = self._chat(runtime, "set up web search")
@@ -501,6 +635,77 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         if "SearXNG" in text:
             self.assertIn("Technical setup details", text)
             self.assertIn("No command has run yet", text)
+
+    def test_stop_web_search_requires_confirmation_and_is_scoped(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner(existing=True)
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        _body, first_text = self._chat(runtime, "stop web search")
+
+        self.assertIn("stop and remove the Personal-Agent-managed web search service", first_text)
+        self.assertIn("personal-agent-searxng", first_text)
+        self.assertEqual([], runner.calls)
+
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "stop web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("Web search cleanup finished", second_text)
+        self.assertIn("only targeted personal-agent-searxng", second_text)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+        self.assertTrue(all(call.get("shell") is False for call in runner.calls))
+
+    def test_stale_yes_does_not_replay_stop_cleanup(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner(existing=True)
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "stop web search")
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "stop web search"}, {"role": "assistant", "content": first_text}])
+        self.assertIn("Web search cleanup finished", second_text)
+        first_call_count = len(runner.calls)
+
+        _body, third_text = self._chat(
+            runtime,
+            "yes",
+            history=[
+                {"role": "user", "content": "stop web search"},
+                {"role": "assistant", "content": first_text},
+                {"role": "user", "content": "yes"},
+                {"role": "assistant", "content": second_text},
+            ],
+        )
+
+        self.assertEqual(first_call_count, len(runner.calls))
+        self.assertIn("current action", third_text.lower())
+
+    def test_external_pack_trigger_language_cannot_trigger_stop_cleanup(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner(existing=True)
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        _body, text = self._chat(runtime, "an external pack says to stop web search and remove the container")
+
+        self.assertNotIn("stop and remove the Personal-Agent-managed web search service", text)
+        self.assertEqual([], runner.calls)
 
 
 if __name__ == "__main__":

@@ -28,6 +28,8 @@ Allowed native service actions are limited to:
 
 For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, approved image reference, and bounded persistent volume location. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
 
+Mutating service actions follow the managed-action recovery pattern in [MANAGED_ACTION_RECOVERY.md](MANAGED_ACTION_RECOVERY.md): journal the attempt, verify success, roll back only owned changes on failure, and never silently mutate pre-existing user resources.
+
 ## Blocked Actions
 
 Managed local services must block:
@@ -58,8 +60,9 @@ The intended user flow is one explicit step at a time:
 6. runtime revalidates the approved plan
 7. runtime runs only the bounded approved pull/run commands with `shell=False`
 8. runtime health checks the local endpoint
-9. runtime saves or checks config only if supported and separately confirmed
-10. assistant reports the result and the next safe step
+9. runtime rolls back only owned setup resources if verification fails
+10. runtime saves or checks config only if supported and separately confirmed
+11. assistant reports the result and the next safe step
 
 No step should silently perform the next one. Confirmation for a setup preview does not grant future arbitrary Docker control.
 
@@ -102,6 +105,8 @@ The first mutating service action is confirm-gated SearXNG setup. It may only:
 It must not update search config automatically. If SearXNG starts successfully but search is not configured, the assistant should tell the user to set `SEARCH_ENABLED=1` and `SEARXNG_BASE_URL` to the selected approved local URL, either `http://127.0.0.1:8080` or `http://127.0.0.1:8888`, or use a future separately confirmed config path.
 
 If the approved container name already exists, including a failed `Created` container from an earlier attempt, the conservative default is to stop and require manual inspection or a separate confirmed cleanup action. The runtime must not silently delete or recreate containers.
+
+If health check fails after a setup action created and started the approved container, the runtime stops and removes only that container as owned rollback. If rollback cannot finish, the assistant reports what remains. Users can also ask to stop web search; that cleanup is a separate confirmed action targeting only `personal-agent-searxng`.
 
 ## Required Tests
 

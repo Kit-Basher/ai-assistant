@@ -11,6 +11,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
+
 
 APPROVED_SEARXNG_IMAGE = "searxng/searxng:latest"
 APPROVED_SEARXNG_CONTAINER = "personal-agent-searxng"
@@ -138,6 +140,40 @@ class ManagedLocalServiceSetupPlan:
 
 
 @dataclass(frozen=True)
+class ManagedLocalServiceStopPlan:
+    service_id: str
+    engine: str
+    container_name: str
+
+    def stop_argv(self) -> list[str]:
+        return [self.engine, "stop", self.container_name]
+
+    def remove_argv(self) -> list[str]:
+        return [self.engine, "rm", self.container_name]
+
+    def existing_container_argv(self) -> list[str]:
+        return [
+            self.engine,
+            "ps",
+            "-a",
+            "--filter",
+            f"name=^/{self.container_name}$",
+            "--format",
+            "{{.Names}}",
+        ]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "service_id": self.service_id,
+            "engine": self.engine,
+            "container_name": self.container_name,
+            "stop_argv": self.stop_argv(),
+            "remove_argv": self.remove_argv(),
+            "shell": False,
+        }
+
+
+@dataclass(frozen=True)
 class ManagedLocalServiceExecutionResult:
     ok: bool
     service_id: str
@@ -151,6 +187,11 @@ class ManagedLocalServiceExecutionResult:
     error: str | None = None
     plan: ManagedLocalServiceSetupPlan | None = None
     port_conflict: bool = False
+    rollback_attempted: bool = False
+    rollback_ok: bool = False
+    cleanup_performed: bool = False
+    cleanup_incomplete: bool = False
+    journal: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -166,6 +207,39 @@ class ManagedLocalServiceExecutionResult:
             "error": self.error,
             "plan": self.plan.to_dict() if self.plan else None,
             "port_conflict": self.port_conflict,
+            "rollback_attempted": self.rollback_attempted,
+            "rollback_ok": self.rollback_ok,
+            "cleanup_performed": self.cleanup_performed,
+            "cleanup_incomplete": self.cleanup_incomplete,
+            "journal": dict(self.journal),
+            "shell": False,
+            "external_pack_triggered": False,
+        }
+
+
+@dataclass(frozen=True)
+class ManagedLocalServiceStopResult:
+    ok: bool
+    service_id: str
+    selected_engine: str
+    did_stop: bool = False
+    did_remove: bool = False
+    blocked_reason: str | None = None
+    error: str | None = None
+    plan: ManagedLocalServiceStopPlan | None = None
+    journal: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "ok": self.ok,
+            "service_id": self.service_id,
+            "selected_engine": self.selected_engine,
+            "did_stop": self.did_stop,
+            "did_remove": self.did_remove,
+            "blocked_reason": self.blocked_reason,
+            "error": self.error,
+            "plan": self.plan.to_dict() if self.plan else None,
+            "journal": dict(self.journal),
             "shell": False,
             "external_pack_triggered": False,
         }
@@ -313,16 +387,28 @@ class ManagedLocalServiceExecutor:
         return None
 
     def execute_plan(self, plan: ManagedLocalServiceSetupPlan) -> ManagedLocalServiceExecutionResult:
+        journal = ManagedActionJournal(action_type="managed_local_service_setup", target=plan.service_id)
+        journal.plan_step("validate_plan", resource=plan.service_id)
+        journal.plan_step("preflight_port", resource=f"127.0.0.1:{plan.host_port}")
+        journal.plan_step("ensure_volume", resource=plan.host_volume_path)
+        journal.plan_step("check_existing_container", resource=plan.container_name)
+        journal.plan_step("pull_image", resource=plan.image)
+        journal.plan_step("run_container", resource=plan.container_name)
+        journal.plan_step("health_check", resource=plan.health_url)
         reason = self.validate_plan(plan)
         if reason:
+            journal.record_step("validate_plan", ok=False, resource=plan.service_id, reason=reason)
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
                 selected_engine=plan.engine,
                 blocked_reason=reason,
                 plan=plan,
+                journal=journal.to_dict(),
             )
+        journal.record_step("validate_plan", ok=True, resource=plan.service_id)
         if not self._is_port_available(plan.host_port):
+            journal.record_step("preflight_port", ok=False, resource=f"127.0.0.1:{plan.host_port}")
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -331,10 +417,15 @@ class ManagedLocalServiceExecutor:
                 error=f"Port {plan.host_port} is already being used by another local app.",
                 plan=plan,
                 port_conflict=True,
+                journal=journal.to_dict(),
             )
+        journal.record_step("preflight_port", ok=True, resource=f"127.0.0.1:{plan.host_port}")
         try:
             Path(plan.host_volume_path).mkdir(parents=True, exist_ok=True)
+            journal.record_step("ensure_volume", ok=True, resource=plan.host_volume_path)
+            journal.record_changed_resource("directory", plan.host_volume_path, owned_by="personal-agent")
         except OSError as exc:
+            journal.record_step("ensure_volume", ok=False, resource=plan.host_volume_path, error=str(exc))
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -342,9 +433,11 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_volume_create_failed",
                 error=str(exc),
                 plan=plan,
+                journal=journal.to_dict(),
             )
         existing = self._run_fixed(plan.existing_container_argv())
         if existing.returncode == 0 and plan.container_name in str(existing.stdout or "").splitlines():
+            journal.record_step("check_existing_container", ok=False, resource=plan.container_name, reason="preexisting_container")
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -352,9 +445,12 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_container_already_exists",
                 error="A container with the approved name already exists; manual inspection is required before reuse.",
                 plan=plan,
+                journal=journal.to_dict(),
             )
+        journal.record_step("check_existing_container", ok=True, resource=plan.container_name)
         pulled = self._run_fixed(plan.pull_argv())
         if pulled.returncode != 0:
+            journal.record_step("pull_image", ok=False, resource=plan.image, error=self._short_process_error(pulled))
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -362,9 +458,13 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_pull_failed",
                 error=self._short_process_error(pulled),
                 plan=plan,
+                journal=journal.to_dict(),
             )
+        journal.record_step("pull_image", ok=True, resource=plan.image)
+        journal.record_changed_resource("container_image", plan.image, rollback_supported=False)
         ran = self._run_fixed(plan.run_argv())
         if ran.returncode != 0:
+            journal.record_step("run_container", ok=False, resource=plan.container_name, error=self._short_process_error(ran))
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
@@ -373,17 +473,45 @@ class ManagedLocalServiceExecutor:
                 blocked_reason="managed_service_run_failed",
                 error=self._short_process_error(ran),
                 plan=plan,
+                journal=journal.to_dict(),
             )
+        journal.record_step("run_container", ok=True, resource=plan.container_name)
+        journal.record_created_resource("container", plan.container_name, engine=plan.engine, image=plan.image)
         reachable = self._check_health(plan.health_url)
+        journal.record_step("health_check", ok=reachable, resource=plan.health_url)
+        journal.mark_verification(ok=reachable, health_url=plan.health_url)
+        if not reachable:
+            rollback_ok, rollback_error = self._rollback_owned_setup(plan, journal)
+            message = (
+                "Health check failed after the approved container started. I cleaned up the failed setup. Nothing was left running."
+                if rollback_ok
+                else f"Health check failed after the approved container started. Cleanup was incomplete: {rollback_error or 'unknown rollback error'}."
+            )
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                did_pull=True,
+                did_run=True,
+                reachable=False,
+                blocked_reason="managed_service_health_check_failed",
+                error=message,
+                plan=plan,
+                rollback_attempted=True,
+                rollback_ok=rollback_ok,
+                cleanup_performed=rollback_ok,
+                cleanup_incomplete=not rollback_ok,
+                journal=journal.to_dict(),
+            )
         return ManagedLocalServiceExecutionResult(
-            ok=reachable,
+            ok=True,
             service_id=plan.service_id,
             selected_engine=plan.engine,
             did_pull=True,
             did_run=True,
-            reachable=reachable,
-            blocked_reason=None if reachable else "managed_service_health_check_failed",
+            reachable=True,
             plan=plan,
+            journal=journal.to_dict(),
         )
 
     def execute_from_pending(self, params: dict[str, Any]) -> ManagedLocalServiceExecutionResult:
@@ -398,6 +526,145 @@ class ManagedLocalServiceExecutor:
                 blocked_reason=reason or "managed_service_plan_invalid",
             )
         return self.execute_plan(plan)
+
+    def build_searxng_stop_plan(self, *, selected_engine: str) -> ManagedLocalServiceStopPlan:
+        engine = str(selected_engine or "").strip().lower()
+        return ManagedLocalServiceStopPlan(
+            service_id="searxng",
+            engine=engine,
+            container_name=APPROVED_SEARXNG_CONTAINER,
+        )
+
+    def preview_stop_from_status(self, *, service_id: str, selected_engine: str) -> dict[str, Any]:
+        service = str(service_id or "").strip().lower()
+        engine = str(selected_engine or "").strip().lower()
+        if service != "searxng":
+            return {"ok": False, "blocked_reason": "managed_service_unknown", "service_id": service, "selected_engine": engine}
+        if engine not in {"docker", "podman"}:
+            return {"ok": False, "blocked_reason": "managed_service_engine_invalid", "service_id": service, "selected_engine": engine}
+        if not self._command_finder(engine):
+            return {"ok": False, "blocked_reason": "managed_service_engine_missing", "service_id": service, "selected_engine": engine}
+        plan = self.build_searxng_stop_plan(selected_engine=engine)
+        reason = self.validate_stop_plan(plan)
+        if reason:
+            return {"ok": False, "blocked_reason": reason, "service_id": service, "selected_engine": engine}
+        return {"ok": True, "service_id": service, "selected_engine": engine, "plan": plan.to_dict(), "mutated": False}
+
+    def validate_stop_plan(self, plan: ManagedLocalServiceStopPlan) -> str | None:
+        if plan.service_id != "searxng":
+            return "managed_service_unknown"
+        if plan.engine not in {"docker", "podman"}:
+            return "managed_service_engine_invalid"
+        if not self._command_finder(plan.engine):
+            return "managed_service_engine_missing"
+        if plan.container_name != APPROVED_SEARXNG_CONTAINER:
+            return "managed_service_container_not_approved"
+        return None
+
+    def stop_from_pending(self, params: dict[str, Any]) -> ManagedLocalServiceStopResult:
+        service_id = str(params.get("service_id") or "searxng").strip().lower() or "searxng"
+        engine = str(params.get("selected_engine") or "docker").strip().lower() or "docker"
+        if service_id != "searxng":
+            return ManagedLocalServiceStopResult(ok=False, service_id=service_id, selected_engine=engine, blocked_reason="managed_service_unknown")
+        if str(params.get("action") or "").strip().lower() != "stop_preview_only":
+            return ManagedLocalServiceStopResult(ok=False, service_id=service_id, selected_engine=engine, blocked_reason="managed_service_action_invalid")
+        if str(params.get("approved_container_name") or "").strip() != APPROVED_SEARXNG_CONTAINER:
+            return ManagedLocalServiceStopResult(
+                ok=False,
+                service_id=service_id,
+                selected_engine=engine,
+                blocked_reason="managed_service_plan_tampered_approved_container_name",
+            )
+        plan = self.build_searxng_stop_plan(selected_engine=engine)
+        return self.stop_plan(plan)
+
+    def stop_plan(self, plan: ManagedLocalServiceStopPlan) -> ManagedLocalServiceStopResult:
+        journal = ManagedActionJournal(action_type="managed_local_service_stop", target=plan.service_id)
+        journal.plan_step("validate_stop_plan", resource=plan.service_id)
+        journal.plan_step("check_existing_container", resource=plan.container_name)
+        journal.plan_step("stop_container", resource=plan.container_name)
+        journal.plan_step("remove_container", resource=plan.container_name)
+        reason = self.validate_stop_plan(plan)
+        if reason:
+            journal.record_step("validate_stop_plan", ok=False, resource=plan.service_id, reason=reason)
+            return ManagedLocalServiceStopResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason=reason,
+                plan=plan,
+                journal=journal.to_dict(),
+            )
+        journal.record_step("validate_stop_plan", ok=True, resource=plan.service_id)
+        existing = self._run_fixed(plan.existing_container_argv())
+        if existing.returncode == 0 and plan.container_name not in str(existing.stdout or "").splitlines():
+            journal.record_step("check_existing_container", ok=False, resource=plan.container_name, reason="missing_container")
+            return ManagedLocalServiceStopResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_container_not_found",
+                error="The approved Personal-Agent-managed SearXNG container was not found.",
+                plan=plan,
+                journal=journal.to_dict(),
+            )
+        journal.record_step("check_existing_container", ok=True, resource=plan.container_name)
+        stopped = self._run_fixed(plan.stop_argv())
+        if stopped.returncode != 0:
+            journal.record_step("stop_container", ok=False, resource=plan.container_name, error=self._short_process_error(stopped))
+            return ManagedLocalServiceStopResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_stop_failed",
+                error=self._short_process_error(stopped),
+                plan=plan,
+                journal=journal.to_dict(),
+            )
+        journal.record_step("stop_container", ok=True, resource=plan.container_name)
+        removed = self._run_fixed(plan.remove_argv())
+        if removed.returncode != 0:
+            journal.record_step("remove_container", ok=False, resource=plan.container_name, error=self._short_process_error(removed))
+            return ManagedLocalServiceStopResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                did_stop=True,
+                blocked_reason="managed_service_remove_failed",
+                error=self._short_process_error(removed),
+                plan=plan,
+                journal=journal.to_dict(),
+            )
+        journal.record_step("remove_container", ok=True, resource=plan.container_name)
+        journal.mark_verification(ok=True, container_removed=True)
+        return ManagedLocalServiceStopResult(
+            ok=True,
+            service_id=plan.service_id,
+            selected_engine=plan.engine,
+            did_stop=True,
+            did_remove=True,
+            plan=plan,
+            journal=journal.to_dict(),
+        )
+
+    def _rollback_owned_setup(self, plan: ManagedLocalServiceSetupPlan, journal: ManagedActionJournal) -> tuple[bool, str | None]:
+        stop_result = self._run_fixed([plan.engine, "stop", plan.container_name])
+        stop_ok = stop_result.returncode == 0
+        journal.record_rollback_step("stop_container", ok=stop_ok, resource=plan.container_name, error=None if stop_ok else self._short_process_error(stop_result))
+        remove_result = self._run_fixed([plan.engine, "rm", plan.container_name])
+        remove_ok = remove_result.returncode == 0
+        journal.record_rollback_step("remove_container", ok=remove_ok, resource=plan.container_name, error=None if remove_ok else self._short_process_error(remove_result))
+        rollback_ok = stop_ok and remove_ok
+        error = None if rollback_ok else "; ".join(
+            item
+            for item in [
+                None if stop_ok else f"stop failed: {self._short_process_error(stop_result)}",
+                None if remove_ok else f"remove failed: {self._short_process_error(remove_result)}",
+            ]
+            if item
+        )
+        journal.mark_rollback(ok=rollback_ok, stopped_container=stop_ok, removed_container=remove_ok, error=error)
+        return rollback_ok, error
 
     def _run_fixed(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         return self._runner(

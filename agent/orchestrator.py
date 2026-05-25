@@ -2339,6 +2339,81 @@ class Orchestrator:
             mutating=False,
         )
 
+    @staticmethod
+    def _looks_like_managed_service_stop_request(text: str) -> bool:
+        normalized = " ".join(normalize_setup_text(text).replace("/", " ").lower().split())
+        if "external pack" in normalized or "skill pack" in normalized or "imported pack" in normalized:
+            return False
+        return bool(
+            re.search(r"\b(stop|turn off|shut down|remove|cleanup|clean up)\b.*\b(web search|searxng)\b", normalized)
+            or re.search(r"\b(web search|searxng)\b.*\b(stop|turn off|shut down|remove|cleanup|clean up)\b", normalized)
+        )
+
+    def _managed_service_stop_preview_response(self, user_id: str) -> OrchestratorResponse:
+        services_payload = self._managed_service_status_payload()
+        searxng = self._searxng_service_from_status(services_payload)
+        engine = self._selected_managed_service_engine(services_payload, searxng)
+        if not engine:
+            return self._managed_service_missing_engine_response(services_payload)
+        adapter = self._chat_runtime_adapter
+        preview_payload_from_runtime: dict[str, Any] = {}
+        if callable(getattr(adapter, "preview_managed_service_stop", None)):
+            try:
+                preview_payload_from_runtime = dict(adapter.preview_managed_service_stop({"service_id": "searxng", "selected_engine": engine}))
+            except Exception:
+                preview_payload_from_runtime = {}
+        if preview_payload_from_runtime and not bool(preview_payload_from_runtime.get("ok")):
+            blocked_reason = str(preview_payload_from_runtime.get("blocked_reason") or "managed_service_stop_unavailable")
+            return self._runtime_truth_response(
+                text=(
+                    "I cannot prepare the web search cleanup plan right now. "
+                    f"Reason: {blocked_reason}. No container was stopped or removed."
+                ),
+                route="action_tool",
+                used_tools=["managed_local_service_stop_preview"],
+                ok=False,
+                error_kind=blocked_reason,
+                payload={
+                    "type": "managed_local_service_stop_unavailable",
+                    "service_id": "searxng",
+                    "selected_engine": engine,
+                    "stop_preview": preview_payload_from_runtime,
+                    "mutated": False,
+                },
+            )
+        lines = [
+            "I can stop and remove the Personal-Agent-managed web search service.",
+            "This only targets the approved container personal-agent-searxng.",
+            "I will not touch any other containers, images, ports, volumes, or system packages.",
+            "Say yes to stop and remove it, or no to cancel.",
+        ]
+        return self._confirmation_preview_response(
+            user_id,
+            route="action_tool",
+            question="\n".join(lines),
+            used_tools=["managed_local_service_stop_preview"],
+            action={
+                "operation": "managed_local_service_stop_preview",
+                "params": {
+                    "service_id": "searxng",
+                    "selected_engine": engine,
+                    "action": "stop_preview_only",
+                    "approved_container_name": "personal-agent-searxng",
+                },
+            },
+            title="Stop web search service",
+            preview_payload={
+                "type": "managed_local_service_stop_preview",
+                "service_id": "searxng",
+                "selected_engine": engine,
+                "approved_container_name": "personal-agent-searxng",
+                "stop_preview": preview_payload_from_runtime,
+                "services_status": services_payload,
+                "mutated": False,
+            },
+            mutating=False,
+        )
+
     def _safe_web_search_status_response(self, user_id: str, text: str) -> OrchestratorResponse:
         _ = (user_id, text)
         status_payload: dict[str, Any]
@@ -2682,9 +2757,13 @@ class Orchestrator:
                 lines.append(str(result.get("error") or "The approved port is already being used by another local app."))
             elif blocked_reason == "managed_service_container_already_exists":
                 lines.append("A personal-agent-searxng container already exists, possibly from an earlier failed attempt. I did not remove it. Remove/recreate cleanup needs a separate confirmation, or manually inspect it with Docker/Podman.")
+            elif blocked_reason == "managed_service_health_check_failed" and bool(result.get("rollback_attempted")):
+                lines.append(str(result.get("error") or "Health check failed. I attempted to clean up only resources created by this setup."))
             elif blocked_reason:
                 lines.append(f"Blocked or failed reason: {blocked_reason}.")
             if ok:
+                lines.append("A background service is running, and it is only reachable from this computer.")
+                lines.append("You can ask me to stop web search if you want to remove the managed container.")
                 lines.append(f"Next step: if web search is not already configured, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL={health_url}, then check search again.")
             else:
                 lines.append("Next step: fix the reported port/container issue, then ask me to set up web search again.")
@@ -2705,6 +2784,70 @@ class Orchestrator:
                 used_tools=["managed_local_service_setup", "safe_web_search"],
                 ok=ok,
                 error_kind=None if ok else (blocked_reason or "managed_service_setup_failed"),
+                payload=payload,
+            )
+        if operation == "managed_local_service_stop_preview":
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            service_id = str(params.get("service_id") or "searxng").strip() or "searxng"
+            engine = str(params.get("selected_engine") or "docker").strip() or "docker"
+            adapter = self._chat_runtime_adapter
+            if not callable(getattr(adapter, "execute_managed_service_stop", None)):
+                return self._runtime_truth_response(
+                    text="I could not stop web search because the managed service cleanup executor is unavailable. No container was stopped or removed.",
+                    route="action_tool",
+                    used_tools=["managed_local_service_stop_preview"],
+                    ok=False,
+                    error_kind="managed_service_stop_executor_unavailable",
+                    payload={
+                        "type": "managed_local_service_stop_result",
+                        "service_id": service_id,
+                        "selected_engine": engine,
+                        "mutated": False,
+                    },
+                )
+            try:
+                result = adapter.execute_managed_service_stop(params)
+            except Exception as exc:  # noqa: BLE001 - user-facing safe failure.
+                result = {
+                    "ok": False,
+                    "service_id": service_id,
+                    "selected_engine": engine,
+                    "blocked_reason": "managed_service_stop_execution_error",
+                    "error": str(exc),
+                    "did_stop": False,
+                    "did_remove": False,
+                }
+            ok = bool(result.get("ok"))
+            did_stop = bool(result.get("did_stop"))
+            did_remove = bool(result.get("did_remove"))
+            blocked_reason = str(result.get("blocked_reason") or "").strip()
+            lines = [
+                "Web search cleanup finished." if ok else "Web search cleanup did not complete.",
+                f"Engine: {engine}",
+                f"Stopped approved container: {'yes' if did_stop else 'no'}.",
+                f"Removed approved container: {'yes' if did_remove else 'no'}.",
+                "I only targeted personal-agent-searxng.",
+                "No arbitrary Docker commands ran, and no external pack code ran.",
+            ]
+            if blocked_reason:
+                lines.append(f"Blocked or failed reason: {blocked_reason}.")
+            if result.get("error"):
+                lines.append(str(result.get("error")))
+            payload = dict(result) if isinstance(result, dict) else {}
+            payload.update(
+                {
+                    "type": "managed_local_service_stop_result",
+                    "service_id": service_id,
+                    "selected_engine": engine,
+                    "mutated": bool(did_stop or did_remove),
+                }
+            )
+            return self._runtime_truth_response(
+                text="\n".join(lines),
+                route="action_tool",
+                used_tools=["managed_local_service_stop"],
+                ok=ok,
+                error_kind=None if ok else (blocked_reason or "managed_service_stop_failed"),
                 payload=payload,
             )
         if operation == "shell_install_package":
@@ -14282,6 +14425,8 @@ class Orchestrator:
             return repair_followup
         if self._looks_like_managed_adapter_execution_request(text):
             return self._managed_adapter_block_response(user_id, text)
+        if self._looks_like_managed_service_stop_request(text):
+            return self._managed_service_stop_preview_response(user_id)
         if self._looks_like_unbounded_install_request(text):
             return self._unbounded_install_block_response(user_id, text)
         if self._looks_like_agent_pack_install_request(text) and self._looks_like_email_access_request(text):

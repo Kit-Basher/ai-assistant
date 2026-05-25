@@ -107,3 +107,14 @@ def test_assistant_agent_planning_doc_exists_and_draws_boundary() -> None:
     assert "unknown capabilities or actions are rejected" in text
     assert "cannot execute" in text
     assert "yes/no pending confirmations" in text
+
+
+def test_managed_action_recovery_doc_exists_and_states_rollback_boundary() -> None:
+    path = REPO_ROOT / "docs" / "design" / "MANAGED_ACTION_RECOVERY.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8").lower()
+    assert "action journal" in text
+    assert "rollback owned changes only" in text
+    assert "never silently mutate pre-existing user resources" in text
+    assert "shell=false" in text
+    assert "searxng" in text

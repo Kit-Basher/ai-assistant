@@ -10714,6 +10714,15 @@ class AgentRuntime:
     def execute_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._managed_service_executor().execute_from_pending(params).to_dict()
 
+    def preview_managed_service_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._managed_service_executor().preview_stop_from_status(
+            service_id=str((params or {}).get("service_id") or "searxng"),
+            selected_engine=str((params or {}).get("selected_engine") or "docker"),
+        )
+
+    def execute_managed_service_stop(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._managed_service_executor().stop_from_pending(params).to_dict()
+
     def search_query(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         query = str((payload or {}).get("query") or "").strip()
         max_results_raw = (payload or {}).get("max_results")

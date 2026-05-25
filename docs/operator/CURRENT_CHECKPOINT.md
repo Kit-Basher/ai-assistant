@@ -24,6 +24,8 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Permission/configuration is previewed and explicitly confirmed before recording metadata/config only.
 - Managed-adapter invocation is previewed and explicitly confirmed before running a core-owned adapter operation.
 - Confirm-gated SearXNG managed local service setup can run only the approved Docker/Podman image, name, loopback bind, approved primary/fallback ports, and managed volume.
+- Managed local service setup now journals owned changes and rolls back the SearXNG container it created if health checks fail.
+- Web search cleanup is a separate confirmed action that only targets `personal-agent-searxng`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -64,6 +66,7 @@ missing capability
 - No automatic adapter invocation after permission/configuration grant.
 - No external code, shell, subprocess, browser, OAuth, or pack-owned network access during managed-adapter invocation.
 - No arbitrary Docker commands, arbitrary ports, host networking, privileged containers, random mounts, silent container deletion, or external-pack-triggered service execution.
+- No managed action may silently mutate pre-existing user resources during recovery.
 - Source trust is not content trust.
 - Review approval is not enablement.
 - Enablement is not permission grant.
@@ -79,7 +82,7 @@ Run this after external-pack, search, acquisition, or routing changes:
 3. `python -u scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90 --strict-quality`
 4. `git status`
 
-`external_pack_safety_smoke` currently covers 36 hostile-intake, lifecycle, and managed-service gates. It proves hostile intake gates. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
+`external_pack_safety_smoke` currently covers 39 hostile-intake, lifecycle, managed-service, and recovery gates. It proves hostile intake gates. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
 
 ## Next Likely Work
 
