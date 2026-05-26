@@ -7284,6 +7284,13 @@ class AgentRuntime:
         )
 
     def update_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        requested_payload = payload if isinstance(payload, dict) else {}
+        journal = ManagedActionJournal(action_type="default_model_config", target="defaults")
+        journal.plan_step("capture_previous_defaults", resource="defaults")
+        journal.plan_step("preflight_defaults_request", resource="defaults")
+        journal.plan_step("persist_defaults", resource="defaults")
+        journal.plan_step("verify_defaults", resource="defaults")
+
         valid_modes = {
             "auto",
             "prefer_cheap",
@@ -7291,30 +7298,60 @@ class AgentRuntime:
             "prefer_local_lowest_cost_capable",
         }
 
-        document = self.registry_document
+        document = copy.deepcopy(self.registry_document) if isinstance(self.registry_document, dict) else {}
         defaults = self._ensure_defaults(document)
+        previous_defaults = copy.deepcopy(defaults)
         previous_default_provider = str(defaults.get("default_provider") or "").strip().lower() or None
         previous_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         provider_ids = {str(provider_id).strip().lower() for provider_id in providers.keys()}
-        provider_override = str(payload.get("default_provider") or "").strip().lower() if "default_provider" in payload else None
+        provider_override = str(requested_payload.get("default_provider") or "").strip().lower() if "default_provider" in requested_payload else None
 
-        if "routing_mode" in payload:
-            mode = str(payload.get("routing_mode") or "").strip().lower()
+        journal.record_step(
+            "capture_previous_defaults",
+            ok=True,
+            resource="defaults",
+            previous_defaults=self._defaults_metadata(previous_defaults),
+        )
+
+        if "routing_mode" in requested_payload:
+            mode = str(requested_payload.get("routing_mode") or "").strip().lower()
             if mode not in valid_modes:
-                return False, {"ok": False, "error": "invalid routing_mode"}
+                journal.record_step("preflight_defaults_request", ok=False, resource="defaults", reason="invalid_routing_mode")
+                return False, {
+                    "ok": False,
+                    "error": "invalid routing_mode",
+                    "error_kind": "invalid_routing_mode",
+                    "managed_action_journal": journal.to_dict(),
+                }
             defaults["routing_mode"] = mode
 
-        if "default_provider" in payload:
+        if "default_provider" in requested_payload:
             provider = provider_override or None
-            if provider and provider not in self._sorted_provider_ids():
-                return False, {"ok": False, "error": "default_provider not found"}
+            if provider and provider not in provider_ids:
+                journal.record_step("preflight_defaults_request", ok=False, resource=str(provider or ""), reason="default_provider_not_found")
+                return False, {
+                    "ok": False,
+                    "error": "default_provider not found",
+                    "error_kind": "default_provider_not_found",
+                    "managed_action_journal": journal.to_dict(),
+                }
+            provider_preflight = self._default_provider_preflight(provider, providers)
+            if provider_preflight is not None:
+                journal.record_step(
+                    "preflight_defaults_request",
+                    ok=False,
+                    resource=str(provider or ""),
+                    reason=str(provider_preflight.get("error_kind") or provider_preflight.get("error") or "provider_not_usable"),
+                )
+                provider_preflight["managed_action_journal"] = journal.to_dict()
+                return False, provider_preflight
             defaults["default_provider"] = provider
 
-        chat_model_key = "chat_model" if "chat_model" in payload else ("default_model" if "default_model" in payload else None)
+        chat_model_key = "chat_model" if "chat_model" in requested_payload else ("default_model" if "default_model" in requested_payload else None)
         if chat_model_key is not None:
-            model = str(payload.get(chat_model_key) or "").strip() or None
+            model = str(requested_payload.get(chat_model_key) or "").strip() or None
             if model is None:
                 defaults["chat_model"] = None
                 defaults["default_model"] = None
@@ -7328,7 +7365,13 @@ class AgentRuntime:
                     provider_ids=provider_ids,
                 )
                 if canonical_model is None:
-                    return False, {"ok": False, "error": "default_model not found"}
+                    journal.record_step("preflight_defaults_request", ok=False, resource=model, reason="default_model_not_found")
+                    return False, {
+                        "ok": False,
+                        "error": "default_model not found",
+                        "error_kind": "default_model_not_found",
+                        "managed_action_journal": journal.to_dict(),
+                    }
                 valid_default, validated_model, validation_error = validate_default_model(
                     canonical_model,
                     models,
@@ -7347,11 +7390,33 @@ class AgentRuntime:
                     )
                     if details is not None:
                         legacy_error["details"] = details
+                    journal.record_step(
+                        "preflight_defaults_request",
+                        ok=False,
+                        resource=canonical_model,
+                        reason=str(legacy_error.get("error_kind") or legacy_error.get("error") or "chat_model_not_chat_capable"),
+                    )
+                    legacy_error["managed_action_journal"] = journal.to_dict()
                     return False, legacy_error
+                model_preflight = self._default_chat_model_preflight(
+                    validated_model,
+                    models=models,
+                    providers=providers,
+                    selected_provider=str(defaults.get("default_provider") or "").strip().lower() or None,
+                )
+                if model_preflight is not None:
+                    journal.record_step(
+                        "preflight_defaults_request",
+                        ok=False,
+                        resource=validated_model,
+                        reason=str(model_preflight.get("error_kind") or model_preflight.get("error") or "chat_model_not_usable"),
+                    )
+                    model_preflight["managed_action_journal"] = journal.to_dict()
+                    return False, model_preflight
                 defaults["chat_model"] = validated_model
                 defaults["default_model"] = validated_model
-        if "embed_model" in payload:
-            model = str(payload.get("embed_model") or "").strip() or None
+        if "embed_model" in requested_payload:
+            model = str(requested_payload.get("embed_model") or "").strip() or None
             if model is None:
                 defaults["embed_model"] = None
             else:
@@ -7364,7 +7429,13 @@ class AgentRuntime:
                     provider_ids=provider_ids,
                 )
                 if canonical_model is None:
-                    return False, {"ok": False, "error": "embed_model not found"}
+                    journal.record_step("preflight_defaults_request", ok=False, resource=model, reason="embed_model_not_found")
+                    return False, {
+                        "ok": False,
+                        "error": "embed_model not found",
+                        "error_kind": "embed_model_not_found",
+                        "managed_action_journal": journal.to_dict(),
+                    }
                 valid_default, validated_model, validation_error = validate_default_model(
                     canonical_model,
                     models,
@@ -7383,10 +7454,17 @@ class AgentRuntime:
                     )
                     if details is not None:
                         error_payload["details"] = details
+                    journal.record_step(
+                        "preflight_defaults_request",
+                        ok=False,
+                        resource=canonical_model,
+                        reason=str(error_payload.get("error_kind") or "embed_model_not_embedding_capable"),
+                    )
+                    error_payload["managed_action_journal"] = journal.to_dict()
                     return False, error_payload
                 defaults["embed_model"] = validated_model
         elif (
-            "default_provider" in payload
+            "default_provider" in requested_payload
             and defaults.get("chat_model")
             and str(defaults.get("default_provider") or "").strip()
         ):
@@ -7398,8 +7476,8 @@ class AgentRuntime:
                     defaults["chat_model"] = None
                     defaults["default_model"] = None
 
-        if "allow_remote_fallback" in payload:
-            defaults["allow_remote_fallback"] = bool(payload.get("allow_remote_fallback"))
+        if "allow_remote_fallback" in requested_payload:
+            defaults["allow_remote_fallback"] = bool(requested_payload.get("allow_remote_fallback"))
 
         defaults["default_model"] = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
         current_chat_model = str(defaults.get("chat_model") or defaults.get("default_model") or "").strip() or None
@@ -7410,10 +7488,57 @@ class AgentRuntime:
         if defaults.get("embed_model") in {"", "none"}:
             defaults["embed_model"] = None
         document["defaults"] = defaults
+        journal.record_step(
+            "preflight_defaults_request",
+            ok=True,
+            resource="defaults",
+            requested_defaults=self._defaults_metadata(defaults),
+        )
         saved, error = self._persist_registry_document(document)
         if not saved:
             assert error is not None
-            return False, error
+            journal.record_step("persist_defaults", ok=False, resource="defaults", reason=str(error.get("error") or "persist_failed"))
+            response = dict(error)
+            response.setdefault("error_kind", str(response.get("error") or "persist_failed"))
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
+        journal.record_step(
+            "persist_defaults",
+            ok=True,
+            resource="defaults",
+            changed_defaults=self._defaults_metadata(defaults),
+        )
+        journal.record_changed_resource(
+            "registry_defaults",
+            "defaults",
+            rollback_supported=True,
+            previous_defaults=self._defaults_metadata(previous_defaults),
+            new_defaults=self._defaults_metadata(defaults),
+        )
+        verification = self._verify_defaults_update(expected_defaults=defaults, requested_payload=requested_payload)
+        journal.record_step(
+            "verify_defaults",
+            ok=bool(verification.get("ok")),
+            resource="defaults",
+            verification=verification,
+        )
+        if not bool(verification.get("ok")):
+            rollback_ok, rollback_summary = self._restore_defaults_state(previous_defaults, journal=journal)
+            journal.mark_verification(ok=False, verification=verification)
+            return False, {
+                "ok": False,
+                "error": str(verification.get("error_kind") or "default_model_verification_failed"),
+                "error_kind": str(verification.get("error_kind") or "default_model_verification_failed"),
+                "message": (
+                    "The model switch did not finish: I could not verify the new default model. "
+                    f"{rollback_summary}. Check model status and try again."
+                ),
+                "rollback_ok": rollback_ok,
+                "rollback_summary": rollback_summary,
+                "managed_action_journal": journal.to_dict(),
+            }
+        journal.mark_verification(ok=True, verification=verification)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         current_defaults = self.get_defaults()
         current_default_provider = str(current_defaults.get("default_provider") or "").strip().lower() or None
         current_chat_model = (
@@ -7431,7 +7556,156 @@ class AgentRuntime:
                 current_chat_model,
                 provider=current_default_provider,
             )
-        return True, {"ok": True, **current_defaults}
+        return True, {"ok": True, **current_defaults, "managed_action_journal": journal.to_dict()}
+
+    @staticmethod
+    def _defaults_metadata(defaults: Mapping[str, Any] | None) -> dict[str, Any]:
+        source = defaults if isinstance(defaults, Mapping) else {}
+        return {
+            "default_provider": str(source.get("default_provider") or "").strip().lower() or None,
+            "chat_model": str(source.get("chat_model") or source.get("default_model") or "").strip() or None,
+            "default_model": str(source.get("default_model") or source.get("chat_model") or "").strip() or None,
+            "embed_model": str(source.get("embed_model") or "").strip() or None,
+            "routing_mode": str(source.get("routing_mode") or "").strip() or None,
+            "allow_remote_fallback": bool(source.get("allow_remote_fallback", True)),
+            "last_chat_model": str(source.get("last_chat_model") or "").strip() or None,
+        }
+
+    @staticmethod
+    def _default_provider_preflight(provider_id: str | None, providers: Mapping[str, Any]) -> dict[str, Any] | None:
+        if not provider_id:
+            return None
+        provider = providers.get(provider_id) if isinstance(providers, Mapping) else None
+        if not isinstance(provider, dict):
+            return {"ok": False, "error": "default_provider not found", "error_kind": "default_provider_not_found"}
+        if provider.get("enabled") is False:
+            return {
+                "ok": False,
+                "error": "default_provider_disabled",
+                "error_kind": "default_provider_disabled",
+                "message": "The model switch did not start because that provider is disabled.",
+            }
+        return None
+
+    @staticmethod
+    def _default_chat_model_preflight(
+        model_id: str,
+        *,
+        models: Mapping[str, Any],
+        providers: Mapping[str, Any],
+        selected_provider: str | None,
+    ) -> dict[str, Any] | None:
+        model = models.get(model_id) if isinstance(models, Mapping) else None
+        if not isinstance(model, dict):
+            return {"ok": False, "error": "default_model not found", "error_kind": "default_model_not_found"}
+        model_provider = str(model.get("provider") or "").strip().lower()
+        if selected_provider and model_provider and model_provider != selected_provider:
+            return {
+                "ok": False,
+                "error": "default_model_provider_mismatch",
+                "error_kind": "default_model_provider_mismatch",
+                "message": "The model switch did not start because the model belongs to a different provider.",
+            }
+        provider = providers.get(model_provider) if isinstance(providers, Mapping) else None
+        if isinstance(provider, dict) and provider.get("enabled") is False:
+            return {
+                "ok": False,
+                "error": "default_provider_disabled",
+                "error_kind": "default_provider_disabled",
+                "message": "The model switch did not start because that provider is disabled.",
+            }
+        if model.get("enabled") is False:
+            return {
+                "ok": False,
+                "error": "chat_model_disabled",
+                "error_kind": "chat_model_disabled",
+                "message": "The model switch did not start because that model is disabled.",
+            }
+        if model.get("available") is False:
+            return {
+                "ok": False,
+                "error": "chat_model_unavailable",
+                "error_kind": "chat_model_unavailable",
+                "message": "The model switch did not start because that model is not available.",
+            }
+        if model.get("routable") is False:
+            return {
+                "ok": False,
+                "error": "chat_model_not_routable",
+                "error_kind": "chat_model_not_routable",
+                "message": "The model switch did not start because that model is not routable.",
+            }
+        return None
+
+    def _verify_defaults_update(
+        self,
+        *,
+        expected_defaults: Mapping[str, Any],
+        requested_payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        current_doc = self.registry_document if isinstance(self.registry_document, dict) else {}
+        current_defaults = current_doc.get("defaults") if isinstance(current_doc.get("defaults"), dict) else {}
+        expected = self._defaults_metadata(expected_defaults)
+        current = self._defaults_metadata(current_defaults)
+        keys = {"default_provider", "chat_model", "default_model", "embed_model", "routing_mode", "allow_remote_fallback"}
+        for key in sorted(keys):
+            if key in {"chat_model", "default_model"} and not ({"chat_model", "default_model"} & set(requested_payload.keys())):
+                continue
+            if key == "embed_model" and "embed_model" not in requested_payload:
+                continue
+            if key == "routing_mode" and "routing_mode" not in requested_payload:
+                continue
+            if key == "allow_remote_fallback" and "allow_remote_fallback" not in requested_payload:
+                continue
+            if key == "default_provider" and "default_provider" not in requested_payload:
+                continue
+            if current.get(key) != expected.get(key):
+                return {
+                    "ok": False,
+                    "error_kind": "default_model_verification_failed",
+                    "mismatch": key,
+                    "expected": expected.get(key),
+                    "actual": current.get(key),
+                }
+        chat_model = str(current.get("chat_model") or "").strip()
+        if chat_model:
+            models = current_doc.get("models") if isinstance(current_doc.get("models"), dict) else {}
+            providers = current_doc.get("providers") if isinstance(current_doc.get("providers"), dict) else {}
+            preflight = self._default_chat_model_preflight(
+                chat_model,
+                models=models,
+                providers=providers,
+                selected_provider=str(current.get("default_provider") or "").strip().lower() or None,
+            )
+            if preflight is not None:
+                return {
+                    "ok": False,
+                    "error_kind": str(preflight.get("error_kind") or "default_model_verification_failed"),
+                    "details": str(preflight.get("message") or preflight.get("error") or ""),
+                }
+        return {"ok": True, "current_defaults": current}
+
+    def _restore_defaults_state(self, previous_defaults: Mapping[str, Any], *, journal: ManagedActionJournal) -> tuple[bool, str]:
+        try:
+            document = copy.deepcopy(self.registry_document) if isinstance(self.registry_document, dict) else {}
+            document["defaults"] = copy.deepcopy(dict(previous_defaults))
+            saved, error = self._persist_registry_document(document)
+            if not saved:
+                raise RuntimeError(str((error or {}).get("error") or "persist_failed"))
+            journal.record_rollback_step(
+                "restore_registry_defaults",
+                ok=True,
+                resource="defaults",
+                restored_defaults=self._defaults_metadata(previous_defaults),
+            )
+            summary = "restored the previous default model settings"
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            journal.record_rollback_step("restore_registry_defaults", ok=False, resource="defaults", error=exc.__class__.__name__)
+            summary = "could not restore the previous default model settings automatically"
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
 
     def rollback_defaults(self) -> tuple[bool, dict[str, Any]]:
         # Operator-only rollback for persisted defaults. Assistant switch-back uses
@@ -9625,11 +9899,60 @@ class AgentRuntime:
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
+        journal = ManagedActionJournal(action_type="temporary_chat_model_override", target=applied_model)
+        journal.plan_step("capture_previous_temporary_target", resource="temporary_chat_target")
+        journal.plan_step("apply_temporary_chat_target", resource="temporary_chat_target")
+        journal.plan_step("verify_temporary_chat_target", resource="temporary_chat_target")
+        previous_safe_override = (
+            dict(self._safe_mode_explicit_chat_target_override)
+            if isinstance(self._safe_mode_explicit_chat_target_override, dict)
+            else None
+        )
+        previous_temporary_override = (
+            dict(self._temporary_chat_target_override)
+            if isinstance(self._temporary_chat_target_override, dict)
+            else None
+        )
+        journal.record_step(
+            "capture_previous_temporary_target",
+            ok=True,
+            resource="temporary_chat_target",
+            previous_safe_override=self._temporary_target_metadata(previous_safe_override),
+            previous_temporary_override=self._temporary_target_metadata(previous_temporary_override),
+        )
         if self._safe_mode_enabled():
             self._safe_mode_explicit_chat_target_override = {
                 "provider": applied_provider,
                 "model": applied_model,
             }
+            expected_safe_override = {"provider": applied_provider, "model": applied_model}
+            verified = self._safe_mode_explicit_chat_target_override == expected_safe_override
+            journal.record_step(
+                "apply_temporary_chat_target",
+                ok=True,
+                resource="safe_mode_explicit_chat_target",
+                new_override=self._temporary_target_metadata(expected_safe_override),
+            )
+            journal.record_step("verify_temporary_chat_target", ok=verified, resource="safe_mode_explicit_chat_target")
+            if not verified:
+                self._safe_mode_explicit_chat_target_override = previous_safe_override
+                journal.record_rollback_step(
+                    "restore_temporary_chat_target",
+                    ok=True,
+                    resource="safe_mode_explicit_chat_target",
+                    restored_override=self._temporary_target_metadata(previous_safe_override),
+                )
+                journal.mark_verification(ok=False, target=applied_model)
+                journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
+                return False, {
+                    "ok": False,
+                    "error": "temporary_chat_target_verification_failed",
+                    "error_kind": "temporary_chat_target_verification_failed",
+                    "message": "The temporary model switch did not finish, so I restored the previous chat target.",
+                    "managed_action_journal": journal.to_dict(),
+                }
+            journal.mark_verification(ok=True, target=applied_model)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
             return True, {
                 "ok": True,
                 "provider": applied_provider,
@@ -9638,12 +9961,14 @@ class AgentRuntime:
                     f"Temporary chat model switched to {applied_model}. "
                     "This does not change your default model."
                 ),
+                "managed_action_journal": journal.to_dict(),
             }
         stored_default = self._stored_chat_default_target()
         default_model = str((stored_default or {}).get("model") or "").strip() or None
         default_provider = str((stored_default or {}).get("provider") or "").strip().lower() or None
         if applied_model == default_model and applied_provider == default_provider:
             self._temporary_chat_target_override = None
+            expected_temporary_override = None
         else:
             self._temporary_chat_target_override = {
                 "provider": applied_provider,
@@ -9651,9 +9976,38 @@ class AgentRuntime:
                 "user_id": str((self._active_chat_scope or {}).get("user_id") or "").strip(),
                 "thread_id": str((self._active_chat_scope or {}).get("thread_id") or "").strip(),
             }
+            expected_temporary_override = dict(self._temporary_chat_target_override)
+        verified = self._temporary_chat_target_override == expected_temporary_override
+        journal.record_step(
+            "apply_temporary_chat_target",
+            ok=True,
+            resource="temporary_chat_target",
+            new_override=self._temporary_target_metadata(expected_temporary_override),
+        )
+        journal.record_step("verify_temporary_chat_target", ok=verified, resource="temporary_chat_target")
+        if not verified:
+            self._safe_mode_explicit_chat_target_override = previous_safe_override
+            self._temporary_chat_target_override = previous_temporary_override
+            journal.record_rollback_step(
+                "restore_temporary_chat_target",
+                ok=True,
+                resource="temporary_chat_target",
+                restored_override=self._temporary_target_metadata(previous_temporary_override),
+            )
+            journal.mark_verification(ok=False, target=applied_model)
+            journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
+            return False, {
+                "ok": False,
+                "error": "temporary_chat_target_verification_failed",
+                "error_kind": "temporary_chat_target_verification_failed",
+                "message": "The temporary model switch did not finish, so I restored the previous chat target.",
+                "managed_action_journal": journal.to_dict(),
+            }
         invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
         if callable(invalidate_truth_cache):
             invalidate_truth_cache()
+        journal.mark_verification(ok=True, target=applied_model)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         return True, {
             "ok": True,
             "provider": applied_provider,
@@ -9662,6 +10016,16 @@ class AgentRuntime:
                 f"Temporary chat model switched to {applied_model}. "
                 "This does not change your default model."
             ),
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    @staticmethod
+    def _temporary_target_metadata(target: Mapping[str, Any] | None) -> dict[str, Any]:
+        source = target if isinstance(target, Mapping) else {}
+        return {
+            "present": bool(source),
+            "provider": str(source.get("provider") or "").strip().lower() or None,
+            "model": str(source.get("model") or "").strip() or None,
         }
 
     def restore_temporary_chat_model_target(

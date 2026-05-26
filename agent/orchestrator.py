@@ -4520,6 +4520,17 @@ class Orchestrator:
             return None
         context = self._current_interpretable_result(user_id)
         if not isinstance(context, dict) or not context:
+            setup_state = self._current_runtime_setup_state(user_id)
+            payload = setup_state.get("payload") if isinstance(setup_state.get("payload"), dict) else {}
+            if (
+                str(setup_state.get("action_type") or "").strip().lower() == "provider_repair_options"
+                and str(payload.get("type") or "").strip().lower() == "provider_repair_options"
+            ):
+                context = {
+                    "route": str(setup_state.get("route") or "setup_flow").strip().lower() or "setup_flow",
+                    "payload": dict(payload),
+                }
+        if not isinstance(context, dict) or not context:
             return None
         if str(context.get("route") or "").strip().lower() != "setup_flow":
             return None
@@ -4580,6 +4591,14 @@ class Orchestrator:
 
     def _recent_unhealthy_runtime_context(self, user_id: str) -> dict[str, Any]:
         context = self._current_interpretable_result(user_id)
+        if not isinstance(context, dict) or not context:
+            setup_state = self._current_runtime_setup_state(user_id)
+            payload = setup_state.get("payload") if isinstance(setup_state.get("payload"), dict) else {}
+            if str(payload.get("type") or "").strip().lower() in {"provider_repair", "provider_repair_options"}:
+                context = {
+                    "route": str(setup_state.get("route") or "setup_flow").strip().lower() or "setup_flow",
+                    "payload": dict(payload),
+                }
         if not isinstance(context, dict) or not context:
             return {}
         route = str(context.get("route") or "").strip().lower()
@@ -10719,6 +10738,26 @@ class Orchestrator:
                     f"2) Switch back to {previous_model}.\n"
                     "Reply 1 or 2."
                 )
+                repair_payload = {
+                    "type": "provider_repair_options",
+                    "provider": provider_hint,
+                    "model_id": model_label,
+                    "provider_health_status": provider_health_status,
+                    "model_health_status": model_health_status,
+                    "summary": message,
+                    "option_1_kind": "recheck_model",
+                    "option_2_kind": "switch_back",
+                    "previous_model": previous_model,
+                }
+                self._save_runtime_setup_state(
+                    user_id,
+                    {
+                        "step": "awaiting_provider_repair_option",
+                        "action_type": "provider_repair_options",
+                        "route": "setup_flow",
+                        "payload": dict(repair_payload),
+                    },
+                )
                 return self._runtime_truth_response(
                     text=message,
                     route="setup_flow",
@@ -10726,17 +10765,7 @@ class Orchestrator:
                     used_runtime_state=True,
                     used_tools=["provider_repair_check"] if repair_attempted else [],
                     skip_post_response_hooks=True,
-                    payload={
-                        "type": "provider_repair_options",
-                        "provider": provider_hint,
-                        "model_id": model_label,
-                        "provider_health_status": provider_health_status,
-                        "model_health_status": model_health_status,
-                        "summary": message,
-                        "option_1_kind": "recheck_model",
-                        "option_2_kind": "switch_back",
-                        "previous_model": previous_model,
-                    },
+                    payload=repair_payload,
                 )
             if suggested_model:
                 message = (
@@ -10745,6 +10774,27 @@ class Orchestrator:
                     f"2) Switch to {suggested_model}.\n"
                     "Reply 1 or 2."
                 )
+                repair_payload = {
+                    "type": "provider_repair_options",
+                    "provider": provider_hint,
+                    "model_id": model_label,
+                    "provider_health_status": provider_health_status,
+                    "model_health_status": model_health_status,
+                    "summary": message,
+                    "option_1_kind": "recheck_model",
+                    "option_2_kind": "switch_model",
+                    "option_2_model_id": suggested_model,
+                    "option_2_provider": provider_hint,
+                }
+                self._save_runtime_setup_state(
+                    user_id,
+                    {
+                        "step": "awaiting_provider_repair_option",
+                        "action_type": "provider_repair_options",
+                        "route": "setup_flow",
+                        "payload": dict(repair_payload),
+                    },
+                )
                 return self._runtime_truth_response(
                     text=message,
                     route="setup_flow",
@@ -10752,18 +10802,7 @@ class Orchestrator:
                     used_runtime_state=True,
                     used_tools=["provider_repair_check"] if repair_attempted else [],
                     skip_post_response_hooks=True,
-                    payload={
-                        "type": "provider_repair_options",
-                        "provider": provider_hint,
-                        "model_id": model_label,
-                        "provider_health_status": provider_health_status,
-                        "model_health_status": model_health_status,
-                        "summary": message,
-                        "option_1_kind": "recheck_model",
-                        "option_2_kind": "switch_model",
-                        "option_2_model_id": suggested_model,
-                        "option_2_provider": provider_hint,
-                    },
+                    payload=repair_payload,
                 )
             message = f"{message.rstrip('.')} I can explain the failure or help you choose another installed local model."
             return self._runtime_truth_response(

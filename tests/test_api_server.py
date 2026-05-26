@@ -1169,6 +1169,156 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("ollama:qwen2.5:3b-instruct", updated["chat_model"])
         self.assertEqual("ollama:llama3", updated["last_chat_model"])
 
+    def test_defaults_update_journals_and_verifies_default_model_change(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        ok, updated = runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        self.assertTrue(ok)
+        self.assertEqual("ollama:qwen2.5:3b-instruct", updated["chat_model"])
+        journal = updated.get("managed_action_journal", {})
+        self.assertEqual("default_model_config", journal.get("action_type"))
+        self.assertTrue(journal.get("planned_steps"))
+        self.assertTrue(journal.get("executed_steps"))
+        self.assertTrue(journal.get("changed_resources"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_defaults_verification_failure_restores_previous_defaults_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        providers_before = copy.deepcopy(document.get("providers"))
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        previous_defaults = copy.deepcopy(runtime.registry_document["defaults"])
+
+        with patch.object(
+            runtime,
+            "_verify_defaults_update",
+            return_value={"ok": False, "error_kind": "default_model_verification_failed", "mismatch": "chat_model"},
+        ):
+            ok, response = runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        self.assertFalse(ok)
+        self.assertEqual("default_model_verification_failed", response["error_kind"])
+        self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+        self.assertEqual(providers_before, runtime.registry_document["providers"])
+        self.assertIn("restored the previous default model settings", response["rollback_summary"])
+        journal = response.get("managed_action_journal", {})
+        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        self.assertTrue(any(step.get("name") == "restore_registry_defaults" for step in journal.get("rollback_steps", [])))
+
+    def test_defaults_rejects_embedding_only_chat_default_before_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:nomic-embed-text"] = {
+            "provider": "ollama",
+            "model": "nomic-embed-text",
+            "capabilities": ["embedding"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        previous_defaults = copy.deepcopy(runtime.registry_document["defaults"])
+
+        ok, response = runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:nomic-embed-text"})
+
+        self.assertFalse(ok)
+        self.assertEqual("chat_model_not_chat_capable", response["error_kind"])
+        self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+        self.assertEqual([], response.get("managed_action_journal", {}).get("changed_resources"))
+
+    def test_defaults_rejects_disabled_provider_before_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+        providers["ollama"]["enabled"] = False
+        document["providers"] = providers
+        runtime._save_registry_document(document)
+        previous_defaults = copy.deepcopy(runtime.registry_document["defaults"])
+
+        ok, response = runtime.update_defaults({"default_provider": "ollama"})
+
+        self.assertFalse(ok)
+        self.assertEqual("default_provider_disabled", response["error_kind"])
+        self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+
+    def test_defaults_rejects_unavailable_chat_model_before_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": False,
+            "routable": False,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        previous_defaults = copy.deepcopy(runtime.registry_document["defaults"])
+
+        ok, response = runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        self.assertFalse(ok)
+        self.assertEqual("chat_model_unavailable", response["error_kind"])
+        self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+
+    def test_defaults_update_path_does_not_shell_out(self) -> None:
+        source = inspect.getsource(AgentRuntime.update_defaults)
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("shell=True", source)
+
+    def test_temporary_chat_model_switch_journals_and_does_not_persist_default(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        previous_defaults = copy.deepcopy(runtime.registry_document["defaults"])
+
+        ok, response = runtime.set_temporary_chat_model_target("ollama:qwen2.5:3b-instruct")
+
+        self.assertTrue(ok)
+        self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("temporary_chat_model_override", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
     def test_defaults_rollback_swaps_chat_and_last_chat_model(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         document = runtime.registry_document
@@ -5737,11 +5887,8 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIn("1) recheck ollama:qwen3.5:4b now", second_message.lower())
         self.assertIn("2) switch to ollama:qwen2.5:3b-instruct", second_message.lower())
 
-        self.assertEqual("setup_flow", third_meta.get("route"))
-        self.assertTrue(bool(third_meta.get("skip_post_response_hooks")))
-        self.assertEqual(0, int(third_meta.get("orchestrator_timing_ms", {}).get("assistant_response_guard_ms", -1)))
-        self.assertIn("ollama is reachable", third_message.lower())
-        self.assertIn("not healthy right now", third_message.lower())
+        self.assertEqual("assistant_clarification", third_meta.get("route"))
+        self.assertIn("current action", third_message.lower())
 
         self.assertEqual("setup_flow", fourth_meta.get("route"))
         self.assertIn("switch chat to ollama:qwen2.5:3b-instruct now", fourth_message.lower())
@@ -7125,7 +7272,10 @@ class TestAPIServerRuntime(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertTrue(bool(body.get("ok")))
-        self.assertIn("Switched to openrouter:openai/gpt-4o-mini", str(body.get("message") or ""))
+        self.assertIn(
+            "Default chat model updated from ollama:qwen3.5:4b to openrouter:openai/gpt-4o-mini",
+            str(body.get("message") or ""),
+        )
         envelope = body.get("envelope") if isinstance(body.get("envelope"), dict) else {}
         execution = envelope.get("execution") if isinstance(envelope.get("execution"), list) else []
         first_step = execution[0] if execution and isinstance(execution[0], dict) else {}
