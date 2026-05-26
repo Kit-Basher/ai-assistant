@@ -10,7 +10,9 @@ from agent.secret_store import SecretStore
 from agent.telegram_runtime_state import (
     clear_stale_telegram_locks,
     get_telegram_runtime_state,
+    is_approved_telegram_systemctl_user_action,
     is_personal_agent_telegram_dropin_path,
+    manage_telegram_service_state,
     read_telegram_enablement,
     telegram_control_env,
     telegram_dropin_path,
@@ -37,6 +39,33 @@ class TestTelegramRuntimeState(unittest.TestCase):
             raise AssertionError(f"unexpected command: {cmd}")
 
         return _runner
+
+    def _service_action_runner(self, *, active_after_restart: bool = True, active_after_stop: bool = False):
+        state = {"active": False, "enabled": True}
+        calls: list[list[str]] = []
+
+        def _runner(args, **_kwargs):  # type: ignore[no-untyped-def]
+            cmd = list(args)
+            calls.append(cmd)
+            if cmd == ["systemctl", "--user", "--version"]:
+                return _completed(cmd, 0, "systemd 255\n")
+            if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+                return _completed(cmd, 0)
+            if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+                return _completed(cmd, 0 if state["active"] else 3, "active\n" if state["active"] else "inactive\n")
+            if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+                return _completed(cmd, 0 if state["enabled"] else 1, "enabled\n" if state["enabled"] else "disabled\n")
+            if cmd[-1:] == ["daemon-reload"]:
+                return _completed(cmd, 0)
+            if cmd[-2:] == ["restart", "personal-agent-telegram.service"]:
+                state["active"] = bool(active_after_restart)
+                return _completed(cmd, 0 if active_after_restart else 1)
+            if cmd[-2:] == ["stop", "personal-agent-telegram.service"]:
+                state["active"] = bool(active_after_stop)
+                return _completed(cmd, 0 if not active_after_stop else 1)
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        return _runner, calls
 
     def test_disabled_state_reports_disabled_optional(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -164,6 +193,97 @@ class TestTelegramRuntimeState(unittest.TestCase):
         source = inspect.getsource(write_telegram_enablement_managed)
         self.assertNotIn("subprocess", source)
         self.assertNotIn("shell=True", source)
+
+    def test_manage_telegram_service_enable_journals_and_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            runner, calls = self._service_action_runner(active_after_restart=True)
+
+            ok, response = manage_telegram_service_state(
+                True,
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=runner,
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(response["ok"])
+        commands = [call[-2:] for call in calls]
+        self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("telegram_service_enable", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_manage_telegram_service_verification_failure_rolls_back_dropin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            original = "[Service]\nEnvironment=TELEGRAM_ENABLED=0\n"
+            path = telegram_dropin_path(home=home)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(original, encoding="utf-8")
+            runner, calls = self._service_action_runner(active_after_restart=False)
+
+            ok, response = manage_telegram_service_state(
+                True,
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=runner,
+            )
+
+            self.assertFalse(ok)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+        self.assertEqual("telegram_service_restart_failed", response["error_kind"])
+        self.assertIn("restored previous Telegram service config", response["message"])
+        commands = [call[-2:] for call in calls]
+        self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+        self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+        journal = response.get("managed_action_journal", {})
+        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        self.assertTrue(any(step.get("name") == "restore_telegram_dropin" for step in journal.get("rollback_steps", [])))
+
+    def test_manage_telegram_service_disable_stops_and_verifies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            write_telegram_enablement(True, home=home, env={})
+            runner, calls = self._service_action_runner(active_after_stop=False)
+
+            ok, response = manage_telegram_service_state(False, home=home, env={}, run=runner)
+
+        self.assertTrue(ok)
+        commands = [call[-2:] for call in calls]
+        self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+        self.assertFalse(bool(response["state"]["enabled"]))
+        self.assertFalse(bool(response["state"]["service_active"]))
+
+    def test_approved_telegram_systemctl_actions_reject_arbitrary_service(self) -> None:
+        self.assertTrue(is_approved_telegram_systemctl_user_action(["restart", "personal-agent-telegram.service"]))
+        self.assertFalse(is_approved_telegram_systemctl_user_action(["restart", "unrelated.service"]))
+        self.assertFalse(is_approved_telegram_systemctl_user_action(["enable", "personal-agent-telegram.service"]))
+
+    def test_manage_telegram_service_does_not_require_online_getme(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            runner, _calls = self._service_action_runner(active_after_restart=True)
+
+            ok, response = manage_telegram_service_state(
+                True,
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=runner,
+            )
+
+        self.assertTrue(ok)
+        self.assertFalse(bool(response["managed_action_journal"]["verification_result"].get("online_getme_required")))
 
 
 if __name__ == "__main__":

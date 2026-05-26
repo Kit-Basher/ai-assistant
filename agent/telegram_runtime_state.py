@@ -11,6 +11,15 @@ from agent.secret_store import SecretStore
 
 
 TELEGRAM_SERVICE_NAME = "personal-agent-telegram.service"
+_APPROVED_SYSTEMCTL_USER_ACTIONS = {
+    ("--version",),
+    ("cat", TELEGRAM_SERVICE_NAME),
+    ("is-active", TELEGRAM_SERVICE_NAME),
+    ("is-enabled", TELEGRAM_SERVICE_NAME),
+    ("daemon-reload",),
+    ("restart", TELEGRAM_SERVICE_NAME),
+    ("stop", TELEGRAM_SERVICE_NAME),
+}
 
 
 def _truthy(value: Any) -> bool:
@@ -244,6 +253,55 @@ def _systemctl_user(
         text=True,
         timeout=float(timeout_seconds),
     )
+
+
+def is_approved_telegram_systemctl_user_action(args: list[str]) -> bool:
+    return tuple(str(item) for item in list(args or [])) in _APPROVED_SYSTEMCTL_USER_ACTIONS
+
+
+def _safe_status_snapshot(state: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(state.get("enabled", False)),
+        "config_source": str(state.get("config_source") or "default"),
+        "service_installed": bool(state.get("service_installed", False)),
+        "service_active": bool(state.get("service_active", False)),
+        "service_enabled": bool(state.get("service_enabled", False)),
+        "token_configured": bool(state.get("token_configured", False)),
+        "lock_present": bool(state.get("lock_present", False)),
+        "lock_stale": bool(state.get("lock_stale", False)),
+        "effective_state": str(state.get("effective_state") or "unknown"),
+        "ready_state": str(state.get("ready_state") or "unknown"),
+    }
+
+
+def _run_approved_systemctl_user(
+    args: list[str],
+    *,
+    journal: ManagedActionJournal,
+    step_name: str,
+    run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    timeout_seconds: float = 10.0,
+) -> subprocess.CompletedProcess[str] | None:
+    resource = " ".join(["systemctl", "--user", *args])
+    if not is_approved_telegram_systemctl_user_action(args):
+        journal.record_step(step_name, ok=False, resource=resource, reason="systemctl_action_not_approved")
+        return None
+    try:
+        proc = _systemctl_user(args, run=run, timeout_seconds=timeout_seconds)
+    except Exception as exc:
+        journal.record_step(step_name, ok=False, resource=resource, error=exc.__class__.__name__)
+        return None
+    stdout = str(proc.stdout or "").strip()
+    stderr = str(proc.stderr or "").strip()
+    journal.record_step(
+        step_name,
+        ok=proc.returncode == 0,
+        resource=resource,
+        returncode=int(proc.returncode),
+        stdout=stdout[:160],
+        stderr=stderr[:160],
+    )
+    return proc
 
 
 def _service_installed(*, run: Callable[..., subprocess.CompletedProcess[str]] | None = None) -> bool:
@@ -487,6 +545,304 @@ def write_telegram_enablement_managed(
     }
 
 
+def manage_telegram_service_state(
+    enabled: bool,
+    *,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    secret_store_path: str | None = None,
+    run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    action_name = "telegram_service_enable" if enabled else "telegram_service_disable"
+    journal = ManagedActionJournal(action_type=action_name, target=TELEGRAM_SERVICE_NAME)
+    path = telegram_dropin_path(home=home)
+    journal.plan_step("preflight_telegram_dropin_path", resource=str(path))
+    journal.plan_step("preflight_systemd_user_available", resource="systemctl --user --version")
+    journal.plan_step("capture_previous_telegram_state", resource=TELEGRAM_SERVICE_NAME)
+    journal.plan_step("write_telegram_enablement", resource=str(path))
+    journal.plan_step("systemctl_daemon_reload", resource="systemctl --user daemon-reload")
+    journal.plan_step("systemctl_service_action", resource=TELEGRAM_SERVICE_NAME)
+    journal.plan_step("verify_telegram_runtime_state", resource=TELEGRAM_SERVICE_NAME)
+
+    if not is_personal_agent_telegram_dropin_path(path, home=home):
+        journal.record_step("preflight_telegram_dropin_path", ok=False, resource=str(path), reason="unexpected_dropin_path")
+        return False, {
+            "ok": False,
+            "error": "telegram_dropin_path_invalid",
+            "error_kind": "telegram_dropin_path_invalid",
+            "message": "Telegram setup/start did not finish: the service config target was not the known Personal Agent path.",
+            "managed_action_journal": journal.to_dict(),
+        }
+    journal.record_step("preflight_telegram_dropin_path", ok=True, resource=str(path))
+
+    version_proc = _run_approved_systemctl_user(
+        ["--version"],
+        journal=journal,
+        step_name="preflight_systemd_user_available",
+        run=run,
+        timeout_seconds=2.0,
+    )
+    if version_proc is None or version_proc.returncode != 0:
+        journal.mark_verification(ok=False, systemd_user_available=False)
+        return False, {
+            "ok": False,
+            "error": "systemd_user_unavailable",
+            "error_kind": "systemd_user_unavailable",
+            "message": "Telegram setup/start did not finish: systemd user services are not available. Check the user service manager, then try again.",
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    previous_exists = path.is_file()
+    previous_content = ""
+    if previous_exists:
+        try:
+            previous_content = path.read_text(encoding="utf-8")
+        except Exception:
+            previous_content = ""
+    state_before = get_telegram_runtime_state(env=env, home=home, run=run, secret_store_path=secret_store_path)
+    journal.record_step(
+        "capture_previous_telegram_state",
+        ok=True,
+        resource=TELEGRAM_SERVICE_NAME,
+        previous_dropin_exists=previous_exists,
+        previous_state=_safe_status_snapshot(state_before),
+    )
+
+    write_ok, write_body = write_telegram_enablement_managed(
+        enabled,
+        env=env,
+        home=home,
+        secret_store_path=secret_store_path,
+    )
+    journal.record_step(
+        "write_telegram_enablement",
+        ok=write_ok,
+        resource=str(path),
+        nested_action_id=str((write_body.get("managed_action_journal") or {}).get("action_id") or ""),
+    )
+    if not write_ok:
+        journal.mark_verification(ok=False, dropin_write_verified=False)
+        body = dict(write_body)
+        body["managed_action_journal"] = journal.to_dict()
+        return False, body
+    journal.record_changed_resource(
+        "telegram_service_dropin",
+        str(path),
+        rollback_supported=True,
+        previous_exists=previous_exists,
+    )
+
+    reload_proc = _run_approved_systemctl_user(
+        ["daemon-reload"],
+        journal=journal,
+        step_name="systemctl_daemon_reload",
+        run=run,
+    )
+    if reload_proc is None or reload_proc.returncode != 0:
+        rollback_ok = _rollback_telegram_dropin(path, previous_exists, previous_content, journal)
+        journal.mark_verification(ok=False, daemon_reload=False)
+        journal.mark_rollback(
+            ok=rollback_ok,
+            attempted=True,
+            summary=_telegram_dropin_rollback_summary(previous_exists, rollback_ok),
+        )
+        return _telegram_service_failure_response(
+            journal=journal,
+            error_kind="telegram_daemon_reload_failed",
+            detail="I could not reload systemd after changing the Telegram service config.",
+            rollback_ok=rollback_ok,
+            previous_exists=previous_exists,
+        )
+
+    state_after_write = get_telegram_runtime_state(env=env, home=home, run=run, secret_store_path=secret_store_path)
+    service_installed = bool(state_after_write.get("service_installed", False))
+    token_configured = bool(state_after_write.get("token_configured", False))
+    service_action_attempted = False
+    if enabled and service_installed and token_configured:
+        service_action_attempted = True
+        try:
+            token, _token_source = resolve_telegram_token_with_source(
+                env=env,
+                home=home,
+                secret_store_path=secret_store_path,
+            )
+        except Exception:
+            token = None
+        removed_locks = clear_stale_telegram_locks(token, env=env, home=home)
+        journal.record_step("clear_stale_telegram_locks", ok=True, resource=TELEGRAM_SERVICE_NAME, removed_count=len(removed_locks))
+        proc = _run_approved_systemctl_user(
+            ["restart", TELEGRAM_SERVICE_NAME],
+            journal=journal,
+            step_name="systemctl_service_action",
+            run=run,
+        )
+        if proc is None or proc.returncode != 0:
+            return _recover_failed_telegram_service_action(
+                journal=journal,
+                path=path,
+                previous_exists=previous_exists,
+                previous_content=previous_content,
+                state_before=state_before,
+                run=run,
+                error_kind="telegram_service_restart_failed",
+                detail="I could not restart the Personal Agent Telegram service.",
+            )
+    elif not enabled and service_installed:
+        service_action_attempted = True
+        proc = _run_approved_systemctl_user(
+            ["stop", TELEGRAM_SERVICE_NAME],
+            journal=journal,
+            step_name="systemctl_service_action",
+            run=run,
+        )
+        if proc is None or proc.returncode != 0:
+            return _recover_failed_telegram_service_action(
+                journal=journal,
+                path=path,
+                previous_exists=previous_exists,
+                previous_content=previous_content,
+                state_before=state_before,
+                run=run,
+                error_kind="telegram_service_stop_failed",
+                detail="I could not stop the Personal Agent Telegram service.",
+            )
+    else:
+        journal.record_step(
+            "systemctl_service_action",
+            ok=True,
+            resource=TELEGRAM_SERVICE_NAME,
+            skipped=True,
+            reason="service_not_installed" if not service_installed else "token_not_configured",
+        )
+
+    state_after = get_telegram_runtime_state(env=env, home=home, run=run, secret_store_path=secret_store_path)
+    verification_ok = _telegram_service_verification_ok(
+        enabled=enabled,
+        state=state_after,
+        service_action_attempted=service_action_attempted,
+    )
+    journal.record_step(
+        "verify_telegram_runtime_state",
+        ok=verification_ok,
+        resource=TELEGRAM_SERVICE_NAME,
+        current_state=_safe_status_snapshot(state_after),
+        service_action_attempted=service_action_attempted,
+    )
+    if not verification_ok:
+        return _recover_failed_telegram_service_action(
+            journal=journal,
+            path=path,
+            previous_exists=previous_exists,
+            previous_content=previous_content,
+            state_before=state_before,
+            run=run,
+            error_kind="telegram_service_verification_failed",
+            detail="I could not verify the Telegram service state after the change.",
+        )
+
+    journal.mark_verification(ok=True, current_state=_safe_status_snapshot(state_after), online_getme_required=False)
+    journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+    return True, {
+        "ok": True,
+        "enabled": bool(enabled),
+        "state": state_after,
+        "message": "Telegram service setup finished." if enabled else "Telegram service disable finished.",
+        "managed_action_journal": journal.to_dict(),
+    }
+
+
+def _telegram_service_verification_ok(
+    *,
+    enabled: bool,
+    state: Mapping[str, Any],
+    service_action_attempted: bool,
+) -> bool:
+    if enabled:
+        if not bool(state.get("enabled", False)):
+            return False
+        if service_action_attempted:
+            return bool(state.get("service_active", False)) and str(state.get("ready_state") or "") == "running"
+        return True
+    if bool(state.get("enabled", True)):
+        return False
+    if service_action_attempted and bool(state.get("service_active", False)):
+        return False
+    return True
+
+
+def _recover_failed_telegram_service_action(
+    *,
+    journal: ManagedActionJournal,
+    path: Path,
+    previous_exists: bool,
+    previous_content: str,
+    state_before: Mapping[str, Any],
+    run: Callable[..., subprocess.CompletedProcess[str]] | None,
+    error_kind: str,
+    detail: str,
+) -> tuple[bool, dict[str, Any]]:
+    rollback_ok = _rollback_telegram_dropin(path, previous_exists, previous_content, journal)
+    _run_approved_systemctl_user(
+        ["daemon-reload"],
+        journal=journal,
+        step_name="rollback_systemctl_daemon_reload",
+        run=run,
+    )
+    previous_active = bool(state_before.get("service_active", False))
+    if not previous_active:
+        _run_approved_systemctl_user(
+            ["stop", TELEGRAM_SERVICE_NAME],
+            journal=journal,
+            step_name="rollback_stop_service_if_not_previously_active",
+            run=run,
+        )
+    summary = _telegram_dropin_rollback_summary(previous_exists, rollback_ok)
+    if not rollback_ok:
+        summary = f"{summary}; the Telegram service config may still need manual attention"
+    journal.mark_verification(ok=False, error_kind=error_kind, previous_state=_safe_status_snapshot(state_before))
+    journal.mark_rollback(ok=rollback_ok, attempted=True, summary=summary)
+    return _telegram_service_failure_response(
+        journal=journal,
+        error_kind=error_kind,
+        detail=detail,
+        rollback_ok=rollback_ok,
+        previous_exists=previous_exists,
+    )
+
+
+def _telegram_dropin_rollback_summary(previous_exists: bool, rollback_ok: bool) -> str:
+    if previous_exists and rollback_ok:
+        return "restored previous Telegram service config"
+    if rollback_ok:
+        return "removed failed new Telegram service config"
+    return "could not restore Telegram service config automatically"
+
+
+def _telegram_service_failure_response(
+    *,
+    journal: ManagedActionJournal,
+    error_kind: str,
+    detail: str,
+    rollback_ok: bool,
+    previous_exists: bool,
+) -> tuple[bool, dict[str, Any]]:
+    rollback_summary = _telegram_dropin_rollback_summary(previous_exists, rollback_ok)
+    next_step = "Check the Telegram service status, then run python -m agent telegram_status."
+    return False, {
+        "ok": False,
+        "error": error_kind,
+        "error_kind": error_kind,
+        "message": (
+            f"Telegram setup/start did not finish: {detail} "
+            f"{rollback_summary}. {next_step}"
+        ),
+        "rollback_ok": rollback_ok,
+        "rollback_summary": rollback_summary,
+        "next_step": next_step,
+        "managed_action_journal": journal.to_dict(),
+    }
+
+
 def _rollback_telegram_dropin(
     path: Path,
     previous_exists: bool,
@@ -521,9 +877,11 @@ __all__ = [
     "clear_stale_telegram_locks",
     "get_telegram_runtime_state",
     "inspect_telegram_lock",
+    "is_approved_telegram_systemctl_user_action",
     "read_telegram_enablement",
     "resolve_telegram_token_with_source",
     "is_personal_agent_telegram_dropin_path",
+    "manage_telegram_service_state",
     "telegram_control_env",
     "telegram_dropin_path",
     "telegram_lock_paths",

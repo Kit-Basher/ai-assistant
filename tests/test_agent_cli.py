@@ -396,23 +396,14 @@ class TestAgentCLI(unittest.TestCase):
                 "next_action": "No action needed.",
             },
         ]
-        with patch("agent.cli.write_telegram_enablement"), patch(
-            "agent.cli.get_telegram_runtime_state",
-            side_effect=states,
-        ), patch(
-            "agent.cli.resolve_telegram_token_with_source",
-            return_value=("123:token", "secret_store"),
-        ), patch(
-            "agent.cli.clear_stale_telegram_locks",
-            return_value=[],
-        ), patch(
-            "agent.cli._run_systemctl_user",
-        ) as systemctl_mock, redirect_stdout(output):
+        with patch(
+            "agent.cli.manage_telegram_service_state",
+            return_value=(True, {"ok": True, "state": states[-1]}),
+        ) as manage_mock, redirect_stdout(output):
             code = cli.main(["telegram_enable"])
         self.assertEqual(0, code)
-        commands = [call.args[0] for call in systemctl_mock.call_args_list]
-        self.assertIn(["daemon-reload"], commands)
-        self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+        manage_mock.assert_called_once()
+        self.assertEqual(True, manage_mock.call_args.args[0])
         self.assertIn("effective_state: enabled_running", output.getvalue())
 
     def test_run_systemctl_user_retries_once_after_timeout(self) -> None:
@@ -452,17 +443,14 @@ class TestAgentCLI(unittest.TestCase):
                 "next_action": "Run: python -m agent telegram_enable",
             },
         ]
-        with patch("agent.cli.write_telegram_enablement"), patch(
-            "agent.cli.get_telegram_runtime_state",
-            side_effect=states,
-        ), patch(
-            "agent.cli._run_systemctl_user",
-        ) as systemctl_mock, redirect_stdout(output):
+        with patch(
+            "agent.cli.manage_telegram_service_state",
+            return_value=(True, {"ok": True, "state": states[-1]}),
+        ) as manage_mock, redirect_stdout(output):
             code = cli.main(["telegram_disable"])
         self.assertEqual(0, code)
-        commands = [call.args[0] for call in systemctl_mock.call_args_list]
-        self.assertIn(["daemon-reload"], commands)
-        self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+        manage_mock.assert_called_once()
+        self.assertEqual(False, manage_mock.call_args.args[0])
         self.assertIn("effective_state: disabled_optional", output.getvalue())
 
     def test_health_subcommand_failure_returns_structured_error(self) -> None:

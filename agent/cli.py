@@ -45,11 +45,9 @@ from agent.skills.system_health_summary import render_system_health_summary
 from agent.setup_wizard import render_setup_text, run_setup_wizard
 from agent.telegram_runtime_state import (
     TELEGRAM_SERVICE_NAME,
-    clear_stale_telegram_locks,
     get_telegram_runtime_state,
-    resolve_telegram_token_with_source,
+    manage_telegram_service_state,
     telegram_control_env,
-    write_telegram_enablement_managed,
 )
 from agent.version import read_build_info, read_git_commit
 
@@ -1230,44 +1228,22 @@ def _cmd_telegram_status(_args: argparse.Namespace) -> int:
 
 def _cmd_telegram_enable(_args: argparse.Namespace) -> int:
     operator_env = telegram_control_env()
-    ok, body = write_telegram_enablement_managed(True, env=operator_env)
+    ok, body = manage_telegram_service_state(True, env=operator_env)
     if not ok:
         print(str(body.get("message") or body.get("error") or "Telegram enablement failed."), flush=True)
         return 1
-    state_before = get_telegram_runtime_state(env=operator_env)
-    token_configured = bool(state_before.get("token_configured", False))
-    try:
-        token, _token_source = resolve_telegram_token_with_source(env=operator_env)
-    except Exception:
-        token = None
-    cleared = clear_stale_telegram_locks(token, env=operator_env)
-    try:
-        _run_systemctl_user(["daemon-reload"])
-    except Exception:
-        pass
-    if token_configured and bool(state_before.get("service_installed", False)):
-        _run_systemctl_user(["restart", TELEGRAM_SERVICE_NAME])
-    state = get_telegram_runtime_state(env=operator_env)
-    if cleared:
-        state = {**state, "next_action": str(state.get("next_action") or "No action needed.")}
+    state = body.get("state") if isinstance(body.get("state"), dict) else get_telegram_runtime_state(env=operator_env)
     print(_render_telegram_status(state), flush=True)
     return 0
 
 
 def _cmd_telegram_disable(_args: argparse.Namespace) -> int:
     operator_env = telegram_control_env()
-    ok, body = write_telegram_enablement_managed(False, env=operator_env)
+    ok, body = manage_telegram_service_state(False, env=operator_env)
     if not ok:
         print(str(body.get("message") or body.get("error") or "Telegram disablement failed."), flush=True)
         return 1
-    try:
-        _run_systemctl_user(["daemon-reload"])
-    except Exception:
-        pass
-    state_before = get_telegram_runtime_state(env=operator_env)
-    if bool(state_before.get("service_installed", False)):
-        _run_systemctl_user(["stop", TELEGRAM_SERVICE_NAME])
-    state = get_telegram_runtime_state(env=operator_env)
+    state = body.get("state") if isinstance(body.get("state"), dict) else get_telegram_runtime_state(env=operator_env)
     print(_render_telegram_status(state), flush=True)
     return 0
 
