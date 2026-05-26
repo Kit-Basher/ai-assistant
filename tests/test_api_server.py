@@ -260,7 +260,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             restarted.close()
 
     def test_health_reports_telegram_partial_failure_explicitly(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True, telegram_required=True))
         runtime.add_provider_model(
             "ollama",
             {
