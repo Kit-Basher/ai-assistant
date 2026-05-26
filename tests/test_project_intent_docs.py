@@ -118,3 +118,28 @@ def test_managed_action_recovery_doc_exists_and_states_rollback_boundary() -> No
     assert "never silently mutate pre-existing user resources" in text
     assert "shell=false" in text
     assert "searxng" in text
+
+
+def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> None:
+    standard = REPO_ROOT / "docs" / "design" / "MANAGED_ACTION_RELIABILITY_STANDARD.md"
+    audit = REPO_ROOT / "docs" / "operator" / "MANAGED_ACTION_RELIABILITY_AUDIT.md"
+    assert standard.is_file()
+    assert audit.is_file()
+
+    standard_text = standard.read_text(encoding="utf-8").lower()
+    audit_text = audit.read_text(encoding="utf-8").lower()
+    assert "rollback owned changes only" in standard_text
+    assert "no silent" in standard_text and "background services" in standard_text
+    assert "expired confirmations must not execute" in standard_text
+
+    for required in (
+        "searxng",
+        "model downloads",
+        "provider/api key",
+        "telegram",
+        "pack source approval",
+        "pack quarantine fetch/import",
+        "registry prune/rollback/hygiene/autoconfig/self-heal",
+        "file operations",
+    ):
+        assert required in audit_text

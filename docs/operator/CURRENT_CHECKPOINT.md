@@ -26,6 +26,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Confirm-gated SearXNG managed local service setup can run only the approved Docker/Podman image, name, loopback bind, approved primary/fallback ports, and managed volume.
 - Managed local service setup now journals owned changes and rolls back the SearXNG container it created if health checks fail.
 - Web search cleanup is a separate confirmed action that only targets `personal-agent-searxng`.
+- Managed action reliability now has a product-wide standard and audit. Only SearXNG setup/cleanup currently meets the full journal/owned-rollback pattern; other mutating flows are tracked as follow-up work.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -67,6 +68,8 @@ missing capability
 - No external code, shell, subprocess, browser, OAuth, or pack-owned network access during managed-adapter invocation.
 - No arbitrary Docker commands, arbitrary ports, host networking, privileged containers, random mounts, silent container deletion, or external-pack-triggered service execution.
 - No managed action may silently mutate pre-existing user resources during recovery.
+- Expired confirmations must not execute, and consumed confirmations must not replay.
+- No managed action should leave silent background services after failed setup.
 - Source trust is not content trust.
 - Review approval is not enablement.
 - Enablement is not permission grant.
