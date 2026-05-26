@@ -6,7 +6,7 @@ This audit is a checkpoint, not a claim that every flow already meets the full s
 
 Highest-confidence flow today: managed SearXNG setup/cleanup. It has preflight, preview, confirmation, journal, verification, owned rollback, and tests.
 
-Main gaps: provider/API key writes, registry/autoconfig/self-heal, and several pack lifecycle mutations have confirmation and validation but do not yet share the managed-action journal and rollback contract. Model downloads/imports now have in-memory managed-action journals, post-action verification, and owned temp/Modelfile cleanup where ownership is proven, but still do not delete unproven Ollama cache/model data.
+Main gaps: Telegram setup, registry/autoconfig/self-heal, and several pack lifecycle mutations have confirmation and validation but do not yet share the managed-action journal and rollback contract. Provider/API key writes and model downloads/imports now have in-memory managed-action journals, verification, and scoped rollback/cleanup where ownership is proven.
 
 ## Audit Table
 
@@ -17,7 +17,7 @@ Main gaps: provider/API key writes, registry/autoconfig/self-heal, and several p
 | model downloads / Ollama pulls | Ollama model inventory, model manager state | yes through model acquisition preview | partial; provider/backend delegated to existing guard, disk space recorded as not checked when no helper exists | yes, in-memory result journal | yes; inventory refresh and verification row | partial | owned temp files only; Ollama cache/model data is not deleted unless ownership is proven | improved; names failed step, cleanup, possible remaining cache/model data, and one next step | medium | add persistent journal storage, disk-space preflight, and explicit ownership markers before any safe `ollama rm` cleanup |
 | GGUF import / local model import | downloaded files, generated Modelfile, Ollama model create, model manager state | yes for acquisition/import request | partial; backend delegated to existing guard, disk space recorded as not checked when no helper exists | yes, in-memory result journal | yes; Ollama inventory refresh and verification row | partial | generated Personal-Agent Modelfile/temp files only; user-provided Modelfile and Ollama cache/model data are not deleted | improved; verification/import failures report cleanup and what may remain | medium | add persistent journal storage, disk-space preflight, and model ownership markers for safe future cleanup of failed Ollama creates |
 | default model changes | routing/default model config | yes for chat default changes | yes, target resolution | no shared journal | partial post-switch response/status | trial switch has remembered previous target; default rollback exists separately | limited previous-target/default state | medium | medium | journal config write, verify active target, and expose explicit rollback for failed default changes |
-| provider/API key config | secret store and provider config/status | setup flow confirmation/secret entry varies by path | partial | no shared journal | provider test/status exists | no transactional rollback proven | none proven | medium | high | add preview/confirm for writes, journal previous secret/config metadata, verify provider, rollback failed writes |
+| provider/API key config | secret store, provider `api_key_source`, provider config/status | explicit UI/API save action; controlled mode still requires confirm | yes for known provider, required secret, expected secret/config store | yes, in-memory result journal | yes for secret write readback; optional provider connection test for save-and-test/OpenRouter setup; config persist verification | partial | restores previous provider secret/source or removes newly created failed key; OpenRouter setup restores previous provider config on failed verification | improved; reports provider setup failure, rollback result, and one next step without exposing secrets | medium | add persistent journal storage and extend rollback coverage to later model/default mutations after provider verification |
 | Telegram token/service setup | secret store, enablement drop-in/env, service state | mostly operator/setup guided; confirmation varies | partial | no shared journal | doctor/startup checks | no transactional rollback proven | none proven | medium | medium | add managed setup flow with journal, token write verification, service restart verification, and rollback of owned enablement writes |
 | pack source approval | catalog source/policy JSON | yes: source approval preview then confirmation | yes | no shared journal | policy/source record returned | no rollback; write is atomic-ish | source/policy record only | good; says no content fetched/imported | medium | add journal and rollback/delete of source policy if paired write partially fails |
 | pack quarantine fetch/import | quarantine files, normalized pack files, pack store record | yes: fetch preview then confirmation | yes | no shared journal | ingestion/normalization status and lifecycle | quarantine hardening blocks unsafe content; full rollback of partial record/files not proven | none proven beyond ingestion safeguards | medium-good; reports review-only or blocked | medium | add transaction journal across fetch, quarantine, normalization, and store record; cleanup owned partial artifacts |
@@ -34,13 +34,14 @@ Main gaps: provider/API key writes, registry/autoconfig/self-heal, and several p
 - SearXNG is the reference implementation for the standard.
 - External pack lifecycle gates are strong on safety and one-step confirmation, but most pack metadata writes are not yet journaled as managed actions.
 - Model acquisition now records managed-action journals and verifies inventory after pulls/imports. It still needs persistent journals, disk-space preflight, and provable model/cache ownership before any automated cache/model deletion.
-- Provider and Telegram setup affect secrets and services. They need transactional metadata and rollback/repair messaging.
+- Provider/API key setup now journals redacted previous/new secret metadata, verifies writes, and rolls back failed verified saves. Later provider setup steps such as model/default mutations still need broader transaction coverage.
+- Telegram setup affects secrets and services. It still needs transactional metadata and rollback/repair messaging.
 - Registry/autoconfig/self-heal are operator-grade today. They should not be treated as normal-user managed actions until journal and rollback coverage exists.
 
 ## Required Follow-Up Order
 
-1. Add provider/API key config transaction records and rollback/verify behavior.
-2. Add Telegram setup transaction records and service verification/rollback.
-3. Add persistent managed-action journals and disk-space preflight for model downloads/imports.
+1. Add Telegram setup transaction records and service verification/rollback.
+2. Add persistent managed-action journals for provider/API key and model acquisition flows.
+3. Extend provider setup transaction coverage to model/default mutations after provider verification.
 4. Add pack source/fetch/import journal coverage and partial artifact cleanup.
 5. Move registry/autoconfig/self-heal mutations under the same standard before expanding automatic apply behavior.

@@ -526,6 +526,143 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("secret", restarted_source["type"])
         self.assertEqual("provider:openrouter:api_key", restarted_source["name"])
 
+    def test_provider_secret_save_journals_and_verifies_without_raw_secret(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        raw_secret = "sk-openrouter-secret-value"
+
+        ok, response = runtime.set_provider_secret("openrouter", {"api_key": raw_secret})
+
+        self.assertTrue(ok)
+        self.assertTrue(response["ok"])
+        self.assertEqual(raw_secret, runtime.secret_store.get_secret("provider:openrouter:api_key"))
+        serialized = json.dumps(response, sort_keys=True)
+        self.assertNotIn(raw_secret, serialized)
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("provider_api_key_config", journal.get("action_type"))
+        self.assertTrue(journal.get("planned_steps"))
+        self.assertTrue(journal.get("executed_steps"))
+        self.assertTrue(journal.get("changed_resources"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_provider_secret_failed_provider_verification_restores_previous_key(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        old_secret = "sk-openrouter-old-secret"
+        bad_secret = "sk-openrouter-bad-secret"
+        ok, _response = runtime.set_provider_secret("openrouter", {"api_key": old_secret})
+        self.assertTrue(ok)
+
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(
+                False,
+                {
+                    "ok": False,
+                    "provider": "openrouter",
+                    "error": "auth_error",
+                    "error_kind": "auth_error",
+                    "message": "Authentication failed for provider.",
+                },
+            ),
+        ):
+            ok, response = runtime.set_provider_secret(
+                "openrouter",
+                {"api_key": bad_secret, "verify_provider": True},
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual("auth_error", response["error_kind"])
+        self.assertEqual(old_secret, runtime.secret_store.get_secret("provider:openrouter:api_key"))
+        serialized = json.dumps(response, sort_keys=True)
+        self.assertNotIn(old_secret, serialized)
+        self.assertNotIn(bad_secret, serialized)
+        journal = response.get("managed_action_journal", {})
+        self.assertFalse(journal.get("verification_result", {}).get("ok"))
+        rollback_steps = journal.get("rollback_steps", [])
+        self.assertTrue(any(step.get("name") == "restore_provider_secret" and step.get("status") == "ok" for step in rollback_steps))
+
+    def test_provider_secret_failed_new_key_verification_removes_owned_key_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.secret_store.set_secret("provider:other:api_key", "sk-other-secret")
+        bad_secret = "sk-openrouter-new-bad-secret"
+
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(
+                False,
+                {
+                    "ok": False,
+                    "provider": "openrouter",
+                    "error": "auth_error",
+                    "error_kind": "auth_error",
+                    "message": "Authentication failed for provider.",
+                },
+            ),
+        ):
+            ok, response = runtime.set_provider_secret(
+                "openrouter",
+                {"api_key": bad_secret, "verify_provider": True},
+            )
+
+        self.assertFalse(ok)
+        self.assertIsNone(runtime.secret_store.get_secret("provider:openrouter:api_key"))
+        self.assertEqual("sk-other-secret", runtime.secret_store.get_secret("provider:other:api_key"))
+        source = runtime.registry_document["providers"]["openrouter"]["api_key_source"]
+        self.assertEqual("env", source["type"])
+        self.assertNotIn(bad_secret, json.dumps(response, sort_keys=True))
+
+    def test_provider_secret_unknown_provider_rejected_before_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        ok, response = runtime.set_provider_secret("missing-provider", {"api_key": "sk-missing-secret"})
+
+        self.assertFalse(ok)
+        self.assertEqual("provider not found", response["error"])
+        self.assertIsNone(runtime.secret_store.get_secret("provider:missing-provider:api_key"))
+        self.assertEqual([], response.get("managed_action_journal", {}).get("changed_resources"))
+
+    def test_provider_secret_save_path_does_not_shell_out(self) -> None:
+        source = inspect.getsource(AgentRuntime.set_provider_secret)
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("shell=True", source)
+
+    def test_configure_openrouter_failed_verification_restores_provider_config_and_secret(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        old_secret = "sk-openrouter-old-secret"
+        ok, _response = runtime.set_provider_secret("openrouter", {"api_key": old_secret})
+        self.assertTrue(ok)
+        ok, _updated = runtime.update_provider("openrouter", {"base_url": "https://old-openrouter.example/api/v1"})
+        self.assertTrue(ok)
+
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(
+                False,
+                {
+                    "ok": False,
+                    "provider": "openrouter",
+                    "error": "auth_error",
+                    "error_kind": "auth_error",
+                    "message": "Authentication failed for provider.",
+                },
+            ),
+        ):
+            ok, response = runtime.configure_openrouter("sk-openrouter-bad-secret")
+
+        self.assertFalse(ok)
+        self.assertEqual(old_secret, runtime.secret_store.get_secret("provider:openrouter:api_key"))
+        self.assertEqual(
+            "https://old-openrouter.example/api/v1",
+            runtime.registry_document["providers"]["openrouter"]["base_url"],
+        )
+        self.assertNotIn("sk-openrouter-bad-secret", json.dumps(response, sort_keys=True))
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("provider_openrouter_config", journal.get("action_type"))
+        self.assertTrue(any(step.get("name") == "restore_openrouter_provider_config" for step in journal.get("rollback_steps", [])))
+
     def test_update_provider_persists_and_survives_restart(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
 

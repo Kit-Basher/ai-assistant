@@ -105,6 +105,7 @@ from agent.model_scout import build_model_scout
 from agent.telegram_runner import TelegramRunner
 from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
 from agent.audit_log import AuditLog, redact as redact_audit_value
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.bootstrap.snapshot import collect_bootstrap_snapshot
 from agent.logging_bootstrap import configure_logging_if_needed
 from agent.llm.action_ledger import ActionLedgerStore
@@ -6100,12 +6101,28 @@ class AgentRuntime:
 
     def update_provider(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
+        journal = ManagedActionJournal(action_type="provider_config_update", target=provider_key)
+        journal.plan_step("preflight_provider", resource=provider_key)
+        journal.plan_step("write_provider_config", resource=provider_key)
+        journal.plan_step("verify_provider_config_persisted", resource=provider_key)
         document = self.registry_document
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         if provider_key not in providers:
-            return False, {"ok": False, "error": "provider not found"}
+            journal.record_step("preflight_provider", ok=False, resource=provider_key, reason="provider_not_found")
+            return False, {
+                "ok": False,
+                "error": "provider not found",
+                "managed_action_journal": journal.to_dict(),
+            }
 
         current = dict(providers[provider_key])
+        previous = copy.deepcopy(current)
+        journal.record_step(
+            "preflight_provider",
+            ok=True,
+            resource=provider_key,
+            previous_source=self._provider_api_source_metadata(previous.get("api_key_source")),
+        )
         if "base_url" in payload:
             current["base_url"] = str(payload.get("base_url") or "").strip() or current.get("base_url")
         if "chat_path" in payload:
@@ -6133,12 +6150,113 @@ class AgentRuntime:
         saved, error = self._persist_registry_document(document)
         if not saved:
             assert error is not None
-            return False, error
+            journal.record_step("write_provider_config", ok=False, resource=provider_key, reason=str(error.get("error") or "persist_failed"))
+            response = dict(error)
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
+        journal.record_step(
+            "write_provider_config",
+            ok=True,
+            resource=provider_key,
+            previous_source=self._provider_api_source_metadata(previous.get("api_key_source")),
+            new_source=self._provider_api_source_metadata(current.get("api_key_source")),
+        )
+        journal.record_changed_resource("provider_config", provider_key, rollback_supported=True)
+        persisted = (
+            self.registry_document.get("providers", {}).get(provider_key)
+            if isinstance(self.registry_document.get("providers"), dict)
+            else None
+        )
+        persisted_ok = isinstance(persisted, dict) and dict(persisted) == current
+        journal.record_step("verify_provider_config_persisted", ok=persisted_ok, resource=provider_key)
+        journal.mark_verification(ok=persisted_ok, provider=provider_key, config_persisted=persisted_ok)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         self._schedule_autoconfig_soon()
         return True, {
             "ok": True,
             "provider": self._provider_public_payload(provider_key, current),
+            "managed_action_journal": journal.to_dict(),
         }
+
+    @staticmethod
+    def _secret_metadata(value: str | None) -> dict[str, Any]:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            return {"present": False, "length": 0}
+        return {
+            "present": True,
+            "length": len(cleaned),
+            "fingerprint": hashlib.sha256(cleaned.encode("utf-8")).hexdigest()[:12],
+        }
+
+    @staticmethod
+    def _provider_api_source_metadata(source: Any) -> dict[str, Any] | None:
+        if not isinstance(source, dict):
+            return None
+        return {
+            "type": str(source.get("type") or "").strip() or None,
+            "name": str(source.get("name") or "").strip() or None,
+        }
+
+    def _restore_provider_secret_state(
+        self,
+        *,
+        provider_key: str,
+        secret_key: str,
+        previous_secret: str | None,
+        previous_source: Any,
+        restore_source: bool,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        ok = True
+        details: list[str] = []
+        try:
+            self.secret_store.set_secret(secret_key, previous_secret or "")
+            self._router.set_provider_api_key(provider_key, previous_secret or "")
+            journal.record_rollback_step(
+                "restore_provider_secret",
+                ok=True,
+                resource=secret_key,
+                previous_secret=self._secret_metadata(previous_secret),
+            )
+            details.append("restored previous provider secret" if previous_secret else "removed failed new provider secret")
+        except Exception as exc:
+            ok = False
+            journal.record_rollback_step("restore_provider_secret", ok=False, resource=secret_key, error=exc.__class__.__name__)
+            details.append("could not restore provider secret")
+
+        if restore_source:
+            try:
+                document = copy.deepcopy(self.registry_document)
+                providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
+                provider_payload = providers.get(provider_key) if isinstance(providers.get(provider_key), dict) else None
+                if isinstance(provider_payload, dict):
+                    provider_payload["api_key_source"] = copy.deepcopy(previous_source)
+                    providers[provider_key] = provider_payload
+                    document["providers"] = providers
+                    saved, error = self._persist_registry_document(document)
+                    if not saved:
+                        raise RuntimeError(str((error or {}).get("error") or "registry_restore_failed"))
+                    journal.record_rollback_step(
+                        "restore_provider_api_key_source",
+                        ok=True,
+                        resource=provider_key,
+                        previous_source=self._provider_api_source_metadata(previous_source),
+                    )
+                    details.append("restored previous provider key source")
+            except Exception as exc:
+                ok = False
+                journal.record_rollback_step(
+                    "restore_provider_api_key_source",
+                    ok=False,
+                    resource=provider_key,
+                    error=exc.__class__.__name__,
+                )
+                details.append("could not restore previous provider key source")
+
+        summary = "; ".join(details) if details else "No rollback changes were needed."
+        journal.mark_rollback(ok=ok, attempted=True, summary=summary)
+        return ok, summary
 
     def add_provider_model(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
@@ -6212,16 +6330,37 @@ class AgentRuntime:
         api_key = str(payload.get("api_key") or "").strip()
         if not api_key:
             return False, {"ok": False, "error": "api_key is required"}
+        journal = ManagedActionJournal(action_type="provider_api_key_config", target=provider_key)
+        journal.plan_step("preflight_provider", resource=provider_key)
+        journal.plan_step("write_provider_key_source", resource=provider_key)
+        journal.plan_step("write_provider_secret", resource=f"provider:{provider_key}:api_key")
+        journal.plan_step("verify_secret_write", resource=f"provider:{provider_key}:api_key")
 
         document = self.registry_document
         providers = document.get("providers") if isinstance(document.get("providers"), dict) else {}
         provider_payload = providers.get(provider_key)
         if not isinstance(provider_payload, dict):
-            return False, {"ok": False, "error": "provider not found"}
+            journal.record_step("preflight_provider", ok=False, resource=provider_key, reason="provider_not_found")
+            return False, {
+                "ok": False,
+                "error": "provider not found",
+                "managed_action_journal": journal.to_dict(),
+            }
+        journal.record_step("preflight_provider", ok=True, resource=provider_key)
 
         secret_key = f"provider:{provider_key}:api_key"
         desired_source = {"type": "secret", "name": secret_key}
         source = provider_payload.get("api_key_source") if isinstance(provider_payload.get("api_key_source"), dict) else None
+        previous_source = copy.deepcopy(source)
+        previous_secret = self.secret_store.get_secret(secret_key)
+        source_changed = source != desired_source
+        journal.record_step(
+            "capture_previous_secret_metadata",
+            ok=True,
+            resource=secret_key,
+            previous_secret=self._secret_metadata(previous_secret),
+            previous_source=self._provider_api_source_metadata(previous_source),
+        )
         if source != desired_source:
             provider_payload["api_key_source"] = desired_source
             providers[provider_key] = provider_payload
@@ -6229,12 +6368,111 @@ class AgentRuntime:
             saved, error = self._persist_registry_document(document)
             if not saved:
                 assert error is not None
-                return False, error
+                journal.record_step("write_provider_key_source", ok=False, resource=provider_key, reason=str(error.get("error") or "persist_failed"))
+                response = dict(error)
+                response["managed_action_journal"] = journal.to_dict()
+                return False, response
+            journal.record_step(
+                "write_provider_key_source",
+                ok=True,
+                resource=provider_key,
+                previous_source=self._provider_api_source_metadata(previous_source),
+                new_source=self._provider_api_source_metadata(desired_source),
+            )
+            journal.record_changed_resource("provider_api_key_source", provider_key, rollback_supported=True)
+        else:
+            journal.record_step("write_provider_key_source", ok=True, resource=provider_key, changed=False)
 
         self.secret_store.set_secret(secret_key, api_key)
         self._router.set_provider_api_key(provider_key, api_key)
+        journal.record_step("write_provider_secret", ok=True, resource=secret_key, new_secret=self._secret_metadata(api_key))
+        journal.record_changed_resource(
+            "provider_secret",
+            secret_key,
+            rollback_supported=True,
+            previous_secret=self._secret_metadata(previous_secret),
+            new_secret=self._secret_metadata(api_key),
+        )
+        stored_secret = self.secret_store.get_secret(secret_key)
+        secret_verified = str(stored_secret or "").strip() == api_key
+        journal.record_step("verify_secret_write", ok=secret_verified, resource=secret_key, stored_secret=self._secret_metadata(stored_secret))
+        if not secret_verified:
+            cleanup_ok, cleanup_summary = self._restore_provider_secret_state(
+                provider_key=provider_key,
+                secret_key=secret_key,
+                previous_secret=previous_secret,
+                previous_source=previous_source,
+                restore_source=source_changed,
+                journal=journal,
+            )
+            journal.mark_verification(ok=False, provider=provider_key, secret_write_verified=False)
+            return False, {
+                "ok": False,
+                "provider": provider_key,
+                "error": "secret_write_verification_failed",
+                "error_kind": "secret_write_verification_failed",
+                "message": (
+                    "Provider setup did not work: I could not verify the saved key. "
+                    f"{cleanup_summary}. Check the key and paste it again."
+                ),
+                "rollback_ok": cleanup_ok,
+                "rollback_summary": cleanup_summary,
+                "managed_action_journal": journal.to_dict(),
+            }
+        verify_provider = bool(payload.get("verify_provider", False))
+        provider_test: dict[str, Any] | None = None
+        if verify_provider:
+            journal.plan_step("verify_provider_connection", resource=provider_key)
+            test_payload: dict[str, Any] = {"api_key": api_key}
+            model = str(payload.get("model") or "").strip()
+            if model:
+                test_payload["model"] = model
+            test_ok, test_body = self.test_provider(provider_key, test_payload)
+            provider_test = test_body if isinstance(test_body, dict) else {"ok": bool(test_ok)}
+            journal.record_step(
+                "verify_provider_connection",
+                ok=bool(test_ok),
+                resource=provider_key,
+                error_kind=str(provider_test.get("error_kind") or provider_test.get("error") or "") or None,
+            )
+            journal.mark_verification(ok=bool(test_ok), provider=provider_key, secret_write_verified=True, provider_test=provider_test)
+            if not test_ok:
+                cleanup_ok, cleanup_summary = self._restore_provider_secret_state(
+                    provider_key=provider_key,
+                    secret_key=secret_key,
+                    previous_secret=previous_secret,
+                    previous_source=previous_source,
+                    restore_source=source_changed,
+                    journal=journal,
+                )
+                response = {
+                    "ok": False,
+                    "provider": provider_key,
+                    "error": str(provider_test.get("error") or "provider_test_failed"),
+                    "error_kind": str(provider_test.get("error_kind") or provider_test.get("error") or "provider_test_failed"),
+                    "message": (
+                        "Provider setup did not work during the connection test. "
+                        f"{cleanup_summary}. Check the key and paste it again."
+                    ),
+                    "provider_test": provider_test,
+                    "rollback_ok": cleanup_ok,
+                    "rollback_summary": cleanup_summary,
+                    "managed_action_journal": journal.to_dict(),
+                }
+                return False, response
+            self._router.set_provider_api_key(provider_key, api_key)
+        else:
+            journal.mark_verification(ok=True, provider=provider_key, secret_write_verified=True, provider_test="not_requested")
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         self._schedule_autoconfig_soon()
-        return True, {"ok": True, "provider": provider_key}
+        response = {
+            "ok": True,
+            "provider": provider_key,
+            "secret": self._secret_metadata(api_key),
+            "provider_test": provider_test or {"ok": None, "status": "not_requested"},
+            "managed_action_journal": journal.to_dict(),
+        }
+        return True, response
 
     def _provider_default_model(self, provider_id: str) -> str | None:
         models = self.registry_document.get("models") if isinstance(self.registry_document.get("models"), dict) else {}
@@ -9465,6 +9703,51 @@ class AgentRuntime:
             return False, {"ok": False, "error": "api_key is required"}
         started_at = time.monotonic()
         timings_ms: dict[str, int] = {}
+        journal = ManagedActionJournal(action_type="provider_openrouter_config", target="openrouter")
+        journal.plan_step("preflight_provider_config", resource="openrouter")
+        journal.plan_step("write_provider_config", resource="openrouter")
+        previous_document = copy.deepcopy(self.registry_document)
+        previous_providers = previous_document.get("providers") if isinstance(previous_document.get("providers"), dict) else {}
+        previous_openrouter = copy.deepcopy(previous_providers.get("openrouter")) if isinstance(previous_providers.get("openrouter"), dict) else None
+        provider_existed = isinstance(previous_openrouter, dict)
+        journal.record_step(
+            "preflight_provider_config",
+            ok=True,
+            resource="openrouter",
+            provider_existed=provider_existed,
+            secret=self._secret_metadata(normalized_key),
+        )
+
+        def _restore_openrouter_config(reason: str) -> tuple[bool, str]:
+            restore_doc = copy.deepcopy(self.registry_document)
+            restore_providers = restore_doc.get("providers") if isinstance(restore_doc.get("providers"), dict) else {}
+            if not isinstance(restore_providers, dict):
+                restore_providers = {}
+            if provider_existed and isinstance(previous_openrouter, dict):
+                restore_providers["openrouter"] = copy.deepcopy(previous_openrouter)
+                summary = "restored previous OpenRouter provider config"
+            else:
+                restore_providers.pop("openrouter", None)
+                summary = "removed newly created OpenRouter provider config"
+            restore_doc["providers"] = restore_providers
+            saved, error = self._persist_registry_document(restore_doc)
+            if not saved:
+                journal.record_rollback_step(
+                    "restore_openrouter_provider_config",
+                    ok=False,
+                    resource="openrouter",
+                    reason=reason,
+                    error=str((error or {}).get("error") or "persist_failed"),
+                )
+                return False, "could not restore OpenRouter provider config"
+            journal.record_rollback_step(
+                "restore_openrouter_provider_config",
+                ok=True,
+                resource="openrouter",
+                reason=reason,
+                provider_existed=provider_existed,
+            )
+            return True, summary
 
         def _mark(label: str, step_started_at: float) -> None:
             timings_ms[str(label)] = int(max(0.0, time.monotonic() - step_started_at) * 1000)
@@ -9491,7 +9774,12 @@ class AgentRuntime:
                 }
             )
             if not add_ok:
-                return False, add_body if isinstance(add_body, dict) else {"ok": False, "error": "provider_config_failed"}
+                journal.record_step("write_provider_config", ok=False, resource="openrouter", reason=str((add_body or {}).get("error") if isinstance(add_body, dict) else "provider_config_failed"))
+                response = add_body if isinstance(add_body, dict) else {"ok": False, "error": "provider_config_failed"}
+                response["managed_action_journal"] = journal.to_dict()
+                return False, response
+            journal.record_step("write_provider_config", ok=True, resource="openrouter", operation="add")
+            journal.record_created_resource("provider_config", "openrouter")
         else:
             update_ok, update_body = self.update_provider(
                 "openrouter",
@@ -9504,17 +9792,48 @@ class AgentRuntime:
                 },
             )
             if not update_ok:
-                return False, update_body if isinstance(update_body, dict) else {"ok": False, "error": "provider_config_failed"}
+                journal.record_step("write_provider_config", ok=False, resource="openrouter", reason=str((update_body or {}).get("error") if isinstance(update_body, dict) else "provider_config_failed"))
+                response = update_body if isinstance(update_body, dict) else {"ok": False, "error": "provider_config_failed"}
+                response["managed_action_journal"] = journal.to_dict()
+                return False, response
+            journal.record_step("write_provider_config", ok=True, resource="openrouter", operation="update")
+            journal.record_changed_resource("provider_config", "openrouter", rollback_supported=True)
         _mark("provider_config", provider_step_started)
 
         secret_step_started = time.monotonic()
-        secret_ok, secret_body = self.set_provider_secret("openrouter", {"api_key": normalized_key})
+        secret_ok, secret_body = self.set_provider_secret(
+            "openrouter",
+            {
+                "api_key": normalized_key,
+                "verify_provider": True,
+                "model": str(request.get("model") or "").strip(),
+            },
+        )
         if not secret_ok:
-            return False, secret_body if isinstance(secret_body, dict) else {"ok": False, "error": "secret_store_failed"}
+            config_restore_ok, config_restore_summary = _restore_openrouter_config("secret_or_provider_test_failed")
+            journal.record_step(
+                "write_provider_secret_and_verify",
+                ok=False,
+                resource="provider:openrouter:api_key",
+                error_kind=str((secret_body or {}).get("error_kind") if isinstance(secret_body, dict) else "secret_store_failed"),
+            )
+            journal.mark_verification(ok=False, provider="openrouter", provider_test=False)
+            journal.mark_rollback(ok=bool(config_restore_ok), attempted=True, summary=config_restore_summary)
+            response = secret_body if isinstance(secret_body, dict) else {"ok": False, "error": "secret_store_failed"}
+            response["message"] = str(
+                response.get("message")
+                or f"OpenRouter setup failed and {config_restore_summary}. Check the key and paste it again."
+            )
+            response["provider_config_rollback_ok"] = bool(config_restore_ok)
+            response["provider_config_rollback_summary"] = config_restore_summary
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
+        journal.record_step("write_provider_secret_and_verify", ok=True, resource="provider:openrouter:api_key")
         _mark("secret_store", secret_step_started)
 
         provider_test_started = time.monotonic()
-        test_ok, test_body = self.test_provider("openrouter", {"api_key": normalized_key})
+        test_ok = True
+        test_body = secret_body.get("provider_test") if isinstance(secret_body.get("provider_test"), dict) else {"ok": True}
         _mark("provider_test", provider_test_started)
         if not test_ok:
             response = test_body if isinstance(test_body, dict) else {"ok": False, "error": "provider_test_failed"}
@@ -9596,6 +9915,9 @@ class AgentRuntime:
                 )
             ),
         }
+        journal.mark_verification(ok=True, provider="openrouter", provider_test=True)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        response["managed_action_journal"] = journal.to_dict()
         self._safe_log_event(
             "runtime.configure_openrouter",
             {

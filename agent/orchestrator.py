@@ -15009,6 +15009,17 @@ class Orchestrator:
         # Pending confirmations and vague continuations are safety-critical deterministic flows.
         if normalized in {"yes", "y", "no", "n", "do it", "continue", "1", "ok", "okay"}:
             return None
+        deterministic_route = classify_runtime_chat_route(text)
+        deterministic_kind = str(deterministic_route.get("kind") or "").strip().lower()
+        deterministic_route_name = str(deterministic_route.get("route") or "").strip().lower()
+        if deterministic_route_name == "setup_flow" or deterministic_kind in {
+            "configure_openrouter",
+            "configure_ollama",
+            "provide_openrouter_key",
+            "confirm_pending_setup",
+            "cancel_pending_setup",
+        }:
+            return None
         planner = getattr(self, "_assistant_planner", None)
         if not callable(getattr(planner, "plan", None)):
             return None

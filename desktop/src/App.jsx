@@ -1088,14 +1088,20 @@ export default function App() {
     }
     setAddProviderBusy(true);
     try {
-      if (key) {
-        await request("POST", `/providers/${providerId}/secret`, { api_key: key });
-        setProviderSecrets((prev) => ({ ...prev, [providerId]: "" }));
-      }
       const preferredModel = models.find((model) => model.provider === providerId)?.id || null;
-      const result = await request("POST", `/providers/${providerId}/test`, { model: preferredModel });
+      if (key) {
+        await request("POST", `/providers/${providerId}/secret`, {
+          api_key: key,
+          verify_provider: true,
+          model: preferredModel
+        });
+        setProviderSecrets((prev) => ({ ...prev, [providerId]: "" }));
+        appendLog({ endpoint: `/providers/${providerId}/secret`, ok: true, detail: "Saved and tested provider key" });
+      } else {
+        const result = await request("POST", `/providers/${providerId}/test`, { model: preferredModel });
+        appendLog({ endpoint: `/providers/${providerId}/test`, ok: true, detail: `${result.provider}/${result.model}` });
+      }
       setProviderStatuses((prev) => ({ ...prev, [providerId]: "Working" }));
-      appendLog({ endpoint: `/providers/${providerId}/test`, ok: true, detail: `${result.provider}/${result.model}` });
       await refreshRuntimeState();
     } catch (error) {
       setProviderStatuses((prev) => ({ ...prev, [providerId]: "Could not connect" }));
