@@ -8,6 +8,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.error_response_ux import compose_actionable_message
 from agent.llm.model_inventory import build_model_inventory
 from agent.model_watch_hf import deterministic_ollama_model_name, hf_snapshot_download
@@ -202,6 +203,25 @@ def _verification_row(inventory: list[dict[str, Any]], model_id: str) -> dict[st
         "provider": str(row.get("provider") or "").strip() or None,
         "capabilities": list(row.get("capabilities") or []) if isinstance(row.get("capabilities"), list) else [],
     }
+
+
+def _attach_journal(payload: dict[str, Any], journal: ManagedActionJournal) -> dict[str, Any]:
+    payload["managed_action_journal"] = journal.to_dict()
+    return payload
+
+
+def _verification_ok(verification: dict[str, Any]) -> bool:
+    if not isinstance(verification, dict):
+        return False
+    return bool(verification.get("found")) and bool(verification.get("installed"))
+
+
+def _model_reliability_failure_message(*, step: str, cleaned: str, remains: str, next_action: str) -> str:
+    return compose_actionable_message(
+        what_happened=f"Model acquisition failed during {step}. {cleaned}",
+        why=remains,
+        next_action=next_action,
+    )
 
 
 def build_model_manager_request_from_hf_plan_rows(plan_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -487,6 +507,51 @@ class CanonicalModelManager:
         return bool(ok), dict(body) if isinstance(body, dict) else {"ok": bool(ok)}
 
     @staticmethod
+    def _journal_model_preflight(journal: ManagedActionJournal, *, target: str, provider: str | None = None, disk_space_checked: bool = False) -> None:
+        journal.plan_step("preflight_target", resource=target, provider=provider)
+        journal.plan_step("check_backend_available", resource=provider or "unknown")
+        journal.plan_step("check_disk_space", resource=target)
+        journal.record_step("preflight_target", ok=True, resource=target, provider=provider)
+        journal.record_step("check_backend_available", ok=True, resource=provider or "unknown", note="delegated_to_existing_backend_guard")
+        journal.record_step(
+            "check_disk_space",
+            ok=True,
+            resource=target,
+            checked=bool(disk_space_checked),
+            note="not_checked_no_existing_disk_space_helper" if not disk_space_checked else None,
+        )
+
+    def _cleanup_owned_files(self, journal: ManagedActionJournal, paths: list[Path]) -> tuple[bool, str]:
+        attempted = False
+        ok = True
+        details: list[str] = []
+        for path in paths:
+            resolved = path.expanduser().resolve()
+            if not resolved.exists():
+                continue
+            if not resolved.is_file():
+                ok = False
+                attempted = True
+                details.append(f"skipped non-file {resolved}")
+                journal.record_rollback_step("remove_owned_file", ok=False, resource=str(resolved), reason="not_file")
+                continue
+            attempted = True
+            try:
+                resolved.unlink()
+                journal.record_rollback_step("remove_owned_file", ok=True, resource=str(resolved))
+                details.append(f"removed {resolved.name}")
+            except OSError as exc:
+                ok = False
+                journal.record_rollback_step("remove_owned_file", ok=False, resource=str(resolved), error=str(exc))
+                details.append(f"could not remove {resolved.name}: {exc}")
+        if not attempted:
+            journal.mark_rollback(ok=True, attempted=False, cleaned="no owned temp files needed cleanup")
+            return True, "No owned temp files needed cleanup."
+        summary = "; ".join(details) if details else "Owned cleanup completed."
+        journal.mark_rollback(ok=ok, attempted=True, summary=summary)
+        return ok, summary
+
+    @staticmethod
     def _result_state_from_verification(verification: dict[str, Any]) -> str:
         if bool(verification.get("found", False)) and bool(verification.get("installed", False)):
             if bool(verification.get("available", False)) and bool(verification.get("healthy", False)):
@@ -552,7 +617,11 @@ class CanonicalModelManager:
                 "message": "model is required",
                 "source": source,
             }
+        journal = ManagedActionJournal(action_type="model_ollama_pull", target=model_ref)
+        self._journal_model_preflight(journal, target=model_ref, provider="ollama")
+        journal.plan_step("build_install_plan", resource=model_ref)
         plan = self._install_planner_fn(inventory=self._inventory(), model_ref=model_ref)
+        journal.record_step("build_install_plan", ok=True, resource=model_ref)
         candidate = (
             plan.get("candidates")[0]
             if isinstance(plan.get("candidates"), list) and plan.get("candidates")
@@ -563,6 +632,7 @@ class CanonicalModelManager:
         install_name = str((candidate or {}).get("install_name") or "").strip() or None
         allow, blocked = self._guard_install_allowed(source=source)
         if not allow:
+            journal.record_step("check_install_policy", ok=False, resource=model_id, reason=str((blocked or {}).get("error_kind") or "blocked"))
             response = {
                 **dict(blocked or {}),
                 "model_id": model_id,
@@ -571,8 +641,10 @@ class CanonicalModelManager:
                 "trace_id": str(trace_id or ""),
                 "verification": {},
             }
-            return response
+            return _attach_journal(response, journal)
+        journal.record_step("check_install_policy", ok=True, resource=model_id)
         if not approve and bool(plan.get("needed", False)) and bool(plan.get("approved", False)):
+            journal.record_step("preview_requires_confirmation", ok=True, resource=model_id)
             self._update_target_state(
                 target_key=model_id,
                 target_type="model",
@@ -587,6 +659,7 @@ class CanonicalModelManager:
                 source=source,
             )
         if approve:
+            journal.plan_step("mark_downloading", resource=model_id)
             self._update_target_state(
                 target_key=model_id,
                 target_type="model",
@@ -600,6 +673,8 @@ class CanonicalModelManager:
                 error_kind=None,
                 source=source,
             )
+            journal.record_step("mark_downloading", ok=True, resource=model_id)
+        journal.plan_step("execute_ollama_pull", resource=model_id)
         result = self._install_executor_fn(
             config=self.runtime.config,
             registry=self.runtime._router.registry,
@@ -610,13 +685,58 @@ class CanonicalModelManager:
         )
         payload = dict(result) if isinstance(result, dict) else {"ok": False, "executed": False}
         payload["install_plan"] = plan
+        journal.record_step(
+            "execute_ollama_pull",
+            ok=bool(payload.get("ok")),
+            resource=model_id,
+            executed=bool(payload.get("executed")),
+            error_kind=str(payload.get("error_kind") or "") or None,
+        )
+        if bool(payload.get("executed")):
+            journal.record_changed_resource("ollama_model_inventory", model_id, rollback_supported=False)
         verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else {}
         if bool(payload.get("ok", False)):
+            journal.plan_step("refresh_ollama_inventory", resource=model_id)
             refresh_ok, refresh_body = self._refresh_ollama()
             payload["refresh_ok"] = bool(refresh_ok)
             payload["refresh_result"] = refresh_body
-            verification = _verification_row(self._inventory(), model_id)
+            refreshed_verification = _verification_row(self._inventory(), model_id)
+            verification = refreshed_verification if _verification_ok(refreshed_verification) else verification
             payload["verification"] = verification
+            journal.record_step("refresh_ollama_inventory", ok=bool(refresh_ok), resource=model_id)
+            journal.mark_verification(ok=_verification_ok(verification), model_id=model_id, verification=verification)
+            if not _verification_ok(verification):
+                cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
+                error_kind = "model_verification_failed"
+                message = _model_reliability_failure_message(
+                    step="verification",
+                    cleaned=cleanup_summary,
+                    remains="The pull command reported success, but the model did not appear in the verified inventory. I did not delete any Ollama cache/model data because ownership is not proven.",
+                    next_action="Check Ollama status and model inventory, then retry from the model setup screen if needed.",
+                )
+                self._update_target_state(
+                    target_key=model_id,
+                    target_type="model",
+                    provider_id="ollama",
+                    model_id=model_id,
+                    artifact_id=None,
+                    repo_id=None,
+                    revision=None,
+                    state="failed",
+                    message=message,
+                    error_kind=error_kind,
+                    source=source,
+                )
+                payload.update(
+                    {
+                        "ok": False,
+                        "error_kind": error_kind,
+                        "message": message,
+                        "cleanup_ok": cleanup_ok,
+                        "cleanup_summary": cleanup_summary,
+                    }
+                )
+                return _attach_journal(payload, journal)
             lifecycle_state = self._result_state_from_verification(verification)
             self._update_target_state(
                 target_key=model_id,
@@ -633,6 +753,16 @@ class CanonicalModelManager:
             )
         else:
             error_kind = str(payload.get("error_kind") or "install_failed").strip() or "install_failed"
+            cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
+            if error_kind != "approval_required":
+                payload["message"] = _model_reliability_failure_message(
+                    step="Ollama pull",
+                    cleaned=cleanup_summary,
+                    remains="No owned temporary files were left by this action. I did not delete any Ollama cache/model data because ownership is not proven.",
+                    next_action="Check that Ollama is running and has enough disk space, then retry the confirmed model acquisition.",
+                )
+                payload["cleanup_ok"] = cleanup_ok
+                payload["cleanup_summary"] = cleanup_summary
             if error_kind == "approval_required":
                 lifecycle_state = "queued"
             else:
@@ -650,7 +780,9 @@ class CanonicalModelManager:
                 error_kind=None if lifecycle_state == "queued" else error_kind,
                 source=source,
             )
-        return payload
+        if not journal.verification_result:
+            journal.mark_verification(ok=bool(payload.get("ok")), model_id=model_id, verification=payload.get("verification") if isinstance(payload.get("verification"), dict) else {})
+        return _attach_journal(payload, journal)
 
     def _execute_hf_local_download(
         self,
@@ -683,16 +815,22 @@ class CanonicalModelManager:
         model_id = _canonical_ollama_model_id(ollama_model_name) if ollama_model_name else None
         artifact_id = _hf_artifact_id(repo_id, revision)
         target_key = model_id or artifact_id
+        journal = ManagedActionJournal(action_type="model_hf_local_download", target=target_key)
+        self._journal_model_preflight(journal, target=target_key, provider="huggingface")
+        journal.record_step("validate_download_request", ok=True, resource=target_key, repo_id=repo_id, target_dir=target_dir)
         allow, blocked = self._guard_install_allowed(source=source)
         if not allow:
-            return {
+            journal.record_step("check_install_policy", ok=False, resource=target_key, reason=str((blocked or {}).get("error_kind") or "blocked"))
+            return _attach_journal({
                 **dict(blocked or {}),
                 "trace_id": str(trace_id or ""),
                 "model_id": model_id,
                 "artifact_id": artifact_id,
                 "verification": {},
-            }
+            }, journal)
+        journal.record_step("check_install_policy", ok=True, resource=target_key)
         if not approve:
+            journal.record_step("preview_requires_confirmation", ok=True, resource=target_key)
             self._update_target_state(
                 target_key=target_key,
                 target_type="model" if model_id else "artifact",
@@ -706,7 +844,7 @@ class CanonicalModelManager:
                 error_kind=None,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": False,
                 "executed": False,
                 "error_kind": "approval_required",
@@ -716,7 +854,8 @@ class CanonicalModelManager:
                 "artifact_id": artifact_id,
                 "verification": {},
                 "source": source,
-            }
+            }, journal)
+        journal.plan_step("mark_downloading", resource=target_key)
         self._update_target_state(
             target_key=target_key,
             target_type="model" if model_id else "artifact",
@@ -730,6 +869,8 @@ class CanonicalModelManager:
             error_kind=None,
             source=source,
         )
+        journal.record_step("mark_downloading", ok=True, resource=target_key)
+        journal.plan_step("download_snapshot", resource=repo_id, target_dir=target_dir, allow_patterns=allow_patterns)
         try:
             downloaded_path = self._hf_snapshot_download_fn(
                 repo_id=repo_id,
@@ -737,8 +878,12 @@ class CanonicalModelManager:
                 target_dir=target_dir,
                 allow_patterns=allow_patterns,
             )
+            journal.record_step("download_snapshot", ok=True, resource=str(downloaded_path))
+            journal.record_changed_resource("downloaded_snapshot", str(downloaded_path), rollback_supported=False, reason="cache ownership_not_proven")
         except Exception as exc:
             error_kind = f"snapshot_download_failed:{exc.__class__.__name__}"
+            cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
+            journal.record_step("download_snapshot", ok=False, resource=repo_id, error_kind=error_kind)
             self._update_target_state(
                 target_key=target_key,
                 target_type="model" if model_id else "artifact",
@@ -752,17 +897,24 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": False,
                 "executed": True,
                 "error_kind": error_kind,
-                "message": "Snapshot download failed.",
+                "message": _model_reliability_failure_message(
+                    step="snapshot download",
+                    cleaned=cleanup_summary,
+                    remains="The download did not complete. I did not delete any model cache directory because ownership is not proven.",
+                    next_action="Check network/backend availability and disk space, then retry the confirmed model download.",
+                ),
                 "trace_id": str(trace_id or ""),
                 "model_id": model_id,
                 "artifact_id": artifact_id,
                 "verification": {},
+                "cleanup_ok": cleanup_ok,
+                "cleanup_summary": cleanup_summary,
                 "source": source,
-            }
+            }, journal)
 
         verification: dict[str, Any] = {}
         refresh_ok = False
@@ -772,9 +924,12 @@ class CanonicalModelManager:
                 modelfile_path
                 or str((Path(target_dir).expanduser().resolve() / "Modelfile.personal-agent").resolve())
             ).expanduser().resolve()
+            generated_modelfile_owned = not bool(modelfile_path)
+            owned_cleanup_paths: list[Path] = [modelfile_target] if generated_modelfile_owned else []
             gguf_path = (Path(target_dir).expanduser().resolve() / selected_gguf).resolve()
             if not gguf_path.is_file():
                 error_kind = "selected_gguf_missing"
+                cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, owned_cleanup_paths)
                 self._update_target_state(
                     target_key=target_key,
                     target_type="model",
@@ -788,17 +943,24 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
-                return {
+                return _attach_journal({
                     "ok": False,
                     "executed": True,
                     "error_kind": error_kind,
-                    "message": "Selected GGUF file is missing after download.",
+                    "message": _model_reliability_failure_message(
+                        step="GGUF selection verification",
+                        cleaned=cleanup_summary,
+                        remains="The selected GGUF file was not present after download. Downloaded cache data may remain; I did not delete it because ownership is not proven.",
+                        next_action="Choose an existing GGUF file from the downloaded artifact or retry the download.",
+                    ),
                     "trace_id": str(trace_id or ""),
                     "model_id": model_id,
                     "artifact_id": None,
                     "verification": {},
+                    "cleanup_ok": cleanup_ok,
+                    "cleanup_summary": cleanup_summary,
                     "source": source,
-                }
+                }, journal)
             modelfile_target.parent.mkdir(parents=True, exist_ok=True)
             fd = -1
             tmp_path = ""
@@ -815,6 +977,9 @@ class CanonicalModelManager:
                 fd = -1
                 os.replace(tmp_path, modelfile_target)
                 tmp_path = ""
+                journal.record_step("write_modelfile", ok=True, resource=str(modelfile_target))
+                if generated_modelfile_owned:
+                    journal.record_created_resource("modelfile", str(modelfile_target))
             except Exception as exc:
                 if fd >= 0:
                     try:
@@ -827,6 +992,8 @@ class CanonicalModelManager:
                     except OSError:
                         pass
                 error_kind = f"modelfile_write_failed:{exc.__class__.__name__}"
+                cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, owned_cleanup_paths)
+                journal.record_step("write_modelfile", ok=False, resource=str(modelfile_target), error_kind=error_kind)
                 self._update_target_state(
                     target_key=target_key,
                     target_type="model",
@@ -840,19 +1007,27 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
-                return {
+                return _attach_journal({
                     "ok": False,
                     "executed": True,
                     "error_kind": error_kind,
-                    "message": "Modelfile generation failed.",
+                    "message": _model_reliability_failure_message(
+                        step="Modelfile generation",
+                        cleaned=cleanup_summary,
+                        remains="The generated Modelfile could not be written. Downloaded cache data may remain; I did not delete it because ownership is not proven.",
+                        next_action="Check write permissions and retry the confirmed import.",
+                    ),
                     "trace_id": str(trace_id or ""),
                     "model_id": model_id,
                     "artifact_id": None,
                     "verification": {},
+                    "cleanup_ok": cleanup_ok,
+                    "cleanup_summary": cleanup_summary,
                     "source": source,
-                }
+                }, journal)
 
             try:
+                journal.plan_step("ollama_create", resource=model_id)
                 completed = self._subprocess_run_fn(
                     ["ollama", "create", str(model_id.split(":", 1)[1]), "-f", str(modelfile_target)],
                     check=False,
@@ -862,6 +1037,8 @@ class CanonicalModelManager:
                 )
             except Exception as exc:
                 error_kind = f"ollama_create_failed:{exc.__class__.__name__}"
+                cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, owned_cleanup_paths)
+                journal.record_step("ollama_create", ok=False, resource=model_id, error_kind=error_kind)
                 self._update_target_state(
                     target_key=target_key,
                     target_type="model",
@@ -875,20 +1052,29 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
-                return {
+                return _attach_journal({
                     "ok": False,
                     "executed": True,
                     "error_kind": error_kind,
-                    "message": "Ollama create failed.",
+                    "message": _model_reliability_failure_message(
+                        step="Ollama import",
+                        cleaned=cleanup_summary,
+                        remains="Ollama did not create the model. I did not delete any Ollama model/cache data because ownership is not proven.",
+                        next_action="Check Ollama status and retry the confirmed import.",
+                    ),
                     "trace_id": str(trace_id or ""),
                     "model_id": model_id,
                     "artifact_id": None,
                     "verification": {},
+                    "cleanup_ok": cleanup_ok,
+                    "cleanup_summary": cleanup_summary,
                     "source": source,
-                }
+                }, journal)
             if int(completed.returncode) != 0:
                 error_kind = "ollama_create_failed"
                 detail = _tail(str(completed.stderr or "").strip() or "ollama_create_failed", limit=240)
+                cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, owned_cleanup_paths)
+                journal.record_step("ollama_create", ok=False, resource=model_id, error_kind=error_kind, detail=detail)
                 self._update_target_state(
                     target_key=target_key,
                     target_type="model",
@@ -902,21 +1088,73 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
-                return {
+                return _attach_journal({
                     "ok": False,
                     "executed": True,
                     "error_kind": error_kind,
-                    "message": detail,
+                    "message": _model_reliability_failure_message(
+                        step="Ollama import",
+                        cleaned=cleanup_summary,
+                        remains=f"Ollama create failed: {detail}. I did not delete any Ollama model/cache data because ownership is not proven.",
+                        next_action="Fix the Ollama import error, then retry the confirmed import.",
+                    ),
                     "trace_id": str(trace_id or ""),
                     "model_id": model_id,
                     "artifact_id": None,
                     "verification": {},
+                    "cleanup_ok": cleanup_ok,
+                    "cleanup_summary": cleanup_summary,
                     "stdout_tail": _tail(completed.stdout),
                     "stderr_tail": _tail(completed.stderr),
                     "source": source,
-                }
+                }, journal)
+            journal.record_step("ollama_create", ok=True, resource=model_id)
+            journal.record_changed_resource("ollama_model_inventory", model_id, rollback_supported=False)
             refresh_ok, refresh_result = self._refresh_ollama()
             verification = _verification_row(self._inventory(), model_id)
+            journal.record_step("refresh_ollama_inventory", ok=bool(refresh_ok), resource=model_id)
+            journal.mark_verification(ok=_verification_ok(verification), model_id=model_id, verification=verification)
+            if not _verification_ok(verification):
+                cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, owned_cleanup_paths)
+                error_kind = "model_verification_failed"
+                message = _model_reliability_failure_message(
+                    step="verification",
+                    cleaned=cleanup_summary,
+                    remains="Ollama create completed, but the model did not appear in the verified inventory. I did not delete any Ollama model/cache data because ownership is not proven.",
+                    next_action="Check Ollama model inventory and remove the failed model manually if needed before retrying.",
+                )
+                self._update_target_state(
+                    target_key=target_key,
+                    target_type="model",
+                    provider_id="ollama",
+                    model_id=model_id,
+                    artifact_id=None,
+                    repo_id=repo_id,
+                    revision=revision,
+                    state="failed",
+                    message=message,
+                    error_kind=error_kind,
+                    source=source,
+                )
+                return _attach_journal({
+                    "ok": False,
+                    "executed": True,
+                    "error_kind": error_kind,
+                    "message": message,
+                    "trace_id": str(trace_id or ""),
+                    "model_id": model_id,
+                    "artifact_id": None,
+                    "download_path": str(downloaded_path),
+                    "modelfile_path": str(modelfile_target),
+                    "refresh_ok": bool(refresh_ok),
+                    "refresh_result": refresh_result,
+                    "verification": verification,
+                    "cleanup_ok": cleanup_ok,
+                    "cleanup_summary": cleanup_summary,
+                    "stdout_tail": _tail(completed.stdout),
+                    "stderr_tail": _tail(completed.stderr),
+                    "source": source,
+                }, journal)
             lifecycle_state = self._result_state_from_verification(verification)
             self._update_target_state(
                 target_key=target_key,
@@ -931,7 +1169,7 @@ class CanonicalModelManager:
                 error_kind=None,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": True,
                 "executed": True,
                 "error_kind": None,
@@ -947,7 +1185,7 @@ class CanonicalModelManager:
                 "stdout_tail": _tail(completed.stdout),
                 "stderr_tail": _tail(completed.stderr),
                 "source": source,
-            }
+            }, journal)
 
         marker_path = (Path(target_dir).expanduser().resolve() / ".personal-agent-download-only.json").resolve()
         marker_path.parent.mkdir(parents=True, exist_ok=True)
@@ -958,8 +1196,12 @@ class CanonicalModelManager:
         }
         try:
             marker_path.write_text(json.dumps(marker_payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            journal.record_step("write_download_marker", ok=True, resource=str(marker_path))
+            journal.record_created_resource("download_marker", str(marker_path))
         except Exception as exc:
             error_kind = f"download_marker_failed:{exc.__class__.__name__}"
+            cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [marker_path])
+            journal.record_step("write_download_marker", ok=False, resource=str(marker_path), error_kind=error_kind)
             self._update_target_state(
                 target_key=target_key,
                 target_type="artifact",
@@ -973,17 +1215,24 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": False,
                 "executed": True,
                 "error_kind": error_kind,
-                "message": "Download marker write failed.",
+                "message": _model_reliability_failure_message(
+                    step="download marker write",
+                    cleaned=cleanup_summary,
+                    remains="The snapshot may remain in the target directory. I did not delete it because ownership is not proven.",
+                    next_action="Inspect the target directory and retry the confirmed download if needed.",
+                ),
                 "trace_id": str(trace_id or ""),
                 "model_id": None,
                 "artifact_id": artifact_id,
                 "verification": {},
+                "cleanup_ok": cleanup_ok,
+                "cleanup_summary": cleanup_summary,
                 "source": source,
-            }
+            }, journal)
         self._update_target_state(
             target_key=target_key,
             target_type="artifact",
@@ -997,7 +1246,8 @@ class CanonicalModelManager:
             error_kind=None,
             source=source,
         )
-        return {
+        journal.mark_verification(ok=True, artifact_id=artifact_id, download_path=str(downloaded_path), marker_path=str(marker_path))
+        return _attach_journal({
             "ok": True,
             "executed": True,
             "error_kind": None,
@@ -1008,7 +1258,7 @@ class CanonicalModelManager:
             "download_path": str(downloaded_path),
             "verification": {},
             "source": source,
-        }
+        }, journal)
 
     def _execute_ollama_import_gguf(
         self,
@@ -1029,15 +1279,21 @@ class CanonicalModelManager:
                 "message": "model_name and modelfile_path are required",
                 "source": source,
             }
+        journal = ManagedActionJournal(action_type="model_ollama_import_gguf", target=model_id)
+        self._journal_model_preflight(journal, target=model_id, provider="ollama")
+        journal.record_step("validate_import_request", ok=True, resource=model_id, modelfile_path=modelfile_path)
         allow, blocked = self._guard_install_allowed(source=source)
         if not allow:
-            return {
+            journal.record_step("check_install_policy", ok=False, resource=model_id, reason=str((blocked or {}).get("error_kind") or "blocked"))
+            return _attach_journal({
                 **dict(blocked or {}),
                 "trace_id": str(trace_id or ""),
                 "model_id": model_id,
                 "verification": {},
-            }
+            }, journal)
+        journal.record_step("check_install_policy", ok=True, resource=model_id)
         if not approve:
+            journal.record_step("preview_requires_confirmation", ok=True, resource=model_id)
             self._update_target_state(
                 target_key=model_id,
                 target_type="model",
@@ -1051,7 +1307,7 @@ class CanonicalModelManager:
                 error_kind=None,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": False,
                 "executed": False,
                 "error_kind": "approval_required",
@@ -1060,7 +1316,8 @@ class CanonicalModelManager:
                 "model_id": model_id,
                 "verification": {},
                 "source": source,
-            }
+            }, journal)
+        journal.plan_step("mark_downloading", resource=model_id)
         self._update_target_state(
             target_key=model_id,
             target_type="model",
@@ -1074,7 +1331,9 @@ class CanonicalModelManager:
             error_kind=None,
             source=source,
         )
+        journal.record_step("mark_downloading", ok=True, resource=model_id)
         try:
+            journal.plan_step("ollama_create", resource=model_id)
             completed = self._subprocess_run_fn(
                 ["ollama", "create", str(model_id.split(":", 1)[1]), "-f", modelfile_path],
                 check=False,
@@ -1084,6 +1343,8 @@ class CanonicalModelManager:
             )
         except Exception as exc:
             error_kind = f"ollama_create_failed:{exc.__class__.__name__}"
+            cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
+            journal.record_step("ollama_create", ok=False, resource=model_id, error_kind=error_kind)
             self._update_target_state(
                 target_key=model_id,
                 target_type="model",
@@ -1097,19 +1358,28 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": False,
                 "executed": True,
                 "error_kind": error_kind,
-                "message": "Ollama create failed.",
+                "message": _model_reliability_failure_message(
+                    step="Ollama import",
+                    cleaned=cleanup_summary,
+                    remains="Ollama did not create the model. I did not delete the user-provided Modelfile or any Ollama model/cache data because ownership is not proven.",
+                    next_action="Check Ollama status and the Modelfile path, then retry the confirmed import.",
+                ),
                 "trace_id": str(trace_id or ""),
                 "model_id": model_id,
                 "verification": {},
+                "cleanup_ok": cleanup_ok,
+                "cleanup_summary": cleanup_summary,
                 "source": source,
-            }
+            }, journal)
         if int(completed.returncode) != 0:
             error_kind = "ollama_create_failed"
             detail = _tail(str(completed.stderr or "").strip() or "ollama_create_failed", limit=240)
+            cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
+            journal.record_step("ollama_create", ok=False, resource=model_id, error_kind=error_kind, detail=detail)
             self._update_target_state(
                 target_key=model_id,
                 target_type="model",
@@ -1123,20 +1393,69 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
-            return {
+            return _attach_journal({
                 "ok": False,
                 "executed": True,
                 "error_kind": error_kind,
-                "message": detail,
+                "message": _model_reliability_failure_message(
+                    step="Ollama import",
+                    cleaned=cleanup_summary,
+                    remains=f"Ollama create failed: {detail}. I did not delete the user-provided Modelfile or any Ollama model/cache data because ownership is not proven.",
+                    next_action="Fix the Ollama import error, then retry the confirmed import.",
+                ),
                 "trace_id": str(trace_id or ""),
                 "model_id": model_id,
                 "verification": {},
+                "cleanup_ok": cleanup_ok,
+                "cleanup_summary": cleanup_summary,
                 "stdout_tail": _tail(completed.stdout),
                 "stderr_tail": _tail(completed.stderr),
                 "source": source,
-            }
+            }, journal)
+        journal.record_step("ollama_create", ok=True, resource=model_id)
+        journal.record_changed_resource("ollama_model_inventory", model_id, rollback_supported=False)
         refresh_ok, refresh_result = self._refresh_ollama()
         verification = _verification_row(self._inventory(), model_id)
+        journal.record_step("refresh_ollama_inventory", ok=bool(refresh_ok), resource=model_id)
+        journal.mark_verification(ok=_verification_ok(verification), model_id=model_id, verification=verification)
+        if not _verification_ok(verification):
+            cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
+            error_kind = "model_verification_failed"
+            message = _model_reliability_failure_message(
+                step="verification",
+                cleaned=cleanup_summary,
+                remains="Ollama create completed, but the model did not appear in the verified inventory. I did not delete the user-provided Modelfile or any Ollama model/cache data because ownership is not proven.",
+                next_action="Check Ollama model inventory and remove the failed model manually if needed before retrying.",
+            )
+            self._update_target_state(
+                target_key=model_id,
+                target_type="model",
+                provider_id="ollama",
+                model_id=model_id,
+                artifact_id=None,
+                repo_id=None,
+                revision=None,
+                state="failed",
+                message=message,
+                error_kind=error_kind,
+                source=source,
+            )
+            return _attach_journal({
+                "ok": False,
+                "executed": True,
+                "error_kind": error_kind,
+                "message": message,
+                "trace_id": str(trace_id or ""),
+                "model_id": model_id,
+                "refresh_ok": bool(refresh_ok),
+                "refresh_result": refresh_result,
+                "verification": verification,
+                "cleanup_ok": cleanup_ok,
+                "cleanup_summary": cleanup_summary,
+                "stdout_tail": _tail(completed.stdout),
+                "stderr_tail": _tail(completed.stderr),
+                "source": source,
+            }, journal)
         lifecycle_state = self._result_state_from_verification(verification)
         self._update_target_state(
             target_key=model_id,
@@ -1151,7 +1470,7 @@ class CanonicalModelManager:
             error_kind=None,
             source=source,
         )
-        return {
+        return _attach_journal({
             "ok": True,
             "executed": True,
             "error_kind": None,
@@ -1164,7 +1483,7 @@ class CanonicalModelManager:
             "stdout_tail": _tail(completed.stdout),
             "stderr_tail": _tail(completed.stderr),
             "source": source,
-        }
+        }, journal)
 
 
 __all__ = [

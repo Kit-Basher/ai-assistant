@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import os
+import subprocess
 import threading
 import tempfile
 import time
@@ -3609,6 +3610,157 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("safe_mode_blocked", import_result["error_kind"])
         download_mock.assert_not_called()
         subprocess_mock.assert_not_called()
+
+    def test_canonical_model_manager_ollama_pull_verification_failure_is_journaled(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"needed": True, "approved": True, "candidates": [{"model_id": "ollama:missing", "install_name": "missing"}]},
+            install_executor_fn=lambda **_: {"ok": True, "executed": True, "message": "pulled"},
+            inventory_builder=lambda **_: [],
+        )
+
+        result = manager.execute_request(
+            {"kind": "approved_ollama_pull", "model_ref": "missing"},
+            approve=True,
+            trace_id="pull-verification-fail",
+            source="test",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("model_verification_failed", result["error_kind"])
+        self.assertIn("did not appear in the verified inventory", result["message"])
+        self.assertIn("did not delete any Ollama cache/model data", result["message"])
+        journal = result.get("managed_action_journal", {})
+        self.assertEqual("model_ollama_pull", journal.get("action_type"))
+        self.assertTrue(journal.get("planned_steps"))
+        self.assertTrue(journal.get("executed_steps"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_canonical_model_manager_ollama_pull_preview_is_journaled_without_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        executor_mock = unittest.mock.Mock(
+            return_value={
+                "ok": False,
+                "executed": False,
+                "error_kind": "approval_required",
+                "message": "Explicit approval is required before executing this local install.",
+                "verification": {},
+            }
+        )
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {
+                "needed": True,
+                "approved": True,
+                "candidates": [{"model_id": "ollama:preview-model", "install_name": "preview-model"}],
+            },
+            install_executor_fn=executor_mock,
+            inventory_builder=lambda **_: [],
+        )
+
+        result = manager.execute_request(
+            {"kind": "approved_ollama_pull", "model_ref": "preview-model"},
+            approve=False,
+            trace_id="pull-preview",
+            source="test",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["executed"])
+        self.assertEqual("approval_required", result["error_kind"])
+        executor_mock.assert_called_once()
+        self.assertFalse(bool(executor_mock.call_args.kwargs["approve"]))
+        journal = result.get("managed_action_journal", {})
+        self.assertEqual("model_ollama_pull", journal.get("action_type"))
+        executed_names = [step.get("name") for step in journal.get("executed_steps", [])]
+        self.assertIn("preview_requires_confirmation", executed_names)
+        self.assertFalse(journal.get("changed_resources"))
+
+    def test_canonical_model_manager_hf_import_verification_failure_cleans_owned_modelfile(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        target_dir = Path(self.tmpdir.name) / "hf-download"
+        calls: list[dict[str, object]] = []
+
+        def _download(**_: object) -> str:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "model.gguf").write_text("fake gguf", encoding="utf-8")
+            return str(target_dir)
+
+        def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append({"argv": list(argv), **kwargs})
+            return subprocess.CompletedProcess(argv, 0, stdout="created", stderr="")
+
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"ok": True},
+            install_executor_fn=lambda **_: {"ok": True},
+            hf_snapshot_download_fn=_download,
+            subprocess_run_fn=_run,
+            inventory_builder=lambda **_: [],
+        )
+
+        result = manager.execute_request(
+            {
+                "kind": "hf_local_download",
+                "repo_id": "example/model",
+                "revision": "main",
+                "target_dir": str(target_dir),
+                "selected_gguf": "model.gguf",
+                "ollama_model_name": "example-model",
+            },
+            approve=True,
+            trace_id="hf-verification-fail",
+            source="test",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("model_verification_failed", result["error_kind"])
+        self.assertFalse((target_dir / "Modelfile.personal-agent").exists())
+        self.assertTrue(calls)
+        self.assertTrue(all(call.get("shell") is not True for call in calls))
+        journal = result.get("managed_action_journal", {})
+        self.assertEqual("model_hf_local_download", journal.get("action_type"))
+        rollback_steps = journal.get("rollback_steps", [])
+        self.assertTrue(any(step.get("name") == "remove_owned_file" and step.get("status") == "ok" for step in rollback_steps))
+
+    def test_canonical_model_manager_import_failure_does_not_delete_user_modelfile(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        modelfile = Path(self.tmpdir.name) / "UserModelfile"
+        modelfile.write_text("FROM /tmp/model.gguf\n", encoding="utf-8")
+        calls: list[dict[str, object]] = []
+
+        def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            calls.append({"argv": list(argv), **kwargs})
+            return subprocess.CompletedProcess(argv, 2, stdout="", stderr="bad modelfile")
+
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"ok": True},
+            install_executor_fn=lambda **_: {"ok": True},
+            subprocess_run_fn=_run,
+            inventory_builder=lambda **_: [],
+        )
+
+        result = manager.execute_request(
+            {
+                "kind": "ollama_import_gguf",
+                "model_name": "user-import",
+                "modelfile_path": str(modelfile),
+            },
+            approve=True,
+            trace_id="import-failure",
+            source="test",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("ollama_create_failed", result["error_kind"])
+        self.assertTrue(modelfile.exists())
+        self.assertIn("did not delete the user-provided Modelfile", result["message"])
+        self.assertTrue(all(call.get("shell") is not True for call in calls))
+        journal = result.get("managed_action_journal", {})
+        self.assertEqual("model_ollama_import_gguf", journal.get("action_type"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
 
     def test_runtime_truth_surfaces_acquirable_local_model_without_treating_it_as_ready(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

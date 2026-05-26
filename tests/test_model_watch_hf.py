@@ -9,6 +9,7 @@ from agent.api_server import AgentRuntime
 from agent.config import Config
 from agent.model_watch_hf import (
     build_hf_local_download_proposal,
+    deterministic_ollama_model_name,
     hf_watch_state_path_for_runtime,
     load_hf_watch_state,
     scan_hf_watch,
@@ -234,11 +235,25 @@ class TestModelWatchHF(unittest.TestCase):
             os.makedirs(target_dir, exist_ok=True)
             with open(os.path.join(target_dir, "model-q4_k_m.gguf"), "w", encoding="utf-8") as handle:
                 handle.write("fake-gguf")
+        model_name = deterministic_ollama_model_name(
+            repo_id="acme/model-b",
+            selected_gguf="model-q4_k_m.gguf",
+            revision="abcd1234",
+        )
+        inventory_rows = [
+            {
+                "id": f"ollama:{model_name}",
+                "provider": "ollama",
+                "installed": True,
+                "available": True,
+                "healthy": True,
+            }
+        ]
 
         with patch("agent.api_server.hf_snapshot_download", return_value="/tmp/hf") as download_mock, patch(
             "agent.api_server.subprocess.run",
             return_value=Mock(returncode=0, stderr="", stdout=""),
-        ) as subprocess_mock, patch.object(
+        ) as subprocess_mock, patch("agent.api_server.build_model_inventory", return_value=inventory_rows), patch.object(
             runtime,
             "refresh_models",
             return_value=(True, {"ok": True}),

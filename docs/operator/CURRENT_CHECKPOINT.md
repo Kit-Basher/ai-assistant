@@ -27,6 +27,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Managed local service setup now journals owned changes and rolls back the SearXNG container it created if health checks fail.
 - Web search cleanup is a separate confirmed action that only targets `personal-agent-searxng`.
 - Managed action reliability now has a product-wide standard and audit. Only SearXNG setup/cleanup currently meets the full journal/owned-rollback pattern; other mutating flows are tracked as follow-up work.
+- Model acquisition/import flows now attach managed-action journals, verify post-action inventory, and clean up owned generated Modelfiles/temp artifacts. They do not delete unproven Ollama cache/model data or user-provided Modelfiles.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
