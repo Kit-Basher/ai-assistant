@@ -49,7 +49,7 @@ from agent.telegram_runtime_state import (
     get_telegram_runtime_state,
     resolve_telegram_token_with_source,
     telegram_control_env,
-    write_telegram_enablement,
+    write_telegram_enablement_managed,
 )
 from agent.version import read_build_info, read_git_commit
 
@@ -1230,7 +1230,10 @@ def _cmd_telegram_status(_args: argparse.Namespace) -> int:
 
 def _cmd_telegram_enable(_args: argparse.Namespace) -> int:
     operator_env = telegram_control_env()
-    write_telegram_enablement(True, env=operator_env)
+    ok, body = write_telegram_enablement_managed(True, env=operator_env)
+    if not ok:
+        print(str(body.get("message") or body.get("error") or "Telegram enablement failed."), flush=True)
+        return 1
     state_before = get_telegram_runtime_state(env=operator_env)
     token_configured = bool(state_before.get("token_configured", False))
     try:
@@ -1253,7 +1256,10 @@ def _cmd_telegram_enable(_args: argparse.Namespace) -> int:
 
 def _cmd_telegram_disable(_args: argparse.Namespace) -> int:
     operator_env = telegram_control_env()
-    write_telegram_enablement(False, env=operator_env)
+    ok, body = write_telegram_enablement_managed(False, env=operator_env)
+    if not ok:
+        print(str(body.get("message") or body.get("error") or "Telegram disablement failed."), flush=True)
+        return 1
     try:
         _run_systemctl_user(["daemon-reload"])
     except Exception:

@@ -628,6 +628,74 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertNotIn("subprocess", source)
         self.assertNotIn("shell=True", source)
 
+    def test_telegram_secret_save_journals_and_verifies_without_raw_token(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        raw_token = "123456789:telegram-secret-token-value"
+
+        ok, response = runtime.set_telegram_secret({"bot_token": raw_token})
+
+        self.assertTrue(ok)
+        self.assertTrue(response["ok"])
+        self.assertEqual(raw_token, runtime.secret_store.get_secret("telegram:bot_token"))
+        serialized = json.dumps(response, sort_keys=True)
+        self.assertNotIn(raw_token, serialized)
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("telegram_token_config", journal.get("action_type"))
+        self.assertTrue(journal.get("planned_steps"))
+        self.assertTrue(journal.get("executed_steps"))
+        self.assertTrue(journal.get("changed_resources"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_telegram_secret_failed_verification_restores_previous_token(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        old_token = "123456789:old-telegram-secret-token"
+        bad_token = "123456789:bad-telegram-secret-token"
+        runtime.secret_store.set_secret("telegram:bot_token", old_token)
+
+        with patch.object(runtime.secret_store, "get_secret", side_effect=[old_token, "wrong-token"]):
+            ok, response = runtime.set_telegram_secret({"bot_token": bad_token})
+
+        self.assertFalse(ok)
+        self.assertEqual("telegram_secret_write_verification_failed", response["error_kind"])
+        self.assertEqual(old_token, runtime.secret_store.get_secret("telegram:bot_token"))
+        serialized = json.dumps(response, sort_keys=True)
+        self.assertNotIn(old_token, serialized)
+        self.assertNotIn(bad_token, serialized)
+        journal = response.get("managed_action_journal", {})
+        self.assertFalse(journal.get("verification_result", {}).get("ok"))
+        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        rollback_steps = journal.get("rollback_steps", [])
+        self.assertTrue(any(step.get("name") == "restore_telegram_secret" and step.get("status") == "ok" for step in rollback_steps))
+
+    def test_telegram_secret_failed_new_token_verification_removes_owned_token_only(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.secret_store.set_secret("provider:other:api_key", "sk-other-secret")
+        bad_token = "123456789:bad-new-telegram-secret-token"
+
+        with patch.object(runtime.secret_store, "get_secret", side_effect=[None, "wrong-token"]):
+            ok, response = runtime.set_telegram_secret({"bot_token": bad_token})
+
+        self.assertFalse(ok)
+        self.assertIsNone(runtime.secret_store.get_secret("telegram:bot_token"))
+        self.assertEqual("sk-other-secret", runtime.secret_store.get_secret("provider:other:api_key"))
+        self.assertNotIn(bad_token, json.dumps(response, sort_keys=True))
+        self.assertIn("removed failed new Telegram token", response["rollback_summary"])
+
+    def test_telegram_secret_empty_token_rejected_before_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        ok, response = runtime.set_telegram_secret({"bot_token": ""})
+
+        self.assertFalse(ok)
+        self.assertEqual("bot_token is required", response["error"])
+        self.assertIsNone(runtime.secret_store.get_secret("telegram:bot_token"))
+
+    def test_telegram_secret_save_path_does_not_shell_out(self) -> None:
+        source = inspect.getsource(AgentRuntime.set_telegram_secret)
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("shell=True", source)
+
     def test_configure_openrouter_failed_verification_restores_provider_config_and_secret(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         old_secret = "sk-openrouter-old-secret"

@@ -4,15 +4,19 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent.secret_store import SecretStore
 from agent.telegram_runtime_state import (
     clear_stale_telegram_locks,
     get_telegram_runtime_state,
+    is_personal_agent_telegram_dropin_path,
     read_telegram_enablement,
     telegram_control_env,
+    telegram_dropin_path,
     telegram_lock_paths,
     write_telegram_enablement,
+    write_telegram_enablement_managed,
 )
 
 
@@ -109,6 +113,57 @@ class TestTelegramRuntimeState(unittest.TestCase):
             )
         self.assertFalse(bool(enablement["enabled"]))
         self.assertEqual("config", enablement["config_source"])
+
+    def test_managed_enablement_write_journals_and_verifies_owned_dropin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+
+            ok, response = write_telegram_enablement_managed(True, home=home, env={})
+
+            self.assertTrue(ok)
+            self.assertTrue(response["ok"])
+            self.assertTrue(telegram_dropin_path(home=home).is_file())
+            self.assertTrue(bool(read_telegram_enablement(home=home, env={})["enabled"]))
+            journal = response.get("managed_action_journal", {})
+            self.assertEqual("telegram_enablement_config", journal.get("action_type"))
+            self.assertTrue(journal.get("planned_steps"))
+            self.assertTrue(journal.get("executed_steps"))
+            self.assertTrue(journal.get("changed_resources"))
+            self.assertTrue(journal.get("verification_result", {}).get("ok"))
+            self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_managed_enablement_rollback_restores_owned_dropin(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            path = telegram_dropin_path(home=home)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            original = "[Service]\nEnvironment=TELEGRAM_ENABLED=0\n"
+            path.write_text(original, encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=[original, "[Service]\n"]):
+                ok, response = write_telegram_enablement_managed(True, home=home, env={})
+
+            self.assertFalse(ok)
+            self.assertEqual(original, path.read_text(encoding="utf-8"))
+            self.assertEqual("telegram_dropin_write_verification_failed", response["error_kind"])
+            journal = response.get("managed_action_journal", {})
+            rollback_steps = journal.get("rollback_steps", [])
+            self.assertTrue(any(step.get("name") == "restore_telegram_dropin" and step.get("status") == "ok" for step in rollback_steps))
+
+    def test_telegram_dropin_path_validator_rejects_unrelated_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            unrelated = home / ".config" / "systemd" / "user" / "unrelated.service.d" / "override.conf"
+
+            self.assertFalse(is_personal_agent_telegram_dropin_path(unrelated, home=home))
+            self.assertTrue(is_personal_agent_telegram_dropin_path(telegram_dropin_path(home=home), home=home))
+
+    def test_managed_enablement_write_path_does_not_shell_out(self) -> None:
+        import inspect
+
+        source = inspect.getsource(write_telegram_enablement_managed)
+        self.assertNotIn("subprocess", source)
+        self.assertNotIn("shell=True", source)
 
 
 if __name__ == "__main__":

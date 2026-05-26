@@ -5920,8 +5920,120 @@ class AgentRuntime:
         token = str(payload.get("bot_token") or "").strip()
         if not token:
             return False, {"ok": False, "error": "bot_token is required"}
-        self.secret_store.set_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY, token)
-        return True, {"ok": True}
+
+        secret_key = _TELEGRAM_BOT_TOKEN_SECRET_KEY
+        journal = ManagedActionJournal(action_type="telegram_token_config", target=secret_key)
+        journal.plan_step("preflight_telegram_secret", resource=secret_key)
+        journal.plan_step("capture_previous_telegram_secret", resource=secret_key)
+        journal.plan_step("write_telegram_secret", resource=secret_key)
+        journal.plan_step("verify_telegram_secret_write", resource=secret_key)
+
+        if secret_key != "telegram:bot_token":
+            journal.record_step("preflight_telegram_secret", ok=False, resource=secret_key, reason="unexpected_secret_key")
+            return False, {
+                "ok": False,
+                "error": "telegram_secret_target_invalid",
+                "error_kind": "telegram_secret_target_invalid",
+                "message": "Telegram setup did not work: the secret target was not the known Telegram token key.",
+                "managed_action_journal": journal.to_dict(),
+            }
+        journal.record_step("preflight_telegram_secret", ok=True, resource=secret_key)
+
+        previous_token = self.secret_store.get_secret(secret_key)
+        journal.record_step(
+            "capture_previous_telegram_secret",
+            ok=True,
+            resource=secret_key,
+            previous_secret=self._secret_metadata(previous_token),
+        )
+
+        try:
+            self.secret_store.set_secret(secret_key, token)
+        except Exception as exc:
+            journal.record_step("write_telegram_secret", ok=False, resource=secret_key, error=exc.__class__.__name__)
+            journal.mark_verification(ok=False, secret_write_verified=False)
+            return False, {
+                "ok": False,
+                "error": "telegram_secret_write_failed",
+                "error_kind": "telegram_secret_write_failed",
+                "message": "Telegram setup did not work: I could not save the token. Check the token and paste it again.",
+                "managed_action_journal": journal.to_dict(),
+            }
+
+        journal.record_step("write_telegram_secret", ok=True, resource=secret_key, new_secret=self._secret_metadata(token))
+        journal.record_changed_resource(
+            "telegram_secret",
+            secret_key,
+            rollback_supported=True,
+            previous_secret=self._secret_metadata(previous_token),
+            new_secret=self._secret_metadata(token),
+        )
+
+        stored_token = self.secret_store.get_secret(secret_key)
+        secret_verified = str(stored_token or "").strip() == token
+        journal.record_step(
+            "verify_telegram_secret_write",
+            ok=secret_verified,
+            resource=secret_key,
+            stored_secret=self._secret_metadata(stored_token),
+        )
+        if not secret_verified:
+            cleanup_ok, cleanup_summary = self._restore_telegram_secret_state(
+                secret_key=secret_key,
+                previous_token=previous_token,
+                journal=journal,
+            )
+            journal.mark_verification(ok=False, secret_write_verified=False)
+            return False, {
+                "ok": False,
+                "error": "telegram_secret_write_verification_failed",
+                "error_kind": "telegram_secret_write_verification_failed",
+                "message": (
+                    "Telegram setup did not work: I could not verify the saved token. "
+                    f"{cleanup_summary}. Check the token and paste it again."
+                ),
+                "rollback_ok": cleanup_ok,
+                "rollback_summary": cleanup_summary,
+                "managed_action_journal": journal.to_dict(),
+            }
+
+        journal.mark_verification(ok=True, secret_write_verified=True, telegram_status="not_checked")
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        return True, {
+            "ok": True,
+            "secret": self._secret_metadata(token),
+            "telegram_status": {"ok": None, "status": "not_checked"},
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    def _restore_telegram_secret_state(
+        self,
+        *,
+        secret_key: str,
+        previous_token: str | None,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            self.secret_store.set_secret(secret_key, previous_token or "")
+            journal.record_rollback_step(
+                "restore_telegram_secret",
+                ok=True,
+                resource=secret_key,
+                previous_secret=self._secret_metadata(previous_token),
+            )
+            summary = "restored previous Telegram token" if previous_token else "removed failed new Telegram token"
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            journal.record_rollback_step(
+                "restore_telegram_secret",
+                ok=False,
+                resource=secret_key,
+                error=exc.__class__.__name__,
+            )
+            summary = "could not restore the previous Telegram token automatically"
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
 
     def test_telegram(self) -> tuple[bool, dict[str, Any]]:
         token = (self.secret_store.get_secret(_TELEGRAM_BOT_TOKEN_SECRET_KEY) or "").strip()

@@ -5,6 +5,8 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
+
 from agent.secret_store import SecretStore
 
 
@@ -35,6 +37,13 @@ def telegram_dropin_dir(*, home: Path | None = None) -> Path:
 
 def telegram_dropin_path(*, home: Path | None = None) -> Path:
     return telegram_dropin_dir(home=home) / "override.conf"
+
+
+def is_personal_agent_telegram_dropin_path(path: str | Path, *, home: Path | None = None) -> bool:
+    try:
+        return Path(path).expanduser().resolve(strict=False) == telegram_dropin_path(home=home).expanduser().resolve(strict=False)
+    except Exception:
+        return False
 
 
 def _default_secret_store_path(*, home: Path | None = None) -> Path:
@@ -361,6 +370,152 @@ def write_telegram_enablement(
     return str(path)
 
 
+def write_telegram_enablement_managed(
+    enabled: bool,
+    *,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    secret_store_path: str | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    path = telegram_dropin_path(home=home)
+    journal = ManagedActionJournal(action_type="telegram_enablement_config", target=str(path))
+    journal.plan_step("preflight_telegram_dropin_path", resource=str(path))
+    journal.plan_step("capture_previous_telegram_dropin", resource=str(path))
+    journal.plan_step("write_telegram_enablement", resource=str(path))
+    journal.plan_step("verify_telegram_enablement_write", resource=str(path))
+
+    if not is_personal_agent_telegram_dropin_path(path, home=home):
+        journal.record_step("preflight_telegram_dropin_path", ok=False, resource=str(path), reason="unexpected_dropin_path")
+        return False, {
+            "ok": False,
+            "error": "telegram_dropin_path_invalid",
+            "error_kind": "telegram_dropin_path_invalid",
+            "message": "Telegram setup did not work: the service drop-in target was not the known Personal Agent path.",
+            "managed_action_journal": journal.to_dict(),
+        }
+    journal.record_step("preflight_telegram_dropin_path", ok=True, resource=str(path))
+
+    previous_exists = path.is_file()
+    previous_content = ""
+    if previous_exists:
+        try:
+            previous_content = path.read_text(encoding="utf-8")
+        except Exception:
+            previous_content = ""
+    journal.record_step(
+        "capture_previous_telegram_dropin",
+        ok=True,
+        resource=str(path),
+        previous_exists=previous_exists,
+        previous_length=len(previous_content),
+    )
+
+    try:
+        written_path = write_telegram_enablement(
+            enabled,
+            env=env,
+            home=home,
+            secret_store_path=secret_store_path,
+        )
+    except Exception as exc:
+        journal.record_step("write_telegram_enablement", ok=False, resource=str(path), error=exc.__class__.__name__)
+        journal.mark_verification(ok=False, dropin_write_verified=False)
+        return False, {
+            "ok": False,
+            "error": "telegram_dropin_write_failed",
+            "error_kind": "telegram_dropin_write_failed",
+            "message": "Telegram setup did not work: I could not write the Personal Agent Telegram service config.",
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    journal.record_step("write_telegram_enablement", ok=True, resource=written_path, enabled=bool(enabled))
+    journal.record_changed_resource(
+        "telegram_service_dropin",
+        str(path),
+        rollback_supported=True,
+        previous_exists=previous_exists,
+    )
+
+    try:
+        current = path.read_text(encoding="utf-8")
+        expected = f"Environment=TELEGRAM_ENABLED={'1' if enabled else '0'}"
+        verified = expected in current
+        journal.record_step(
+            "verify_telegram_enablement_write",
+            ok=verified,
+            resource=str(path),
+            expected_enabled=bool(enabled),
+            persisted_length=len(current),
+        )
+    except Exception as exc:
+        verified = False
+        journal.record_step(
+            "verify_telegram_enablement_write",
+            ok=False,
+            resource=str(path),
+            error=exc.__class__.__name__,
+        )
+
+    if not verified:
+        rollback_ok = _rollback_telegram_dropin(path, previous_exists, previous_content, journal)
+        summary = (
+            "restored previous Telegram service config"
+            if previous_exists and rollback_ok
+            else "removed failed new Telegram service config"
+            if rollback_ok
+            else "could not restore Telegram service config automatically"
+        )
+        journal.mark_verification(ok=False, dropin_write_verified=False)
+        journal.mark_rollback(ok=rollback_ok, attempted=True, summary=summary)
+        return False, {
+            "ok": False,
+            "error": "telegram_dropin_write_verification_failed",
+            "error_kind": "telegram_dropin_write_verification_failed",
+            "message": f"Telegram setup did not work: I could not verify the service config. {summary}.",
+            "rollback_ok": rollback_ok,
+            "rollback_summary": summary,
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    journal.mark_verification(ok=True, dropin_write_verified=True)
+    journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+    return True, {
+        "ok": True,
+        "path": str(path),
+        "enabled": bool(enabled),
+        "managed_action_journal": journal.to_dict(),
+    }
+
+
+def _rollback_telegram_dropin(
+    path: Path,
+    previous_exists: bool,
+    previous_content: str,
+    journal: ManagedActionJournal,
+) -> bool:
+    try:
+        if previous_exists:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(previous_content, encoding="utf-8")
+        elif path.exists():
+            path.unlink()
+        journal.record_rollback_step(
+            "restore_telegram_dropin",
+            ok=True,
+            resource=str(path),
+            previous_exists=previous_exists,
+        )
+        return True
+    except Exception as exc:
+        journal.record_rollback_step(
+            "restore_telegram_dropin",
+            ok=False,
+            resource=str(path),
+            error=exc.__class__.__name__,
+        )
+        return False
+
+
 __all__ = [
     "TELEGRAM_SERVICE_NAME",
     "clear_stale_telegram_locks",
@@ -368,8 +523,10 @@ __all__ = [
     "inspect_telegram_lock",
     "read_telegram_enablement",
     "resolve_telegram_token_with_source",
+    "is_personal_agent_telegram_dropin_path",
     "telegram_control_env",
     "telegram_dropin_path",
     "telegram_lock_paths",
     "write_telegram_enablement",
+    "write_telegram_enablement_managed",
 ]
