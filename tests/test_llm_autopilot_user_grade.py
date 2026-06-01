@@ -191,8 +191,11 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
             "impact": {"changes_count": 1},
         }
         with patch("agent.api_server.build_autoconfig_plan", return_value=plan):
-            ok, _body = runtime.llm_autoconfig_apply({"actor": "webui", "confirm": True})
+            ok, body = runtime.llm_autoconfig_apply({"actor": "webui", "confirm": True})
         self.assertTrue(ok)
+        journal = body.get("managed_action_journal", {})
+        self.assertEqual("llm.autoconfig.apply", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
 
         payload = runtime.llm_autopilot_explain_last()
         self.assertTrue(payload["ok"])
@@ -408,6 +411,9 @@ class TestLLMAutopilotUserGrade(unittest.TestCase):
             ok, body = runtime.llm_autopilot_bootstrap({"actor": "webui", "confirm": True}, trigger="manual")
         self.assertTrue(ok)
         self.assertTrue(body["applied"])
+        journal = body.get("managed_action_journal", {})
+        self.assertEqual("llm.autopilot.bootstrap.apply", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertEqual("ollama:strong-local", runtime.registry_document["defaults"]["default_model"])
 
     def test_bootstrap_policy_requires_explicit_opt_in_even_on_loopback(self) -> None:

@@ -117,6 +117,10 @@ class TestLLMCleanupAPI(unittest.TestCase):
             ok, body = runtime.llm_cleanup_apply({"actor": "scheduler"}, trigger="scheduler")
         self.assertTrue(ok)
         self.assertTrue(body["applied"])
+        journal = body.get("managed_action_journal", {})
+        self.assertEqual("llm.cleanup.apply", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agent.api_server import AgentRuntime
 from agent.config import Config
@@ -188,9 +189,44 @@ class TestLLMCapabilitiesAPI(unittest.TestCase):
         self.assertTrue(ok_apply)
         self.assertTrue(apply_payload["applied"])
         self.assertTrue(str(apply_payload.get("snapshot_id") or "").strip())
+        journal = apply_payload.get("managed_action_journal", {})
+        self.assertEqual("llm.capabilities.reconcile.apply", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
         models_rows = runtime.models().get("models") if isinstance(runtime.models().get("models"), list) else []
         row = [item for item in models_rows if item.get("id") == "ollama:nomic-embed-text:latest"][0]
         self.assertEqual(["embedding"], row["capabilities"])
+
+    def test_failed_apply_verification_restores_previous_registry(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        runtime.set_listening("127.0.0.1", 8765)
+        runtime.update_permissions(
+            {
+                "mode": "auto",
+                "actions": {"llm.capabilities.reconcile.apply": True},
+            }
+        )
+        before_default_model = str((runtime.registry_document.get("defaults") or {}).get("default_model") or "")
+        invalid_document = {
+            "schema_version": 2,
+            "providers": {},
+            "models": {"bad-model": {"provider": "missing", "capabilities": ["chat"]}},
+            "defaults": {},
+        }
+        with patch("agent.api_server.apply_capabilities_reconcile_plan", return_value=invalid_document):
+            ok_apply, apply_payload = runtime.llm_capabilities_reconcile_apply(
+                {"actor": "test", "confirm": True},
+                trigger="manual",
+            )
+
+        self.assertFalse(ok_apply)
+        self.assertEqual("verify_failed", apply_payload["error"])
+        self.assertEqual(before_default_model, str((runtime.registry_document.get("defaults") or {}).get("default_model") or ""))
+        journal = apply_payload.get("managed_action_journal", {})
+        self.assertEqual("llm.capabilities.reconcile.apply", journal.get("action_type"))
+        self.assertFalse(journal.get("verification_result", {}).get("ok"))
+        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        self.assertTrue(journal.get("rollback_result", {}).get("ok"))
 
     def test_scheduler_non_loopback_denies_without_permission(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

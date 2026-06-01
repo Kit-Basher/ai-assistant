@@ -98,6 +98,10 @@ class TestRegistryRollbackAPI(unittest.TestCase):
         ok, body = runtime.llm_registry_rollback({"actor": "webui", "snapshot_id": snap["snapshot_id"]})
         self.assertTrue(ok)
         self.assertEqual(snap["snapshot_id"], body["snapshot_id"])
+        journal = body.get("managed_action_journal", {})
+        self.assertEqual("llm.registry.rollback", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
         self.assertEqual(before.get("defaults"), runtime.registry_document.get("defaults"))
 
         snapshots = runtime.llm_registry_snapshots(limit=20)

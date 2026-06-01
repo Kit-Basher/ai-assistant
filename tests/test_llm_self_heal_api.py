@@ -383,6 +383,10 @@ class TestLLMSelfHealAPI(unittest.TestCase):
             ok, body = runtime.llm_self_heal_apply({"actor": "test", "confirm": True}, trigger="manual")
         self.assertTrue(ok)
         self.assertTrue(body["applied"])
+        journal = body.get("managed_action_journal", {})
+        self.assertEqual("llm.self_heal.apply", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
 
         ok_plan, plan_payload = runtime.llm_autoconfig_plan({"actor": "test"})
         self.assertTrue(ok_plan)
