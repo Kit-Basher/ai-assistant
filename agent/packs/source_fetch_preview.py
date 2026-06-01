@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from agent.packs.external_ingestion import (
@@ -67,6 +67,7 @@ class SourceFetchResult:
     normalization_result: dict[str, Any] | None = None
     review: dict[str, Any] | None = None
     user_message: str = ""
+    managed_action_journal: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -219,6 +220,7 @@ class SourceFetchController:
             },
             review=review_envelope.to_dict(),
             user_message=message,
+            managed_action_journal=pack_row.get("managed_action_journal") if isinstance(pack_row.get("managed_action_journal"), dict) else {},
         )
 
     def _approved_source_payload(self, source_id: str) -> tuple[dict[str, Any], str | None]:
@@ -255,4 +257,3 @@ class SourceFetchController:
         if inferred in FETCHABLE_SOURCE_KINDS:
             return inferred
         return inferred or "generic_web_result"
-

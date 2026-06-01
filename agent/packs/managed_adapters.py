@@ -8,6 +8,8 @@ import re
 import time
 from typing import Any
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
+
 
 ADAPTER_LOCAL_FILE_IMPORT = "local_file_import"
 ADAPTER_LOCAL_DIRECTORY_IMPORT = "local_directory_import"
@@ -291,12 +293,54 @@ def list_adapter_grants(storage_root: str | Path) -> list[dict[str, Any]]:
 
 def record_adapter_grant(storage_root: str | Path, grant: ManagedAdapterGrant) -> dict[str, Any]:
     path = grants_store_path(storage_root)
+    journal = ManagedActionJournal(action_type="managed_adapter_permission_grant", target=grant.grant_id)
+    journal.plan_step("capture_previous_adapter_grants", resource=str(path))
+    journal.plan_step("write_adapter_grant", resource=grant.grant_id)
+    journal.plan_step("verify_adapter_grant", resource=grant.grant_id)
     path.parent.mkdir(parents=True, exist_ok=True)
+    previous_exists = path.exists()
     rows = list_adapter_grants(storage_root)
+    previous_rows = [dict(row) for row in rows if isinstance(row, dict)]
+    previous_grant_ids = sorted(str(row.get("grant_id") or "") for row in rows if isinstance(row, dict) and str(row.get("grant_id") or ""))
+    journal.record_step(
+        "capture_previous_adapter_grants",
+        ok=True,
+        resource=str(path),
+        previous_grant_count=len(previous_grant_ids),
+        previous_grant_ids=previous_grant_ids,
+    )
     payload = grant.to_dict()
     rows = [row for row in rows if str(row.get("grant_id") or "") != grant.grant_id]
     rows.append(payload)
     path.write_text(json.dumps(rows, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    journal.record_step("write_adapter_grant", ok=True, resource=grant.grant_id, adapter_kind=grant.adapter_kind)
+    current_rows = list_adapter_grants(storage_root)
+    verify_ok = any(str(row.get("grant_id") or "") == grant.grant_id for row in current_rows if isinstance(row, dict))
+    journal.record_step("verify_adapter_grant", ok=verify_ok, resource=grant.grant_id)
+    if not verify_ok:
+        try:
+            if previous_exists:
+                path.write_text(json.dumps(previous_rows, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+                summary = "restored the previous managed adapter grant metadata"
+            else:
+                path.unlink(missing_ok=True)
+                summary = "removed the failed new managed adapter grant metadata"
+            journal.record_rollback_step("restore_adapter_grants", ok=True, resource=str(path), summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+        except Exception as exc:
+            summary = "rollback could not restore managed adapter grant metadata"
+            journal.record_rollback_step("restore_adapter_grants", ok=False, resource=str(path), error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+        journal.mark_verification(ok=False, grant_id=grant.grant_id)
+        payload["metadata_update_ok"] = False
+        payload["error_kind"] = "managed_adapter_grant_verification_failed"
+        payload["managed_action_journal"] = journal.to_dict()
+        return payload
+    journal.record_created_resource("managed_adapter_grant", grant.grant_id, rollback_supported=True)
+    journal.mark_verification(ok=True, grant_id=grant.grant_id)
+    journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+    payload["metadata_update_ok"] = True
+    payload["managed_action_journal"] = journal.to_dict()
     return payload
 
 

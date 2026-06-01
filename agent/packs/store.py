@@ -7,9 +7,11 @@ import threading
 import time
 import shutil
 import hashlib
+import copy
 from pathlib import Path
 from typing import Any
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.llm.support import sanitize_support_payload
 from agent.packs.diffing import build_pack_diff, build_pack_version_ref
 from agent.packs.manifest import PackManifest, compute_permissions_hash, normalize_permissions
@@ -990,8 +992,19 @@ class PackStore:
     ) -> dict[str, Any]:
         now_ts = self._now_ts()
         pack_id = self._canonical_id_from_pack(canonical_pack)
+        journal = ManagedActionJournal(action_type="external_pack_import_record", target=pack_id)
+        journal.plan_step("capture_previous_external_pack", resource=pack_id)
+        journal.plan_step("write_external_pack_record", resource=pack_id)
+        journal.plan_step("verify_external_pack_record", resource=pack_id)
         canonical_pack["id"] = pack_id
         existing = self.get_external_pack(pack_id)
+        journal.record_step(
+            "capture_previous_external_pack",
+            ok=True,
+            resource=pack_id,
+            existed=existing is not None,
+            previous=self._external_pack_metadata_snapshot(existing),
+        )
         installed_at = int(existing.get("installed_at") or now_ts) if existing else now_ts
         existing_history = self._sequence(existing.get("source_history")) if isinstance(existing, dict) else []
         current_history = self._sequence(canonical_pack.get("source_history"))
@@ -1150,9 +1163,39 @@ class PackStore:
                 self._conn.commit()
 
         self._write_with_retry(_write)
+        journal.record_step(
+            "write_external_pack_record",
+            ok=True,
+            resource=pack_id,
+            status=str(status or "").strip() or "blocked",
+            classification=str(classification or "").strip() or "unknown_pack",
+        )
         self._forget_external_pack_removed(pack_id)
         updated = self.get_external_pack(pack_id)
         assert updated is not None
+        verify_ok = (
+            str(updated.get("pack_id") or "") == pack_id
+            and str(updated.get("status") or "").strip() == (str(status or "").strip() or "blocked")
+        )
+        journal.record_step(
+            "verify_external_pack_record",
+            ok=verify_ok,
+            resource=pack_id,
+            current=self._external_pack_metadata_snapshot(updated),
+        )
+        if not verify_ok:
+            rollback_ok, rollback_summary = self._restore_external_pack_record(pack_id, existing, journal=journal)
+            journal.mark_verification(ok=False, pack_id=pack_id, expected_status=str(status or "").strip() or "blocked")
+            updated = self.get_external_pack(pack_id) or updated
+            updated["metadata_update_ok"] = False
+            updated["error_kind"] = "external_pack_record_verification_failed"
+            updated["rollback_ok"] = rollback_ok
+            updated["rollback_summary"] = rollback_summary
+            updated["managed_action_journal"] = journal.to_dict()
+            return updated
+        journal.mark_verification(ok=True, pack_id=pack_id)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        updated["managed_action_journal"] = journal.to_dict()
         if prior_same_source is not None:
             previous_id = str(prior_same_source.get("canonical_id") or prior_same_source.get("pack_id") or "").strip()
             if previous_id:
@@ -1169,6 +1212,22 @@ class PackStore:
         current = self.get_external_pack(canonical_id)
         if current is None:
             return None
+        journal = ManagedActionJournal(action_type="external_pack_review_status", target=canonical_id)
+        journal.plan_step("capture_previous_review_state", resource=canonical_id)
+        journal.plan_step("preflight_review_state", resource=canonical_id)
+        journal.plan_step("write_review_state", resource=canonical_id)
+        journal.plan_step("verify_review_state", resource=canonical_id)
+        previous_canonical = copy.deepcopy(current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {})
+        previous_snapshot = self._external_pack_metadata_snapshot(current)
+        journal.record_step("capture_previous_review_state", ok=True, resource=canonical_id, previous=previous_snapshot)
+        if str(current.get("status") or "").strip().lower() in {"blocked", "removed"}:
+            journal.record_step("preflight_review_state", ok=False, resource=canonical_id, reason="pack_blocked_or_removed")
+            journal.mark_verification(ok=False, reason="pack_blocked_or_removed")
+            current["metadata_update_ok"] = False
+            current["error_kind"] = "pack_blocked_or_removed"
+            current["managed_action_journal"] = journal.to_dict()
+            return current
+        journal.record_step("preflight_review_state", ok=True, resource=canonical_id)
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         trust_anchor = canonical_pack.get("trust_anchor") if isinstance(canonical_pack.get("trust_anchor"), dict) else {}
         content_hash = self._content_hash_from_pack(canonical_pack)
@@ -1202,12 +1261,70 @@ class PackStore:
                 self._conn.commit()
 
         self._write_with_retry(_write)
-        return self.get_external_pack(canonical_id)
+        journal.record_step("write_review_state", ok=True, resource=canonical_id, local_review_status=str(local_review_status or "reviewed").strip() or "reviewed")
+        updated = self.get_external_pack(canonical_id)
+        expected_status = str(local_review_status or "reviewed").strip() or "reviewed"
+        updated_anchor = (
+            (updated or {}).get("canonical_pack", {}).get("trust_anchor", {})
+            if isinstance((updated or {}).get("canonical_pack"), dict)
+            else {}
+        )
+        verify_ok = isinstance(updated, dict) and str(updated_anchor.get("local_review_status") or "").strip() == expected_status
+        journal.record_step(
+            "verify_review_state",
+            ok=verify_ok,
+            resource=canonical_id,
+            current=self._external_pack_metadata_snapshot(updated),
+        )
+        if not verify_ok:
+            rollback_ok, rollback_summary = self._restore_external_pack_canonical(
+                canonical_id,
+                previous_canonical,
+                journal=journal,
+                rollback_step="restore_external_pack_review_state",
+            )
+            journal.mark_verification(ok=False, expected_review_status=expected_status)
+            restored = self.get_external_pack(canonical_id) or current
+            restored["metadata_update_ok"] = False
+            restored["error_kind"] = "pack_review_state_verification_failed"
+            restored["rollback_ok"] = rollback_ok
+            restored["rollback_summary"] = rollback_summary
+            restored["managed_action_journal"] = journal.to_dict()
+            return restored
+        journal.record_changed_resource(
+            "external_pack_review_state",
+            canonical_id,
+            rollback_supported=True,
+            previous=previous_snapshot,
+            current=self._external_pack_metadata_snapshot(updated),
+        )
+        journal.mark_verification(ok=True, review_status=expected_status)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        assert updated is not None
+        updated["metadata_update_ok"] = True
+        updated["managed_action_journal"] = journal.to_dict()
+        return updated
 
     def set_external_pack_enabled(self, canonical_id: str, *, enabled: bool) -> dict[str, Any] | None:
         current = self.get_external_pack(canonical_id)
         if current is None:
             return None
+        journal = ManagedActionJournal(action_type="external_pack_enablement", target=canonical_id)
+        journal.plan_step("capture_previous_enablement_state", resource=canonical_id)
+        journal.plan_step("preflight_enablement_state", resource=canonical_id)
+        journal.plan_step("write_enablement_state", resource=canonical_id)
+        journal.plan_step("verify_enablement_state", resource=canonical_id)
+        previous_canonical = copy.deepcopy(current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {})
+        previous_snapshot = self._external_pack_metadata_snapshot(current)
+        journal.record_step("capture_previous_enablement_state", ok=True, resource=canonical_id, previous=previous_snapshot)
+        if str(current.get("status") or "").strip().lower() in {"blocked", "removed"}:
+            journal.record_step("preflight_enablement_state", ok=False, resource=canonical_id, reason="pack_blocked_or_removed")
+            journal.mark_verification(ok=False, reason="pack_blocked_or_removed")
+            current["metadata_update_ok"] = False
+            current["error_kind"] = "pack_blocked_or_removed"
+            current["managed_action_journal"] = journal.to_dict()
+            return current
+        journal.record_step("preflight_enablement_state", ok=True, resource=canonical_id)
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
         canonical_pack["runtime"] = {**runtime, "enabled": bool(enabled)}
@@ -1229,8 +1346,172 @@ class PackStore:
                 self._conn.commit()
 
         self._write_with_retry(_write)
-        return self.get_external_pack(canonical_id)
+        journal.record_step("write_enablement_state", ok=True, resource=canonical_id, enabled=bool(enabled))
+        updated = self.get_external_pack(canonical_id)
+        updated_runtime = (
+            (updated or {}).get("canonical_pack", {}).get("runtime", {})
+            if isinstance((updated or {}).get("canonical_pack"), dict)
+            else {}
+        )
+        verify_ok = isinstance(updated, dict) and bool(updated_runtime.get("enabled", False)) == bool(enabled)
+        journal.record_step(
+            "verify_enablement_state",
+            ok=verify_ok,
+            resource=canonical_id,
+            current=self._external_pack_metadata_snapshot(updated),
+        )
+        if not verify_ok:
+            rollback_ok, rollback_summary = self._restore_external_pack_canonical(
+                canonical_id,
+                previous_canonical,
+                journal=journal,
+                rollback_step="restore_external_pack_enablement_state",
+            )
+            journal.mark_verification(ok=False, expected_enabled=bool(enabled))
+            restored = self.get_external_pack(canonical_id) or current
+            restored["metadata_update_ok"] = False
+            restored["error_kind"] = "pack_enablement_verification_failed"
+            restored["rollback_ok"] = rollback_ok
+            restored["rollback_summary"] = rollback_summary
+            restored["managed_action_journal"] = journal.to_dict()
+            return restored
+        journal.record_changed_resource(
+            "external_pack_enablement_state",
+            canonical_id,
+            rollback_supported=True,
+            previous=previous_snapshot,
+            current=self._external_pack_metadata_snapshot(updated),
+        )
+        journal.mark_verification(ok=True, enabled=bool(enabled))
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        assert updated is not None
+        updated["metadata_update_ok"] = True
+        updated["managed_action_journal"] = journal.to_dict()
+        return updated
 
     def external_storage_root(self) -> str:
         parent = Path(self.db_path).expanduser().resolve().parent
         return str((parent / "external_packs").resolve())
+
+    @staticmethod
+    def _external_pack_metadata_snapshot(row: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(row, dict):
+            return {"exists": False}
+        canonical = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
+        identity = canonical.get("pack_identity") if isinstance(canonical.get("pack_identity"), dict) else {}
+        trust_anchor = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+        runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
+        adapters = canonical.get("managed_adapters") if isinstance(canonical.get("managed_adapters"), list) else []
+        canonical_json = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return {
+            "exists": True,
+            "pack_id": str(row.get("pack_id") or row.get("canonical_id") or "").strip(),
+            "canonical_id": str(identity.get("canonical_id") or row.get("canonical_id") or row.get("pack_id") or "").strip(),
+            "content_hash": str(identity.get("content_hash") or row.get("content_hash") or "").strip() or None,
+            "status": str(row.get("status") or "").strip() or None,
+            "local_review_status": str(trust_anchor.get("local_review_status") or "").strip() or None,
+            "approved_hash_count": len(trust_anchor.get("user_approved_hashes") if isinstance(trust_anchor.get("user_approved_hashes"), list) else []),
+            "enabled": bool(runtime.get("enabled", False)),
+            "managed_adapter_kinds": sorted(
+                str(item.get("kind") or "").strip()
+                for item in adapters
+                if isinstance(item, dict) and str(item.get("kind") or "").strip()
+            ),
+            "canonical_hash": hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
+        }
+
+    def _restore_external_pack_canonical(
+        self,
+        canonical_id: str,
+        previous_canonical: dict[str, Any],
+        *,
+        journal: ManagedActionJournal,
+        rollback_step: str,
+    ) -> tuple[bool, str]:
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """
+                    UPDATE external_packs
+                    SET canonical_json = ?, updated_at = ?
+                    WHERE pack_id = ?
+                    """,
+                    (
+                        json.dumps(previous_canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        self._now_ts(),
+                        canonical_id,
+                    ),
+                )
+                self._conn.commit()
+            summary = "restored the previous external pack metadata"
+            journal.record_rollback_step(rollback_step, ok=True, resource=canonical_id, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "rollback could not restore the previous external pack metadata"
+            journal.record_rollback_step(rollback_step, ok=False, resource=canonical_id, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
+    def _restore_external_pack_record(
+        self,
+        pack_id: str,
+        previous: dict[str, Any] | None,
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            with self._lock:
+                if previous is None:
+                    self._conn.execute("DELETE FROM external_packs WHERE pack_id = ?", (pack_id,))
+                    summary = "removed the failed new external pack record"
+                else:
+                    canonical = previous.get("canonical_pack") if isinstance(previous.get("canonical_pack"), dict) else {}
+                    risk = previous.get("risk_report") if isinstance(previous.get("risk_report"), dict) else {}
+                    review = previous.get("review_envelope") if isinstance(previous.get("review_envelope"), dict) else {}
+                    self._conn.execute(
+                        """
+                        INSERT INTO external_packs (
+                            pack_id, pack_name, version, pack_type, classification, status,
+                            canonical_json, risk_json, review_json, quarantine_path, normalized_path,
+                            installed_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(pack_id) DO UPDATE SET
+                            pack_name = excluded.pack_name,
+                            version = excluded.version,
+                            pack_type = excluded.pack_type,
+                            classification = excluded.classification,
+                            status = excluded.status,
+                            canonical_json = excluded.canonical_json,
+                            risk_json = excluded.risk_json,
+                            review_json = excluded.review_json,
+                            quarantine_path = excluded.quarantine_path,
+                            normalized_path = excluded.normalized_path,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            pack_id,
+                            str(previous.get("name") or previous.get("pack_name") or pack_id),
+                            str(previous.get("version") or "0.1.0"),
+                            str(previous.get("pack_type") or canonical.get("type") or "skill"),
+                            str(previous.get("classification") or "unknown_pack"),
+                            str(previous.get("status") or "blocked"),
+                            json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                            json.dumps(risk, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                            json.dumps(review, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                            str(previous.get("quarantine_path") or "").strip() or None,
+                            str(previous.get("normalized_path") or "").strip() or None,
+                            int(previous.get("installed_at") or self._now_ts()),
+                            self._now_ts(),
+                        ),
+                    )
+                    summary = "restored the previous external pack record"
+                self._conn.commit()
+            journal.record_rollback_step("restore_external_pack_record", ok=True, resource=pack_id, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "rollback could not restore the previous external pack record"
+            journal.record_rollback_step("restore_external_pack_record", ok=False, resource=pack_id, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary

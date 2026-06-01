@@ -101,12 +101,17 @@ class TestManagedAdapters(unittest.TestCase):
             record = record_adapter_grant(tmpdir, grant)
             rows = list_adapter_grants(tmpdir)
 
-            self.assertEqual([record], rows)
+            self.assertEqual(1, len(rows))
+            self.assertEqual(record["grant_id"], rows[0]["grant_id"])
             self.assertEqual("granted", record["state"])
             self.assertEqual([], record["permissions_granted"])
             self.assertFalse(record["executes_code"])
             self.assertNotIn("history contents", str(record))
             self.assertIn("<redacted-local-history-path>/watch-history.json", record["granted_path_redacted"])
+            journal = record.get("managed_action_journal") if isinstance(record.get("managed_action_journal"), dict) else {}
+            self.assertEqual("managed_adapter_permission_grant", journal.get("action_type"))
+            self.assertTrue(journal.get("verification_result", {}).get("ok"))
+            self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
 
 
 if __name__ == "__main__":

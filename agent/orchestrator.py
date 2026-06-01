@@ -7854,6 +7854,32 @@ class Orchestrator:
         )
         grant = create_metadata_only_grant(request=request, state=GRANT_GRANTED, path_metadata=path_metadata)
         grant_payload = record_adapter_grant(self._pack_store.external_storage_root(), grant)
+        if grant_payload.get("metadata_update_ok") is False:
+            message = (
+                f"Permission setup did not finish for {pack_name}: I could not verify the grant metadata. "
+                "I restored the previous grant metadata where possible. I did not read the file, invoke an adapter, use the pack, or run code."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["managed_adapter_permission_grant"],
+                ok=False,
+                error_kind=str(grant_payload.get("error_kind") or "managed_adapter_grant_verification_failed"),
+                payload={
+                    "type": "managed_adapter_permission_grant",
+                    "ok": False,
+                    "summary": message,
+                    "grant": grant_payload,
+                    "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
+                    "did_grant_permissions": False,
+                    "did_invoke_adapter": False,
+                    "did_use_pack": False,
+                    "executes_code": False,
+                    "reads_file": False,
+                },
+            )
         self._pending_managed_adapter_requests.pop(user_id, None)
         pack = self._pack_store.get_external_pack(request.pack_id)
         lifecycle = PackLifecycleService().evaluate(
@@ -7902,6 +7928,7 @@ class Orchestrator:
                 "executes_code": False,
                 "reads_file": False,
                 "usable": bool(lifecycle.get("usable")),
+                "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
             },
         )
 
@@ -9246,6 +9273,33 @@ class Orchestrator:
                 used_tools=["pack_lifecycle_action"],
                 payload={"type": "pack_lifecycle_action", "ok": False, "action": "review_approve", "summary": message},
             )
+        if pack.get("metadata_update_ok") is False:
+            rollback_summary = str(pack.get("rollback_summary") or "previous review state may need attention").strip()
+            message = (
+                "Review approval did not finish: I could not verify the updated pack review state. "
+                f"{rollback_summary}. No pack was enabled, granted permissions, used, or invoked."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["pack_lifecycle_action"],
+                ok=False,
+                error_kind=str(pack.get("error_kind") or "pack_review_state_verification_failed"),
+                payload={
+                    "type": "pack_lifecycle_action",
+                    "ok": False,
+                    "action": "review_approve",
+                    "summary": message,
+                    "pack": pack,
+                    "managed_action_journal": pack.get("managed_action_journal") if isinstance(pack.get("managed_action_journal"), dict) else {},
+                    "did_approve": False,
+                    "did_enable": False,
+                    "did_grant_permissions": False,
+                    "did_use_pack": False,
+                },
+            )
         lifecycle = PackLifecycleService().evaluate(
             imported_pack=pack,
             permission_grants=list_adapter_grants(self._pack_store.external_storage_root()),
@@ -9280,6 +9334,7 @@ class Orchestrator:
                 "enabled": False,
                 "usable": bool(lifecycle.get("usable")),
                 "executes_code": False,
+                "managed_action_journal": pack.get("managed_action_journal") if isinstance(pack.get("managed_action_journal"), dict) else {},
             },
         )
 
@@ -9364,6 +9419,34 @@ class Orchestrator:
                 used_tools=["pack_lifecycle_action"],
                 payload={"type": "pack_lifecycle_action", "ok": False, "action": "enable", "summary": message},
             )
+        if pack.get("metadata_update_ok") is False:
+            rollback_summary = str(pack.get("rollback_summary") or "previous enablement state may need attention").strip()
+            message = (
+                "Enablement did not finish: I could not verify the updated pack state. "
+                f"{rollback_summary}. No permissions were granted, no adapter ran, and I did not use the skill."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["pack_lifecycle_action"],
+                ok=False,
+                error_kind=str(pack.get("error_kind") or "pack_enablement_verification_failed"),
+                payload={
+                    "type": "pack_lifecycle_action",
+                    "ok": False,
+                    "action": "enable",
+                    "summary": message,
+                    "pack": pack,
+                    "managed_action_journal": pack.get("managed_action_journal") if isinstance(pack.get("managed_action_journal"), dict) else {},
+                    "did_enable": False,
+                    "did_grant_permissions": False,
+                    "did_use_pack": False,
+                    "permissions_granted": [],
+                    "executes_code": False,
+                },
+            )
         grants = list_adapter_grants(self._pack_store.external_storage_root())
         lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=grants).to_dict()
         name = str(pack.get("name") or lifecycle.get("pack_name") or "The pack").strip()
@@ -9409,6 +9492,7 @@ class Orchestrator:
                 "permissions_granted": [],
                 "executes_code": False,
                 "usable": bool(lifecycle.get("usable")),
+                "managed_action_journal": pack.get("managed_action_journal") if isinstance(pack.get("managed_action_journal"), dict) else {},
             },
         )
 

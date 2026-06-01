@@ -31,6 +31,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Provider/API key configuration now attaches managed-action journals, verifies secret/config writes, redacts secret metadata, and rolls back failed verified key saves to the previous key/source or removes the failed new key.
 - Default model changes now attach managed-action journals, preflight chat capability/provider/model usability, verify persisted defaults or temporary override state after mutation, and roll back only previous defaults/temporary target state if verification fails.
 - Telegram token setup now attaches managed-action journals, verifies secret writes by readback, redacts token metadata, and rolls back failed token saves to the previous token or removes the failed new token. Telegram enable/disable now journals the known Personal Agent drop-in, approved `systemctl --user` daemon-reload/restart/stop actions, runtime status verification, and restores/removes only the owned drop-in on service verification failure.
+- Pack lifecycle metadata mutations now attach managed-action journals for source approval, import records, review approval, enablement, and selected-file permission grants. They verify metadata by readback and restore only owned prior pack/source/grant metadata when verification fails.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 

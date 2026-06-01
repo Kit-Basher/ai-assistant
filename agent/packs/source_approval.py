@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.packs.registry_discovery import REGISTRY_KIND_GENERIC_API, REGISTRY_KIND_GITHUB_INDEX
 from agent.packs.remote_fetch import (
     REMOTE_KIND_GENERIC_ARCHIVE_URL,
@@ -59,6 +60,7 @@ class SourceApprovalResult:
     did_install: bool = False
     blocked_reason: str | None = None
     user_message: str = ""
+    managed_action_journal: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -176,6 +178,20 @@ class SourceApprovalController:
                 user_message="I did not approve that source because the approval preview was incomplete. No content was fetched or imported.",
             )
         notes = _approval_notes(source_kind=source_kind, title=str(row.get("title") or ""), provenance=row.get("provenance"))
+        journal = ManagedActionJournal(action_type="pack_source_approval", target=source_id)
+        journal.plan_step("capture_previous_source_policy", resource=source_id)
+        journal.plan_step("write_source_catalog_record", resource=source_id)
+        journal.plan_step("write_source_policy_record", resource=source_id)
+        journal.plan_step("verify_source_approval", resource=source_id)
+        previous_source = _safe_call(lambda: self.pack_registry_discovery.get_catalog_source(source_id))
+        previous_policy = _safe_call(lambda: self.pack_registry_discovery.get_source_policy(source_id))
+        journal.record_step(
+            "capture_previous_source_policy",
+            ok=True,
+            resource=source_id,
+            source_existed=isinstance(previous_source, dict) and bool(previous_source.get("source")),
+            policy_existed=isinstance(previous_policy, dict) and bool(previous_policy.get("persisted_override")),
+        )
         source_payload = {
             "source_id": source_id,
             "name": _short_text(row.get("title"), default=source_id, limit=80),
@@ -202,6 +218,7 @@ class SourceApprovalController:
                     {key: value for key, value in source_payload.items() if key != "source_id"},
                     changed_by=changed_by or "assistant_source_approval",
                 )
+            journal.record_step("write_source_catalog_record", ok=True, resource=source_id, registry_kind=registry_kind)
             policy = self.pack_registry_discovery.update_source_policy(
                 source_id,
                 {
@@ -215,7 +232,57 @@ class SourceApprovalController:
                 },
                 changed_by=changed_by or "assistant_source_approval",
             )
+            journal.record_step("write_source_policy_record", ok=True, resource=source_id)
+            effective_policy = (
+                policy.get("effective_policy")
+                if isinstance(policy, dict) and isinstance(policy.get("effective_policy"), dict)
+                else {}
+            )
+            persisted_override = (
+                policy.get("persisted_override")
+                if isinstance(policy, dict) and isinstance(policy.get("persisted_override"), dict)
+                else {}
+            )
+            verify_ok = (
+                bool(effective_policy.get("allowlisted"))
+                and not bool(effective_policy.get("denied"))
+                and bool(persisted_override.get("approved_by_user"))
+            )
+            journal.record_step(
+                "verify_source_approval",
+                ok=verify_ok,
+                resource=source_id,
+                allowlisted=bool(effective_policy.get("allowlisted")),
+                approved_by_user=bool(persisted_override.get("approved_by_user")),
+                denied=bool(effective_policy.get("denied")),
+            )
+            if not verify_ok:
+                journal.mark_verification(ok=False, source_id=source_id)
+                rollback_ok, rollback_summary = self._rollback_source_approval(
+                    source_id,
+                    previous_source=previous_source,
+                    previous_policy=previous_policy,
+                    changed_by=changed_by or "assistant_source_approval_rollback",
+                    journal=journal,
+                )
+                return SourceApprovalResult(
+                    ok=False,
+                    approved=False,
+                    source_id=source_id,
+                    source_kind=source_kind,
+                    registry_kind=registry_kind,
+                    policy=policy,
+                    catalog_source=catalog_source,
+                    blocked_reason="source_approval_verification_failed",
+                    user_message=(
+                        "Source approval did not finish: I could not verify the source trust record. "
+                        f"{rollback_summary}. No content was fetched or imported."
+                    ),
+                    managed_action_journal=journal.to_dict(),
+                )
         except Exception as exc:
+            journal.record_step("write_source_policy_record", ok=False, resource=source_id, error=exc.__class__.__name__)
+            journal.mark_verification(ok=False, source_id=source_id, error=exc.__class__.__name__)
             return SourceApprovalResult(
                 ok=False,
                 approved=False,
@@ -226,7 +293,11 @@ class SourceApprovalController:
                 catalog_source=None,
                 blocked_reason=str(exc),
                 user_message="I could not record source approval. No content was fetched, imported, installed, enabled, or granted permissions.",
+                managed_action_journal=journal.to_dict(),
             )
+        journal.record_changed_resource("pack_source_policy", source_id, rollback_supported=True)
+        journal.mark_verification(ok=True, source_id=source_id)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         message = (
             f"I recorded source approval for {source_id}. No pack was fetched, imported, installed, approved, enabled, or granted permissions. "
             "The source content remains hostile and must still go through preview/fetch into quarantine, normalization, review, approval, enablement, and any required permissions before use. "
@@ -241,7 +312,52 @@ class SourceApprovalController:
             policy=policy,
             catalog_source=catalog_source,
             user_message=message,
+            managed_action_journal=journal.to_dict(),
         )
+
+    def _rollback_source_approval(
+        self,
+        source_id: str,
+        *,
+        previous_source: dict[str, Any] | None,
+        previous_policy: dict[str, Any] | None,
+        changed_by: str,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        ok = True
+        details: list[str] = []
+        try:
+            persisted_source = previous_source.get("persisted_source") if isinstance(previous_source, dict) else None
+            if isinstance(persisted_source, dict) and persisted_source:
+                self.pack_registry_discovery.update_catalog_source(
+                    source_id,
+                    {key: value for key, value in persisted_source.items() if key not in {"id", "source_id"}},
+                    changed_by=changed_by,
+                )
+                details.append("restored previous source catalog record")
+            else:
+                self.pack_registry_discovery.delete_catalog_source(source_id, changed_by=changed_by)
+                details.append("removed failed new source catalog record")
+            journal.record_rollback_step("restore_source_catalog_record", ok=True, resource=source_id)
+        except Exception as exc:
+            ok = False
+            journal.record_rollback_step("restore_source_catalog_record", ok=False, resource=source_id, error=exc.__class__.__name__)
+        try:
+            persisted_override = previous_policy.get("persisted_override") if isinstance(previous_policy, dict) else None
+            if isinstance(persisted_override, dict) and persisted_override:
+                self.pack_registry_discovery.update_source_policy(
+                    source_id,
+                    {key: value for key, value in persisted_override.items() if key != "source_id"},
+                    changed_by=changed_by,
+                )
+                details.append("restored previous source policy record")
+                journal.record_rollback_step("restore_source_policy_record", ok=True, resource=source_id)
+        except Exception as exc:
+            ok = False
+            journal.record_rollback_step("restore_source_policy_record", ok=False, resource=source_id, error=exc.__class__.__name__)
+        summary = "; ".join(details) if details else "No previous source metadata needed restoration."
+        journal.mark_rollback(ok=ok, attempted=True, summary=summary)
+        return ok, summary
 
 
 def _registry_kind_for_source_kind(kind: str) -> str:
@@ -288,6 +404,14 @@ def _compact_provenance(value: Any) -> dict[str, Any]:
     }
 
 
+def _safe_call(fn: Any) -> dict[str, Any] | None:
+    try:
+        result = fn()
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
 def _approval_notes(*, source_kind: str, title: str, provenance: Any) -> str:
     prov = _compact_provenance(provenance)
     parts = [
@@ -313,4 +437,3 @@ def _short_text(value: Any, *, default: str, limit: int) -> str:
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
