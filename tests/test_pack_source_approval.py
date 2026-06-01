@@ -107,6 +107,10 @@ class TestPackSourceApproval(unittest.TestCase):
         self.assertTrue(persisted_override.get("approved_by_user"))
         self.assertIn("content_remains_hostile=true", str(persisted_override.get("notes") or ""))
         self.assertEqual([], self.store.list_external_packs())
+        journal = result.managed_action_journal
+        self.assertEqual("pack_source_approval", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
 
     def test_approval_result_says_content_remains_hostile(self) -> None:
         preview = self.controller.preview(
@@ -135,4 +139,3 @@ class TestPackSourceApproval(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

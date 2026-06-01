@@ -124,6 +124,8 @@ class TestPackSourceFetchPreview(unittest.TestCase):
         self.assertFalse(result.did_enable)
         self.assertFalse(result.did_grant_permissions)
         self.assertFalse(result.did_use_pack)
+        self.assertEqual("external_pack_import_record", result.managed_action_journal.get("action_type"))
+        self.assertTrue(result.managed_action_journal.get("verification_result", {}).get("ok"))
         assert result.pack is not None
         canonical = result.pack.get("canonical_pack") if isinstance(result.pack.get("canonical_pack"), dict) else {}
         trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
