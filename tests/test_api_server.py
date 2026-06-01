@@ -3621,6 +3621,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(allowed_payload["ok"])
         self.assertTrue(isinstance(allowed_payload["result"], dict))
         self.assertIn("stored_count", allowed_payload["result"])
+        journal = allowed_payload.get("managed_action_journal", {})
+        self.assertEqual("llm.notifications.prune", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
 
     def test_notify_autopilot_changes_noop_when_no_diff(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

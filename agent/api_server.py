@@ -3457,7 +3457,17 @@ class AgentRuntime:
     def _persist_registry_document_transactional(
         self,
         plan_apply_fn: Any,
+        *,
+        action_type: str = "llm.registry.metadata_update",
+        target: str = "registry",
+        modified_ids: list[str] | None = None,
     ) -> tuple[bool, dict[str, Any]]:
+        changed_ids = [str(item).strip() for item in (modified_ids or []) if str(item).strip()]
+        journal = ManagedActionJournal(action_type=action_type, target=target)
+        journal.plan_step("snapshot_registry", resource="llm_registry")
+        journal.plan_step("apply_registry_update", resource="llm_registry", changed_ids=changed_ids)
+        journal.plan_step("verify_registry_update", resource="llm_registry")
+
         def _wrapped_plan_apply(current: dict[str, Any]) -> dict[str, Any]:
             updated = plan_apply_fn(current)
             document = updated if isinstance(updated, dict) else {}
@@ -3483,17 +3493,64 @@ class AgentRuntime:
                     snapshot_id_after = None
         if not bool(result.get("ok")):
             error_kind = str(result.get("error_kind") or "registry_write_failed")
+            snapshot_id = str(result.get("snapshot_id") or "").strip() or None
+            if snapshot_id:
+                journal.record_created_resource("registry_snapshot", snapshot_id, rollback_supported=False)
+                journal.record_step("snapshot_registry", ok=True, resource=snapshot_id)
+            journal.record_step("apply_registry_update", ok=False, resource="llm_registry", error_kind=error_kind)
+            journal.mark_verification(
+                ok=False,
+                error_kind=error_kind,
+                verify_error=str(result.get("verify_error") or "").strip() or None,
+            )
+            rollback_attempted = "rollback_ok" in result
+            rollback_ok = bool(result.get("rollback_ok")) if rollback_attempted else False
+            if rollback_attempted:
+                journal.record_rollback_step(
+                    "restore_registry_snapshot",
+                    ok=rollback_ok,
+                    resource=snapshot_id,
+                    error_kind=str(result.get("rollback_error_kind") or "").strip() or None,
+                )
+                journal.mark_rollback(
+                    ok=rollback_ok,
+                    attempted=True,
+                    summary=(
+                        "restored the previous registry snapshot"
+                        if rollback_ok
+                        else "could not restore the previous registry snapshot automatically"
+                    ),
+                )
+            else:
+                journal.mark_rollback(ok=True, attempted=False, summary="No registry mutation was verified.")
             return False, {
                 "ok": False,
                 "error": error_kind,
-                "snapshot_id": result.get("snapshot_id"),
+                "snapshot_id": snapshot_id,
                 "verify_error": result.get("verify_error"),
+                "rollback_ok": rollback_ok if rollback_attempted else None,
+                "rollback_attempted": rollback_attempted,
+                "managed_action_journal": journal.to_dict(),
             }
+        snapshot_id = str(result.get("snapshot_id") or "").strip() or None
+        if snapshot_id:
+            journal.record_created_resource("registry_snapshot", snapshot_id, rollback_supported=False)
+            journal.record_step("snapshot_registry", ok=True, resource=snapshot_id)
+        journal.record_step("apply_registry_update", ok=True, resource="llm_registry", changed_ids=changed_ids)
+        for changed_id in changed_ids:
+            journal.record_changed_resource("registry_record", changed_id, rollback_supported=True)
+        journal.mark_verification(
+            ok=True,
+            resulting_registry_hash=str(result.get("resulting_registry_hash") or "").strip() or None,
+            snapshot_id_after=snapshot_id_after,
+        )
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         return True, {
             "ok": True,
             "snapshot_id": result.get("snapshot_id"),
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": result.get("resulting_registry_hash"),
+            "managed_action_journal": journal.to_dict(),
         }
 
     def _record_action_ledger(
@@ -11382,7 +11439,10 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_capabilities_reconcile_plan(current, plan)
+            lambda current: apply_capabilities_reconcile_plan(current, plan),
+            action_type="llm.capabilities.reconcile.apply",
+            target="llm_registry",
+            modified_ids=modified_ids,
         )
         if not saved:
             error = txn_meta
@@ -11469,6 +11529,7 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
         }
 
     def get_config(self) -> dict[str, Any]:
@@ -13256,6 +13317,10 @@ class AgentRuntime:
     def llm_notifications_prune(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         actor = str(payload.get("actor") or "user")
         start = time.monotonic()
+        journal = ManagedActionJournal(action_type="llm.notifications.prune", target="autopilot_notifications")
+        journal.plan_step("read_notification_state", resource="autopilot_notifications")
+        journal.plan_step("prune_notification_history", resource="autopilot_notifications")
+        journal.plan_step("verify_notification_state", resource="autopilot_notifications")
         decision = self._modelops_permission_decision(
             "llm.notifications.prune",
             params={},
@@ -13293,7 +13358,26 @@ class AgentRuntime:
             )
             return False, {"ok": False, "error": "confirmation_required"}
 
+        before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
+        journal.record_step("read_notification_state", ok=True, resource="autopilot_notifications", stored_count=before_count)
         result = self._notification_store.prune_now()
+        after_status = self._notification_store.status()
+        after_count = int((after_status or {}).get("stored_count") or 0)
+        journal.record_step(
+            "prune_notification_history",
+            ok=True,
+            resource="autopilot_notifications",
+            removed_total=int(result.get("removed_total") or 0),
+        )
+        journal.record_changed_resource(
+            "notification_history",
+            "autopilot_notifications",
+            rollback_supported=False,
+            before_count=before_count,
+            after_count=after_count,
+        )
+        journal.mark_verification(ok=True, stored_count=after_count, removed_total=int(result.get("removed_total") or 0))
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
             actor=actor,
@@ -13306,7 +13390,7 @@ class AgentRuntime:
             error_kind=None,
             duration_ms=duration_ms,
         )
-        return True, {"ok": True, "result": result}
+        return True, {"ok": True, "result": result, "managed_action_journal": journal.to_dict()}
 
     def llm_notifications_test(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         actor = str(payload.get("actor") or "user")
@@ -16271,7 +16355,10 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_autoconfig_plan(current, plan)
+            lambda current: apply_autoconfig_plan(current, plan),
+            action_type="llm.autoconfig.apply",
+            target="llm_registry",
+            modified_ids=modified_ids,
         )
         if not saved:
             error = txn_meta
@@ -16351,6 +16438,7 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -16547,7 +16635,10 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_hygiene_plan(current, plan)
+            lambda current: apply_hygiene_plan(current, plan),
+            action_type="llm.hygiene.apply",
+            target="llm_registry",
+            modified_ids=modified_ids,
         )
         if not saved:
             error = txn_meta
@@ -16626,6 +16717,7 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -16701,11 +16793,6 @@ class AgentRuntime:
             disable_failing_provider=disable_failing_provider,
             provider_failure_streak=provider_failure_streak,
             apply_prune=False,
-            now_epoch=int(time.time()),
-            local_catalog_freshness_seconds=max(
-                60,
-                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
-            ),
         )
         preview_plan, _preview_blocked = self._apply_safe_mode_to_plan(action="llm.cleanup.apply", plan=raw_preview_plan)
         modified_ids = self._plan_modified_ids(preview_plan)
@@ -16812,11 +16899,6 @@ class AgentRuntime:
             disable_failing_provider=disable_failing_provider,
             provider_failure_streak=provider_failure_streak,
             apply_prune=True,
-            now_epoch=int(time.time()),
-            local_catalog_freshness_seconds=max(
-                60,
-                int(payload.get("local_catalog_freshness_seconds") or self.config.llm_catalog_refresh_interval_seconds),
-            ),
         )
         plan, safe_mode_blocked = self._apply_safe_mode_to_plan(action="llm.cleanup.apply", plan=raw_plan)
         modified_ids = self._plan_modified_ids(plan)
@@ -16865,7 +16947,10 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_registry_cleanup_plan(current, plan)
+            lambda current: apply_registry_cleanup_plan(current, plan),
+            action_type="llm.cleanup.apply",
+            target="llm_registry",
+            modified_ids=modified_ids,
         )
         if not saved:
             error = txn_meta
@@ -16948,6 +17033,7 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -17150,7 +17236,10 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: apply_self_heal_plan(current, plan)
+            lambda current: apply_self_heal_plan(current, plan),
+            action_type="llm.self_heal.apply",
+            target="llm_registry",
+            modified_ids=modified_ids,
         )
         if not saved:
             error = txn_meta
@@ -17242,6 +17331,7 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -19152,7 +19242,10 @@ class AgentRuntime:
             }
 
         saved, txn_meta = self._persist_registry_document_transactional(
-            lambda current: self._apply_bootstrap_plan(current, plan)
+            lambda current: self._apply_bootstrap_plan(current, plan),
+            action_type="llm.autopilot.bootstrap.apply",
+            target="llm_registry",
+            modified_ids=modified_ids,
         )
         if not saved:
             error = txn_meta
@@ -19236,6 +19329,7 @@ class AgentRuntime:
             "snapshot_id": snapshot_id,
             "snapshot_id_after": snapshot_id_after,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": txn_meta.get("managed_action_journal") if isinstance(txn_meta.get("managed_action_journal"), dict) else {},
             "safe_mode_blocked": bool(safe_mode_blocked),
             "safe_mode_blocked_reason": (safe_mode_blocked[0] if safe_mode_blocked else None),
             "safe_mode_blocked_changes": safe_mode_blocked,
@@ -19251,6 +19345,10 @@ class AgentRuntime:
         snapshot_id = str(payload.get("snapshot_id") or "").strip()
         if not snapshot_id:
             return False, {"ok": False, "error": "snapshot_id is required"}
+        journal = ManagedActionJournal(action_type="llm.registry.rollback", target=snapshot_id)
+        journal.plan_step("snapshot_current_registry_before_rollback", resource="llm_registry")
+        journal.plan_step("restore_requested_registry_snapshot", resource=snapshot_id)
+        journal.plan_step("verify_registry_rollback", resource="llm_registry")
 
         decision = self._modelops_permission_decision(
             "llm.registry.rollback",
@@ -19319,12 +19417,32 @@ class AgentRuntime:
             )
             return False, {"ok": False, "error": "confirmation_required"}
 
+        previous_snapshot_id: str | None = None
+        try:
+            previous_snapshot = self._registry_snapshot_store.create_snapshot(
+                self.registry_store.path,
+                self.registry_document if isinstance(self.registry_document, dict) else {},
+            )
+            previous_snapshot_id = str(previous_snapshot.get("snapshot_id") or "").strip() or None
+            if previous_snapshot_id:
+                journal.record_created_resource("registry_snapshot", previous_snapshot_id, rollback_supported=False)
+                journal.record_step("snapshot_current_registry_before_rollback", ok=True, resource=previous_snapshot_id)
+        except Exception as exc:
+            journal.record_step(
+                "snapshot_current_registry_before_rollback",
+                ok=False,
+                resource="llm_registry",
+                error=exc.__class__.__name__,
+            )
         restore_result = self._registry_snapshot_store.restore_snapshot(
             snapshot_id=snapshot_id,
             registry_path=self.registry_store.path,
         )
         if not bool(restore_result.get("ok")):
             error_kind = str(restore_result.get("error_kind") or "rollback_failed")
+            journal.record_step("restore_requested_registry_snapshot", ok=False, resource=snapshot_id, error_kind=error_kind)
+            journal.mark_verification(ok=False, error_kind=error_kind)
+            journal.mark_rollback(ok=True, attempted=False, summary="The requested snapshot was not restored.")
             duration_ms = int((time.monotonic() - start) * 1000)
             self.audit_log.append(
                 actor=actor,
@@ -19348,10 +19466,90 @@ class AgentRuntime:
                 resulting_registry_hash=None,
                 changed_ids=[],
             )
-            return False, {"ok": False, "error": error_kind, "snapshot_id": snapshot_id}
+            return False, {
+                "ok": False,
+                "error": error_kind,
+                "snapshot_id": snapshot_id,
+                "managed_action_journal": journal.to_dict(),
+            }
 
         self._reload_router()
         resulting_registry_hash = str(restore_result.get("resulting_registry_hash") or "").strip() or None
+        actual_registry_hash = self._registry_hash(self.registry_document if isinstance(self.registry_document, dict) else {})
+        verification_ok = bool(resulting_registry_hash and actual_registry_hash == resulting_registry_hash)
+        journal.record_step("restore_requested_registry_snapshot", ok=True, resource=snapshot_id)
+        if not verification_ok:
+            rollback_ok = False
+            rollback_error_kind = None
+            if previous_snapshot_id:
+                rollback_result = self._registry_snapshot_store.restore_snapshot(
+                    snapshot_id=previous_snapshot_id,
+                    registry_path=self.registry_store.path,
+                )
+                rollback_ok = bool(rollback_result.get("ok"))
+                rollback_error_kind = str(rollback_result.get("error_kind") or "").strip() or None
+                if rollback_ok:
+                    self._reload_router()
+                journal.record_rollback_step(
+                    "restore_pre_rollback_registry_snapshot",
+                    ok=rollback_ok,
+                    resource=previous_snapshot_id,
+                    error_kind=rollback_error_kind,
+                )
+            journal.mark_verification(
+                ok=False,
+                error_kind="registry_rollback_verification_failed",
+                expected_hash=resulting_registry_hash,
+                actual_hash=actual_registry_hash,
+            )
+            journal.mark_rollback(
+                ok=rollback_ok,
+                attempted=bool(previous_snapshot_id),
+                summary=(
+                    "restored the registry state from before the failed rollback"
+                    if rollback_ok
+                    else "could not automatically restore the registry state from before the failed rollback"
+                ),
+            )
+            duration_ms = int((time.monotonic() - start) * 1000)
+            self.audit_log.append(
+                actor=actor,
+                action="llm.registry.rollback",
+                params={"snapshot_id": snapshot_id, "rollback_policy": rollback_policy},
+                decision="allow",
+                reason="registry_rollback_verification_failed",
+                dry_run=False,
+                outcome="failed",
+                error_kind="registry_rollback_verification_failed",
+                duration_ms=duration_ms,
+            )
+            self._record_action_ledger(
+                action="llm.registry.rollback",
+                actor=actor,
+                decision="allow",
+                outcome="failed",
+                reason="registry_rollback_verification_failed",
+                trigger="manual",
+                snapshot_id=snapshot_id,
+                resulting_registry_hash=None,
+                changed_ids=[],
+            )
+            return False, {
+                "ok": False,
+                "error": "registry_rollback_verification_failed",
+                "snapshot_id": snapshot_id,
+                "rollback_ok": rollback_ok,
+                "rollback_attempted": bool(previous_snapshot_id),
+                "managed_action_journal": journal.to_dict(),
+            }
+        journal.record_changed_resource(
+            "llm_registry",
+            "registry",
+            rollback_supported=bool(previous_snapshot_id),
+            snapshot_id=snapshot_id,
+        )
+        journal.mark_verification(ok=True, resulting_registry_hash=resulting_registry_hash)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
             actor=actor,
@@ -19383,6 +19581,7 @@ class AgentRuntime:
             "ok": True,
             "snapshot_id": snapshot_id,
             "resulting_registry_hash": resulting_registry_hash,
+            "managed_action_journal": journal.to_dict(),
         }
 
     def _modelops_apply_defaults(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:

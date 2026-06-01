@@ -6,7 +6,7 @@ This audit is a checkpoint, not a claim that every flow already meets the full s
 
 Highest-confidence flow today: managed SearXNG setup/cleanup. It has preflight, preview, confirmation, journal, verification, owned rollback, and tests.
 
-Main gaps: registry/autoconfig/self-heal and full quarantine artifact cleanup. Provider/API key writes, model downloads/imports, default model changes, Telegram token/drop-in/service configuration, and pack lifecycle metadata mutations now have in-memory managed-action journals, verification, and scoped rollback/cleanup where ownership is proven.
+Main gaps: persistent managed-action journal storage and full quarantine artifact cleanup. Provider/API key writes, model downloads/imports, default model changes, Telegram token/drop-in/service configuration, pack lifecycle metadata mutations, and registry/autoconfig/self-heal/hygiene/apply flows now have in-memory managed-action journals, verification, and scoped rollback/cleanup where ownership is proven.
 
 ## Audit Table
 
@@ -26,8 +26,8 @@ Main gaps: registry/autoconfig/self-heal and full quarantine artifact cleanup. P
 | pack permission/config grant | adapter grant metadata/config | yes: permission/config preview, scoped grant preview, confirmation | yes | yes, in-memory result journal | yes; grant file readback verifies grant id | yes | restores previous grant metadata file or removes failed new grant file | good; says grant is metadata only | low | add persistent journal storage |
 | managed adapter invocation | core-owned adapter operation result | yes: invocation preview then confirmation | yes | operation result only, no shared journal | yes for validate/dry-run | not needed for no-content dry-run; future read/write ops need rollback | no mutation in current local file dry-run | good | low now; higher for future ops | require journal before adding content read/write/index operations |
 | file operations | native filesystem skill is read-only today; future writes unknown | destructive skill calls require policy confirmation | read-only path preflight exists | no shared journal | read-only result only | no write rollback implemented | not applicable for read-only | good for read-only | low now; high for future writes | before write/move/delete features, add preview, journal, backup/rollback, and path ownership rules |
-| notification/autopilot mutating actions | scheduler/autopilot may change registry/provider defaults depending policy | policies exist; automatic apply is gated by config | partial | no shared journal | partial status/audit | no full rollback contract | none proven | medium | high | keep auto-apply off unless explicitly enabled; add journal, verification, and rollback for every automatic mutation |
-| registry prune/rollback/hygiene/autoconfig/self-heal | provider/model registry documents and defaults | loopback/operator and policy gates | partial | audit records/snapshots exist, not managed-action journal | partial | rollback/defaults exist in some paths, but not uniform | snapshot/default restore where present | medium | high | unify under managed-action journal; require preview/confirm for manual apply and policy proof for scheduled apply |
+| notification/autopilot mutating actions | scheduler/autopilot may change registry/provider defaults depending policy; notification prune mutates notification history | policies exist; automatic apply is gated by config | partial | yes for registry apply flows and notification prune; action ledger still records audit history separately | yes for registry readback/hash and notification store status | partial | registry snapshot restore for failed registry verification; notification prune records no rollback because history compaction is irreversible by design | improved for registry apply/prune; action ledger writes remain append-only | medium | add persistent journal storage and broaden action-ledger write verification |
+| registry prune/rollback/hygiene/autoconfig/self-heal | provider/model registry documents and defaults | loopback/operator and policy gates | partial | yes, in-memory result journal on transactional registry applies and rollback | yes; registry invariants, resulting hash, snapshot id after success, and readback through runtime state | partial | restores pre-action registry snapshot when verification fails and snapshot is available; does not delete unrelated snapshots/config | improved; reports failed maintenance action and rollback state | medium | add persistent journal storage and more targeted tests for unrelated-field drift |
 
 ## Findings
 
@@ -37,12 +37,12 @@ Main gaps: registry/autoconfig/self-heal and full quarantine artifact cleanup. P
 - Provider/API key setup now journals redacted previous/new secret metadata, verifies writes, and rolls back failed verified saves. Later provider setup steps such as model/default mutations still need broader transaction coverage.
 - Persistent default model changes now journal previous/requested defaults, preflight chat capability and disabled/unavailable/routability states, verify persisted defaults after write, and restore only previous defaults on verification failure.
 - Telegram token setup now records managed-action journals, verifies saved tokens by readback, redacts token metadata, and restores/removes only the owned Telegram token on verification failure. Telegram enablement/disable now journals the known Personal Agent drop-in, approved `systemctl --user` daemon-reload/restart/stop actions, runtime state verification, and restores/removes only the owned drop-in if service verification fails. Online Telegram `getMe` remains optional.
-- Registry/autoconfig/self-heal are operator-grade today. They should not be treated as normal-user managed actions until journal and rollback coverage exists.
+- Registry/autoconfig/self-heal/hygiene/cleanup/capabilities reconcile/bootstrap now use the shared transactional registry path with managed-action journals, registry snapshots, verification, and snapshot rollback on failed verification. They remain operator-grade and policy-gated, not normal-user silent mutations.
 
 ## Required Follow-Up Order
 
-1. Add persistent managed-action journals for provider/API key, Telegram, and model acquisition flows.
+1. Add persistent managed-action journal storage across provider/API key, Telegram, model, pack, and registry maintenance flows.
 2. Extend provider setup transaction coverage to model mutations after provider verification.
-3. Add persistent managed-action journal storage for pack lifecycle metadata flows and extend journal coverage across quarantine file creation.
-4. Move registry/autoconfig/self-heal mutations under the same standard before expanding automatic apply behavior.
+3. Extend pack lifecycle journal coverage across quarantine file creation and cleanup owned partial artifacts.
+4. Add more targeted registry-maintenance tests for unrelated-field drift and action-ledger write verification before expanding automatic apply behavior.
 5. Add normal-user assistant/UI confirmation UX before exposing Telegram service enable/disable outside the operator CLI.

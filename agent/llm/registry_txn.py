@@ -364,22 +364,26 @@ def apply_with_rollback(
     try:
         _write_json_atomic(Path(registry_path).expanduser().resolve(), candidate)
     except OSError:
-        _ = snapshot_store.restore_snapshot(snapshot_id=snapshot_id, registry_path=registry_path)
+        rollback = snapshot_store.restore_snapshot(snapshot_id=snapshot_id, registry_path=registry_path)
         return {
             "ok": False,
             "error_kind": "write_failed",
             "snapshot_id": snapshot_id,
+            "rollback_ok": bool(rollback.get("ok")),
+            "rollback_error_kind": rollback.get("error_kind"),
         }
 
     reloaded = load_registry_document(registry_path)
     ok_verify, verify_error = verify_registry_invariants(reloaded)
     if not ok_verify:
-        _ = snapshot_store.restore_snapshot(snapshot_id=snapshot_id, registry_path=registry_path)
+        rollback = snapshot_store.restore_snapshot(snapshot_id=snapshot_id, registry_path=registry_path)
         return {
             "ok": False,
             "error_kind": "verify_failed",
             "verify_error": verify_error,
             "snapshot_id": snapshot_id,
+            "rollback_ok": bool(rollback.get("ok")),
+            "rollback_error_kind": rollback.get("error_kind"),
         }
 
     return {
