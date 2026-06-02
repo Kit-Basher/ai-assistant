@@ -143,3 +143,16 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "file operations",
     ):
         assert required in audit_text
+
+    for remaining_gap in (
+        "remaining gaps",
+        "package install/directory creation",
+        "notification send/test",
+        "notification prune",
+        "memory/bootstrap writes",
+        "onboarding/preferences writes",
+        "support bundle writes",
+        "medium risk remaining",
+        "high risk remaining",
+    ):
+        assert remaining_gap in audit_text

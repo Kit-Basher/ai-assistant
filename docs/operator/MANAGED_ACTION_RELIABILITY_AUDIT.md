@@ -39,10 +39,37 @@ Main gaps: persistent managed-action journal storage and full quarantine artifac
 - Telegram token setup now records managed-action journals, verifies saved tokens by readback, redacts token metadata, and restores/removes only the owned Telegram token on verification failure. Telegram enablement/disable now journals the known Personal Agent drop-in, approved `systemctl --user` daemon-reload/restart/stop actions, runtime state verification, and restores/removes only the owned drop-in if service verification fails. Online Telegram `getMe` remains optional.
 - Registry/autoconfig/self-heal/hygiene/cleanup/capabilities reconcile/bootstrap now use the shared transactional registry path with managed-action journals, registry snapshots, verification, and snapshot rollback on failed verification. They remain operator-grade and policy-gated, not normal-user silent mutations.
 
+## Remaining Gaps
+
+These are the remaining write surfaces found in the audit pass. They are not all equally risky; the key distinction is whether they are normal assistant-managed mutations, operator/dev tooling, or read-only/reporting paths that merely write artifacts.
+
+| Flow | Classification | Risk | Why it remains a gap | Required next reliability target |
+|---|---|---:|---|---|
+| memory/bootstrap writes | partially covered | medium | Conversation memory, semantic-memory indexing, memory-v2 bootstrap, scheduled observe, and daily-brief preference updates write SQLite rows or preference keys. They have schema/idempotence tests in places, but not a uniform ManagedActionJournal, ownership snapshot, or rollback story. | Add journaled memory write transactions for user-visible preference/memory mutations; keep semantic indexing rebuilds idempotent and scoped by source id. |
+| onboarding/preferences writes | partially covered | medium | Preferences such as Telegram chat id, daily brief flags, response style, and setup/onboarding progress are stored in the local DB. Some writes are explicit user actions or runtime observations, but they do not share the managed-action reliability contract. | Add journaled preference updates with previous-value restore on verification failure and redacted support output. |
+| support bundle writes | intentionally out of scope, but tracked | low-medium | Doctor/support bundle generation writes redacted files under a temp directory. This is diagnostic artifact creation, not runtime state mutation, but failed bundle creation should not leave misleading or unredacted artifacts. | Keep redaction tests; add cleanup/partial-bundle failure tests if support export becomes assistant-triggered by default. |
+| package install/directory creation shell flows | not covered as runtime managed actions | high when user-facing | Release bundle scripts, Debian build scripts, launcher scripts, and operator install/promote flows create directories, copy files, run install scripts, and restart services. They are operator/dev tooling, not assistant runtime actions, and do not use ManagedActionJournal. | Do not expose as normal chat actions. If assistant-managed install/update is added, wrap it in preview/confirm/journal/verify/rollback before use. |
+| pack removal and pack-source deletion cleanup | partially covered | medium | External pack removal has tombstone/redaction/idempotence tests, but it is not yet journaled like review/enable/grant metadata. Pack source deletion is used by workflows/smokes and should prove source-only cleanup without touching unrelated records. | Add ManagedActionJournal to pack remove/source delete paths with readback verification and scoped rollback where safe. |
+| notification send/test and action ledger writes | partially covered | low-medium | Notification prune is journaled. Notification test/send and autopilot action ledger append mutate local history/notification state, but remain append-only audit surfaces without rollback. | Verify append success and redaction; document append-only/no-rollback semantics in journal or wrap with a lightweight action journal. |
+| future filesystem write/native skill operations | not implemented | high for future writes | Current native filesystem skill is read-only. Any future write/move/delete operation would need ownership, backups, preview, and rollback before becoming assistant-managed. | Block write operations until a file-operation transaction design exists. |
+
+### Risk Summary
+
+- High risk remaining: package install/directory creation shell flows if ever exposed to the assistant as normal user actions; future filesystem writes.
+- Medium risk remaining: memory/bootstrap writes, onboarding/preferences writes, pack removal/source deletion cleanup.
+- Low to medium risk remaining: support bundle artifact writes, notification send/test, and action ledger appends.
+- Low risk/read-only: current native filesystem reads and support status inspection paths.
+
+The exact next recommended reliability target is **memory/onboarding/preferences writes**, because they are normal-user-visible state, happen during ordinary use, and currently lack the same journal/verify/restore shape as provider, Telegram, model, pack, and registry writes.
+
 ## Required Follow-Up Order
 
-1. Add persistent managed-action journal storage across provider/API key, Telegram, model, pack, and registry maintenance flows.
-2. Extend provider setup transaction coverage to model mutations after provider verification.
-3. Extend pack lifecycle journal coverage across quarantine file creation and cleanup owned partial artifacts.
-4. Add more targeted registry-maintenance tests for unrelated-field drift and action-ledger write verification before expanding automatic apply behavior.
-5. Add normal-user assistant/UI confirmation UX before exposing Telegram service enable/disable outside the operator CLI.
+1. Add journaled reliability coverage for memory/bootstrap and onboarding/preferences writes.
+2. Add ManagedActionJournal coverage for pack removal and pack-source deletion cleanup.
+3. Add append verification/redaction checks for notification send/test and autopilot action ledger writes.
+4. Add persistent managed-action journal storage across provider/API key, Telegram, model, pack, registry maintenance, and memory/preference flows.
+5. Extend provider setup transaction coverage to model mutations after provider verification.
+6. Extend pack lifecycle journal coverage across quarantine file creation and cleanup owned partial artifacts.
+7. Add more targeted registry-maintenance tests for unrelated-field drift and action-ledger write verification before expanding automatic apply behavior.
+8. Keep package install/directory creation shell flows and future filesystem writes out of normal assistant actions until they have a dedicated transaction design.
+9. Add normal-user assistant/UI confirmation UX before exposing Telegram service enable/disable outside the operator CLI.
