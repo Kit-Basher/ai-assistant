@@ -6,7 +6,7 @@ This audit is a checkpoint, not a claim that every flow already meets the full s
 
 Highest-confidence flow today: managed SearXNG setup/cleanup. It has preflight, preview, confirmation, journal, verification, owned rollback, and tests.
 
-Main gaps: persistent managed-action journal storage and full quarantine artifact cleanup. Provider/API key writes, model downloads/imports, default model changes, Telegram token/drop-in/service configuration, pack lifecycle metadata mutations, and registry/autoconfig/self-heal/hygiene/apply flows now have in-memory managed-action journals, verification, and scoped rollback/cleanup where ownership is proven.
+Main gaps: persistent managed-action journal storage and full quarantine artifact cleanup. Provider/API key writes, model downloads/imports, default model changes, Telegram token/drop-in/service configuration, pack lifecycle metadata mutations, registry/autoconfig/self-heal/hygiene/apply flows, and normal user memory/onboarding/preference markers now have in-memory managed-action journals, verification, and scoped rollback/cleanup where ownership is proven.
 
 ## Audit Table
 
@@ -28,6 +28,8 @@ Main gaps: persistent managed-action journal storage and full quarantine artifac
 | file operations | native filesystem skill is read-only today; future writes unknown | destructive skill calls require policy confirmation | read-only path preflight exists | no shared journal | read-only result only | no write rollback implemented | not applicable for read-only | good for read-only | low now; high for future writes | before write/move/delete features, add preview, journal, backup/rollback, and path ownership rules |
 | notification/autopilot mutating actions | scheduler/autopilot may change registry/provider defaults depending policy; notification prune mutates notification history | policies exist; automatic apply is gated by config | partial | yes for registry apply flows and notification prune; action ledger still records audit history separately | yes for registry readback/hash and notification store status | partial | registry snapshot restore for failed registry verification; notification prune records no rollback because history compaction is irreversible by design | improved for registry apply/prune; action ledger writes remain append-only | medium | add persistent journal storage and broaden action-ledger write verification |
 | registry prune/rollback/hygiene/autoconfig/self-heal | provider/model registry documents and defaults | loopback/operator and policy gates | partial | yes, in-memory result journal on transactional registry applies and rollback | yes; registry invariants, resulting hash, snapshot id after success, and readback through runtime state | partial | restores pre-action registry snapshot when verification fails and snapshot is available; does not delete unrelated snapshots/config | improved; reports failed maintenance action and rollback state | medium | add persistent journal storage and more targeted tests for unrelated-field drift |
+| memory/bootstrap writes | memory bootstrap marker preferences and user-visible setup continuity flags | explicit user/runtime action depending caller | partial | yes for preference-backed bootstrap markers and low-level preference writes | yes; readback checks expected marker/value | yes | restores previous marker/preference or removes failed new marker/preference only | improved; journals are redacted and failures restore owned keys | low-medium | extend journal coverage to semantic-memory indexing records before making indexing user-mutating |
+| onboarding/preferences writes | onboarding completion state, intent hints, global preferences, per-thread preferences | explicit user/runtime action depending caller | partial | yes for onboarding completion, preference, user preference, and thread preference writes | yes; readback verifies expected state and onboarding status | yes | restores only previous target keys or removes failed newly created target keys; global and per-thread scopes stay separate | improved; raw preference/memory content is not returned in journals | low-medium | add persistent journal storage and cover reset/clear bulk preference operations before exposing them as assistant-managed actions |
 
 ## Findings
 
@@ -38,6 +40,7 @@ Main gaps: persistent managed-action journal storage and full quarantine artifac
 - Persistent default model changes now journal previous/requested defaults, preflight chat capability and disabled/unavailable/routability states, verify persisted defaults after write, and restore only previous defaults on verification failure.
 - Telegram token setup now records managed-action journals, verifies saved tokens by readback, redacts token metadata, and restores/removes only the owned Telegram token on verification failure. Telegram enablement/disable now journals the known Personal Agent drop-in, approved `systemctl --user` daemon-reload/restart/stop actions, runtime state verification, and restores/removes only the owned drop-in if service verification fails. Online Telegram `getMe` remains optional.
 - Registry/autoconfig/self-heal/hygiene/cleanup/capabilities reconcile/bootstrap now use the shared transactional registry path with managed-action journals, registry snapshots, verification, and snapshot rollback on failed verification. They remain operator-grade and policy-gated, not normal-user silent mutations.
+- Preference-backed memory/bootstrap writes and onboarding/preferences writes now use in-memory managed-action journals, readback verification, scoped previous-value restore/removal, and redacted metadata for global preferences, user preferences, per-thread preferences, onboarding completion state, and bootstrap marker keys.
 
 ## Remaining Gaps
 
@@ -45,8 +48,8 @@ These are the remaining write surfaces found in the audit pass. They are not all
 
 | Flow | Classification | Risk | Why it remains a gap | Required next reliability target |
 |---|---|---:|---|---|
-| memory/bootstrap writes | partially covered | medium | Conversation memory, semantic-memory indexing, memory-v2 bootstrap, scheduled observe, and daily-brief preference updates write SQLite rows or preference keys. They have schema/idempotence tests in places, but not a uniform ManagedActionJournal, ownership snapshot, or rollback story. | Add journaled memory write transactions for user-visible preference/memory mutations; keep semantic indexing rebuilds idempotent and scoped by source id. |
-| onboarding/preferences writes | partially covered | medium | Preferences such as Telegram chat id, daily brief flags, response style, and setup/onboarding progress are stored in the local DB. Some writes are explicit user actions or runtime observations, but they do not share the managed-action reliability contract. | Add journaled preference updates with previous-value restore on verification failure and redacted support output. |
+| memory/bootstrap writes | partially covered; preference-backed markers improved | low-medium | Preference-backed memory/bootstrap markers now journal, verify, and restore owned keys on verification failure. Semantic-memory indexing, conversation-memory observation rows, and scheduled observe still need a richer idempotent/journal story before they are treated as assistant-managed mutating actions. | Add journaled/idempotent reliability coverage to semantic-memory indexing and scheduled observe writes if they become normal user-triggered managed actions. |
+| onboarding/preferences writes | mostly covered for targeted writes | low-medium | Onboarding completion, intent hints, global preferences, user preferences, and per-thread preferences now journal, verify, and restore scoped keys. Bulk reset/clear paths are still not wrapped and should remain operator/internal until journaled. | Add journal coverage to reset/clear/bulk preference operations before exposing them as assistant-managed actions. |
 | support bundle writes | intentionally out of scope, but tracked | low-medium | Doctor/support bundle generation writes redacted files under a temp directory. This is diagnostic artifact creation, not runtime state mutation, but failed bundle creation should not leave misleading or unredacted artifacts. | Keep redaction tests; add cleanup/partial-bundle failure tests if support export becomes assistant-triggered by default. |
 | package install/directory creation shell flows | not covered as runtime managed actions | high when user-facing | Release bundle scripts, Debian build scripts, launcher scripts, and operator install/promote flows create directories, copy files, run install scripts, and restart services. They are operator/dev tooling, not assistant runtime actions, and do not use ManagedActionJournal. | Do not expose as normal chat actions. If assistant-managed install/update is added, wrap it in preview/confirm/journal/verify/rollback before use. |
 | pack removal and pack-source deletion cleanup | partially covered | medium | External pack removal has tombstone/redaction/idempotence tests, but it is not yet journaled like review/enable/grant metadata. Pack source deletion is used by workflows/smokes and should prove source-only cleanup without touching unrelated records. | Add ManagedActionJournal to pack remove/source delete paths with readback verification and scoped rollback where safe. |
@@ -56,20 +59,21 @@ These are the remaining write surfaces found in the audit pass. They are not all
 ### Risk Summary
 
 - High risk remaining: package install/directory creation shell flows if ever exposed to the assistant as normal user actions; future filesystem writes.
-- Medium risk remaining: memory/bootstrap writes, onboarding/preferences writes, pack removal/source deletion cleanup.
+- Medium risk remaining: pack removal/source deletion cleanup. Memory/bootstrap writes and onboarding/preferences writes are lower risk for targeted key writes, but semantic-memory indexing and bulk preference resets remain follow-up work.
 - Low to medium risk remaining: support bundle artifact writes, notification send/test, and action ledger appends.
 - Low risk/read-only: current native filesystem reads and support status inspection paths.
 
-The exact next recommended reliability target is **memory/onboarding/preferences writes**, because they are normal-user-visible state, happen during ordinary use, and currently lack the same journal/verify/restore shape as provider, Telegram, model, pack, and registry writes.
+The exact next recommended reliability target is **pack removal and pack-source deletion cleanup**, because targeted memory/onboarding/preference writes now have journal/verify/restore coverage, while pack deletion paths still need the same scoped metadata/tombstone transaction contract as source approval, review, enablement, and permission grants.
 
 ## Required Follow-Up Order
 
-1. Add journaled reliability coverage for memory/bootstrap and onboarding/preferences writes.
-2. Add ManagedActionJournal coverage for pack removal and pack-source deletion cleanup.
-3. Add append verification/redaction checks for notification send/test and autopilot action ledger writes.
-4. Add persistent managed-action journal storage across provider/API key, Telegram, model, pack, registry maintenance, and memory/preference flows.
-5. Extend provider setup transaction coverage to model mutations after provider verification.
-6. Extend pack lifecycle journal coverage across quarantine file creation and cleanup owned partial artifacts.
-7. Add more targeted registry-maintenance tests for unrelated-field drift and action-ledger write verification before expanding automatic apply behavior.
-8. Keep package install/directory creation shell flows and future filesystem writes out of normal assistant actions until they have a dedicated transaction design.
-9. Add normal-user assistant/UI confirmation UX before exposing Telegram service enable/disable outside the operator CLI.
+1. Add ManagedActionJournal coverage for pack removal and pack-source deletion cleanup.
+2. Add append verification/redaction checks for notification send/test and autopilot action ledger writes.
+3. Extend memory reliability from preference-backed markers into semantic-memory indexing and scheduled observe writes if they become normal user-triggered actions.
+4. Add journal coverage to reset/clear/bulk preference operations before exposing them as assistant-managed actions.
+5. Add persistent managed-action journal storage across provider/API key, Telegram, model, pack, registry maintenance, and memory/preference flows.
+6. Extend provider setup transaction coverage to model mutations after provider verification.
+7. Extend pack lifecycle journal coverage across quarantine file creation and cleanup owned partial artifacts.
+8. Add more targeted registry-maintenance tests for unrelated-field drift and action-ledger write verification before expanding automatic apply behavior.
+9. Keep package install/directory creation shell flows and future filesystem writes out of normal assistant actions until they have a dedicated transaction design.
+10. Add normal-user assistant/UI confirmation UX before exposing Telegram service enable/disable outside the operator CLI.

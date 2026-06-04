@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.packs.capability_recommendation import recommend_packs_for_capability, render_pack_capability_response
 from agent.persona import normalize_persona_text
 
@@ -208,14 +210,184 @@ def onboarding_is_completed(db: Any, user_id: str) -> bool:
 
 
 def mark_onboarding_completed(db: Any, user_id: str, *, intent_hint: str | None = None) -> None:
+    mark_onboarding_completed_reliable(db, user_id, intent_hint=intent_hint)
+
+
+def mark_onboarding_completed_reliable(db: Any, user_id: str, *, intent_hint: str | None = None) -> dict[str, Any]:
     completed_key = onboarding_completed_key(user_id)
     intent_key = onboarding_intent_hint_key(user_id)
-    if callable(getattr(db, "set_user_pref", None)):
+    normalized_hint = _normalize_text(intent_hint)
+    user_hash = hashlib.sha256(str(user_id or "").encode("utf-8")).hexdigest()
+    previous_completed = _get_user_pref_entry(db, completed_key)
+    previous_intent = _get_user_pref_entry(db, intent_key)
+
+    journal = ManagedActionJournal(action_type="onboarding.completed.write", target=f"user:{user_hash}")
+    journal.plan_step("preflight_onboarding_state", resource="onboarding_state")
+    journal.plan_step("write_onboarding_completed_marker", resource="onboarding_completed")
+    journal.plan_step("write_onboarding_intent_hint", resource="user_intent_hint")
+    journal.plan_step("verify_onboarding_state", resource="onboarding_state")
+    journal.record_step(
+        "preflight_onboarding_state",
+        ok=True,
+        resource="onboarding_state",
+        user_hash=user_hash,
+        completed_previous=_value_metadata(previous_completed.get("value") if previous_completed else None),
+        intent_previous=_value_metadata(previous_intent.get("value") if previous_intent else None),
+        intent_requested=_value_metadata(normalized_hint if normalized_hint else None),
+    )
+
+    try:
+        if not callable(getattr(db, "set_user_pref", None)):
+            raise RuntimeError("DB does not support user preferences")
         db.set_user_pref(completed_key, "true")
-        if str(intent_hint or "").strip():
-            db.set_user_pref(intent_key, _normalize_text(intent_hint))
+        journal.record_step("write_onboarding_completed_marker", ok=True, resource="onboarding_completed")
+        if normalized_hint:
+            db.set_user_pref(intent_key, normalized_hint)
+            journal.record_step("write_onboarding_intent_hint", ok=True, resource="user_intent_hint", mode="set")
         elif callable(getattr(db, "delete_user_pref", None)):
             db.delete_user_pref(intent_key)
+            journal.record_step("write_onboarding_intent_hint", ok=True, resource="user_intent_hint", mode="delete")
+        else:
+            journal.record_step("write_onboarding_intent_hint", ok=True, resource="user_intent_hint", mode="none")
+    except Exception as exc:
+        journal.record_step(
+            "write_onboarding_completed_marker",
+            ok=False,
+            resource="onboarding_state",
+            error=exc.__class__.__name__,
+        )
+        rollback_ok, rollback_summary = _restore_onboarding_state(
+            db,
+            completed_key,
+            previous_completed,
+            intent_key,
+            previous_intent,
+            journal=journal,
+        )
+        return {
+            "ok": False,
+            "error": "onboarding_state_write_failed",
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": _onboarding_write_failure_message(rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    state = load_onboarding_state(db, user_id)
+    verification_ok = bool(state.get("available") and state.get("completed"))
+    if normalized_hint:
+        verification_ok = verification_ok and state.get("intent_hint") == normalized_hint
+    elif previous_intent is None:
+        verification_ok = verification_ok and state.get("intent_hint") is None
+    journal.mark_verification(
+        ok=verification_ok,
+        completed=bool(state.get("completed")),
+        intent_present=bool(state.get("intent_hint")),
+    )
+    if verification_ok:
+        journal.record_changed_resource("onboarding_state", f"user:{user_hash}", rollback_supported=True)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        return {"ok": True, "managed_action_journal": journal.to_dict()}
+
+    rollback_ok, rollback_summary = _restore_onboarding_state(
+        db,
+        completed_key,
+        previous_completed,
+        intent_key,
+        previous_intent,
+        journal=journal,
+    )
+    return {
+        "ok": False,
+        "error": "onboarding_state_verification_failed",
+        "rollback_ok": rollback_ok,
+        "rollback_summary": rollback_summary,
+        "message": _onboarding_write_failure_message(rollback_ok, rollback_summary),
+        "managed_action_journal": journal.to_dict(),
+    }
+
+
+def _get_user_pref_entry(db: Any, key: str) -> dict[str, Any] | None:
+    fn = getattr(db, "get_user_pref_entry", None)
+    if callable(fn):
+        row = fn(key)
+        return dict(row) if isinstance(row, dict) else None
+    get_fn = getattr(db, "get_user_pref", None)
+    if callable(get_fn):
+        value = get_fn(key)
+        if value is not None:
+            return {"key": key, "value": value}
+    return None
+
+
+def _restore_onboarding_state(
+    db: Any,
+    completed_key: str,
+    previous_completed: dict[str, Any] | None,
+    intent_key: str,
+    previous_intent: dict[str, Any] | None,
+    *,
+    journal: ManagedActionJournal,
+) -> tuple[bool, str]:
+    try:
+        _restore_user_pref(db, completed_key, previous_completed)
+        _restore_user_pref(db, intent_key, previous_intent)
+        summary = "restored previous onboarding state"
+        journal.record_rollback_step("restore_onboarding_state", ok=True, resource="onboarding_state", summary=summary)
+        journal.mark_rollback(ok=True, attempted=True, summary=summary)
+        return True, summary
+    except Exception as exc:
+        summary = "could not fully restore previous onboarding state"
+        journal.record_rollback_step(
+            "restore_onboarding_state",
+            ok=False,
+            resource="onboarding_state",
+            error=exc.__class__.__name__,
+        )
+        journal.mark_rollback(ok=False, attempted=True, summary=summary)
+        return False, summary
+
+
+def _restore_user_pref(db: Any, key: str, previous: dict[str, Any] | None) -> None:
+    if previous is None:
+        reliable_delete_fn = getattr(db, "delete_user_pref_reliable", None)
+        if callable(reliable_delete_fn):
+            result = reliable_delete_fn(key)
+            if isinstance(result, dict) and result.get("ok") is False:
+                raise RuntimeError("onboarding preference rollback delete verification failed")
+            return
+        delete_fn = getattr(db, "delete_user_pref", None)
+        if callable(delete_fn):
+            delete_fn(key)
+        return
+    reliable_set_fn = getattr(db, "set_user_pref_reliable", None)
+    if callable(reliable_set_fn):
+        result = reliable_set_fn(key, str(previous.get("value") or ""))
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise RuntimeError("onboarding preference rollback restore verification failed")
+        return
+    set_fn = getattr(db, "set_user_pref", None)
+    if callable(set_fn):
+        set_fn(key, str(previous.get("value") or ""))
+
+
+def _value_metadata(value: Any) -> dict[str, Any]:
+    text = str(value or "")
+    return {
+        "present": value is not None,
+        "length": len(text),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest() if value is not None else None,
+    }
+
+
+def _onboarding_write_failure_message(rollback_ok: bool, rollback_summary: str) -> str:
+    restored = "The previous setting/state was restored." if rollback_ok else "The previous setting/state may still need attention."
+    remaining = str(rollback_summary or "check the onboarding completion state").strip()
+    return (
+        "The onboarding update did not finish. "
+        f"{restored} Attention: {remaining}. "
+        "Safe next step: retry onboarding after checking local memory status."
+    )
 
 
 def should_offer_onboarding(db: Any, pack_store: Any, user_id: str) -> bool:
@@ -376,6 +548,7 @@ __all__ = [
     "is_onboarding_entry_trigger",
     "load_onboarding_state",
     "mark_onboarding_completed",
+    "mark_onboarding_completed_reliable",
     "onboarding_completed_key",
     "onboarding_decline_response",
     "onboarding_entry_prompt",

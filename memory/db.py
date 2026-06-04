@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
+
+from agent.actions.managed_action_recovery import ManagedActionJournal
+
+_PREFERENCE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
+_PREFERENCE_SCOPES = {
+    "global_preference",
+    "memory_bootstrap_state",
+    "onboarding_state",
+    "user_preference",
+    "thread_preference",
+}
 
 
 @dataclass
@@ -108,6 +121,15 @@ class MemoryDB:
     @staticmethod
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _value_metadata(value: Any) -> dict[str, Any]:
+        text = str(value or "")
+        return {
+            "present": value is not None,
+            "length": len(text),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest() if value is not None else None,
+        }
 
     def add_note(self, content: str, project_id: int | None, tags: str | None) -> int:
         created_at = self._now_iso()
@@ -465,12 +487,71 @@ class MemoryDB:
             return 0
 
     def set_preference(self, key: str, value: str) -> None:
+        self.set_preference_reliable(key, value)
+
+    def set_preference_reliable(
+        self,
+        key: str,
+        value: str,
+        *,
+        action_type: str = "memory.preference.write",
+        scope: str = "global_preference",
+    ) -> dict[str, Any]:
+        normalized_key = str(key or "").strip()
+        self._preflight_preference_target(normalized_key, scope=scope)
+        previous = self.get_preference(normalized_key)
+        existed = previous is not None
+        journal = ManagedActionJournal(action_type=action_type, target=normalized_key)
+        journal.plan_step("preflight_preference_key", resource=normalized_key)
+        journal.plan_step("write_preference", resource=normalized_key)
+        journal.plan_step("verify_preference", resource=normalized_key)
+        journal.record_step(
+            "preflight_preference_key",
+            ok=True,
+            resource=normalized_key,
+            scope=scope,
+            previous=self._value_metadata(previous),
+            requested=self._value_metadata(value),
+        )
         now = self._now_iso()
         self._conn.execute(
             "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (key, value, now),
+            (normalized_key, value, now),
         )
         self._commit_if_needed()
+        journal.record_step("write_preference", ok=True, resource=normalized_key)
+        journal.record_changed_resource(
+            "memory_preference",
+            normalized_key,
+            rollback_supported=True,
+            created=not existed,
+        )
+        current = self.get_preference(normalized_key)
+        verification_ok = self._verify_preference_write(normalized_key, value)
+        journal.mark_verification(
+            ok=verification_ok,
+            key=normalized_key,
+            expected=self._value_metadata(value),
+            actual=self._value_metadata(current),
+        )
+        if verification_ok:
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "key": normalized_key,
+                "created": not existed,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._rollback_preference(normalized_key, previous, existed, journal=journal)
+        return {
+            "ok": False,
+            "error": "preference_write_verification_failed",
+            "key": normalized_key,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._write_failure_message("preference", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
 
     def get_preference(self, key: str) -> str | None:
         cur = self._conn.execute(
@@ -485,6 +566,26 @@ class MemoryDB:
         return [dict(row) for row in cur.fetchall()]
 
     def set_user_pref(self, key: str, value: str) -> None:
+        self.set_user_pref_reliable(key, value)
+
+    def set_user_pref_reliable(self, key: str, value: str) -> dict[str, Any]:
+        normalized_key = str(key or "").strip()
+        self._preflight_preference_target(normalized_key, scope="user_preference")
+        previous_row = self.get_user_pref_entry(normalized_key)
+        previous = str(previous_row.get("value")) if isinstance(previous_row, dict) and previous_row.get("value") is not None else None
+        existed = previous_row is not None
+        journal = ManagedActionJournal(action_type="memory.user_preference.write", target=normalized_key)
+        journal.plan_step("preflight_user_preference_key", resource=normalized_key)
+        journal.plan_step("write_user_preference", resource=normalized_key)
+        journal.plan_step("verify_user_preference", resource=normalized_key)
+        journal.record_step(
+            "preflight_user_preference_key",
+            ok=True,
+            resource=normalized_key,
+            scope="user_preference",
+            previous=self._value_metadata(previous),
+            requested=self._value_metadata(value),
+        )
         now = self._now_iso()
         self._conn.execute(
             """
@@ -494,9 +595,42 @@ class MemoryDB:
                 updated_at = excluded.updated_at,
                 revision = user_prefs.revision + 1
             """,
-            (key, value, now),
+            (normalized_key, value, now),
         )
         self._commit_if_needed()
+        journal.record_step("write_user_preference", ok=True, resource=normalized_key)
+        journal.record_changed_resource(
+            "memory_user_preference",
+            normalized_key,
+            rollback_supported=True,
+            created=not existed,
+        )
+        current = self.get_user_pref(normalized_key)
+        verification_ok = self._verify_user_pref_write(normalized_key, value)
+        journal.mark_verification(
+            ok=verification_ok,
+            key=normalized_key,
+            expected=self._value_metadata(value),
+            actual=self._value_metadata(current),
+        )
+        if verification_ok:
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "key": normalized_key,
+                "created": not existed,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._rollback_user_pref(normalized_key, previous_row, journal=journal)
+        return {
+            "ok": False,
+            "error": "user_preference_write_verification_failed",
+            "key": normalized_key,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._write_failure_message("preference", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
 
     def set_user_pref_if_revision(self, key: str, value: str, expected_revision: int) -> dict[str, Any]:
         normalized_revision = max(int(expected_revision), 0)
@@ -568,9 +702,56 @@ class MemoryDB:
         return [dict(row) for row in cur.fetchall()]
 
     def delete_user_pref(self, key: str) -> bool:
-        cur = self._conn.execute("DELETE FROM user_prefs WHERE key = ?", (key,))
+        return bool(self.delete_user_pref_reliable(key).get("deleted", False))
+
+    def delete_user_pref_reliable(self, key: str) -> dict[str, Any]:
+        normalized_key = str(key or "").strip()
+        self._preflight_preference_target(normalized_key, scope="user_preference")
+        previous_row = self.get_user_pref_entry(normalized_key)
+        existed = previous_row is not None
+        journal = ManagedActionJournal(action_type="memory.user_preference.delete", target=normalized_key)
+        journal.plan_step("preflight_user_preference_key", resource=normalized_key)
+        journal.plan_step("delete_user_preference", resource=normalized_key)
+        journal.plan_step("verify_user_preference_deleted", resource=normalized_key)
+        journal.record_step(
+            "preflight_user_preference_key",
+            ok=True,
+            resource=normalized_key,
+            scope="user_preference",
+            previous=self._value_metadata(previous_row.get("value") if previous_row else None),
+        )
+        cur = self._conn.execute("DELETE FROM user_prefs WHERE key = ?", (normalized_key,))
         self._commit_if_needed()
-        return int(cur.rowcount) > 0
+        deleted = int(cur.rowcount) > 0
+        journal.record_step("delete_user_preference", ok=True, resource=normalized_key, deleted=deleted)
+        verification_ok = self.get_user_pref_entry(normalized_key) is None
+        journal.mark_verification(ok=verification_ok, key=normalized_key, deleted=deleted)
+        if verification_ok:
+            if existed:
+                journal.record_changed_resource(
+                    "memory_user_preference",
+                    normalized_key,
+                    rollback_supported=True,
+                    deleted=True,
+                )
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "key": normalized_key,
+                "deleted": deleted,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._rollback_user_pref(normalized_key, previous_row, journal=journal)
+        return {
+            "ok": False,
+            "error": "user_preference_delete_verification_failed",
+            "key": normalized_key,
+            "deleted": deleted,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._write_failure_message("preference", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
 
     def delete_user_prefs_by_prefix(self, prefix: str) -> int:
         normalized = str(prefix or "")
@@ -583,6 +764,33 @@ class MemoryDB:
         self._commit_if_needed()
 
     def set_thread_pref(self, thread_id: str, key: str, value: str) -> None:
+        self.set_thread_pref_reliable(thread_id, key, value)
+
+    def set_thread_pref_reliable(self, thread_id: str, key: str, value: str) -> dict[str, Any]:
+        normalized_thread = str(thread_id or "").strip()
+        normalized_key = str(key or "").strip()
+        if not normalized_thread:
+            raise ValueError("thread id is required")
+        self._preflight_preference_target(normalized_key, scope="thread_preference")
+        previous = self.get_thread_pref(normalized_thread, normalized_key)
+        existed = previous is not None
+        thread_hash = hashlib.sha256(normalized_thread.encode("utf-8")).hexdigest()
+        journal = ManagedActionJournal(
+            action_type="memory.thread_preference.write",
+            target=f"thread:{thread_hash}:{normalized_key}",
+        )
+        journal.plan_step("preflight_thread_preference_key", resource=normalized_key)
+        journal.plan_step("write_thread_preference", resource=normalized_key)
+        journal.plan_step("verify_thread_preference", resource=normalized_key)
+        journal.record_step(
+            "preflight_thread_preference_key",
+            ok=True,
+            resource=normalized_key,
+            scope="thread_preference",
+            thread_hash=thread_hash,
+            previous=self._value_metadata(previous),
+            requested=self._value_metadata(value),
+        )
         now = self._now_iso()
         self._conn.execute(
             """
@@ -591,9 +799,86 @@ class MemoryDB:
                 value = excluded.value,
                 updated_at = excluded.updated_at
             """,
-            (thread_id, key, value, now),
+            (normalized_thread, normalized_key, value, now),
         )
         self._commit_if_needed()
+        journal.record_step("write_thread_preference", ok=True, resource=normalized_key)
+        journal.record_changed_resource(
+            "memory_thread_preference",
+            normalized_key,
+            rollback_supported=True,
+            created=not existed,
+            thread_hash=thread_hash,
+        )
+        current = self.get_thread_pref(normalized_thread, normalized_key)
+        verification_ok = self._verify_thread_pref_write(normalized_thread, normalized_key, value)
+        journal.mark_verification(
+            ok=verification_ok,
+            key=normalized_key,
+            expected=self._value_metadata(value),
+            actual=self._value_metadata(current),
+        )
+        if verification_ok:
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "key": normalized_key,
+                "created": not existed,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._rollback_thread_pref(
+            normalized_thread,
+            normalized_key,
+            previous,
+            existed,
+            journal=journal,
+        )
+        return {
+            "ok": False,
+            "error": "thread_preference_write_verification_failed",
+            "key": normalized_key,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._write_failure_message("thread preference", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    def set_memory_bootstrap_marker_reliable(self, key: str, value: str) -> dict[str, Any]:
+        normalized_key = str(key or "").strip()
+        self._preflight_preference_target(normalized_key, scope="memory_bootstrap_state")
+        return self.set_preference_reliable(
+            f"memory_bootstrap:{normalized_key}",
+            str(value),
+            action_type="memory.bootstrap_marker.write",
+            scope="memory_bootstrap_state",
+        )
+
+    def _verify_preference_write(self, key: str, expected_value: str) -> bool:
+        return self.get_preference(key) == expected_value
+
+    def _verify_user_pref_write(self, key: str, expected_value: str) -> bool:
+        return self.get_user_pref(key) == expected_value
+
+    def _verify_thread_pref_write(self, thread_id: str, key: str, expected_value: str) -> bool:
+        return self.get_thread_pref(thread_id, key) == expected_value
+
+    @staticmethod
+    def _preflight_preference_target(key: str, *, scope: str) -> None:
+        if scope not in _PREFERENCE_SCOPES:
+            raise ValueError(f"preference scope is not allowed: {scope}")
+        if not key:
+            raise ValueError("preference key is required")
+        if not _PREFERENCE_KEY_RE.fullmatch(key):
+            raise ValueError("preference key must be a known local-state key format")
+
+    @staticmethod
+    def _write_failure_message(kind: str, rollback_ok: bool, rollback_summary: str) -> str:
+        restored = "The previous setting/state was restored." if rollback_ok else "The previous setting/state may still need attention."
+        remaining = str(rollback_summary or "check the affected local state key").strip()
+        return (
+            f"The {kind} update did not finish. {restored} "
+            f"Attention: {remaining}. Safe next step: retry the update after checking local memory status."
+        )
 
     def get_thread_pref(self, thread_id: str, key: str) -> str | None:
         cur = self._conn.execute(
@@ -613,6 +898,108 @@ class MemoryDB:
     def clear_thread_prefs(self, thread_id: str) -> None:
         self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ?", (thread_id,))
         self._commit_if_needed()
+
+    def _rollback_preference(
+        self,
+        key: str,
+        previous: str | None,
+        existed: bool,
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            if existed:
+                now = self._now_iso()
+                self._conn.execute(
+                    "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    (key, previous, now),
+                )
+                summary = "restored previous preference value"
+            else:
+                self._conn.execute("DELETE FROM preferences WHERE key = ?", (key,))
+                summary = "removed failed new preference"
+            self._commit_if_needed()
+            journal.record_rollback_step("restore_preference", ok=True, resource=key, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "could not restore previous preference state"
+            journal.record_rollback_step("restore_preference", ok=False, resource=key, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
+    def _rollback_user_pref(
+        self,
+        key: str,
+        previous_row: dict[str, Any] | None,
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            if previous_row is not None:
+                self._conn.execute(
+                    """
+                    INSERT INTO user_prefs (key, value, updated_at, revision) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at,
+                        revision = excluded.revision
+                    """,
+                    (
+                        key,
+                        previous_row.get("value"),
+                        previous_row.get("updated_at") or self._now_iso(),
+                        int(previous_row.get("revision") or 1),
+                    ),
+                )
+                summary = "restored previous user preference value"
+            else:
+                self._conn.execute("DELETE FROM user_prefs WHERE key = ?", (key,))
+                summary = "removed failed new user preference"
+            self._commit_if_needed()
+            journal.record_rollback_step("restore_user_preference", ok=True, resource=key, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "could not restore previous user preference state"
+            journal.record_rollback_step("restore_user_preference", ok=False, resource=key, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
+    def _rollback_thread_pref(
+        self,
+        thread_id: str,
+        key: str,
+        previous: str | None,
+        existed: bool,
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            if existed:
+                now = self._now_iso()
+                self._conn.execute(
+                    """
+                    INSERT INTO thread_prefs (thread_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(thread_id, key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (thread_id, key, previous, now),
+                )
+                summary = "restored previous thread preference value"
+            else:
+                self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ? AND key = ?", (thread_id, key))
+                summary = "removed failed new thread preference"
+            self._commit_if_needed()
+            journal.record_rollback_step("restore_thread_preference", ok=True, resource=key, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "could not restore previous thread preference state"
+            journal.record_rollback_step("restore_thread_preference", ok=False, resource=key, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
 
     def add_thread_anchor(self, thread_id: str, title: str, bullets_json: str, open_line: str) -> int:
         created_at = self._now_iso()
