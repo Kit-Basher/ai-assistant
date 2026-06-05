@@ -5,7 +5,7 @@
 > Authoritative current-branch status lives at repo root: `PROJECT_STATUS.md`.
 
 ## Project Identity + Non-Negotiables
-Personal Agent is a local-first, Telegram-first assistant that treats Telegram input as untrusted and enforces safe, auditable, reversible, bounded behavior; it separates factual reports from optional narration or opinion and forbids surprise actions, with audit hard-fail semantics and explicit confirmation gates for sensitive operations.
+Personal Agent is a local-first, Telegram-first assistant that treats Telegram input as untrusted and enforces safe, auditable, reversible, bounded behavior; it keeps factual reports deterministic and forbids surprise actions, with audit hard-fail semantics and explicit confirmation gates for sensitive operations. Presentation rewrites/narration are not core runtime behavior; if reintroduced, they belong in a bounded text-only skill pack or presentation adapter.
 
 ## Current Repo Status
 ### Git

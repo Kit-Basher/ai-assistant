@@ -16494,66 +16494,6 @@ class Orchestrator:
         payload = {"ok": True, "source": source, "inventory": summary}
         return OrchestratorResponse(self._render_pretty_json(payload))
 
-    def _maybe_add_narration(self, kind: str, payload: dict[str, Any], text: str) -> str:
-        if not self._narration_enabled():
-            return text
-        if not self.llm_client or not hasattr(self.llm_client, "chat"):
-            return text
-        result = route_inference(
-            llm_client=self.llm_client,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Summarize the payload in 2-4 concise bullet lines with no recommendations.",
-                },
-                {"role": "user", "content": json.dumps({"kind": kind, "payload": payload}, ensure_ascii=True)},
-            ],
-            task_hint=kind,
-            purpose="narration",
-            task_type="chat",
-            compute_tier="low",
-            trace_id=self._trace_id("llm"),
-        )
-        if not result.get("ok") or not result.get("text"):
-            return text
-        provider = result.get("provider") or "unknown"
-        scope = "local" if provider == "ollama" else "cloud" if provider == "openai" else provider
-        header = f"Narration ({scope})"
-        return f"{header}\n{result.get('text')}\n\n{text}"
-
-    def _maybe_add_narration_from_text(self, kind: str, text: str) -> str:
-        if not self._narration_enabled():
-            return text
-        if not self.llm_client or not hasattr(self.llm_client, "chat"):
-            return text
-        result = route_inference(
-            llm_client=self.llm_client,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Summarize the report in 2-4 concise bullet lines with no recommendations.",
-                },
-                {"role": "user", "content": json.dumps({"kind": kind, "report_text": text}, ensure_ascii=True)},
-            ],
-            task_hint=kind,
-            purpose="narration",
-            task_type="chat",
-            compute_tier="low",
-            trace_id=self._trace_id("llm"),
-        )
-        if not result.get("ok") or not result.get("text"):
-            return text
-        provider = result.get("provider") or "unknown"
-        scope = "local" if provider == "ollama" else "cloud" if provider == "openai" else provider
-        header = f"Narration ({scope})"
-        return f"{header}\n{result.get('text')}\n\n{text}"
-
-    @staticmethod
-    def _narration_enabled() -> bool:
-        narration_flag = os.getenv("ENABLE_NARRATION", "").strip().lower()
-        legacy_flag = os.getenv("LLM_NARRATION_ENABLED", "").strip().lower()
-        return (narration_flag or legacy_flag) in {"1", "true", "yes", "y", "on"}
-
     def _extract_opinion_facts(
         self, skill_name: str, function_name: str, result: dict[str, Any]
     ) -> tuple[dict[str, Any] | None, str | None]:
@@ -17346,8 +17286,6 @@ class Orchestrator:
                 response_text = (
                     f"{response_text}\n---\nWant my opinion?\n{opinion_gate.OPINION_GATE_PROMPT}"
                 )
-        if skill_name == "disk_report" and isinstance(result, dict):
-            response_text = self._maybe_add_narration("disk_report", result, response_text)
         if not read_only_mode:
             try:
                 memory_ingest.ingest_event(
@@ -19234,8 +19172,7 @@ class Orchestrator:
 
                 if cmd.name == "disk_changes":
                     report = self._disk_changes_report(user_id)
-                    text_out = self._maybe_add_narration("disk_changes", report["payload"], report["text"])
-                    return OrchestratorResponse(text_out, report["payload"])
+                    return OrchestratorResponse(report["text"], report["payload"])
 
                 if cmd.name == "disk_baseline":
                     return OrchestratorResponse(self._disk_baseline(user_id))
@@ -19246,8 +19183,7 @@ class Orchestrator:
 
                 if cmd.name == "disk_digest":
                     report = self._disk_digest_report(user_id)
-                    text_out = self._maybe_add_narration("disk_digest", report["payload"], report["text"])
-                    return OrchestratorResponse(text_out, report["payload"])
+                    return OrchestratorResponse(report["text"], report["payload"])
 
                 if cmd.name == "ask":
                     question = (cmd.args or "").strip()
@@ -19420,37 +19356,31 @@ class Orchestrator:
                     )
 
                 if cmd.name == "storage_report":
-                    response = self._call_skill(
+                    return self._call_skill(
                         user_id,
                         "storage_governor",
                         "storage_report",
                         {"user_id": user_id},
                         ["db:read"],
                     )
-                    response.text = self._maybe_add_narration_from_text("storage_report", response.text)
-                    return response
 
                 if cmd.name == "resource_report":
-                    response = self._call_skill(
+                    return self._call_skill(
                         user_id,
                         "resource_governor",
                         "resource_report",
                         {"user_id": user_id},
                         ["db:read"],
                     )
-                    response.text = self._maybe_add_narration_from_text("resource_report", response.text)
-                    return response
 
                 if cmd.name == "network_report":
-                    response = self._call_skill(
+                    return self._call_skill(
                         user_id,
                         "network_governor",
                         "network_report",
                         {"user_id": user_id},
                         ["db:read"],
                     )
-                    response.text = self._maybe_add_narration_from_text("network_report", response.text)
-                    return response
 
                 if cmd.name == "sys_metrics_snapshot":
                     return self._sys_metrics_snapshot()
@@ -20177,8 +20107,7 @@ class Orchestrator:
 
             if decision.get("type") == "disk_changes":
                 report = self._disk_changes_report(user_id)
-                text_out = self._maybe_add_narration("disk_changes", report["payload"], report["text"])
-                return OrchestratorResponse(text_out, report["payload"])
+                return OrchestratorResponse(report["text"], report["payload"])
 
             if decision.get("type") == "disk_baseline":
                 return OrchestratorResponse(self._disk_baseline(user_id))
