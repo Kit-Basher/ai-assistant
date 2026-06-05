@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from memory.db import MemoryDB
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.cards import validate_cards_payload
 from agent.nl_router import build_cards_payload
 from skills.observe_now.handler import observe_now
@@ -2828,10 +2830,27 @@ def _safe_support_bundle(
     repo_root: Path,
     api_base_url: str,
 ) -> str | None:
+    journal = ManagedActionJournal(action_type="doctor.support_bundle.write", target="temp:agent-support")
+    journal.plan_step("preflight_support_bundle_path", resource="support_bundle")
+    journal.plan_step("write_support_bundle_artifacts", resource="support_bundle")
+    journal.plan_step("verify_support_bundle_artifacts", resource="support_bundle")
+    bundle_dir: Path | None = None
     try:
         bundle_dir = Path(tempfile.mkdtemp(prefix="agent-support-"))
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        resolved_bundle_dir = bundle_dir.resolve()
+        if temp_root not in (resolved_bundle_dir, *resolved_bundle_dir.parents):
+            raise RuntimeError("support bundle path is outside temp")
         bundle_path = bundle_dir / "doctor_support_bundle.json"
         summary_path = bundle_dir / "SUMMARY.txt"
+        journal_path = bundle_dir / "managed_action_journal.json"
+        journal.record_step(
+            "preflight_support_bundle_path",
+            ok=True,
+            resource="support_bundle",
+            path_hash=_support_bundle_path_hash(bundle_dir),
+            temp_root=str(temp_root),
+        )
         payload = {
             "trace_id": report.trace_id,
             "generated_at": report.generated_at,
@@ -2844,10 +2863,89 @@ def _safe_support_bundle(
         }
         safe_payload = _redact_bundle_value(payload)
         bundle_path.write_text(json.dumps(safe_payload, ensure_ascii=True, sort_keys=True, indent=2) + "\n", encoding="utf-8")
-        summary_path.write_text(_render_text_report(report) + "\n", encoding="utf-8")
+        summary_path.write_text(redact_secrets(_render_text_report(report)) + "\n", encoding="utf-8")
+        journal.record_step(
+            "write_support_bundle_artifacts",
+            ok=True,
+            resource="support_bundle",
+            files=["doctor_support_bundle.json", "SUMMARY.txt", "managed_action_journal.json"],
+        )
+        verification_ok = _verify_support_bundle_artifacts(bundle_dir)
+        journal.mark_verification(ok=verification_ok, files=["doctor_support_bundle.json", "SUMMARY.txt"])
+        if not verification_ok:
+            cleanup_ok, cleanup_summary = _cleanup_owned_support_bundle(bundle_dir)
+            journal.record_rollback_step(
+                "remove_incomplete_support_bundle",
+                ok=cleanup_ok,
+                resource="support_bundle",
+                summary=cleanup_summary,
+            )
+            journal.mark_rollback(ok=cleanup_ok, attempted=True, summary=cleanup_summary)
+            return None
+        journal.record_created_resource(
+            "support_bundle",
+            _support_bundle_path_hash(bundle_dir),
+            rollback_supported=True,
+            files=["doctor_support_bundle.json", "SUMMARY.txt", "managed_action_journal.json"],
+        )
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        journal_path.write_text(
+            json.dumps(journal.to_dict(), ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
         return str(bundle_dir)
     except Exception:
+        if bundle_dir is not None:
+            cleanup_ok, cleanup_summary = _cleanup_owned_support_bundle(bundle_dir)
+            journal.record_rollback_step(
+                "remove_incomplete_support_bundle",
+                ok=cleanup_ok,
+                resource="support_bundle",
+                summary=cleanup_summary,
+            )
+            journal.mark_rollback(ok=cleanup_ok, attempted=True, summary=cleanup_summary)
         return None
+
+
+def _support_bundle_path_hash(path: Path) -> str:
+    return hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+
+
+def _verify_support_bundle_artifacts(bundle_dir: Path) -> bool:
+    try:
+        resolved = bundle_dir.resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if temp_root not in (resolved, *resolved.parents):
+            return False
+        bundle_path = resolved / "doctor_support_bundle.json"
+        summary_path = resolved / "SUMMARY.txt"
+        journal_path = resolved / "managed_action_journal.json"
+        if not bundle_path.is_file() or not summary_path.is_file():
+            return False
+        payload = json.loads(bundle_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict) or not bool(str(payload.get("trace_id") or "").strip()):
+            return False
+        if journal_path.exists():
+            journal_payload = json.loads(journal_path.read_text(encoding="utf-8"))
+            if not isinstance(journal_payload, dict):
+                return False
+        return True
+    except Exception:
+        return False
+
+
+def _cleanup_owned_support_bundle(bundle_dir: Path) -> tuple[bool, str]:
+    try:
+        resolved = bundle_dir.resolve()
+        temp_root = Path(tempfile.gettempdir()).resolve()
+        if temp_root not in (resolved, *resolved.parents):
+            return False, "support bundle path was outside temp; no cleanup attempted"
+        if resolved.name.startswith("agent-support-") and resolved.is_dir():
+            shutil.rmtree(resolved)
+            return True, "removed incomplete support bundle"
+        return False, "support bundle path was not an owned support bundle"
+    except Exception:
+        return False, "could not remove incomplete support bundle"
 
 
 def _apply_safe_fixes(report: DoctorReport, *, repo_root: Path) -> list[str]:

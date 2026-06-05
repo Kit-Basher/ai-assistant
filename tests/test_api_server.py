@@ -3418,7 +3418,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("not_found", payload["error"])
 
     def test_llm_notifications_endpoints_and_permission_gate(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=False))
+        runtime = AgentRuntime(
+            _config(self.registry_path, self.db_path, llm_notifications_allow_test=False, llm_notifications_max_age_days=0)
+        )
 
         class _HandlerForTest(APIServerHandler):
             def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
@@ -3475,6 +3477,8 @@ class TestAPIServerRuntime(unittest.TestCase):
             allowed_payload = json.loads(allowed_test.body.decode("utf-8"))
             self.assertTrue(allowed_payload["ok"])
             self.assertEqual("sent", allowed_payload["result"]["outcome"])
+            self.assertEqual("llm.notifications.send", allowed_payload["managed_action_journal"]["action_type"])
+            self.assertTrue(allowed_payload["managed_action_journal"]["verification_result"]["ok"])
 
         list_handler = _HandlerForTest(runtime, "/llm/notifications?limit=5")
         list_handler.do_GET()
@@ -3543,6 +3547,7 @@ class TestAPIServerRuntime(unittest.TestCase):
             payload = json.loads(allowed_test.body.decode("utf-8"))
             self.assertTrue(payload["ok"])
             self.assertEqual("sent", payload["result"]["outcome"])
+            self.assertEqual("llm.notifications.send", payload["managed_action_journal"]["action_type"])
 
         notifications = runtime.llm_notifications(limit=5)["notifications"]
         self.assertTrue(len(notifications) >= 1)
@@ -3555,7 +3560,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("local_loopback_default", notification_test_audit[0]["reason"])
 
     def test_llm_notifications_prune_endpoint_requires_permission(self) -> None:
-        runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=False))
+        runtime = AgentRuntime(
+            _config(self.registry_path, self.db_path, llm_notifications_allow_test=False, llm_notifications_max_age_days=0)
+        )
 
         class _HandlerForTest(APIServerHandler):
             def __init__(self, runtime_obj: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
@@ -3624,6 +3631,94 @@ class TestAPIServerRuntime(unittest.TestCase):
         journal = allowed_payload.get("managed_action_journal", {})
         self.assertEqual("llm.notifications.prune", journal.get("action_type"))
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
+
+    def test_llm_notifications_test_failed_append_does_not_leave_success_state(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path, llm_notifications_allow_test=None))
+        runtime.set_listening("127.0.0.1", 8765)
+
+        with patch.object(runtime, "_send_telegram_message", return_value=None), patch.object(
+            runtime, "_resolve_telegram_target", return_value=("token", "chat-1")
+        ), patch.object(runtime._notification_store, "append_verified", return_value=({}, False)):  # type: ignore[attr-defined]
+            ok, payload = runtime.llm_notifications_test({"actor": "test", "confirm": True})
+
+        self.assertFalse(ok)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("notification_history_verification_failed", payload["error"])
+        self.assertEqual([], runtime.llm_notifications(limit=5)["notifications"])
+        journal = payload.get("managed_action_journal", {})
+        self.assertEqual("llm.notifications.send", journal.get("action_type"))
+        self.assertFalse(journal.get("verification_result", {}).get("ok"))
+        self.assertIn("notification test did not finish", payload["message"])
+
+    def test_llm_notifications_prune_verification_failure_restores_history(self) -> None:
+        runtime = AgentRuntime(
+            _config(
+                self.registry_path,
+                self.db_path,
+                llm_notifications_allow_test=False,
+                llm_notifications_max_age_days=0,
+            )
+        )
+        runtime.update_permissions({"mode": "auto", "actions": {"llm.notifications.prune": True}})
+        runtime._notification_store.append(  # type: ignore[attr-defined]
+            ts=1_000,
+            message="keep one",
+            dedupe_hash="h1",
+            delivered_to="local",
+            deferred=False,
+            outcome="sent",
+            reason="sent_local",
+            modified_ids=["defaults:default_model"],
+            mark_sent=True,
+        )
+        runtime._notification_store.append(  # type: ignore[attr-defined]
+            ts=1_001,
+            message="keep two",
+            dedupe_hash="h2",
+            delivered_to="local",
+            deferred=False,
+            outcome="sent",
+            reason="sent_local",
+            modified_ids=["defaults:default_model"],
+            mark_sent=True,
+        )
+
+        real_prune_now = runtime._notification_store.prune_now  # type: ignore[attr-defined]
+
+        def _bad_prune_now(*args: object, **kwargs: object) -> dict[str, object]:
+            result = dict(real_prune_now(*args, **kwargs))
+            result["stored_count"] = 99
+            return result
+
+        with patch.object(runtime._notification_store, "prune_now", side_effect=_bad_prune_now):  # type: ignore[attr-defined]
+            ok, payload = runtime.llm_notifications_prune({"actor": "test", "confirm": True})
+
+        self.assertFalse(ok)
+        self.assertEqual("notification_prune_verification_failed", payload["error"])
+        rows = runtime.llm_notifications(limit=5)["notifications"]
+        self.assertEqual(["h2", "h1"], [row["dedupe_hash"] for row in rows])
+        journal = payload.get("managed_action_journal", {})
+        self.assertFalse(journal.get("verification_result", {}).get("ok"))
+        self.assertTrue(journal.get("rollback_result", {}).get("ok"))
+
+    def test_support_notification_and_ledger_paths_do_not_use_shell_true(self) -> None:
+        import inspect
+        import agent.doctor as doctor_module
+        import agent.llm.notifications as notifications_module
+        import agent.llm.action_ledger as ledger_module
+
+        combined = "\n".join(
+            [
+                inspect.getsource(doctor_module._safe_support_bundle),
+                inspect.getsource(notifications_module.NotificationStore),
+                inspect.getsource(ledger_module.ActionLedgerStore),
+                inspect.getsource(AgentRuntime.llm_notifications_test),
+                inspect.getsource(AgentRuntime.llm_notifications_prune),
+                inspect.getsource(AgentRuntime._record_autopilot_notification),
+            ]
+        )
+        self.assertNotIn("shell=True", combined)
+        self.assertNotIn("shell = True", combined)
 
     def test_notify_autopilot_changes_noop_when_no_diff(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

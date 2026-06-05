@@ -11,6 +11,7 @@ from agent.llm.notifications import (
     sanitize_notification_text,
     should_send,
 )
+from agent.llm.action_ledger import ActionLedgerStore
 
 
 def _before_doc() -> dict[str, object]:
@@ -276,6 +277,40 @@ class TestLLMNotifications(unittest.TestCase):
         self.assertIn("Authorization: [REDACTED]", redacted)
         self.assertIn("?token=[REDACTED]", redacted)
         self.assertIn("&key=[REDACTED]", redacted)
+
+    def test_notification_append_verified_and_action_ledger_readback(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = NotificationStore(path=f"{tmpdir}/notifications.json", max_recent=50, max_age_days=0)
+            _state, verified = store.append_verified(
+                ts=1_000,
+                message="Authorization: Bearer sk-private12345678901234567890",
+                dedupe_hash="notify-hash",
+                delivered_to="local",
+                deferred=False,
+                outcome="sent",
+                reason="sent_local",
+                modified_ids=["defaults:default_model"],
+                mark_sent=True,
+            )
+            self.assertTrue(verified)
+            rows = store.recent(limit=1)
+            self.assertEqual("notify-hash", rows[0]["dedupe_hash"])
+            self.assertNotIn("sk-private12345678901234567890", rows[0]["message"])
+
+            ledger = ActionLedgerStore(path=f"{tmpdir}/ledger.json")
+            row, ledger_verified = ledger.append_verified(
+                ts=1_000,
+                action="llm.notifications.send",
+                actor="system",
+                decision="allow",
+                outcome="success",
+                reason="sent",
+                trigger="test",
+                snapshot_id=None,
+                changed_ids=["notification:notify-hash"],
+            )
+            self.assertTrue(ledger_verified)
+            self.assertEqual(row, ledger.get(str(row["id"])))
 
     def test_build_notification_from_state_diff_redacts_reason_and_values(self) -> None:
         before = {

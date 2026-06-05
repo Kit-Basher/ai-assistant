@@ -209,6 +209,38 @@ class ActionLedgerStore:
         self.save(state)
         return row
 
+    def append_verified(
+        self,
+        *,
+        ts: int,
+        action: str,
+        actor: str,
+        decision: str,
+        outcome: str,
+        reason: str,
+        trigger: str | None,
+        snapshot_id: str | None,
+        snapshot_id_after: str | None = None,
+        resulting_registry_hash: str | None = None,
+        changed_ids: list[str] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        row = self.append(
+            ts=ts,
+            action=action,
+            actor=actor,
+            decision=decision,
+            outcome=outcome,
+            reason=reason,
+            trigger=trigger,
+            snapshot_id=snapshot_id,
+            snapshot_id_after=snapshot_id_after,
+            resulting_registry_hash=resulting_registry_hash,
+            changed_ids=changed_ids,
+        )
+        row_id = str(row.get("id") or "").strip()
+        readback = self.get(row_id)
+        return row, bool(readback and str(readback.get("id") or "").strip() == row_id)
+
     def recent(self, *, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.state.get("entries") if isinstance(self.state.get("entries"), list) else []
         sorted_rows = sorted([dict(item) for item in rows if isinstance(item, dict)], key=self._entry_sort_key)

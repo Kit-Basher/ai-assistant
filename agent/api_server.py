@@ -3568,7 +3568,7 @@ class AgentRuntime:
         changed_ids: list[str] | None = None,
     ) -> None:
         try:
-            self._action_ledger.append(
+            row, verified = self._action_ledger.append_verified(
                 ts=int(time.time()),
                 action=action,
                 actor=actor,
@@ -3587,6 +3587,14 @@ class AgentRuntime:
                     }
                 ),
             )
+            if not verified:
+                log_event(
+                    logger,
+                    "warning",
+                    "autopilot_action_ledger_append_unverified",
+                    action=action,
+                    ledger_id=str(row.get("id") or ""),
+                )
         except Exception:
             return
 
@@ -12267,6 +12275,15 @@ class AgentRuntime:
         outbound_message, _fixit_prompt_state = self._autopilot_notification_message_and_fixit(raw_message)
         return outbound_message
 
+    @staticmethod
+    def _notification_failure_message(action_label: str, rollback_ok: bool, rollback_summary: str) -> str:
+        restored = "Previous local notification state was restored." if rollback_ok else "Previous local notification state may still need attention."
+        remaining = str(rollback_summary or "check notification history and delivery configuration").strip()
+        return (
+            f"The {action_label} did not finish. {restored} "
+            f"Attention: {remaining}. Safe next step: check notification policy/status and retry once."
+        )
+
     def _process_scheduler_notification_cycle(
         self,
         *,
@@ -12365,7 +12382,7 @@ class AgentRuntime:
                 and last_subject_sent_ts > 0
                 and (now_epoch - last_subject_sent_ts) < _SAFE_MODE_BLOCKED_DEDUPE_SECONDS
             ):
-                self._notification_store.append(
+                self._notification_store.append_verified(
                     ts=now_epoch,
                     message=message,
                     dedupe_hash=dedupe_hash,
@@ -12426,7 +12443,7 @@ class AgentRuntime:
                 and last_paused_health_sent_ts > 0
                 and (now_epoch - last_paused_health_sent_ts) < _SAFE_MODE_PAUSED_HEALTH_NOTIFY_SECONDS
             ):
-                self._notification_store.append(
+                self._notification_store.append_verified(
                     ts=now_epoch,
                     message=message,
                     dedupe_hash=dedupe_hash,
@@ -12548,7 +12565,31 @@ class AgentRuntime:
                     reason = "permission_required"
                     error_kind = "permission_required"
 
-        self._notification_store.append(
+        before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
+        journal = ManagedActionJournal(action_type="llm.notifications.send", target="autopilot_notifications")
+        journal.plan_step("preflight_notification_target", resource="autopilot_notifications")
+        journal.plan_step("deliver_notification", resource="autopilot_notifications")
+        journal.plan_step("record_notification_history", resource="autopilot_notifications")
+        journal.plan_step("verify_notification_history", resource="autopilot_notifications")
+        journal.record_step(
+            "preflight_notification_target",
+            ok=True,
+            resource="autopilot_notifications",
+            trigger=trigger,
+            before_count=before_count,
+            message_hash=dedupe_hash,
+            policy_allow=remote_send_allowed,
+        )
+        journal.record_step(
+            "deliver_notification",
+            ok=outcome == "sent" or not bool(send_gate.get("send")),
+            resource="autopilot_notifications",
+            delivered_to=delivered_to,
+            outcome=outcome,
+            reason=sanitize_notification_text(reason),
+            error_kind=error_kind,
+        )
+        _saved_state, append_verified = self._notification_store.append_verified(
             ts=now_epoch,
             message=message,
             dedupe_hash=dedupe_hash,
@@ -12559,6 +12600,24 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
+        after_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
+        journal.record_step(
+            "record_notification_history",
+            ok=append_verified,
+            resource="autopilot_notifications",
+            before_count=before_count,
+            after_count=after_count,
+            outcome=outcome,
+        )
+        journal.record_changed_resource(
+            "notification_history",
+            "autopilot_notifications",
+            rollback_supported=False,
+            before_count=before_count,
+            after_count=after_count,
+        )
+        journal.mark_verification(ok=append_verified, stored_count=after_count, dedupe_hash=dedupe_hash)
+        journal.mark_rollback(ok=True, attempted=False, summary="Notification delivery is not rolled back; local history append is append-only.")
         if safe_mode_key and outcome == "sent":
             self._notification_store.mark_reason_subject_sent(safe_mode_key, now_epoch)
         if should_track_paused_health_send and outcome == "sent":
@@ -12611,6 +12670,7 @@ class AgentRuntime:
                 "models": changed_models,
             },
             "delivered_to": delivered_to,
+            "managed_action_journal": journal.to_dict(),
         }
 
     def _record_autopilot_notification(
@@ -12623,6 +12683,13 @@ class AgentRuntime:
         forced: bool = False,
     ) -> dict[str, Any]:
         now_epoch = int(time.time())
+        before_snapshot = self._notification_store.snapshot()
+        before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
+        journal = ManagedActionJournal(action_type="llm.notifications.send", target="autopilot_notifications")
+        journal.plan_step("preflight_notification_target", resource="autopilot_notifications")
+        journal.plan_step("deliver_notification", resource="autopilot_notifications")
+        journal.plan_step("record_notification_history", resource="autopilot_notifications")
+        journal.plan_step("verify_notification_history", resource="autopilot_notifications")
         decision = should_send(
             now_epoch=now_epoch,
             last_sent_ts=self._notification_store.state.get("last_sent_ts"),
@@ -12637,6 +12704,16 @@ class AgentRuntime:
         )
         if forced:
             decision = {"send": True, "deferred": False, "reason": "forced_test"}
+        journal.record_step(
+            "preflight_notification_target",
+            ok=True,
+            resource="autopilot_notifications",
+            forced=bool(forced),
+            trigger=str(trigger or ""),
+            before_count=before_count,
+            message_hash=str(dedupe_hash or "").strip(),
+            modified_count=len([item for item in (modified_ids or []) if str(item).strip()]),
+        )
 
         delivered_to = "none"
         deferred = bool(decision.get("deferred"))
@@ -12661,8 +12738,18 @@ class AgentRuntime:
             outcome = "skipped"
             reason = "quiet_hours_deferred"
             mark_sent = True
+        journal.record_step(
+            "deliver_notification",
+            ok=outcome == "sent" or not bool(decision.get("send")),
+            resource="autopilot_notifications",
+            delivered_to=delivered_to,
+            deferred=deferred,
+            outcome=outcome,
+            reason=sanitize_notification_text(reason),
+            error_kind=error_kind,
+        )
 
-        self._notification_store.append(
+        _saved_state, append_verified = self._notification_store.append_verified(
             ts=now_epoch,
             message=message,
             dedupe_hash=dedupe_hash,
@@ -12673,6 +12760,42 @@ class AgentRuntime:
             modified_ids=modified_ids,
             mark_sent=mark_sent,
         )
+        after_status = self._notification_store.status()
+        after_count = int((after_status or {}).get("stored_count") or 0)
+        journal.record_step(
+            "record_notification_history",
+            ok=append_verified,
+            resource="autopilot_notifications",
+            before_count=before_count,
+            after_count=after_count,
+            outcome=outcome,
+        )
+        journal.record_changed_resource(
+            "notification_history",
+            "autopilot_notifications",
+            rollback_supported=True,
+            before_count=before_count,
+            after_count=after_count,
+        )
+        journal.mark_verification(ok=append_verified, stored_count=after_count, dedupe_hash=dedupe_hash)
+        if append_verified:
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        else:
+            rollback_ok = False
+            rollback_summary = "could not restore notification history"
+            try:
+                self._notification_store.restore_snapshot(before_snapshot)
+                rollback_ok = True
+                rollback_summary = "restored previous notification history"
+            except Exception:
+                rollback_ok = False
+            journal.record_rollback_step(
+                "restore_notification_history",
+                ok=rollback_ok,
+                resource="autopilot_notifications",
+                summary=rollback_summary,
+            )
+            journal.mark_rollback(ok=rollback_ok, attempted=True, summary=rollback_summary)
 
         self.audit_log.append(
             actor="system" if trigger == "scheduler" else "user",
@@ -12692,12 +12815,25 @@ class AgentRuntime:
             duration_ms=0,
         )
         return {
-            "ok": True,
+            "ok": bool(append_verified),
             "outcome": outcome,
             "reason": reason,
             "delivered_to": delivered_to,
             "deferred": deferred,
             "dedupe_hash": dedupe_hash,
+            "managed_action_journal": journal.to_dict(),
+            **(
+                {}
+                if append_verified
+                else {
+                    "error": "notification_history_verification_failed",
+                    "message": self._notification_failure_message(
+                        "notification send",
+                        bool(journal.rollback_result.get("ok")),
+                        str(journal.rollback_result.get("summary") or ""),
+                    ),
+                }
+            ),
         }
 
     def _notify_autopilot_changes(
@@ -13358,11 +13494,37 @@ class AgentRuntime:
             )
             return False, {"ok": False, "error": "confirmation_required"}
 
+        before_snapshot = self._notification_store.snapshot()
+        before_hash = self._notification_store.state_hash(before_snapshot)
         before_count = int((self._notification_store.status() or {}).get("stored_count") or 0)
-        journal.record_step("read_notification_state", ok=True, resource="autopilot_notifications", stored_count=before_count)
-        result = self._notification_store.prune_now()
+        journal.record_step(
+            "read_notification_state",
+            ok=True,
+            resource="autopilot_notifications",
+            stored_count=before_count,
+            previous_state_hash=before_hash,
+            retention=self._notification_store.status().get("retention"),
+        )
+        try:
+            result = self._notification_store.prune_now()
+        except Exception as exc:
+            journal.record_step(
+                "prune_notification_history",
+                ok=False,
+                resource="autopilot_notifications",
+                error=exc.__class__.__name__,
+            )
+            journal.mark_verification(ok=False, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=True, attempted=False, summary="No notification history mutation was verified.")
+            return False, {
+                "ok": False,
+                "error": "notification_prune_failed",
+                "message": self._notification_failure_message("notification prune", True, "no verified history mutation"),
+                "managed_action_journal": journal.to_dict(),
+            }
         after_status = self._notification_store.status()
         after_count = int((after_status or {}).get("stored_count") or 0)
+        expected_after_count = max(0, before_count - int(result.get("removed_total") or 0))
         journal.record_step(
             "prune_notification_history",
             ok=True,
@@ -13376,7 +13538,36 @@ class AgentRuntime:
             before_count=before_count,
             after_count=after_count,
         )
-        journal.mark_verification(ok=True, stored_count=after_count, removed_total=int(result.get("removed_total") or 0))
+        verification_ok = after_count == int(result.get("stored_count") or after_count) and after_count == expected_after_count
+        journal.mark_verification(
+            ok=verification_ok,
+            stored_count=after_count,
+            expected_count=expected_after_count,
+            removed_total=int(result.get("removed_total") or 0),
+            resulting_state_hash=self._notification_store.state_hash(),
+        )
+        if not verification_ok:
+            rollback_ok = False
+            rollback_summary = "could not restore notification history"
+            try:
+                self._notification_store.restore_snapshot(before_snapshot)
+                rollback_ok = True
+                rollback_summary = "restored previous notification history"
+            except Exception:
+                rollback_ok = False
+            journal.record_rollback_step(
+                "restore_notification_history",
+                ok=rollback_ok,
+                resource="autopilot_notifications",
+                summary=rollback_summary,
+            )
+            journal.mark_rollback(ok=rollback_ok, attempted=True, summary=rollback_summary)
+            return False, {
+                "ok": False,
+                "error": "notification_prune_verification_failed",
+                "message": self._notification_failure_message("notification prune", rollback_ok, rollback_summary),
+                "managed_action_journal": journal.to_dict(),
+            }
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
@@ -13473,6 +13664,36 @@ class AgentRuntime:
             return False, {"ok": False, "error": "notification_test_failed"}
 
         duration_ms = int((time.monotonic() - start) * 1000)
+        if not bool(record.get("ok", True)):
+            self.audit_log.append(
+                actor=actor,
+                action="llm.notifications.test",
+                params={
+                    **base_params,
+                    "delivered_to": str(record.get("delivered_to") or "none"),
+                    "deferred": bool(record.get("deferred", False)),
+                },
+                decision="allow",
+                reason=policy_reason,
+                dry_run=False,
+                outcome="failed",
+                error_kind=str(record.get("error") or "notification_history_verification_failed"),
+                duration_ms=duration_ms,
+            )
+            return False, {
+                "ok": False,
+                "error": str(record.get("error") or "notification_test_failed"),
+                "message": self._notification_failure_message(
+                    "notification test",
+                    bool((record.get("managed_action_journal") or {}).get("rollback_result", {}).get("ok"))
+                    if isinstance(record.get("managed_action_journal"), dict)
+                    else False,
+                    str((record.get("managed_action_journal") or {}).get("rollback_result", {}).get("summary") or "")
+                    if isinstance(record.get("managed_action_journal"), dict)
+                    else "",
+                ),
+                "managed_action_journal": record.get("managed_action_journal"),
+            }
         self.audit_log.append(
             actor=actor,
             action="llm.notifications.test",
@@ -13488,7 +13709,7 @@ class AgentRuntime:
             error_kind=None,
             duration_ms=duration_ms,
         )
-        return True, {"ok": True, "result": record}
+        return True, {"ok": True, "result": record, "managed_action_journal": record.get("managed_action_journal")}
 
     def llm_health_summary(
         self,

@@ -460,6 +460,19 @@ class NotificationStore:
         self.state = normalized
         return normalized
 
+    def snapshot(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self.state if isinstance(self.state, dict) else self.empty_state(), ensure_ascii=True))
+
+    def state_hash(self, state: dict[str, Any] | None = None) -> str:
+        payload = state if isinstance(state, dict) else self.state
+        normalized = self._normalize(payload if isinstance(payload, dict) else {})
+        return hashlib.sha256(
+            json.dumps(normalized, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+    def restore_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        return self.save(snapshot if isinstance(snapshot, dict) else self.empty_state())
+
     def append(
         self,
         *,
@@ -499,6 +512,40 @@ class NotificationStore:
             current["last_sent_ts"] = int(ts)
             current["last_sent_hash"] = str(dedupe_hash or "").strip() or None
         return self.save(current)
+
+    def append_verified(
+        self,
+        *,
+        ts: int,
+        message: str,
+        dedupe_hash: str,
+        delivered_to: str,
+        deferred: bool,
+        outcome: str,
+        reason: str,
+        modified_ids: list[str] | None = None,
+        mark_sent: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        saved = self.append(
+            ts=ts,
+            message=message,
+            dedupe_hash=dedupe_hash,
+            delivered_to=delivered_to,
+            deferred=deferred,
+            outcome=outcome,
+            reason=reason,
+            modified_ids=modified_ids,
+            mark_sent=mark_sent,
+        )
+        target_hash = str(dedupe_hash or "").strip()
+        rows = saved.get("notifications") if isinstance(saved.get("notifications"), list) else []
+        verified = any(
+            isinstance(row, dict)
+            and str(row.get("dedupe_hash") or "").strip() == target_hash
+            and str(row.get("outcome") or "").strip() == str(outcome or "skipped")
+            for row in rows
+        )
+        return saved, verified
 
     def recent(self, limit: int = 20) -> list[dict[str, Any]]:
         rows = self.state.get("notifications") if isinstance(self.state.get("notifications"), list) else []

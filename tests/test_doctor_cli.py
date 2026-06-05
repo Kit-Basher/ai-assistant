@@ -30,6 +30,7 @@ from agent.doctor import (
     _check_telegram_token,
     _check_write_mode_safe,
     _render_text_report,
+    _safe_support_bundle,
     main,
     run_doctor_report,
 )
@@ -61,6 +62,59 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertEqual(["a", "b", "c"], [item["check_id"] for item in payload["checks"]])
         self.assertEqual("FAIL", payload["summary_status"])
         self.assertEqual("Do gamma", payload["next_action"])
+
+    def test_support_bundle_creation_journals_and_verifies(self) -> None:
+        report = DoctorReport(
+            trace_id="trace-support",
+            generated_at="2026-01-01T00:00:00+00:00",
+            summary_status="OK",
+            checks=[DoctorCheck("secret", "OK", "token=sk-private12345678901234567890")],
+            next_action=None,
+            fixes_applied=[],
+            support_bundle_path=None,
+        )
+
+        bundle_dir = _safe_support_bundle(report, repo_root=Path.cwd(), api_base_url="http://127.0.0.1:9")
+
+        self.assertTrue(str(bundle_dir or "").strip())
+        root = Path(str(bundle_dir))
+        self.assertTrue((root / "doctor_support_bundle.json").is_file())
+        self.assertTrue((root / "SUMMARY.txt").is_file())
+        journal_path = root / "managed_action_journal.json"
+        self.assertTrue(journal_path.is_file())
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        self.assertEqual("doctor.support_bundle.write", journal["action_type"])
+        self.assertTrue(journal["verification_result"]["ok"])
+        rendered = "\n".join(path.read_text(encoding="utf-8") for path in root.iterdir() if path.is_file())
+        self.assertNotIn("sk-private12345678901234567890", rendered)
+
+    def test_failed_support_bundle_verification_removes_owned_incomplete_artifact(self) -> None:
+        report = DoctorReport(
+            trace_id="trace-support-fail",
+            generated_at="2026-01-01T00:00:00+00:00",
+            summary_status="OK",
+            checks=[],
+            next_action=None,
+            fixes_applied=[],
+            support_bundle_path=None,
+        )
+        created_dirs: list[Path] = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def _tracking_mkdtemp(*args: object, **kwargs: object) -> str:
+            path = Path(real_mkdtemp(*args, **kwargs))
+            created_dirs.append(path)
+            return str(path)
+
+        with patch("agent.doctor.tempfile.mkdtemp", side_effect=_tracking_mkdtemp), patch(
+            "agent.doctor._verify_support_bundle_artifacts",
+            return_value=False,
+        ):
+            bundle_dir = _safe_support_bundle(report, repo_root=Path.cwd(), api_base_url="http://127.0.0.1:9")
+
+        self.assertIsNone(bundle_dir)
+        self.assertTrue(created_dirs)
+        self.assertFalse(created_dirs[0].exists())
 
     def test_secret_store_missing_returns_warn_with_action(self) -> None:
         with patch.dict(os.environ, {"AGENT_SECRET_STORE_PATH": "/tmp/does-not-exist.secrets"}, clear=False):
