@@ -56,9 +56,10 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertFalse(bool(audit.get("stored", True)))
 
     def _record_basic_external_pack(self) -> dict[str, object]:
-        source = self.root / "source-basic"
+        index = len(list(self.root.glob("source-basic-*")))
+        source = self.root / f"source-basic-{index}"
         source.mkdir()
-        (source / "SKILL.md").write_text("# Basic Pack\n\nUse as untrusted guidance.\n", encoding="utf-8")
+        (source / "SKILL.md").write_text(f"# Basic Pack {index}\n\nUse as untrusted guidance.\n", encoding="utf-8")
         result, review = self.ingestor.ingest_from_path(str(source))
         return self.store.record_external_pack(
             canonical_pack=result.pack.to_dict(),
@@ -77,6 +78,77 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertEqual("external_pack_import_record", journal.get("action_type"))
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+
+    def test_pack_removal_journals_and_verifies_tombstone_state(self) -> None:
+        row = self._record_basic_external_pack()
+        pack_id = str(row["pack_id"])
+
+        removed = self.store.remove_external_pack(pack_id, removed_by="test", reason="unit_test")
+
+        assert removed is not None
+        journal = removed.get("managed_action_journal") if isinstance(removed.get("managed_action_journal"), dict) else {}
+        self.assertTrue(removed.get("metadata_update_ok"))
+        self.assertEqual("external_pack_removal", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertTrue(journal.get("verification_result", {}).get("tombstone_present"))
+        self.assertFalse(journal.get("verification_result", {}).get("usable"))
+        self.assertIsNone(self.store.get_external_pack(pack_id))
+        self.assertIsNotNone(self.store.get_external_pack_removal(pack_id))
+
+    def test_failed_pack_removal_verification_restores_previous_metadata(self) -> None:
+        row = self._record_basic_external_pack()
+        pack_id = str(row["pack_id"])
+        current = self.store.get_external_pack(pack_id)
+        assert current is not None
+
+        with patch.object(self.store, "get_external_pack", side_effect=[current, current, current]):
+            failed = self.store.remove_external_pack(pack_id, removed_by="test", reason="unit_test")
+
+        assert failed is not None
+        journal = failed.get("managed_action_journal") if isinstance(failed.get("managed_action_journal"), dict) else {}
+        self.assertFalse(failed.get("metadata_update_ok"))
+        self.assertEqual("external_pack_removal_verification_failed", failed.get("error_kind"))
+        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        self.assertTrue(journal.get("rollback_result", {}).get("ok"))
+        restored = self.store.get_external_pack(pack_id)
+        assert restored is not None
+        self.assertEqual(pack_id, restored.get("pack_id"))
+
+    def test_pack_removal_does_not_touch_unrelated_pack_records(self) -> None:
+        first = self._record_basic_external_pack()
+        second = self._record_basic_external_pack()
+        first_id = str(first["pack_id"])
+        second_id = str(second["pack_id"])
+
+        removed = self.store.remove_external_pack(first_id, removed_by="test", reason="unit_test")
+
+        assert removed is not None
+        self.assertIsNone(self.store.get_external_pack(first_id))
+        unrelated = self.store.get_external_pack(second_id)
+        assert unrelated is not None
+        self.assertEqual(second_id, unrelated.get("pack_id"))
+
+    def test_removed_pack_cannot_be_enabled(self) -> None:
+        row = self._record_basic_external_pack()
+        pack_id = str(row["pack_id"])
+        self.store.set_external_pack_review_status(pack_id, local_review_status="approved", approve_current_hash=True)
+
+        removed = self.store.remove_external_pack(pack_id, removed_by="test", reason="unit_test")
+        enabled = self.store.set_external_pack_enabled(pack_id, enabled=True)
+
+        assert removed is not None
+        self.assertIsNone(enabled)
+        self.assertIsNone(self.store.get_external_pack(pack_id))
+
+    def test_pack_removal_does_not_execute_external_pack_code(self) -> None:
+        row = self._record_basic_external_pack()
+        pack_id = str(row["pack_id"])
+
+        with patch("subprocess.run") as run:
+            removed = self.store.remove_external_pack(pack_id, removed_by="test", reason="unit_test")
+
+        assert removed is not None
+        run.assert_not_called()
 
     def test_review_approval_journals_and_verifies(self) -> None:
         row = self._record_basic_external_pack()

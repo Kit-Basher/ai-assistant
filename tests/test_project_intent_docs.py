@@ -155,6 +155,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "provider/api key",
         "telegram",
         "pack source approval",
+        "pack removal/source deletion cleanup",
         "pack quarantine fetch/import",
         "registry prune/rollback/hygiene/autoconfig/self-heal",
         "file operations",
@@ -169,6 +170,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "memory/bootstrap writes",
         "onboarding/preferences writes",
         "support bundle writes",
+        "semantic-memory indexing/scheduled observe writes",
         "medium risk remaining",
         "high risk remaining",
     ):

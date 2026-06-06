@@ -9,9 +9,12 @@ import threading
 import urllib.error
 import urllib.parse
 import urllib.request
+import copy
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from agent.actions.managed_action_recovery import ManagedActionJournal
 
 REGISTRY_KIND_CLAWHUB_TEXT = "clawhub_text_registry"
 REGISTRY_KIND_GITHUB_INDEX = "github_repo_index"
@@ -465,11 +468,41 @@ class PackRegistryDiscoveryService:
             return self.get_catalog_source(normalized)
 
     def delete_catalog_source(self, source_id: str, *, changed_by: str | None = None) -> dict[str, Any]:
+        journal = ManagedActionJournal(action_type="pack_source_catalog_delete", target=str(source_id or "").strip())
+        journal.plan_step("capture_previous_pack_source", resource=str(source_id or "").strip())
+        journal.plan_step("preflight_pack_source_delete", resource=str(source_id or "").strip())
+        journal.plan_step("write_pack_source_delete", resource=str(source_id or "").strip())
+        journal.plan_step("cleanup_pack_source_policy", resource=str(source_id or "").strip())
+        journal.plan_step("verify_pack_source_delete", resource=str(source_id or "").strip())
         with self._lock:
             source = self._source_by_id(source_id)
             normalized = str(source_id or "").strip()
             document, _ = self._read_sources_document()
+            previous_document = copy.deepcopy(document)
+            previous_policy_document, previous_policy_exists = self._read_policy_document()
             current_row = self._raw_source_for_id(document, normalized) or self._source_to_persisted_row(source)
+            journal.record_step(
+                "capture_previous_pack_source",
+                ok=True,
+                resource=normalized,
+                previous_source=self._source_metadata_snapshot(current_row),
+                previous_catalog_hash=self._catalog_hash(document),
+                previous_policy_hash=self._policy_hash(previous_policy_document),
+            )
+            if str(current_row.get("kind") or "").strip().lower() not in ALLOWED_REGISTRY_SOURCE_KINDS:
+                journal.record_step("preflight_pack_source_delete", ok=False, resource=normalized, reason="unknown_source_kind")
+                journal.mark_verification(ok=False, source_id=normalized, reason="unknown_source_kind")
+                journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+                result = {
+                    "path": str(self.sources_path),
+                    "deleted_source_id": normalized,
+                    "deleted_source": source.to_dict(),
+                    "metadata_update_ok": False,
+                    "error_kind": "unknown_source_kind",
+                    "managed_action_journal": journal.to_dict(),
+                }
+                return result
+            journal.record_step("preflight_pack_source_delete", ok=True, resource=normalized, source_kind=str(current_row.get("kind") or ""))
             next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
             next_document = self._with_catalog_audit_update(
                 current_document=document,
@@ -480,7 +513,72 @@ class PackRegistryDiscoveryService:
                 operation="delete",
             )
             self._write_sources_document(next_document)
+            journal.record_step(
+                "write_pack_source_delete",
+                ok=True,
+                resource=normalized,
+                previous_catalog_hash=self._catalog_hash(document),
+                new_catalog_hash=self._catalog_hash(next_document),
+            )
             policy_cleanup = self._remove_policy_override_for_deleted_source(normalized, changed_by=changed_by)
+            journal.record_step(
+                "cleanup_pack_source_policy",
+                ok=True,
+                resource=normalized,
+                policy_override_removed=bool(policy_cleanup.get("removed", False)),
+            )
+            verified_document, _ = self._read_sources_document()
+            verified_policy_document, _ = self._read_policy_document()
+            source_still_present = self._raw_source_for_id(verified_document, normalized) is not None
+            policy_still_present = self._raw_override_for_source(verified_policy_document, normalized) is not None
+            verify_ok = not source_still_present and not policy_still_present
+            journal.record_step(
+                "verify_pack_source_delete",
+                ok=verify_ok,
+                resource=normalized,
+                source_present=source_still_present,
+                policy_override_present=policy_still_present,
+                catalog_hash=self._catalog_hash(verified_document),
+                policy_hash=self._policy_hash(verified_policy_document),
+            )
+            if not verify_ok:
+                rollback_ok, rollback_summary = self._restore_source_and_policy_documents(
+                    previous_sources_document=previous_document,
+                    previous_policy_document=previous_policy_document,
+                    previous_policy_exists=previous_policy_exists,
+                    journal=journal,
+                    source_id=normalized,
+                )
+                journal.mark_verification(ok=False, source_id=normalized, source_removed=not source_still_present, policy_override_removed=not policy_still_present)
+                return {
+                    "path": str(self.sources_path),
+                    "deleted_source_id": normalized,
+                    "deleted_source": source.to_dict(),
+                    "persisted_catalog": self._read_sources_document()[0],
+                    "policy_override_removed": bool(policy_cleanup.get("removed", False)),
+                    "policy_cleanup": policy_cleanup,
+                    "metadata_update_ok": False,
+                    "error_kind": "pack_source_delete_verification_failed",
+                    "rollback_ok": rollback_ok,
+                    "rollback_summary": rollback_summary,
+                    "managed_action_journal": journal.to_dict(),
+                }
+            journal.record_changed_resource(
+                "pack_source_catalog_record",
+                normalized,
+                rollback_supported=True,
+                previous=self._source_metadata_snapshot(current_row),
+                current={"exists": False, "source_id": normalized},
+            )
+            if bool(policy_cleanup.get("removed", False)):
+                journal.record_changed_resource(
+                    "pack_source_policy_override",
+                    normalized,
+                    rollback_supported=True,
+                    current={"exists": False, "source_id": normalized},
+                )
+            journal.mark_verification(ok=True, source_id=normalized, source_removed=True, policy_override_removed=not policy_still_present)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
             return {
                 "path": str(self.sources_path),
                 "deleted_source_id": normalized,
@@ -488,6 +586,8 @@ class PackRegistryDiscoveryService:
                 "persisted_catalog": next_document,
                 "policy_override_removed": bool(policy_cleanup.get("removed", False)),
                 "policy_cleanup": policy_cleanup,
+                "metadata_update_ok": True,
+                "managed_action_journal": journal.to_dict(),
             }
 
     def get_policy(self) -> dict[str, Any]:
@@ -859,6 +959,50 @@ class PackRegistryDiscoveryService:
             tmp_path = self.sources_path.with_name(f"{self.sources_path.name}.tmp")
             tmp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True) + "\n", encoding="utf-8")
             tmp_path.replace(self.sources_path)
+
+    @staticmethod
+    def _source_metadata_snapshot(row: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(row, dict):
+            return {"exists": False}
+        stable = {
+            "id": str(row.get("id") or row.get("source_id") or "").strip(),
+            "kind": str(row.get("kind") or "").strip(),
+            "enabled": bool(row.get("enabled", True)),
+            "discovery_only": bool(row.get("discovery_only", True)),
+        }
+        return {
+            "exists": True,
+            "source_id": stable["id"],
+            "kind": stable["kind"],
+            "enabled": stable["enabled"],
+            "discovery_only": stable["discovery_only"],
+            "metadata_hash": _hash_text(_safe_json(stable)),
+        }
+
+    def _restore_source_and_policy_documents(
+        self,
+        *,
+        previous_sources_document: dict[str, Any],
+        previous_policy_document: dict[str, Any],
+        previous_policy_exists: bool,
+        journal: ManagedActionJournal,
+        source_id: str,
+    ) -> tuple[bool, str]:
+        try:
+            self._write_sources_document(previous_sources_document)
+            if previous_policy_exists:
+                self._write_policy_document(previous_policy_document)
+            elif self.policy_path.exists():
+                self.policy_path.unlink()
+            summary = "restored the previous pack source catalog and policy metadata"
+            journal.record_rollback_step("restore_pack_source_catalog_and_policy", ok=True, resource=source_id, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "rollback could not restore the previous pack source catalog and policy metadata"
+            journal.record_rollback_step("restore_pack_source_catalog_and_policy", ok=False, resource=source_id, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
 
     def _normalize_sources_document(self, document: dict[str, Any]) -> list[dict[str, Any]]:
         return [

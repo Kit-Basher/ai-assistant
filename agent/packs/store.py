@@ -571,23 +571,57 @@ class PackStore:
         removed_by: str | None = None,
         reason: str | None = None,
     ) -> dict[str, Any] | None:
+        journal = ManagedActionJournal(action_type="external_pack_removal", target=pack_id)
+        journal.plan_step("capture_previous_external_pack", resource=pack_id)
+        journal.plan_step("preflight_external_pack_removal", resource=pack_id)
+        journal.plan_step("write_external_pack_tombstone", resource=pack_id)
+        journal.plan_step("verify_external_pack_removal", resource=pack_id)
         current = self.get_external_pack(pack_id)
         existing_removal = self.get_external_pack_removal(pack_id)
+        journal.record_step(
+            "capture_previous_external_pack",
+            ok=True,
+            resource=pack_id,
+            previous_pack=self._external_pack_metadata_snapshot(current),
+            previous_removal=self._external_pack_removal_snapshot(existing_removal),
+        )
         if current is None:
             if existing_removal is None:
+                journal.record_step("preflight_external_pack_removal", ok=False, resource=pack_id, reason="pack_not_found")
+                journal.mark_verification(ok=False, pack_id=pack_id, reason="pack_not_found")
+                journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
                 return None
+            journal.record_step("preflight_external_pack_removal", ok=True, resource=pack_id, already_removed=True)
             normalized_root = Path(self.external_storage_root())
             normalized_path = self._path_within_root(existing_removal.get("normalized_path"), normalized_root)
             quarantine_path = self._path_within_root(existing_removal.get("quarantine_path"), normalized_root)
             self._remove_tree(normalized_path)
             self._remove_tree(quarantine_path)
             self._mark_external_pack_removed(pack_id)
+            journal.record_step("verify_external_pack_removal", ok=True, resource=pack_id, already_removed=True)
+            journal.mark_verification(ok=True, pack_id=pack_id, already_removed=True)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
             return {
                 "removed": False,
                 "already_removed": True,
                 "removal": existing_removal,
                 "pack": None,
+                "metadata_update_ok": True,
+                "managed_action_journal": journal.to_dict(),
             }
+        if str(current.get("trust") or "").strip().lower() == "native":
+            journal.record_step("preflight_external_pack_removal", ok=False, resource=pack_id, reason="native_pack_not_external")
+            journal.mark_verification(ok=False, pack_id=pack_id, reason="native_pack_not_external")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+            return {
+                "removed": False,
+                "pack": current,
+                "removal": existing_removal or {},
+                "metadata_update_ok": False,
+                "error_kind": "native_pack_not_external",
+                "managed_action_journal": journal.to_dict(),
+            }
+        journal.record_step("preflight_external_pack_removal", ok=True, resource=pack_id, external_pack=True)
         now_ts = self._now_ts()
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         risk_report = current.get("risk_report") if isinstance(current.get("risk_report"), dict) else {}
@@ -664,13 +698,64 @@ class PackStore:
                 self._conn.commit()
 
         self._write_with_retry(_write)
+        journal.record_step(
+            "write_external_pack_tombstone",
+            ok=True,
+            resource=pack_id,
+            tombstone=self._external_pack_removal_snapshot(removal_payload),
+        )
         self._mark_external_pack_removed(pack_id)
+        verified_pack = self.get_external_pack(pack_id)
+        verified_removal = self.get_external_pack_removal(pack_id)
+        verify_ok = verified_pack is None and isinstance(verified_removal, dict) and str(verified_removal.get("pack_id") or "") == str(pack_id)
+        journal.record_step(
+            "verify_external_pack_removal",
+            ok=verify_ok,
+            resource=pack_id,
+            current_pack=self._external_pack_metadata_snapshot(verified_pack),
+            current_removal=self._external_pack_removal_snapshot(verified_removal),
+            usable=False,
+        )
+        if not verify_ok:
+            rollback_ok, rollback_summary = self._restore_external_pack_after_removal(
+                pack_id,
+                previous_pack=current,
+                previous_removal=existing_removal,
+                journal=journal,
+            )
+            journal.mark_verification(ok=False, pack_id=pack_id, expected_removed=True)
+            return {
+                "removed": False,
+                "pack": self.get_external_pack(pack_id) or current,
+                "removal": self.get_external_pack_removal(pack_id) or existing_removal or {},
+                "metadata_update_ok": False,
+                "error_kind": "external_pack_removal_verification_failed",
+                "rollback_ok": rollback_ok,
+                "rollback_summary": rollback_summary,
+                "managed_action_journal": journal.to_dict(),
+            }
+        journal.record_changed_resource(
+            "external_pack_record",
+            pack_id,
+            rollback_supported=True,
+            previous=self._external_pack_metadata_snapshot(current),
+            current={"exists": False, "pack_id": pack_id},
+        )
+        journal.record_created_resource(
+            "external_pack_removal_tombstone",
+            pack_id,
+            rollback_supported=existing_removal is None,
+        )
+        journal.mark_verification(ok=True, pack_id=pack_id, tombstone_present=True, usable=False)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
         self._remove_tree(normalized_path)
         self._remove_tree(quarantine_path)
         return {
             "removed": True,
             "removal": removal_payload,
             "pack": current,
+            "metadata_update_ok": True,
+            "managed_action_journal": journal.to_dict(),
         }
 
     def _store_external_pack_diff(self, from_pack_id: str, to_pack_id: str, diff_payload: dict[str, Any]) -> dict[str, Any]:
@@ -1420,6 +1505,29 @@ class PackStore:
             "canonical_hash": hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
         }
 
+    @staticmethod
+    def _external_pack_removal_snapshot(row: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(row, dict):
+            return {"exists": False}
+        canonical = row.get("canonical_pack") or row.get("canonical_json")
+        if not isinstance(canonical, dict):
+            canonical = {}
+        review = row.get("review_envelope") or row.get("review_json")
+        if not isinstance(review, dict):
+            review = {}
+        audit = review.get("removed_skill_text") if isinstance(review.get("removed_skill_text"), dict) else {}
+        canonical_json = json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return {
+            "exists": True,
+            "pack_id": str(row.get("pack_id") or "").strip(),
+            "canonical_hash": hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
+            "skill_text_stored": bool(str(row.get("skill_text") or "").strip()),
+            "removed_skill_text_sha256": str(audit.get("sha256") or "").strip() or None,
+            "removed_by": str(row.get("removed_by") or "").strip() or None,
+            "reason": str(row.get("reason") or "").strip() or None,
+            "removed_at": int(row.get("removed_at") or 0),
+        }
+
     def _restore_external_pack_canonical(
         self,
         canonical_id: str,
@@ -1513,5 +1621,104 @@ class PackStore:
         except Exception as exc:
             summary = "rollback could not restore the previous external pack record"
             journal.record_rollback_step("restore_external_pack_record", ok=False, resource=pack_id, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
+    def _restore_external_pack_after_removal(
+        self,
+        pack_id: str,
+        *,
+        previous_pack: dict[str, Any],
+        previous_removal: dict[str, Any] | None,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            with self._lock:
+                canonical = previous_pack.get("canonical_pack") if isinstance(previous_pack.get("canonical_pack"), dict) else {}
+                risk = previous_pack.get("risk_report") if isinstance(previous_pack.get("risk_report"), dict) else {}
+                review = previous_pack.get("review_envelope") if isinstance(previous_pack.get("review_envelope"), dict) else {}
+                self._conn.execute(
+                    """
+                    INSERT INTO external_packs (
+                        pack_id, pack_name, version, pack_type, classification, status,
+                        canonical_json, risk_json, review_json, quarantine_path, normalized_path,
+                        installed_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(pack_id) DO UPDATE SET
+                        pack_name = excluded.pack_name,
+                        version = excluded.version,
+                        pack_type = excluded.pack_type,
+                        classification = excluded.classification,
+                        status = excluded.status,
+                        canonical_json = excluded.canonical_json,
+                        risk_json = excluded.risk_json,
+                        review_json = excluded.review_json,
+                        quarantine_path = excluded.quarantine_path,
+                        normalized_path = excluded.normalized_path,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        pack_id,
+                        str(previous_pack.get("name") or previous_pack.get("pack_name") or pack_id),
+                        str(previous_pack.get("version") or "0.1.0"),
+                        str(previous_pack.get("pack_type") or canonical.get("type") or "skill"),
+                        str(previous_pack.get("classification") or "unknown_pack"),
+                        str(previous_pack.get("status") or "blocked"),
+                        json.dumps(canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(risk, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        json.dumps(review, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                        str(previous_pack.get("quarantine_path") or "").strip() or None,
+                        str(previous_pack.get("normalized_path") or "").strip() or None,
+                        int(previous_pack.get("installed_at") or self._now_ts()),
+                        self._now_ts(),
+                    ),
+                )
+                if previous_removal is None:
+                    self._conn.execute("DELETE FROM external_pack_removals WHERE pack_id = ?", (pack_id,))
+                else:
+                    previous_canonical = previous_removal.get("canonical_pack") if isinstance(previous_removal.get("canonical_pack"), dict) else {}
+                    previous_risk = previous_removal.get("risk_report") if isinstance(previous_removal.get("risk_report"), dict) else {}
+                    previous_review = previous_removal.get("review_envelope") if isinstance(previous_removal.get("review_envelope"), dict) else {}
+                    self._conn.execute(
+                        """
+                        INSERT INTO external_pack_removals (
+                            pack_id, canonical_json, risk_json, review_json, skill_text, normalized_path, quarantine_path,
+                            removed_by, reason, removed_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(pack_id) DO UPDATE SET
+                            canonical_json = excluded.canonical_json,
+                            risk_json = excluded.risk_json,
+                            review_json = excluded.review_json,
+                            skill_text = excluded.skill_text,
+                            normalized_path = excluded.normalized_path,
+                            quarantine_path = excluded.quarantine_path,
+                            removed_by = excluded.removed_by,
+                            reason = excluded.reason,
+                            removed_at = excluded.removed_at,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            pack_id,
+                            json.dumps(previous_canonical, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                            json.dumps(previous_risk, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                            json.dumps(previous_review, ensure_ascii=True, sort_keys=True, separators=(",", ":")),
+                            None,
+                            str(previous_removal.get("normalized_path") or "").strip() or None,
+                            str(previous_removal.get("quarantine_path") or "").strip() or None,
+                            str(previous_removal.get("removed_by") or "").strip() or None,
+                            str(previous_removal.get("reason") or "").strip() or None,
+                            int(previous_removal.get("removed_at") or self._now_ts()),
+                            self._now_ts(),
+                        ),
+                    )
+                self._conn.commit()
+            self._forget_external_pack_removed(pack_id)
+            summary = "restored the previous external pack metadata"
+            journal.record_rollback_step("restore_external_pack_after_removal", ok=True, resource=pack_id, summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "rollback could not restore the previous external pack metadata"
+            journal.record_rollback_step("restore_external_pack_after_removal", ok=False, resource=pack_id, error=exc.__class__.__name__)
             journal.mark_rollback(ok=False, attempted=True, summary=summary)
             return False, summary

@@ -1606,6 +1606,37 @@ class AgentRuntime:
                 message=f"pack source not found: {source_id}",
                 next_question="Use a source id returned by GET /pack_sources/catalog.",
             )
+        if result.get("metadata_update_ok") is False:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            rollback_ok = bool(result.get("rollback_ok", False))
+            message = compose_actionable_message(
+                what_happened=f"Pack source cleanup did not finish for {source_id}.",
+                why=(
+                    "Previous source catalog/policy metadata was restored."
+                    if rollback_ok
+                    else "Rollback could not fully restore the previous source catalog/policy metadata."
+                ),
+                next_action="Use GET /pack_sources/catalog and GET /pack_sources/policy to inspect the remaining source state.",
+            )
+            self.audit_log.append(
+                actor=actor,
+                action="packs.discovery_catalog.delete",
+                params={"source_id": source_id},
+                decision="allow",
+                reason="catalog_delete_verification_failed",
+                dry_run=False,
+                outcome="failed",
+                error_kind=str(result.get("error_kind") or "pack_source_delete_verification_failed"),
+                duration_ms=duration_ms,
+            )
+            return False, {
+                "ok": False,
+                "error": str(result.get("error_kind") or "pack_source_delete_verification_failed"),
+                "error_kind": str(result.get("error_kind") or "pack_source_delete_verification_failed"),
+                "message": message,
+                "next_action": "Use GET /pack_sources/catalog and GET /pack_sources/policy to inspect the remaining source state.",
+                **result,
+            }
         last_change = self._pack_source_catalog_last_change(result)
         duration_ms = int((time.monotonic() - start) * 1000)
         self.audit_log.append(
@@ -1898,6 +1929,25 @@ class AgentRuntime:
                 message=f"external pack not found: {canonical_id}",
                 next_question="Use a canonical external pack id returned by /packs or /packs/install.",
             )
+        if removed.get("metadata_update_ok") is False:
+            rollback_ok = bool(removed.get("rollback_ok", False))
+            message = compose_actionable_message(
+                what_happened=f"External pack cleanup did not finish for {canonical_id}.",
+                why=(
+                    "Previous pack metadata was restored."
+                    if rollback_ok
+                    else "Rollback could not fully restore the previous pack metadata."
+                ),
+                next_action="Use /packs to inspect whether the pack is still present before trying again.",
+            )
+            return False, {
+                "ok": False,
+                "error": str(removed.get("error_kind") or "external_pack_removal_verification_failed"),
+                "error_kind": str(removed.get("error_kind") or "external_pack_removal_verification_failed"),
+                "message": message,
+                "next_action": "Use /packs to inspect whether the pack is still present before trying again.",
+                **removed,
+            }
         pack = removed.get("pack") if isinstance(removed.get("pack"), dict) else {}
         removal = removed.get("removal") if isinstance(removed.get("removal"), dict) else {}
         already_removed = bool(removed.get("already_removed", False))
@@ -1930,6 +1980,7 @@ class AgentRuntime:
             "removal": removal,
             "next_action": "Use /packs to confirm it is gone, or reinstall it later if needed.",
             "already_removed": already_removed,
+            "managed_action_journal": removed.get("managed_action_journal") if isinstance(removed.get("managed_action_journal"), dict) else {},
         }
 
     def compare_packs(self, from_pack_id: str, to_pack_id: str) -> tuple[bool, dict[str, Any]]:
