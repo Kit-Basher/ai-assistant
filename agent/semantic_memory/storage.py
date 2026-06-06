@@ -666,6 +666,145 @@ class SQLiteSemanticStore:
         finally:
             conn.close()
 
+    def delete_index_state(self, scope: str = "global") -> None:
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM semantic_index_state WHERE scope = ?", (self._normalize_scope(scope),))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def source_bundle(self, source_id: str) -> dict[str, Any] | None:
+        conn = self._connect()
+        try:
+            source_row = conn.execute("SELECT * FROM semantic_sources WHERE id = ? LIMIT 1", (str(source_id),)).fetchone()
+            if source_row is None:
+                return None
+            chunk_rows = conn.execute(
+                "SELECT * FROM semantic_chunks WHERE source_id = ? ORDER BY chunk_index ASC, id ASC",
+                (str(source_id),),
+            ).fetchall()
+            chunk_ids = [str(row["id"]) for row in chunk_rows]
+            vector_rows: list[sqlite3.Row] = []
+            if chunk_ids:
+                placeholders = ",".join("?" for _ in chunk_ids)
+                vector_rows = conn.execute(
+                    f"SELECT * FROM semantic_vectors WHERE chunk_id IN ({placeholders}) ORDER BY chunk_id ASC",
+                    tuple(chunk_ids),
+                ).fetchall()
+        finally:
+            conn.close()
+
+        return {
+            "source": dict(source_row),
+            "chunks": [dict(row) for row in chunk_rows],
+            "vectors": [dict(row) for row in vector_rows],
+        }
+
+    def restore_source_bundle(self, bundle: dict[str, Any]) -> None:
+        source = dict(bundle.get("source") or {})
+        if not source.get("id"):
+            return
+        chunks = [dict(row) for row in bundle.get("chunks") or [] if isinstance(row, dict)]
+        vectors = [dict(row) for row in bundle.get("vectors") or [] if isinstance(row, dict)]
+        conn = self._connect()
+        try:
+            conn.execute("DELETE FROM semantic_vectors WHERE chunk_id IN (SELECT id FROM semantic_chunks WHERE source_id = ?)", (str(source["id"]),))
+            conn.execute("DELETE FROM semantic_chunks WHERE source_id = ?", (str(source["id"]),))
+            conn.execute("DELETE FROM semantic_sources WHERE id = ?", (str(source["id"]),))
+            conn.execute(
+                """
+                INSERT INTO semantic_sources (
+                    id, source_kind, source_ref, scope, content_hash, title, thread_id, project_id, pinned,
+                    status, created_at, updated_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(source["id"]),
+                    str(source["source_kind"]),
+                    str(source["source_ref"]),
+                    str(source["scope"]),
+                    str(source["content_hash"]),
+                    source.get("title"),
+                    source.get("thread_id"),
+                    source.get("project_id"),
+                    int(source.get("pinned") or 0),
+                    str(source.get("status") or "ready"),
+                    int(source.get("created_at") or _now_ts()),
+                    int(source.get("updated_at") or _now_ts()),
+                    str(source.get("metadata_json") or "{}"),
+                ),
+            )
+            for row in chunks:
+                conn.execute(
+                    """
+                    INSERT INTO semantic_chunks (
+                        id, source_id, chunk_index, text, chunk_hash, char_start, char_end, created_at, updated_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row["id"]),
+                        str(row["source_id"]),
+                        int(row["chunk_index"]),
+                        str(row["text"]),
+                        str(row["chunk_hash"]),
+                        int(row["char_start"]) if row.get("char_start") is not None else None,
+                        int(row["char_end"]) if row.get("char_end") is not None else None,
+                        int(row["created_at"]),
+                        int(row["updated_at"]),
+                        str(row.get("metadata_json") or "{}"),
+                    ),
+                )
+            for row in vectors:
+                conn.execute(
+                    """
+                    INSERT INTO semantic_vectors (
+                        chunk_id, embed_provider, embed_model, embedding_dim, vector_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(row["chunk_id"]),
+                        str(row["embed_provider"]),
+                        str(row["embed_model"]),
+                        int(row["embedding_dim"]),
+                        str(row["vector_json"]),
+                        int(row["created_at"]),
+                        int(row["updated_at"]),
+                    ),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def integrity_report(self) -> dict[str, Any]:
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM semantic_chunks sc
+                        LEFT JOIN semantic_sources ss ON ss.id = sc.source_id
+                        WHERE ss.id IS NULL) AS orphan_chunk_count,
+                    (SELECT COUNT(*) FROM semantic_vectors sv
+                        LEFT JOIN semantic_chunks sc ON sc.id = sv.chunk_id
+                        WHERE sc.id IS NULL) AS orphan_vector_count,
+                    (SELECT COUNT(*) FROM semantic_chunks sc
+                        LEFT JOIN semantic_vectors sv ON sv.chunk_id = sc.id
+                        WHERE sv.chunk_id IS NULL) AS missing_vector_count
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+        counts = self.stats()
+        if row is None:
+            return {**counts, "orphan_chunk_count": 0, "orphan_vector_count": 0, "missing_vector_count": 0}
+        return {
+            **counts,
+            "orphan_chunk_count": int(row["orphan_chunk_count"] or 0),
+            "orphan_vector_count": int(row["orphan_vector_count"] or 0),
+            "missing_vector_count": int(row["missing_vector_count"] or 0),
+        }
+
     def stats(self) -> dict[str, int]:
         conn = self._connect()
         try:

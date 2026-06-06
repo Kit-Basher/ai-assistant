@@ -35,8 +35,11 @@ class _FakeEmbeddingProvider(Provider):
     def embed_texts(self, texts: tuple[str, ...], *, model: str, timeout_seconds: float) -> EmbeddingResponse:
         _ = model
         _ = timeout_seconds
+        if self.vector_mode == "raise":
+            raise RuntimeError("embedding failed")
         vectors: list[tuple[float, ...]] = []
-        for text in texts:
+        selected_texts = texts[:-1] if self.vector_mode == "short" and texts else texts
+        for text in selected_texts:
             lowered = str(text or "").lower()
             if self.vector_mode == "wide":
                 if "cats" in lowered:
@@ -218,6 +221,142 @@ class TestSemanticMemoryService(unittest.TestCase):
             )
             self.assertEqual([], selection.candidates)
             self.assertEqual("semantic_memory_disabled", selection.debug.get("reason"))
+
+    def test_disabled_ingest_performs_no_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = _FakeEmbeddingProvider("fake")
+            service = SemanticMemoryService(
+                config=_config(tmpdir, semantic_memory_enabled=False),
+                registry=_registry(),
+                provider_resolver=lambda provider_id: provider if provider_id == "fake" else None,
+                db_path=f"{tmpdir}/semantic.db",
+            )
+            result = service.ingest_conversation_text(
+                source_ref="observe:1",
+                text="private cats observation",
+                scope="thread:alpha",
+            )
+            self.assertFalse(result["ok"])
+            self.assertEqual("semantic_memory_disabled", result["reason"])
+            self.assertEqual({"source_count": 0, "chunk_count": 0, "vector_count": 0, "index_state_count": 0}, service.store.stats())
+            journal = result["managed_action_journal"]
+            self.assertTrue(journal["verification_result"]["disabled"])
+
+    def test_enabled_ingest_journals_and_verifies_row_counts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = _FakeEmbeddingProvider("fake")
+            service = SemanticMemoryService(
+                config=_config(tmpdir),
+                registry=_registry(),
+                provider_resolver=lambda provider_id: provider if provider_id == "fake" else None,
+                db_path=f"{tmpdir}/semantic.db",
+            )
+            result = service.ingest_conversation_text(
+                source_ref="observe:1",
+                text="cats journal verification",
+                scope="thread:alpha",
+                metadata={"private": "do not journal"},
+            )
+            self.assertTrue(result["ok"])
+            self.assertEqual({"source_count": 1, "chunk_count": 1, "vector_count": 1, "index_state_count": 1}, service.store.stats())
+            journal_text = str(result["managed_action_journal"])
+            self.assertIn("semantic_memory.ingest", journal_text)
+            self.assertIn("source_hash", journal_text)
+            self.assertNotIn("cats journal verification", journal_text)
+            self.assertNotIn("do not journal", journal_text)
+            self.assertTrue(result["managed_action_journal"]["verification_result"]["ok"])
+
+    def test_duplicate_observe_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = _FakeEmbeddingProvider("fake")
+            service = SemanticMemoryService(
+                config=_config(tmpdir),
+                registry=_registry(),
+                provider_resolver=lambda provider_id: provider if provider_id == "fake" else None,
+                db_path=f"{tmpdir}/semantic.db",
+            )
+            first = service.ingest_conversation_text(
+                source_ref="scheduled-observe:alpha",
+                text="cats scheduled observation",
+                scope="thread:alpha",
+                metadata={"observe_id": "alpha"},
+                now_ts=100,
+            )
+            second = service.ingest_conversation_text(
+                source_ref="scheduled-observe:alpha",
+                text="cats scheduled observation",
+                scope="thread:alpha",
+                metadata={"observe_id": "alpha"},
+                now_ts=101,
+            )
+            self.assertTrue(first["ok"])
+            self.assertTrue(second["ok"])
+            self.assertEqual(first["source_id"], second["source_id"])
+            self.assertEqual({"source_count": 1, "chunk_count": 1, "vector_count": 1, "index_state_count": 1}, service.store.stats())
+
+    def test_failed_ingest_verification_removes_only_owned_new_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = _FakeEmbeddingProvider("fake")
+            service = SemanticMemoryService(
+                config=_config(tmpdir),
+                registry=_registry(),
+                provider_resolver=lambda provider_id: provider if provider_id == "fake" else None,
+                db_path=f"{tmpdir}/semantic.db",
+            )
+            existing = service.ingest_note_text(source_ref="note:existing", text="cats existing", scope="global")
+            self.assertTrue(existing["ok"])
+            provider.vector_mode = "short"
+            failed = service.ingest_document_text(source_ref="doc:failed", text="cats " * 300, scope="document:failed")
+            self.assertFalse(failed["ok"])
+            self.assertEqual("embedding_vector_count_mismatch", failed["reason"])
+            self.assertTrue(failed["rollback_ok"])
+            self.assertIsNone(service.store.get_source(str(failed["source_id"])))
+            self.assertIsNotNone(service.store.get_source(str(existing["source_id"])))
+            self.assertEqual(1, service.store.stats()["source_count"])
+            self.assertTrue(failed["managed_action_journal"]["rollback_result"]["ok"])
+
+    def test_failed_rebuild_preserves_old_usable_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = _FakeEmbeddingProvider("fake")
+            service = SemanticMemoryService(
+                config=_config(tmpdir),
+                registry=_registry(),
+                provider_resolver=lambda provider_id: provider if provider_id == "fake" else None,
+                db_path=f"{tmpdir}/semantic.db",
+            )
+            ingest = service.ingest_note_text(source_ref="note:1", text="cats existing", scope="global")
+            self.assertTrue(ingest["ok"])
+            source_before = service.store.get_source(str(ingest["source_id"]))
+            state_before = service.store.get_index_state()
+            provider.vector_mode = "raise"
+            repair = service.repair_scope(scope="global")
+            self.assertFalse(repair["ok"])
+            self.assertTrue(repair["rollback_ok"])
+            source_after = service.store.get_source(str(ingest["source_id"]))
+            state_after = service.store.get_index_state()
+            self.assertEqual(source_before.status if source_before else None, source_after.status if source_after else None)
+            self.assertEqual(state_before.status if state_before else None, state_after.status if state_after else None)
+            self.assertTrue(service.status().healthy)
+
+    def test_self_heal_detects_drift_without_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            provider = _FakeEmbeddingProvider("fake")
+            service = SemanticMemoryService(
+                config=_config(tmpdir),
+                registry=_registry(),
+                provider_resolver=lambda provider_id: provider if provider_id == "fake" else None,
+                db_path=f"{tmpdir}/semantic.db",
+            )
+            ingest = service.ingest_note_text(source_ref="note:1", text="cats existing", scope="global")
+            self.assertTrue(ingest["ok"])
+            before = service.store.stats()
+            self._delete_vectors_for_source(service, str(ingest["source_id"]))
+            doctor = service.semantic_doctor_check(scope="global")
+            after = service.store.stats()
+            self.assertFalse(doctor["healthy"])
+            self.assertFalse(doctor["mutated"])
+            self.assertEqual({**before, "vector_count": 0}, after)
+            self.assertTrue(doctor["repair_actions"])
 
     def test_source_kind_flags_disable_ingestion(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

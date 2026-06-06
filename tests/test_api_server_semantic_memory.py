@@ -263,6 +263,46 @@ class TestAPIServerSemanticMemory(unittest.TestCase):
         self.assertIn("summary", rebuild_payload)
         self.assertIn("rebuilt=1", rebuild_payload["summary"])
         self.assertTrue(self.runtime.semantic_memory_status()["healthy"])
+        self.assertEqual("semantic_memory.repair_scope", rebuild_payload["managed_action_journal"]["action_type"])
+        self.assertTrue(rebuild_payload["managed_action_journal"]["verification_result"]["ok"])
+
+    def test_semantic_doctor_is_read_only_and_repair_requires_confirmation(self) -> None:
+        doc_path = Path(self.tmpdir.name) / "doctor.md"
+        doc_path.write_text("cats doctor repair flow", encoding="utf-8")
+        ingest_handler = _HandlerForTest(
+            self.runtime,
+            "/semantic/documents/ingest",
+            {"path": str(doc_path), "title": "Doctor"},
+        )
+        ingest_handler.do_POST()
+        ingest_payload = json.loads(ingest_handler.body.decode("utf-8"))
+        source_id = str(ingest_payload["source_id"])
+        self._delete_vectors_for_source(source_id)
+        before = self.semantic_service.store.stats()
+
+        doctor_handler = _HandlerForTest(self.runtime, "/semantic/doctor", {"scope": f"document:{doc_path}"})
+        doctor_handler.do_POST()
+        self.assertEqual(200, doctor_handler.status_code)
+        doctor_payload = json.loads(doctor_handler.body.decode("utf-8"))
+        self.assertFalse(doctor_payload["mutated"])
+        self.assertTrue(doctor_payload["repair_actions"])
+        self.assertEqual(before, self.semantic_service.store.stats())
+
+        repair_preview = _HandlerForTest(self.runtime, "/semantic/repair", {"scope": f"document:{doc_path}"})
+        repair_preview.do_POST()
+        self.assertEqual(400, repair_preview.status_code)
+        preview_payload = json.loads(repair_preview.body.decode("utf-8"))
+        self.assertTrue(preview_payload["requires_confirmation"])
+        self.assertFalse(preview_payload["mutated"])
+        self.assertEqual(before, self.semantic_service.store.stats())
+
+        repair_apply = _HandlerForTest(self.runtime, "/semantic/repair", {"scope": f"document:{doc_path}", "confirm": True})
+        repair_apply.do_POST()
+        self.assertEqual(200, repair_apply.status_code)
+        repair_payload = json.loads(repair_apply.body.decode("utf-8"))
+        self.assertTrue(repair_payload["ok"])
+        self.assertEqual("semantic_memory.repair_scope", repair_payload["managed_action_journal"]["action_type"])
+        self.assertTrue(self.runtime.semantic_memory_status()["healthy"])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from agent.actions.managed_action_recovery import ManagedActionJournal
 from agent.config import Config
 from agent.llm.capabilities import is_embedding_model_name
 from agent.llm.registry import Registry
@@ -111,6 +112,10 @@ def _chunk_id(source_id: str, chunk_index: int, chunk_text: str) -> str:
 def _source_id(kind: str, source_ref: str, scope: str, content_hash: str) -> str:
     seed = f"{kind}:{scope}:{source_ref}:{content_hash}"
     return "SS-" + hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+
+def _redacted_hash(value: Any) -> str:
+    return hashlib.sha256(_stable_json(value).encode("utf-8")).hexdigest()
 
 
 def _vector_norm(values: tuple[float, ...]) -> float:
@@ -395,6 +400,156 @@ class SemanticMemoryService:
             details=details or {},
         )
 
+    def _restore_index_state(self, state: SemanticIndexState | None) -> None:
+        if state is None:
+            self.store.delete_index_state(_SCOPE_GLOBAL)
+            return
+        self.store.set_index_state(
+            scope=state.scope,
+            embed_provider=state.embed_provider,
+            embed_model=state.embed_model,
+            embedding_dim=state.embedding_dim,
+            status=state.status,
+            source_count=state.source_count,
+            chunk_count=state.chunk_count,
+            vector_count=state.vector_count,
+            last_indexed_at=state.last_indexed_at,
+            stale_since=state.stale_since,
+            last_error_kind=state.last_error_kind,
+            last_error_message=state.last_error_message,
+            details=state.details,
+            updated_at=state.updated_at,
+        )
+
+    def _verify_ingest_result(
+        self,
+        *,
+        source_id: str,
+        source_hash: str,
+        expected_chunk_count: int,
+        expected_vector_count: int,
+        expected_status: str,
+    ) -> dict[str, Any]:
+        source = self.store.get_source(source_id)
+        chunks = self.store.list_chunks(source_id=source_id) if source is not None else []
+        counts = self._counts_payload(scope=None)
+        state = self._index_state()
+        ok = (
+            source is not None
+            and source.content_hash == source_hash
+            and source.status == expected_status
+            and len(chunks) == expected_chunk_count
+            and counts["vector_count"] >= expected_vector_count
+            and state is not None
+            and state.source_count == counts["source_count"]
+            and state.chunk_count == counts["chunk_count"]
+            and state.vector_count == counts["vector_count"]
+            and state.status in {"ready", "warm"}
+        )
+        return {
+            "ok": ok,
+            "source_id": source_id,
+            "source_present": source is not None,
+            "source_status": source.status if source is not None else None,
+            "source_hash": source_hash,
+            "chunk_count": len(chunks),
+            "expected_chunk_count": expected_chunk_count,
+            "vector_count": counts["vector_count"],
+            "expected_vector_count": expected_vector_count,
+            "index_state_status": state.status if state is not None else None,
+            "counts": counts,
+        }
+
+    def _rollback_ingest(
+        self,
+        *,
+        source_id: str,
+        previous_bundle: dict[str, Any] | None,
+        previous_index_state: SemanticIndexState | None,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            if previous_bundle is None:
+                self.store.delete_source(source_id)
+                journal.record_rollback_step("remove_owned_semantic_source", ok=True, resource=source_id)
+            else:
+                self.store.restore_source_bundle(previous_bundle)
+                journal.record_rollback_step("restore_previous_semantic_source", ok=True, resource=source_id)
+            self._restore_index_state(previous_index_state)
+            journal.record_rollback_step("restore_previous_semantic_index_state", ok=True, resource=_SCOPE_GLOBAL)
+            summary = "restored previous semantic index state"
+            if previous_bundle is None:
+                summary = "removed newly created semantic source and restored previous index state"
+            journal.mark_rollback(ok=True, summary=summary)
+            return True, summary
+        except Exception as exc:  # pragma: no cover - defensive recovery path
+            journal.record_rollback_step("restore_semantic_ingest_state", ok=False, resource=source_id, error=exc.__class__.__name__)
+            journal.mark_rollback(
+                ok=False,
+                summary="semantic ingest rollback did not fully complete",
+                remaining_source_id=source_id,
+                error=exc.__class__.__name__,
+            )
+            return False, f"rollback incomplete: {exc.__class__.__name__}"
+
+    @staticmethod
+    def _with_journal(result: dict[str, Any], journal: ManagedActionJournal) -> dict[str, Any]:
+        result["managed_action_journal"] = journal.to_dict()
+        return result
+
+    def semantic_doctor_check(self, *, scope: str = _SCOPE_GLOBAL) -> dict[str, Any]:
+        selected_scope = _normalize_scope(scope)
+        status = self.status()
+        counts = self._counts_payload(scope=None)
+        scoped_counts = self._counts_payload(scope=selected_scope)
+        integrity = self.store.integrity_report()
+        state = self._index_state()
+        issues: list[dict[str, Any]] = []
+        if not self.enabled():
+            issues.append({"kind": "disabled", "severity": "info", "repairable": False})
+        if integrity["orphan_chunk_count"]:
+            issues.append({"kind": "orphan_chunks", "severity": "high", "repairable": False, "count": integrity["orphan_chunk_count"]})
+        if integrity["orphan_vector_count"]:
+            issues.append({"kind": "orphan_vectors", "severity": "high", "repairable": False, "count": integrity["orphan_vector_count"]})
+        if integrity["missing_vector_count"]:
+            issues.append({"kind": "missing_vectors", "severity": "medium", "repairable": True, "count": integrity["missing_vector_count"]})
+        if state is not None and (
+            state.source_count != counts["source_count"]
+            or state.chunk_count != counts["chunk_count"]
+            or state.vector_count != counts["vector_count"]
+        ):
+            issues.append({"kind": "index_state_drift", "severity": "medium", "repairable": True})
+        if status.reason in {"index_missing", "partial_index", "index_state_mismatch", "stale_embed_model", "dimension_invalid"}:
+            issues.append({"kind": str(status.reason), "severity": "medium", "repairable": True})
+        repair_actions = [
+            {
+                "action": "semantic_repair_scope",
+                "scope": selected_scope,
+                "requires_confirmation": True,
+                "mutates": ["semantic_vectors", "semantic_sources.status", "semantic_index_state"],
+            }
+            for issue in issues
+            if bool(issue.get("repairable"))
+        ]
+        return {
+            "ok": True,
+            "mutated": False,
+            "enabled": status.enabled,
+            "healthy": status.healthy,
+            "reason": status.reason,
+            "scope": selected_scope,
+            "counts": counts,
+            "scoped_counts": scoped_counts,
+            "integrity": integrity,
+            "index_state": self._state_payload(state),
+            "issues": issues,
+            "repair_actions": repair_actions[:1],
+            "summary": (
+                f"semantic={'healthy' if status.healthy else status.reason or 'unknown'}; "
+                f"issues={len(issues)}; repair_available={'yes' if repair_actions else 'no'}"
+            ),
+        }
+
     def _embed_texts(self, provider: Provider, model_id: str, texts: tuple[str, ...]) -> EmbeddingResponse:
         return provider.embed_texts(texts, model=model_id, timeout_seconds=float(getattr(self.config, "llm_timeout_seconds", 15)))
 
@@ -540,6 +695,17 @@ class SemanticMemoryService:
         metadata: dict[str, Any] | None = None,
         now_ts: int | None = None,
     ) -> dict[str, Any]:
+        journal = ManagedActionJournal(action_type="semantic_memory.ingest", target=_redacted_hash(str(source_ref or ""))[:16])
+        for step_name, resource in (
+            ("preflight_semantic_ingest", "semantic_memory"),
+            ("write_semantic_source_chunks", "semantic_sources"),
+            ("write_semantic_vectors", "semantic_vectors"),
+            ("write_semantic_index_state", "semantic_index_state"),
+            ("verify_semantic_ingest", "semantic_memory"),
+        ):
+            journal.plan_step(step_name, resource=resource)
+        counts_before = self._counts_payload(scope=None)
+        index_state_before = self._index_state()
         result = {
             "ok": False,
             "ingested": False,
@@ -554,10 +720,13 @@ class SemanticMemoryService:
         }
         if not self.enabled():
             result["reason"] = "semantic_memory_disabled"
-            return result
+            journal.record_step("preflight_semantic_ingest", ok=False, resource="semantic_memory", reason="semantic_memory_disabled")
+            journal.mark_verification(ok=True, disabled=True, counts_before=counts_before)
+            return self._with_journal(result, journal)
         target = self._resolve_target()
         if target is None or target.reason:
             result["reason"] = target.reason if target is not None else "embed_model_not_configured"
+            journal.record_step("preflight_semantic_ingest", ok=False, resource="semantic_memory", reason=str(result["reason"] or "unknown"))
             state = self.store.set_index_state(
                 scope=_SCOPE_GLOBAL,
                 embed_provider=target.provider_id if target else None,
@@ -573,10 +742,13 @@ class SemanticMemoryService:
                 details={"source_kind": str(source_kind)},
             )
             result["status"] = state.status
-            return result
+            journal.record_changed_resource("semantic_index_state", _SCOPE_GLOBAL, status=state.status, counts_before_hash=_redacted_hash(counts_before))
+            journal.mark_verification(ok=False, reason=str(result["reason"] or "unknown"), status=state.status)
+            return self._with_journal(result, journal)
         provider = self._provider_for_target(target)
         if provider is None:
             result["reason"] = "embedding_provider_unavailable"
+            journal.record_step("preflight_semantic_ingest", ok=False, resource="semantic_memory", reason="embedding_provider_unavailable")
             self._rebuild_state(
                 target=target,
                 status="stale",
@@ -589,12 +761,15 @@ class SemanticMemoryService:
                 last_error_message=result["reason"],
                 details={"source_kind": str(source_kind)},
             )
-            return result
+            journal.mark_verification(ok=False, reason="embedding_provider_unavailable", counts_before=counts_before)
+            return self._with_journal(result, journal)
 
         normalized_text = _normalize_text(text)
         if not normalized_text:
             result["reason"] = "empty_text"
-            return result
+            journal.record_step("preflight_semantic_ingest", ok=False, resource="semantic_memory", reason="empty_text")
+            journal.mark_verification(ok=True, skipped=True, reason="empty_text", counts_before=counts_before)
+            return self._with_journal(result, journal)
 
         if isinstance(source_kind, SemanticSourceKind):
             kind = source_kind
@@ -605,7 +780,9 @@ class SemanticMemoryService:
         if not self._source_kind_enabled(kind):
             result["reason"] = f"{kind.value}_semantic_disabled"
             result["status"] = "disabled"
-            return result
+            journal.record_step("preflight_semantic_ingest", ok=False, resource="semantic_memory", source_kind=kind.value, reason=result["reason"])
+            journal.mark_verification(ok=True, skipped=True, reason=result["reason"], counts_before=counts_before)
+            return self._with_journal(result, journal)
         result["source_kind"] = kind.value
         result["source_ref"] = str(source_ref or "")
 
@@ -614,6 +791,19 @@ class SemanticMemoryService:
         metadata_value = metadata or {}
         source_hash = _content_hash(kind.value, str(source_ref), scope_value, normalized_text, metadata_value)
         source_id = _source_id(kind.value, str(source_ref), scope_value, source_hash)
+        previous_bundle = self.store.source_bundle(source_id)
+        previous_source_existed = previous_bundle is not None
+        journal.record_step(
+            "preflight_semantic_ingest",
+            ok=True,
+            resource="semantic_memory",
+            source_kind=kind.value,
+            scope=scope_value,
+            source_id=source_id,
+            source_hash=source_hash,
+            previous_source_existed=previous_source_existed,
+            counts_before_hash=_redacted_hash(counts_before),
+        )
         source = self.store.upsert_source(
             source_id=source_id,
             source_kind=kind,
@@ -628,6 +818,14 @@ class SemanticMemoryService:
             metadata=metadata_value,
             created_at=created_at,
             updated_at=created_at,
+        )
+        journal.record_changed_resource(
+            "semantic_source",
+            source.id,
+            source_kind=kind.value,
+            status="indexing",
+            source_hash=source_hash,
+            previous_source_existed=previous_source_existed,
         )
         chunk_rows: list[dict[str, Any]] = []
         for index, (start, end, chunk_text) in enumerate(_split_chunks(normalized_text, chunk_size=self._chunk_size)):
@@ -646,6 +844,8 @@ class SemanticMemoryService:
                 }
             )
         self.store.replace_chunks(source_id=source.id, chunks=chunk_rows)
+        journal.record_step("write_semantic_source_chunks", ok=True, resource=source.id, chunk_count=len(chunk_rows), source_hash=source_hash)
+        journal.record_changed_resource("semantic_chunks", source.id, chunk_count=len(chunk_rows), chunk_hashes=[row["chunk_hash"] for row in chunk_rows])
         current_counts = self._counts_payload(scope=None)
         if not chunk_rows:
             state = self._rebuild_state(
@@ -659,7 +859,16 @@ class SemanticMemoryService:
                 details={"source_kind": kind.value, "source_id": source.id},
             )
             result.update({"ok": True, "ingested": True, "reason": None, "source_id": source.id, "status": state.status})
-            return result
+            journal.record_step("write_semantic_index_state", ok=True, resource=_SCOPE_GLOBAL, status=state.status)
+            verification = self._verify_ingest_result(
+                source_id=source.id,
+                source_hash=source_hash,
+                expected_chunk_count=0,
+                expected_vector_count=0,
+                expected_status="indexing",
+            )
+            journal.mark_verification(**verification)
+            return self._with_journal(result, journal)
 
         vectors: list[tuple[float, ...]] = []
         try:
@@ -695,7 +904,20 @@ class SemanticMemoryService:
             )
             result["reason"] = exc.__class__.__name__
             result["status"] = "stale"
-            return result
+            journal.record_step("write_semantic_vectors", ok=False, resource=source.id, reason=exc.__class__.__name__)
+            rollback_ok, rollback_summary = self._rollback_ingest(
+                source_id=source.id,
+                previous_bundle=previous_bundle,
+                previous_index_state=index_state_before,
+                journal=journal,
+            )
+            journal.mark_verification(ok=False, reason=exc.__class__.__name__, rollback_ok=rollback_ok, source_id=source.id)
+            result["rollback_ok"] = rollback_ok
+            result["message"] = (
+                "Semantic memory ingest did not finish. "
+                f"{rollback_summary}. Inspect /semantic/status before retrying."
+            )
+            return self._with_journal(result, journal)
 
         if len(vectors) != len(chunk_rows):
             self._rebuild_state(
@@ -729,7 +951,27 @@ class SemanticMemoryService:
             result["status"] = "partial"
             result["embedding_dim"] = response.dimensions if vectors else None
             result["vector_count"] = len(vectors)
-            return result
+            journal.record_step(
+                "write_semantic_vectors",
+                ok=False,
+                resource=source.id,
+                reason="embedding_vector_count_mismatch",
+                chunk_count=len(chunk_rows),
+                vector_count=len(vectors),
+            )
+            rollback_ok, rollback_summary = self._rollback_ingest(
+                source_id=source.id,
+                previous_bundle=previous_bundle,
+                previous_index_state=index_state_before,
+                journal=journal,
+            )
+            journal.mark_verification(ok=False, reason="embedding_vector_count_mismatch", rollback_ok=rollback_ok, source_id=source.id)
+            result["rollback_ok"] = rollback_ok
+            result["message"] = (
+                "Semantic memory ingest did not finish. "
+                f"{rollback_summary}. Inspect /semantic/status before retrying."
+            )
+            return self._with_journal(result, journal)
 
         embedding_dim = int(response.dimensions)
         for chunk_row, vector in zip(chunk_rows, vectors, strict=True):
@@ -742,6 +984,8 @@ class SemanticMemoryService:
                 created_at=created_at,
                 updated_at=created_at,
             )
+        journal.record_step("write_semantic_vectors", ok=True, resource=source.id, vector_count=len(chunk_rows), embedding_dim=embedding_dim)
+        journal.record_changed_resource("semantic_vectors", source.id, vector_count=len(chunk_rows), embedding_dim=embedding_dim)
         current_counts = self._counts_payload(scope=None)
         state = self._rebuild_state(
             target=target,
@@ -780,10 +1024,51 @@ class SemanticMemoryService:
                 "status": state.status,
             }
         )
-        return result
+        journal.record_step("write_semantic_index_state", ok=True, resource=_SCOPE_GLOBAL, status=state.status, counts_hash=_redacted_hash(current_counts))
+        verification = self._verify_ingest_result(
+            source_id=source.id,
+            source_hash=source_hash,
+            expected_chunk_count=len(chunk_rows),
+            expected_vector_count=len(chunk_rows),
+            expected_status="ready",
+        )
+        if not bool(verification.get("ok")):
+            rollback_ok, rollback_summary = self._rollback_ingest(
+                source_id=source.id,
+                previous_bundle=previous_bundle,
+                previous_index_state=index_state_before,
+                journal=journal,
+            )
+            verification["rollback_ok"] = rollback_ok
+            verification["rollback_summary"] = rollback_summary
+            result.update(
+                {
+                    "ok": False,
+                    "ingested": False,
+                    "reason": "semantic_ingest_verification_failed",
+                    "status": "failed",
+                    "rollback_ok": rollback_ok,
+                    "message": (
+                        "Semantic memory ingest did not finish verification. "
+                        f"{rollback_summary}. Inspect /semantic/status before retrying."
+                    ),
+                }
+            )
+        journal.mark_verification(**verification)
+        return self._with_journal(result, journal)
 
     def repair_scope(self, *, scope: str = _SCOPE_GLOBAL, now_ts: int | None = None) -> dict[str, Any]:
         selected_scope = _normalize_scope(scope)
+        journal = ManagedActionJournal(action_type="semantic_memory.repair_scope", target=_redacted_hash(selected_scope)[:16])
+        for step_name, resource in (
+            ("preflight_semantic_repair", "semantic_memory"),
+            ("read_semantic_sources", "semantic_sources"),
+            ("rewrite_semantic_vectors", "semantic_vectors"),
+            ("write_semantic_index_state", "semantic_index_state"),
+            ("verify_semantic_repair", "semantic_memory"),
+        ):
+            journal.plan_step(step_name, resource=resource)
+        previous_index_state = self._index_state()
         result: dict[str, Any] = {
             "ok": False,
             "scope": selected_scope,
@@ -803,19 +1088,34 @@ class SemanticMemoryService:
         if not self.enabled():
             result["reason"] = "semantic_memory_disabled"
             result["summary"] = f"scope={selected_scope}; state=skipped; reason=semantic_memory_disabled"
-            return result
+            journal.record_step("preflight_semantic_repair", ok=False, resource="semantic_memory", reason="semantic_memory_disabled")
+            journal.mark_verification(ok=True, disabled=True, counts_before=result["counts_before"])
+            return self._with_journal(result, journal)
         target = self._resolve_target()
         if target is None or target.reason:
             result["reason"] = target.reason if target else "embed_model_not_configured"
             result["summary"] = f"scope={selected_scope}; state=skipped; reason={result['reason']}"
-            return result
+            journal.record_step("preflight_semantic_repair", ok=False, resource="semantic_memory", reason=str(result["reason"] or "unknown"))
+            journal.mark_verification(ok=False, reason=str(result["reason"] or "unknown"), counts_before=result["counts_before"])
+            return self._with_journal(result, journal)
         provider = self._provider_for_target(target)
         if provider is None:
             result["reason"] = "embedding_provider_unavailable"
             result["summary"] = f"scope={selected_scope}; state=skipped; reason=embedding_provider_unavailable"
-            return result
+            journal.record_step("preflight_semantic_repair", ok=False, resource="semantic_memory", reason="embedding_provider_unavailable")
+            journal.mark_verification(ok=False, reason="embedding_provider_unavailable", counts_before=result["counts_before"])
+            return self._with_journal(result, journal)
 
         source_rows = [row for row in self.store.list_sources(scope=selected_scope) if self._source_kind_enabled(row.source_kind)]
+        source_snapshots = {row.id: self.store.source_bundle(row.id) for row in source_rows}
+        journal.record_step(
+            "read_semantic_sources",
+            ok=True,
+            resource="semantic_sources",
+            scope=selected_scope,
+            source_count=len(source_rows),
+            counts_before_hash=_redacted_hash(result["counts_before"]),
+        )
         if not source_rows:
             state = self._rebuild_state(
                 target=target,
@@ -840,7 +1140,9 @@ class SemanticMemoryService:
                     "summary": f"scope={selected_scope}; rebuilt=0; state={state.status}; reason=index_missing",
                 }
             )
-            return result
+            journal.record_step("write_semantic_index_state", ok=True, resource=_SCOPE_GLOBAL, status=state.status)
+            journal.mark_verification(ok=True, reason="index_missing", counts_after=result["counts_after"], index_state_status=state.status)
+            return self._with_journal(result, journal)
 
         rebuilt_sources: list[dict[str, Any]] = []
         skipped_sources: list[dict[str, Any]] = []
@@ -869,7 +1171,7 @@ class SemanticMemoryService:
                 skipped_sources.append(
                     {
                         "source_id": source_row.id,
-                        "source_ref": source_row.source_ref,
+                        "source_ref_hash": _redacted_hash(source_row.source_ref)[:16],
                         "reason": "missing_chunks",
                     }
                 )
@@ -895,7 +1197,7 @@ class SemanticMemoryService:
                 failed_sources.append(
                     {
                         "source_id": source_row.id,
-                        "source_ref": source_row.source_ref,
+                        "source_ref_hash": _redacted_hash(source_row.source_ref)[:16],
                         "reason": exc.__class__.__name__,
                     }
                 )
@@ -919,7 +1221,7 @@ class SemanticMemoryService:
                 failed_sources.append(
                     {
                         "source_id": source_row.id,
-                        "source_ref": source_row.source_ref,
+                        "source_ref_hash": _redacted_hash(source_row.source_ref)[:16],
                         "reason": "embedding_vector_count_mismatch",
                     }
                 )
@@ -953,7 +1255,7 @@ class SemanticMemoryService:
             rebuilt_sources.append(
                 {
                     "source_id": source_row.id,
-                    "source_ref": source_row.source_ref,
+                    "source_ref_hash": _redacted_hash(source_row.source_ref)[:16],
                     "chunk_count": len(chunks),
                 }
             )
@@ -1002,7 +1304,70 @@ class SemanticMemoryService:
                 ),
             }
         )
-        return result
+        journal.record_step(
+            "rewrite_semantic_vectors",
+            ok=not bool(failed_sources),
+            resource="semantic_vectors",
+            rebuilt_count=len(rebuilt_sources),
+            skipped_count=len(skipped_sources),
+            failed_count=len(failed_sources),
+        )
+        journal.record_step("write_semantic_index_state", ok=True, resource=_SCOPE_GLOBAL, status=state.status, counts_hash=_redacted_hash(counts_after))
+
+        rollback_summary: str | None = None
+        old_state_usable = previous_index_state is not None and previous_index_state.status in {"ready", "warm"}
+        if failed_sources and old_state_usable:
+            rollback_ok = True
+            for source_id, snapshot in source_snapshots.items():
+                if snapshot is None:
+                    continue
+                try:
+                    self.store.restore_source_bundle(snapshot)
+                    journal.record_rollback_step("restore_previous_semantic_source", ok=True, resource=source_id)
+                except Exception as exc:  # pragma: no cover - defensive path
+                    rollback_ok = False
+                    journal.record_rollback_step("restore_previous_semantic_source", ok=False, resource=source_id, error=exc.__class__.__name__)
+            try:
+                self._restore_index_state(previous_index_state)
+                journal.record_rollback_step("restore_previous_semantic_index_state", ok=True, resource=_SCOPE_GLOBAL)
+            except Exception as exc:  # pragma: no cover - defensive path
+                rollback_ok = False
+                journal.record_rollback_step("restore_previous_semantic_index_state", ok=False, resource=_SCOPE_GLOBAL, error=exc.__class__.__name__)
+            rollback_summary = "preserved previous usable semantic index" if rollback_ok else "semantic repair rollback did not fully complete"
+            journal.mark_rollback(ok=rollback_ok, summary=rollback_summary)
+            result.update(
+                {
+                    "ok": False,
+                    "status": "failed",
+                    "reason": "semantic_repair_failed_previous_index_preserved" if rollback_ok else "semantic_repair_failed_rollback_incomplete",
+                    "rollback_ok": rollback_ok,
+                    "summary": (
+                        "Semantic memory repair did not finish. "
+                        f"{rollback_summary}. Inspect /semantic/status before retrying."
+                    ),
+                    "index_state_after": self._state_payload(self._index_state()),
+                    "counts_after": self._counts_payload(scope=selected_scope),
+                    "all_counts_after": self._counts_payload(scope=None, source_kinds=self._enabled_source_kinds()),
+                }
+            )
+        verification_counts = self._counts_payload(scope=selected_scope)
+        verification_state = self._index_state()
+        verification_ok = bool(
+            result.get("ok")
+            and verification_state is not None
+            and (
+                verification_state.status == "ready"
+                or (verification_state.status in {"missing", "partial"} and result.get("reason") in {"index_missing", "partial_index"})
+            )
+        )
+        journal.mark_verification(
+            ok=verification_ok,
+            reason=str(result.get("reason") or "none"),
+            counts_after=verification_counts,
+            index_state_status=verification_state.status if verification_state is not None else None,
+            rollback_summary=rollback_summary,
+        )
+        return self._with_journal(result, journal)
 
     def rebuild_scope(self, *, scope: str = _SCOPE_GLOBAL, now_ts: int | None = None) -> dict[str, Any]:
         return self.repair_scope(scope=scope, now_ts=now_ts)

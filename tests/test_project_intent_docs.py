@@ -170,7 +170,8 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "memory/bootstrap writes",
         "onboarding/preferences writes",
         "support bundle writes",
-        "semantic-memory indexing/scheduled observe writes",
+        "semantic-memory indexing and observe writes",
+        "semantic-memory promotion risk",
         "medium risk remaining",
         "high risk remaining",
     ):

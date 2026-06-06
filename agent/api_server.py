@@ -8797,6 +8797,47 @@ class AgentRuntime:
         ok = bool(result.get("ok", False))
         return ok, result
 
+    def semantic_memory_doctor(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        service = self._semantic_memory_service
+        if service is None:
+            return True, {
+                "ok": True,
+                "mutated": False,
+                "enabled": bool(self.config.semantic_memory_enabled),
+                "healthy": False,
+                "reason": "semantic_memory_unavailable",
+                "issues": [{"kind": "unavailable", "severity": "info", "repairable": False}],
+                "repair_actions": [],
+                "summary": "semantic=unavailable; issues=1; repair_available=no",
+            }
+        scope = str(payload.get("scope") or payload.get("semantic_scope") or "global").strip() or "global"
+        return True, service.semantic_doctor_check(scope=scope)
+
+    def semantic_memory_repair(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        service = self._semantic_memory_service
+        if service is None:
+            return False, {
+                "ok": False,
+                "error": "semantic_memory_unavailable",
+                "message": "semantic memory service is unavailable.",
+            }
+        scope = str(payload.get("scope") or payload.get("semantic_scope") or "global").strip() or "global"
+        confirm = bool(payload.get("confirm") or payload.get("confirmed"))
+        plan = service.semantic_doctor_check(scope=scope)
+        if not confirm:
+            return False, {
+                "ok": False,
+                "preview": True,
+                "requires_confirmation": True,
+                "mutated": False,
+                "scope": scope,
+                "doctor": plan,
+                "message": "Semantic memory repair was not run. Review the plan and retry with confirm=true.",
+            }
+        result = service.repair_scope(scope=scope, now_ts=int(time.time()))
+        ok = bool(result.get("ok", False))
+        return ok, result
+
     def _value_policy(self, name: str) -> ValuePolicy:
         policy_name = str(name or "default").strip().lower() or "default"
         raw = self.config.premium_policy if policy_name == "premium" else self.config.default_policy
@@ -23828,6 +23869,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
                 ok, body = self.runtime.semantic_memory_rebuild(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/semantic/doctor":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.semantic_memory_doctor(payload)
+                self._send_json(200 if ok else 400, body)
+                return
+            if path == "/semantic/repair":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                ok, body = self.runtime.semantic_memory_repair(payload)
                 self._send_json(200 if ok else 400, body)
                 return
             if path == "/memory/reset":
