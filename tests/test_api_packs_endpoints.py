@@ -636,6 +636,10 @@ class TestAPIPacksEndpoints(unittest.TestCase):
         delete_payload = json.loads(delete_handler.body.decode("utf-8"))
         self.assertEqual(200, delete_handler.status_code)
         self.assertTrue(delete_payload["ok"])
+        journal = delete_payload.get("managed_action_journal") if isinstance(delete_payload.get("managed_action_journal"), dict) else {}
+        self.assertEqual("external_pack_removal", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertTrue(journal.get("verification_result", {}).get("tombstone_present"))
 
         list_handler = _HandlerForTest(self.runtime, "/packs")
         list_handler.do_GET()

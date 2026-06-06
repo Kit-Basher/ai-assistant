@@ -102,6 +102,12 @@ class _HandlerForTest(APIServerHandler):
         return self._payload
 
 
+def _without_managed_journal(row: dict[str, object]) -> dict[str, object]:
+    cleaned = dict(row)
+    cleaned.pop("managed_action_journal", None)
+    return cleaned
+
+
 class TestStateMachineHardening(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -195,7 +201,7 @@ class TestStateMachineHardening(unittest.TestCase):
             quarantine_path=os.path.join(self.tmpdir.name, "quarantine"),
             normalized_path=os.path.join(self.tmpdir.name, "normalized"),
         )
-        self.assertEqual(first_external, second_external)
+        self.assertEqual(_without_managed_journal(first_external), _without_managed_journal(second_external))
 
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime.pack_store = store
@@ -242,7 +248,7 @@ class TestStateMachineHardening(unittest.TestCase):
             normalized_path=str(self.tmpdir.name),
         )
 
-        self.assertEqual(first, second)
+        self.assertEqual(_without_managed_journal(first), _without_managed_journal(second))
 
     def test_runtime_transition_rules_and_startup_guard_are_explicit(self) -> None:
         self.assertTrue(startup_phase_transition_allowed("starting", "listening"))

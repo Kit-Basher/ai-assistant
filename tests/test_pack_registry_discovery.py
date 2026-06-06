@@ -79,6 +79,14 @@ class TestPackRegistryDiscovery(unittest.TestCase):
     def _write_policy(self, payload: dict[str, object]) -> None:
         self.policy_path.write_text(json.dumps(payload, ensure_ascii=True), encoding="utf-8")
 
+    def _service(self) -> PackRegistryDiscoveryService:
+        return PackRegistryDiscoveryService(
+            pack_store=self.store,
+            storage_root=str(self.storage_root),
+            sources_path=str(self.sources_path),
+            policy_path=str(self.policy_path),
+        )
+
     def _record_remote_pack(self, source_url: str, files: dict[str, bytes], *, ref: str = "main") -> dict[str, object]:
         archive = _zip_bytes(files)
         fetcher = RemotePackFetcher(
@@ -165,6 +173,95 @@ class TestPackRegistryDiscovery(unittest.TestCase):
         self.assertEqual("plugin-pack", search_payload["search"]["results"][0]["remote_id"])
         self.assertTrue(sources[0]["allowed_by_policy"])
         self.assertEqual(300, sources[0]["cache_ttl_seconds"])
+
+    def test_source_deletion_journals_and_verifies_catalog_policy_cleanup(self) -> None:
+        self._write_sources(
+            [
+                {
+                    "id": "generic-registry",
+                    "kind": "generic_registry_api",
+                    "name": "Generic Registry",
+                    "base_url": "https://example.com/catalog.json",
+                    "enabled": True,
+                }
+            ]
+        )
+        self._write_policy({"overrides": [{"source_id": "generic-registry", "allowlisted": True}]})
+        service = self._service()
+
+        result = service.delete_catalog_source("generic-registry", changed_by="test")
+
+        journal = result.get("managed_action_journal") if isinstance(result.get("managed_action_journal"), dict) else {}
+        self.assertTrue(result.get("metadata_update_ok"))
+        self.assertEqual("pack_source_catalog_delete", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        self.assertTrue(journal.get("verification_result", {}).get("source_removed"))
+        self.assertTrue(journal.get("verification_result", {}).get("policy_override_removed"))
+        source_ids = {row["source"]["id"] for row in service.get_catalog()["normalized_sources"]}
+        self.assertNotIn("generic-registry", source_ids)
+        self.assertEqual([], service.get_policy()["persisted_policy"].get("overrides"))
+
+    def test_failed_source_deletion_verification_restores_previous_metadata(self) -> None:
+        source_row = {
+            "id": "generic-registry",
+            "kind": "generic_registry_api",
+            "name": "Generic Registry",
+            "base_url": "https://example.com/catalog.json",
+            "enabled": True,
+        }
+        self._write_sources([source_row])
+        self._write_policy({"overrides": [{"source_id": "generic-registry", "allowlisted": True}]})
+        service = self._service()
+
+        with mock.patch.object(service, "_raw_source_for_id", side_effect=[source_row, source_row]):
+            result = service.delete_catalog_source("generic-registry", changed_by="test")
+
+        journal = result.get("managed_action_journal") if isinstance(result.get("managed_action_journal"), dict) else {}
+        self.assertFalse(result.get("metadata_update_ok"))
+        self.assertEqual("pack_source_delete_verification_failed", result.get("error_kind"))
+        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        self.assertTrue(journal.get("rollback_result", {}).get("ok"))
+        restored = service.get_catalog_source("generic-registry")
+        self.assertEqual("generic-registry", restored["source"]["id"])
+        self.assertEqual("generic-registry", service.get_policy()["persisted_policy"]["overrides"][0]["source_id"])
+
+    def test_source_deletion_does_not_touch_unrelated_sources(self) -> None:
+        self._write_sources(
+            [
+                {
+                    "id": "delete-me",
+                    "kind": "generic_registry_api",
+                    "name": "Delete Me",
+                    "base_url": "https://example.com/delete.json",
+                    "enabled": True,
+                },
+                {
+                    "id": "keep-me",
+                    "kind": "generic_registry_api",
+                    "name": "Keep Me",
+                    "base_url": "https://example.com/keep.json",
+                    "enabled": True,
+                },
+            ]
+        )
+        self._write_policy(
+            {
+                "overrides": [
+                    {"source_id": "delete-me", "allowlisted": True},
+                    {"source_id": "keep-me", "allowlisted": True},
+                ]
+            }
+        )
+        service = self._service()
+
+        result = service.delete_catalog_source("delete-me", changed_by="test")
+
+        self.assertTrue(result.get("metadata_update_ok"))
+        sources = {row["source"]["id"] for row in service.get_catalog()["normalized_sources"]}
+        self.assertIn("keep-me", sources)
+        self.assertNotIn("delete-me", sources)
+        overrides = {row["source_id"] for row in service.get_policy()["persisted_policy"]["overrides"]}
+        self.assertEqual({"keep-me"}, overrides)
 
     def test_remote_registry_source_with_no_policy_is_denied_by_default(self) -> None:
         source_url = "https://example.com/catalog.json"
