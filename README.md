@@ -10,6 +10,20 @@ Product intent is defined in
 It is exposed through the HTTP API, the browser/web UI served by the API
 server, the CLI, and the optional Telegram adapter.
 
+## Current Product Truth
+The user interacts with the assistant layer. The assistant interprets intent,
+asks the agent layer for grounded runtime/tool facts or bounded action results
+when needed, and explains those results back to the user.
+
+The agent layer is the runtime/computer/tool boundary. It validates allowed
+capabilities, reads deterministic runtime truth or native skill output, and
+performs only approved bounded actions.
+
+Direct native reports are raw factual outputs. Presentation rewrites,
+narration, or style transforms are not hidden core runtime behavior; if added,
+they belong in explicitly acquired and bounded text-only skills or presentation
+adapters.
+
 It can inspect the current model/runtime, recommend better model choices, read
 and search safe parts of the filesystem, run a small set of bounded shell
 operations, safely ingest downloaded text-based skill packs, and carry out
@@ -433,11 +447,12 @@ gate.
 
 ## Source Of Truth
 Use docs in this order when context conflicts:
-1. `README.md`
-2. `PRODUCT_RUNTIME_SPEC.md`
-3. `PROJECT_STATUS.md`
-4. `docs/operator/*`
-5. `docs/design/*`
+1. `docs/product/PROJECT_INTENT.md`
+2. `README.md`
+3. `PRODUCT_RUNTIME_SPEC.md`
+4. `PROJECT_STATUS.md`
+5. `docs/operator/*`
+6. `docs/design/*`
 
 ## More Context
 - Product/runtime scope: `PRODUCT_RUNTIME_SPEC.md`

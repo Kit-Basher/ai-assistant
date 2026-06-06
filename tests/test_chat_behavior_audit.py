@@ -94,6 +94,32 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 if prompt == "install a skill that lets you browse":
                     self.assertNotIn("which model do you want me to acquire", lowered)
 
+    def test_common_intents_accept_varied_human_phrasing(self) -> None:
+        cases = (
+            ("what is your runtime status", "runtime_status", ("chat", "ready")),
+            ("are you actually connected to a model right now", "runtime_status", ("chat", "ready")),
+            ("which provider are you using", "model_status", ("model", "ollama")),
+            ("what do you remember about my preferences", "agent_memory", ("preference",)),
+            ("where were we before", "agent_memory", ("saved",)),
+            ("can you add browser capabilities", "action_tool", ("browser", "preview")),
+            ("add a capability for reading webpages", "action_tool", ("browser", "preview")),
+            ("why is my system lagging", "operational_status", ("cause",)),
+            ("check ram and cpu pressure", "operational_status", ("cpu",)),
+            ("what should I ask you next", "assistant_capabilities", ("runtime",)),
+        )
+
+        for prompt, expected_route, required_phrases in cases:
+            with self.subTest(prompt=prompt):
+                _status, body, text = self._assert_grounded_reply(prompt)
+                meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+                self.assertEqual(expected_route, meta.get("route"))
+                self.assertNotEqual("assistant_clarification", meta.get("route"))
+                lowered = text.lower()
+                for phrase in required_phrases:
+                    self.assertIn(phrase, lowered)
+                self.assertNotIn("runtime_payload", lowered)
+                self.assertNotIn("trace_id", lowered)
+
     def test_direct_questions_do_not_fall_into_stale_clarification_context(self) -> None:
         cases = {
             "is the local API healthy": ("runtime_status", ("ready", "chat")),
@@ -116,6 +142,24 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 lowered = text.lower()
                 for phrase in required_phrases:
                     self.assertIn(phrase, lowered)
+
+    def test_assistant_does_not_claim_unperformed_agent_actions(self) -> None:
+        cases = (
+            ("open the app", ("i opened", "i launched")),
+            ("install a skill that lets you browse", ("i installed", "installed browser support", "i ran")),
+            ("make qwen3.6 the default model", ("default model updated", "i changed")),
+        )
+
+        for prompt, forbidden_phrases in cases:
+            with self.subTest(prompt=prompt):
+                _status, _body, text = self._assert_grounded_reply(prompt)
+                lowered = text.lower()
+                for phrase in forbidden_phrases:
+                    self.assertNotIn(phrase, lowered)
+                self.assertTrue(
+                    any(token in lowered for token in ("preview", "say yes", "browse to", "desktop launcher")),
+                    text,
+                )
 
     def test_browser_skill_requests_use_pack_preview_not_apt_or_stale_followup(self) -> None:
         prompts = (

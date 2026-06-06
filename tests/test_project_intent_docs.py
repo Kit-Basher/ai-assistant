@@ -15,11 +15,24 @@ def test_project_intent_doc_exists_and_states_external_pack_contract() -> None:
     assert "discover, preview, import, review, configure, permission, enable, and use" in text
     assert "Codex, development agents, and the repo control plane are not part of the normal runtime user workflow" in text
     assert "Managed adapters are the safety boundary" in text
+    assert "The assistant layer is the user-facing layer" in text
+    assert "The agent layer is the grounded runtime/computer/tool layer" in text
+    assert "Core deterministic/native reports are factual agent outputs" in text
+    assert "presentation adapters" in text
 
 
 def test_runtime_spec_links_to_project_intent() -> None:
     text = (REPO_ROOT / "PRODUCT_RUNTIME_SPEC.md").read_text(encoding="utf-8")
     assert "docs/product/PROJECT_INTENT.md" in text
+
+
+def test_readme_names_project_intent_as_top_source_of_truth_and_boundary() -> None:
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    source_section = text.split("## Source Of Truth", 1)[1]
+    assert "1. `docs/product/PROJECT_INTENT.md`" in source_section
+    assert "The user interacts with the assistant layer" in text
+    assert "The agent layer is the runtime/computer/tool boundary" in text
+    assert "Direct native reports are raw factual outputs" in text
 
 
 def test_project_status_is_snapshot_not_sole_source_of_truth() -> None:
@@ -49,6 +62,10 @@ def test_current_checkpoint_doc_exists_and_names_quality_baseline() -> None:
     assert "34ed8c1" in text
     assert "external_pack_safety_smoke" in text
     lowered = text.lower()
+    assert "current truth" in lowered
+    assert "assistant layer" in lowered
+    assert "agent layer" in lowered
+    assert "direct native report commands remain raw and deterministic" in lowered
     assert "source trust is not content trust" in lowered
     assert "no arbitrary external code execution" in lowered
 

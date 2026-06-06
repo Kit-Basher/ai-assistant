@@ -4,6 +4,17 @@ Date: 2026-05-21
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
+## Current Truth
+
+- The user talks to the assistant layer.
+- The assistant layer interprets intent, asks the agent layer for grounded runtime/tool facts or bounded action results when needed, and explains those results back to the user.
+- The agent layer validates capabilities, reads runtime truth/native skill output, performs only approved bounded actions, and returns structured results.
+- Direct native report commands remain raw and deterministic. Presentation rewrites, narration, and style transforms are not hidden core runtime behavior; they belong in explicitly bounded text-only skills or presentation adapters if added later.
+- External pack acquisition remains preview-first and confirmation-gated. Source trust is not content trust, and imported content remains untrusted until it passes quarantine, review, enablement, configuration, and permission gates.
+- Managed-action reliability now covers the high/medium normal-user write paths listed below; remaining follow-ups are tracked in `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md`.
+
+## Operator History Baseline
+
 ## Latest Known Commits
 
 - `9989002` Split external pack review approval confirmation

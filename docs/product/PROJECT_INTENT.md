@@ -6,6 +6,12 @@ This is the product-intent source of truth for Personal Agent. If implementation
 
 Personal Agent is a local personal AI assistant runtime. The user talks to one assistant through the local API, web UI, CLI, or optional Telegram adapter; routing, models, tools, and pack mechanics are implementation details underneath that assistant.
 
+The assistant layer is the user-facing layer. It interprets the user’s intent, decides when grounded runtime or tool facts are needed, asks the agent layer for those facts or bounded action results, and explains the result back to the user.
+
+The agent layer is the grounded runtime/computer/tool layer. It validates requests against allowed capabilities, reads runtime truth or native skill output, performs only approved bounded actions, and returns structured facts/results. It should not invent state or speak to the user as a separate persona.
+
+Core deterministic/native reports are factual agent outputs. Direct report commands such as storage, resource, network, runtime, and model status must stay raw and deterministic, independent of LLM availability. Optional presentation, narration, rewrite, or style transforms are not hidden core behavior; they belong in bounded text-only skill packs or presentation adapters when explicitly added and gated.
+
 Native skills ship with the agent. They are built-in, bounded runtime abilities such as runtime/model status, safe filesystem inspection, safe shell/controller paths, memory/status surfaces, and operational diagnostics.
 
 External skill packs are not bundled built-in abilities. They are optional capability packages that the assistant can discover, preview, import, review, configure, permission, enable, and use only after the user asks for a capability and completes the required safety gates.

@@ -288,6 +288,14 @@ class TestLiveUserBarrageClassifier(unittest.TestCase):
                 )
                 self.assertTrue(any(expected in failure for failure in failures), failures)
 
+    def test_rejects_app_setup_claiming_unproven_local_launch(self) -> None:
+        failures = self._classify(
+            "app_setup",
+            "open the app",
+            "I opened the Personal Agent app for you.",
+        )
+        self.assertIn("app/UI prompt claimed an unproven local open/launch action", failures)
+
     def test_ready_gate_accepts_core_and_chat_ready_with_optional_surface_warning(self) -> None:
         original = live_user_barrage.request_json
         try:

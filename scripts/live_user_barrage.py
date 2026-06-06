@@ -86,6 +86,7 @@ HALLUCINATED_ACTION_MARKERS = (
     "i executed",
     "i changed ",
     "i opened ",
+    "i launched ",
 )
 MODEL_ACQUISITION_MARKERS = (
     "which model do you want me to acquire",
@@ -376,6 +377,8 @@ def classify_barrage_response(
             failures.append("skill/capability request was treated as OS package install")
         if "likely cause:" in lowered:
             failures.append("skill/capability request reused stale operational-status wording")
+    if case.category == "app_setup" and any(marker in lowered for marker in ("i opened ", "i launched ")):
+        failures.append("app/UI prompt claimed an unproven local open/launch action")
     quality = classify_quality_response(case, response, tracker=tracker, runtime_healthy=runtime_healthy)
     response["quality_warnings"] = quality["quality_warnings"]
     response["likely_stale_context"] = quality["likely_stale_context"]
