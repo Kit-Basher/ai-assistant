@@ -32,6 +32,7 @@ from agent.modelops.discovery import ModelInfo
 from agent.orchestrator import OrchestratorResponse
 from agent.memory_runtime import MemoryRuntime
 from agent.safe_mode_ux import build_safe_mode_paused_message
+from memory.db import MemoryDB
 
 
 def _config(registry_path: str, db_path: str, **overrides: object) -> Config:
@@ -201,6 +202,24 @@ class TestAPIServerRuntime(unittest.TestCase):
             self.assertTrue(runtime.assistant_chat_available())
 
         record_success.assert_called_once_with("ollama", "ollama:qwen2.5:7b-instruct")
+
+    def test_memory_reset_preview_does_not_clear_preferences_before_confirmation(self) -> None:
+        db = MemoryDB(self.db_path)
+        db.init_schema(str(Path(__file__).resolve().parents[1] / "memory" / "schema.sql"))
+        db.set_user_pref("memory_runtime:u1:working_memory_state", "private memory payload")
+        db.set_user_pref("show_summary", "off")
+        db.close()
+
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        ok, payload = runtime.memory_reset({"components": ["continuity"]})
+
+        self.assertTrue(ok)
+        self.assertEqual("preview", payload.get("action"))
+        self.assertTrue(bool(payload.get("requires_confirmation")))
+        check = MemoryDB(self.db_path)
+        self.assertEqual("private memory payload", check.get_user_pref("memory_runtime:u1:working_memory_state"))
+        self.assertEqual("off", check.get_user_pref("show_summary"))
+        check.close()
 
     def test_ready_and_state_expose_chat_usability_when_llm_is_available(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
