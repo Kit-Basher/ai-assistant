@@ -10,7 +10,7 @@ runtime. These limits are deliberate.
 - foreign code or plugin pack execution
 - silent install/enable/switch behavior
 - automatic adoption of discovery proposals
-- Debian/system packaging as the supported shipping path
+- legacy root/system install scripts as the supported shipping path
 - background full-disk indexing
 
 ## Still Limited by Design
@@ -36,7 +36,8 @@ runtime. These limits are deliberate.
 
 ## Environment Assumptions
 
-- supported install path is the repo checkout plus user-level systemd service
+- supported install paths are the stable release bundle, the optional Debian
+  package, and the checkout/dev install for repo work
 - canonical mutable state lives under `~/.local/share/personal-agent`
 - canonical operator config lives under `~/.config/personal-agent`
 - the runtime is expected to be started and managed by the user service

@@ -176,3 +176,26 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "high risk remaining",
     ):
         assert remaining_gap in audit_text
+
+
+def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
+    path = REPO_ROOT / "docs" / "operator" / "RELEASE_READINESS_AUDIT.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "yellow" in lowered
+    assert "295b578" in text
+    assert "controlled public trial" in lowered
+    assert "persistent managed-action journal storage" in lowered
+    assert "semantic memory must remain off by default" in lowered
+    assert "package install and directory creation shell flows" in lowered
+    assert "future filesystem writes" in lowered
+    assert "python scripts/external_pack_safety_smoke.py" in text
+
+
+def test_known_limits_do_not_contradict_supported_packaging_paths() -> None:
+    text = (REPO_ROOT / "docs" / "operator" / "KNOWN_LIMITS.md").read_text(encoding="utf-8").lower()
+    assert "debian/system packaging as the supported shipping path" not in text
+    assert "stable release bundle" in text
+    assert "optional debian" in text
+    assert "legacy root/system install scripts" in text

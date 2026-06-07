@@ -1,6 +1,7 @@
-# External Pack Acquisition Safety + Quality Baseline
+# Release Readiness Audit Baseline
 
-Date: 2026-05-21
+Date: 2026-06-06
+Checkpoint: `295b578` Harden semantic memory indexing reliability
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -17,6 +18,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 
 ## Latest Known Commits
 
+- `295b578` Harden semantic memory indexing reliability
 - `9989002` Split external pack review approval confirmation
 - `3dc123f` Add imported pack review state UX
 - `4dd8e80` Document external pack format
@@ -49,6 +51,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Pack removal/source deletion cleanup now attaches managed-action journals, verifies removed/tombstoned/source-policy state by readback, restores prior owned metadata on verification failure, and keeps hostile imported text redacted from tombstones/support output.
 - Semantic memory remains disabled by default and release-gated, but optional semantic ingest/rebuild/repair paths now attach redacted managed-action journals, verify source/chunk/vector/index-state readback, keep duplicate observe writes idempotent through deterministic source hashes, remove only owned failed new ingest rows, preserve prior usable index state on failed repair, and expose a read-only semantic doctor plus confirmed repair path.
 - Remaining managed-action reliability gaps are audited. Highest priority next target is bulk preference reset/clear coverage; package install/directory creation shell flows, persistent journal storage, semantic-memory soak before any default-on promotion, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
+- Release readiness is Yellow at `295b578`: suitable for a controlled public trial only after clean install verification, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -111,6 +114,8 @@ Run this after external-pack, search, acquisition, or routing changes:
 
 ## Next Likely Work
 
+- Add journal coverage to reset/clear/bulk preference operations before exposing them as assistant-managed actions.
+- Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.
 - Add future core-owned content operations only after separate preview/confirmation and safety tests.
 - Add more managed adapters only through core-owned safety boundaries.
