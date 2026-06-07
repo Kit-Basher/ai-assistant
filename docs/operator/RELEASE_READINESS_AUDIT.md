@@ -2,6 +2,7 @@
 
 Date: 2026-06-06
 Checkpoint: `295b578` Harden semantic memory indexing reliability
+Updated after `4e794d2` Add release readiness audit for scoped bulk preference reset/clear reliability.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -58,23 +59,23 @@ surface:
 1. Persistent managed-action journal storage is still missing. Many mutating
    flows have in-memory journals and readback verification, but post-crash
    recovery is not yet a uniform product guarantee.
-2. Bulk preference reset/clear paths are not fully journaled. They should not
-   be exposed as assistant-managed actions until preview/confirm/journal/
-   verify/rollback coverage exists.
-3. Package install and directory creation shell flows are not covered as
+2. Package install and directory creation shell flows are not covered as
    runtime managed actions. They must stay out of normal assistant actions.
-4. Future filesystem writes have no transaction design. Current native
+3. Future filesystem writes have no transaction design. Current native
    filesystem behavior is read-only and should remain that way for public use.
-5. Semantic memory must remain off by default and release-gated. Optional
+4. Semantic memory must remain off by default and release-gated. Optional
    ingest/rebuild/repair has improved, but it needs more restart/provider-failure
    soak before default-on promotion.
-6. Pack quarantine file artifact cleanup is still only partially covered. Pack
+5. Pack quarantine file artifact cleanup is still only partially covered. Pack
    metadata rollback is stronger than artifact cleanup.
-7. Model acquisition/import rollback remains conservative. It does not delete
+6. Model acquisition/import rollback remains conservative. It does not delete
    Ollama cache/model data without ownership proof, so failed acquisitions may
    require operator cleanup.
-8. Provider setup transaction coverage does not yet span every later
+7. Provider setup transaction coverage does not yet span every later
    model/default mutation after provider verification.
+8. Scoped bulk preference reset/clear now has in-memory journal, verification,
+   redaction, and scoped rollback coverage, but it still lacks persistent
+   post-crash journal storage.
 9. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
@@ -136,8 +137,7 @@ other write paths now have journals, verification, and scoped rollback where
 ownership is proven. Remaining gaps are clearly tracked in
 `MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
-Remaining risk: persistent journal storage and bulk reset/clear coverage are
-the next reliability targets.
+Remaining risk: persistent journal storage is the next reliability target.
 
 ### Safety / Security
 
@@ -216,10 +216,9 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Add journal coverage to reset/clear/bulk preference operations before exposing
-them as assistant-managed actions. This is the current highest-value reliability
-target because it is smaller than persistent journal storage and directly
-reduces risk on a normal user state mutation path.
+Add persistent managed-action journal storage before making crash/restart
+recovery claims for mutating managed actions. Scoped preference reset/clear now
+has in-memory journal, verification, redaction, and rollback coverage.
 
 ## Required Verification
 

@@ -18937,7 +18937,16 @@ class Orchestrator:
                     )
 
                 if cmd.name == "prefs_reset":
-                    reset_prefs(self.db)
+                    reset_result = reset_prefs(self.db)
+                    if not bool(reset_result.get("ok", False)):
+                        message = str(
+                            reset_result.get("message")
+                            or "The preference reset/clear did not finish. Previous preferences may still need attention. Safe next step: inspect preferences and retry the reset if needed."
+                        )
+                        return OrchestratorResponse(
+                            message,
+                            {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
+                        )
                     return OrchestratorResponse(
                         "Preferences reset to defaults.",
                         {"skip_friction_formatting": True, "thread_id": self._active_thread_id_for_user(user_id)},
@@ -19007,7 +19016,16 @@ class Orchestrator:
 
                 if cmd.name == "prefs_thread_reset":
                     thread_id = self._active_thread_id_for_user(user_id)
-                    reset_thread_prefs(self.db, thread_id)
+                    reset_result = reset_thread_prefs(self.db, thread_id)
+                    if not bool(reset_result.get("ok", False)):
+                        message = str(
+                            reset_result.get("message")
+                            or "The thread preference reset/clear did not finish. Previous preferences may still need attention. Safe next step: inspect thread preferences and retry the reset if needed."
+                        )
+                        return OrchestratorResponse(
+                            message,
+                            {"skip_friction_formatting": True, "thread_id": thread_id},
+                        )
                     return OrchestratorResponse(
                         "Thread preferences reset.",
                         {"skip_friction_formatting": True, "thread_id": thread_id},

@@ -169,6 +169,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "notification prune",
         "memory/bootstrap writes",
         "onboarding/preferences writes",
+        "scoped preference reset/clear paths",
         "support bundle writes",
         "semantic-memory indexing and observe writes",
         "semantic-memory promotion risk",
@@ -176,6 +177,8 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         "high risk remaining",
     ):
         assert remaining_gap in audit_text
+    assert "persistent managed-action journal storage" in audit_text
+    assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
 def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
@@ -187,6 +190,7 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "295b578" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
+    assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered

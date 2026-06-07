@@ -151,13 +151,23 @@ def get_project_mode(db: Any, thread_id: str | None) -> bool:
     return value == "on"
 
 
-def reset_prefs(db: Any) -> None:
-    fn = getattr(db, "clear_user_prefs", None)
+def reset_prefs(db: Any) -> dict[str, Any]:
+    fn = getattr(db, "clear_user_prefs_reliable", None)
     if callable(fn):
-        fn()
+        return dict(fn(ALLOWED_PREF_KEYS))
+    legacy_fn = getattr(db, "clear_user_prefs", None)
+    if callable(legacy_fn):
+        legacy_fn(ALLOWED_PREF_KEYS)
+        return {"ok": True, "deleted_keys": list(ALLOWED_PREF_KEYS), "deleted_count": len(ALLOWED_PREF_KEYS)}
+    raise RuntimeError("DB does not support user preference reset")
 
 
-def reset_thread_prefs(db: Any, thread_id: str) -> None:
-    fn = getattr(db, "clear_thread_prefs", None)
+def reset_thread_prefs(db: Any, thread_id: str) -> dict[str, Any]:
+    fn = getattr(db, "clear_thread_prefs_reliable", None)
     if callable(fn):
-        fn(thread_id)
+        return dict(fn(thread_id, (*ALLOWED_PREF_KEYS, *THREAD_ONLY_PREF_KEYS)))
+    legacy_fn = getattr(db, "clear_thread_prefs", None)
+    if callable(legacy_fn):
+        legacy_fn(thread_id, (*ALLOWED_PREF_KEYS, *THREAD_ONLY_PREF_KEYS))
+        return {"ok": True, "deleted_keys": [*ALLOWED_PREF_KEYS, *THREAD_ONLY_PREF_KEYS]}
+    raise RuntimeError("DB does not support thread preference reset")

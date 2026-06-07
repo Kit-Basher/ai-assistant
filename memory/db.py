@@ -565,6 +565,73 @@ class MemoryDB:
         cur = self._conn.execute("SELECT key, value, updated_at FROM preferences ORDER BY key ASC")
         return [dict(row) for row in cur.fetchall()]
 
+    def clear_preferences_reliable(
+        self,
+        keys: list[str] | tuple[str, ...],
+        *,
+        action_type: str = "memory.preference.clear",
+        scope: str = "global_preference",
+    ) -> dict[str, Any]:
+        normalized_keys = self._normalize_preference_clear_keys(keys, scope=scope)
+        previous_rows = {
+            str(row.get("key")): dict(row)
+            for row in self.list_preferences()
+            if str(row.get("key")) in normalized_keys
+        }
+        before_unrelated_hash = self._preferences_scope_hash(
+            [row for row in self.list_preferences() if str(row.get("key")) not in normalized_keys]
+        )
+        journal = ManagedActionJournal(action_type=action_type, target=f"{scope}:{len(normalized_keys)}")
+        journal.plan_step("preflight_preference_clear", resource=scope)
+        journal.plan_step("clear_preferences", resource=scope)
+        journal.plan_step("verify_preference_clear", resource=scope)
+        journal.record_step(
+            "preflight_preference_clear",
+            ok=True,
+            resource=scope,
+            scope=scope,
+            target_keys=normalized_keys,
+            previous_snapshot_hash=self._preferences_scope_hash(previous_rows.values()),
+            previous_count=len(previous_rows),
+        )
+        deleted = self._delete_preferences_by_keys(normalized_keys)
+        journal.record_step("clear_preferences", ok=True, resource=scope, deleted_keys=normalized_keys, deleted_count=deleted)
+        after_rows = self.list_preferences()
+        verification = self._verify_preference_clear_rows(
+            after_rows,
+            target_keys=normalized_keys,
+            unrelated_hash=before_unrelated_hash,
+        )
+        journal.mark_verification(**verification)
+        if bool(verification.get("ok", False)):
+            for key in normalized_keys:
+                if key in previous_rows:
+                    journal.record_changed_resource("memory_preference", key, rollback_supported=True, deleted=True)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "scope": scope,
+                "deleted_keys": normalized_keys,
+                "deleted_count": deleted,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._restore_preferences_snapshot(
+            previous_rows,
+            normalized_keys,
+            journal=journal,
+        )
+        return {
+            "ok": False,
+            "error": "preference_clear_verification_failed",
+            "scope": scope,
+            "deleted_keys": normalized_keys,
+            "deleted_count": deleted,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._clear_failure_message("preference reset/clear", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
+
     def set_user_pref(self, key: str, value: str) -> None:
         self.set_user_pref_reliable(key, value)
 
@@ -753,15 +820,111 @@ class MemoryDB:
             "managed_action_journal": journal.to_dict(),
         }
 
-    def delete_user_prefs_by_prefix(self, prefix: str) -> int:
+    def delete_user_prefs_by_prefix_reliable(
+        self,
+        prefix: str,
+        *,
+        allowed_prefixes: tuple[str, ...] = ("memory_runtime:",),
+        action_type: str = "memory.user_preference.prefix_clear",
+    ) -> dict[str, Any]:
         normalized = str(prefix or "")
-        cur = self._conn.execute("DELETE FROM user_prefs WHERE key LIKE ?", (f"{normalized}%",))
-        self._commit_if_needed()
-        return int(cur.rowcount)
+        if not normalized:
+            raise ValueError("preference prefix is required")
+        if normalized not in allowed_prefixes:
+            raise ValueError("preference prefix is not allowed for bulk clear")
+        rows = self.list_user_prefs()
+        target_keys = [
+            str((row or {}).get("key") or "").strip()
+            for row in rows
+            if str((row or {}).get("key") or "").strip().startswith(normalized)
+        ]
+        return self.clear_user_prefs_reliable(
+            target_keys,
+            action_type=action_type,
+            scope="user_preference",
+        )
 
-    def clear_user_prefs(self) -> None:
-        self._conn.execute("DELETE FROM user_prefs")
-        self._commit_if_needed()
+    def delete_user_prefs_by_prefix(self, prefix: str) -> int:
+        return int(self.delete_user_prefs_by_prefix_reliable(prefix).get("deleted_count", 0))
+
+    def clear_user_prefs_reliable(
+        self,
+        keys: list[str] | tuple[str, ...],
+        *,
+        action_type: str = "memory.user_preference.clear",
+        scope: str = "user_preference",
+    ) -> dict[str, Any]:
+        normalized_keys = self._normalize_preference_clear_keys(keys, scope=scope)
+        rows = self.list_user_prefs()
+        previous_rows = {
+            str(row.get("key")): dict(row)
+            for row in rows
+            if str(row.get("key")) in normalized_keys
+        }
+        before_unrelated_hash = self._preferences_scope_hash(
+            [row for row in rows if str(row.get("key")) not in normalized_keys]
+        )
+        journal = ManagedActionJournal(action_type=action_type, target=f"{scope}:{len(normalized_keys)}")
+        journal.plan_step("preflight_user_preference_clear", resource=scope)
+        journal.plan_step("clear_user_preferences", resource=scope)
+        journal.plan_step("verify_user_preference_clear", resource=scope)
+        journal.record_step(
+            "preflight_user_preference_clear",
+            ok=True,
+            resource=scope,
+            scope=scope,
+            target_keys=normalized_keys,
+            previous_snapshot_hash=self._preferences_scope_hash(previous_rows.values()),
+            previous_count=len(previous_rows),
+        )
+        deleted = self._delete_user_prefs_by_keys(normalized_keys)
+        journal.record_step(
+            "clear_user_preferences",
+            ok=True,
+            resource=scope,
+            deleted_keys=normalized_keys,
+            deleted_count=deleted,
+        )
+        after_rows = self.list_user_prefs()
+        verification = self._verify_preference_clear_rows(
+            after_rows,
+            target_keys=normalized_keys,
+            unrelated_hash=before_unrelated_hash,
+        )
+        journal.mark_verification(**verification)
+        if bool(verification.get("ok", False)):
+            for key in normalized_keys:
+                if key in previous_rows:
+                    journal.record_changed_resource("memory_user_preference", key, rollback_supported=True, deleted=True)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "scope": scope,
+                "deleted_keys": normalized_keys,
+                "deleted_count": deleted,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._restore_user_prefs_snapshot(
+            previous_rows,
+            normalized_keys,
+            journal=journal,
+        )
+        return {
+            "ok": False,
+            "error": "user_preference_clear_verification_failed",
+            "scope": scope,
+            "deleted_keys": normalized_keys,
+            "deleted_count": deleted,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._clear_failure_message("preference reset/clear", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    def clear_user_prefs(self, keys: list[str] | tuple[str, ...]) -> None:
+        result = self.clear_user_prefs_reliable(keys)
+        if not bool(result.get("ok", False)):
+            raise RuntimeError(str(result.get("message") or "preference reset/clear did not finish"))
 
     def set_thread_pref(self, thread_id: str, key: str, value: str) -> None:
         self.set_thread_pref_reliable(thread_id, key, value)
@@ -880,6 +1043,228 @@ class MemoryDB:
             f"Attention: {remaining}. Safe next step: retry the update after checking local memory status."
         )
 
+    @staticmethod
+    def _clear_failure_message(kind: str, rollback_ok: bool, rollback_summary: str) -> str:
+        restored = "Previous preferences were restored." if rollback_ok else "Previous preferences may still need attention."
+        remaining = str(rollback_summary or "check the affected preference scope").strip()
+        return (
+            f"The {kind} did not finish. {restored} "
+            f"Attention: {remaining}. Safe next step: inspect preferences and retry the reset if needed."
+        )
+
+    @staticmethod
+    def _normalize_preference_clear_keys(keys: list[str] | tuple[str, ...], *, scope: str) -> list[str]:
+        if scope not in _PREFERENCE_SCOPES:
+            raise ValueError(f"preference scope is not allowed: {scope}")
+        if not isinstance(keys, (list, tuple)):
+            raise ValueError("preference clear target keys must be explicit")
+        normalized: list[str] = []
+        for raw_key in keys:
+            key = str(raw_key or "").strip()
+            MemoryDB._preflight_preference_target(key, scope=scope)
+            if key not in normalized:
+                normalized.append(key)
+        if not normalized:
+            raise ValueError("preference clear target keys must be explicit")
+        return normalized
+
+    @staticmethod
+    def _preferences_scope_hash(rows: Any) -> str:
+        normalized_rows: list[dict[str, Any]] = []
+        for raw in rows:
+            row = dict(raw)
+            key = str(row.get("key") or "")
+            value = row.get("value")
+            normalized_rows.append(
+                {
+                    "key": key,
+                    "value": MemoryDB._value_metadata(value),
+                    "revision": int(row.get("revision") or 0) if "revision" in row else None,
+                    "updated_at": str(row.get("updated_at") or ""),
+                }
+            )
+        payload = json.dumps(sorted(normalized_rows, key=lambda item: item["key"]), sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _thread_prefs_scope_hash(self, *, exclude_thread_id: str | None = None) -> str:
+        if exclude_thread_id:
+            cur = self._conn.execute(
+                "SELECT thread_id, key, value, updated_at FROM thread_prefs WHERE thread_id != ? ORDER BY thread_id ASC, key ASC",
+                (exclude_thread_id,),
+            )
+        else:
+            cur = self._conn.execute("SELECT thread_id, key, value, updated_at FROM thread_prefs ORDER BY thread_id ASC, key ASC")
+        normalized_rows: list[dict[str, Any]] = []
+        for row in cur.fetchall():
+            thread_id = str(row["thread_id"] or "")
+            normalized_rows.append(
+                {
+                    "thread_hash": hashlib.sha256(thread_id.encode("utf-8")).hexdigest(),
+                    "key": str(row["key"] or ""),
+                    "value": self._value_metadata(row["value"]),
+                    "updated_at": str(row["updated_at"] or ""),
+                }
+            )
+        payload = json.dumps(normalized_rows, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _thread_pref_rows(self, thread_id: str) -> list[dict[str, Any]]:
+        cur = self._conn.execute(
+            "SELECT thread_id, key, value, updated_at FROM thread_prefs WHERE thread_id = ? ORDER BY key ASC",
+            (thread_id,),
+        )
+        return [dict(row) for row in cur.fetchall()]
+
+    def _delete_preferences_by_keys(self, keys: list[str]) -> int:
+        deleted = 0
+        for key in keys:
+            cur = self._conn.execute("DELETE FROM preferences WHERE key = ?", (key,))
+            deleted += int(cur.rowcount)
+        self._commit_if_needed()
+        return deleted
+
+    def _delete_user_prefs_by_keys(self, keys: list[str]) -> int:
+        deleted = 0
+        for key in keys:
+            cur = self._conn.execute("DELETE FROM user_prefs WHERE key = ?", (key,))
+            deleted += int(cur.rowcount)
+        self._commit_if_needed()
+        return deleted
+
+    def _delete_thread_prefs_by_keys(self, thread_id: str, keys: list[str]) -> int:
+        deleted = 0
+        for key in keys:
+            cur = self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ? AND key = ?", (thread_id, key))
+            deleted += int(cur.rowcount)
+        self._commit_if_needed()
+        return deleted
+
+    def _verify_preference_clear_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        target_keys: list[str],
+        unrelated_hash: str,
+    ) -> dict[str, Any]:
+        target_set = set(target_keys)
+        target_present = sorted(str(row.get("key")) for row in rows if str(row.get("key")) in target_set)
+        unrelated_hash_after = self._preferences_scope_hash(
+            [row for row in rows if str(row.get("key")) not in target_set]
+        )
+        unrelated_unchanged = unrelated_hash_after == unrelated_hash
+        return {
+            "ok": not target_present and unrelated_unchanged,
+            "target_keys": list(target_keys),
+            "target_keys_still_present": target_present,
+            "unrelated_scope_unchanged": unrelated_unchanged,
+        }
+
+    def _restore_preferences_snapshot(
+        self,
+        previous_rows: dict[str, dict[str, Any]],
+        target_keys: list[str],
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            for key in target_keys:
+                previous = previous_rows.get(key)
+                if previous is None:
+                    self._conn.execute("DELETE FROM preferences WHERE key = ?", (key,))
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, previous.get("value"), previous.get("updated_at") or self._now_iso()),
+                )
+            self._commit_if_needed()
+            summary = "restored previous scoped preference snapshot"
+            journal.record_rollback_step("restore_preference_snapshot", ok=True, resource="global_preference", summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "could not fully restore previous scoped preference snapshot"
+            journal.record_rollback_step("restore_preference_snapshot", ok=False, resource="global_preference", error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
+    def _restore_user_prefs_snapshot(
+        self,
+        previous_rows: dict[str, dict[str, Any]],
+        target_keys: list[str],
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            for key in target_keys:
+                previous = previous_rows.get(key)
+                if previous is None:
+                    self._conn.execute("DELETE FROM user_prefs WHERE key = ?", (key,))
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO user_prefs (key, value, updated_at, revision) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at,
+                        revision = excluded.revision
+                    """,
+                    (
+                        key,
+                        previous.get("value"),
+                        previous.get("updated_at") or self._now_iso(),
+                        int(previous.get("revision") or 1),
+                    ),
+                )
+            self._commit_if_needed()
+            summary = "restored previous scoped user preference snapshot"
+            journal.record_rollback_step("restore_user_preference_snapshot", ok=True, resource="user_preference", summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "could not fully restore previous scoped user preference snapshot"
+            journal.record_rollback_step("restore_user_preference_snapshot", ok=False, resource="user_preference", error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
+    def _restore_thread_prefs_snapshot(
+        self,
+        thread_id: str,
+        previous_rows: dict[str, dict[str, Any]],
+        target_keys: list[str],
+        *,
+        journal: ManagedActionJournal,
+    ) -> tuple[bool, str]:
+        try:
+            for key in target_keys:
+                previous = previous_rows.get(key)
+                if previous is None:
+                    self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ? AND key = ?", (thread_id, key))
+                    continue
+                self._conn.execute(
+                    """
+                    INSERT INTO thread_prefs (thread_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+                    ON CONFLICT(thread_id, key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_at = excluded.updated_at
+                    """,
+                    (thread_id, key, previous.get("value"), previous.get("updated_at") or self._now_iso()),
+                )
+            self._commit_if_needed()
+            summary = "restored previous scoped thread preference snapshot"
+            journal.record_rollback_step("restore_thread_preference_snapshot", ok=True, resource="thread_preference", summary=summary)
+            journal.mark_rollback(ok=True, attempted=True, summary=summary)
+            return True, summary
+        except Exception as exc:
+            summary = "could not fully restore previous scoped thread preference snapshot"
+            journal.record_rollback_step("restore_thread_preference_snapshot", ok=False, resource="thread_preference", error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=True, summary=summary)
+            return False, summary
+
     def get_thread_pref(self, thread_id: str, key: str) -> str | None:
         cur = self._conn.execute(
             "SELECT value FROM thread_prefs WHERE thread_id = ? AND key = ?",
@@ -895,9 +1280,109 @@ class MemoryDB:
         )
         return {str(row["key"]): str(row["value"]) for row in cur.fetchall()}
 
-    def clear_thread_prefs(self, thread_id: str) -> None:
-        self._conn.execute("DELETE FROM thread_prefs WHERE thread_id = ?", (thread_id,))
-        self._commit_if_needed()
+    def clear_thread_prefs_reliable(
+        self,
+        thread_id: str,
+        keys: list[str] | tuple[str, ...],
+        *,
+        action_type: str = "memory.thread_preference.clear",
+    ) -> dict[str, Any]:
+        normalized_thread = str(thread_id or "").strip()
+        if not normalized_thread:
+            raise ValueError("thread id is required")
+        normalized_keys = self._normalize_preference_clear_keys(keys, scope="thread_preference")
+        thread_hash = hashlib.sha256(normalized_thread.encode("utf-8")).hexdigest()
+        previous_rows = self._thread_pref_rows(normalized_thread)
+        previous_target_rows = {
+            str(row.get("key")): dict(row)
+            for row in previous_rows
+            if str(row.get("key")) in normalized_keys
+        }
+        before_user_hash = self._preferences_scope_hash(self.list_user_prefs())
+        before_global_hash = self._preferences_scope_hash(self.list_preferences())
+        before_other_threads_hash = self._thread_prefs_scope_hash(exclude_thread_id=normalized_thread)
+        journal = ManagedActionJournal(action_type=action_type, target=f"thread:{thread_hash}:{len(normalized_keys)}")
+        journal.plan_step("preflight_thread_preference_clear", resource="thread_preference")
+        journal.plan_step("clear_thread_preferences", resource="thread_preference")
+        journal.plan_step("verify_thread_preference_clear", resource="thread_preference")
+        journal.record_step(
+            "preflight_thread_preference_clear",
+            ok=True,
+            resource="thread_preference",
+            scope="thread_preference",
+            thread_hash=thread_hash,
+            target_keys=normalized_keys,
+            previous_snapshot_hash=self._preferences_scope_hash(previous_target_rows.values()),
+            previous_count=len(previous_target_rows),
+        )
+        deleted = self._delete_thread_prefs_by_keys(normalized_thread, normalized_keys)
+        journal.record_step(
+            "clear_thread_preferences",
+            ok=True,
+            resource="thread_preference",
+            deleted_keys=normalized_keys,
+            deleted_count=deleted,
+        )
+        after_rows = self._thread_pref_rows(normalized_thread)
+        target_present = sorted(str(row.get("key")) for row in after_rows if str(row.get("key")) in normalized_keys)
+        verification_ok = (
+            not target_present
+            and self._preferences_scope_hash(self.list_user_prefs()) == before_user_hash
+            and self._preferences_scope_hash(self.list_preferences()) == before_global_hash
+            and self._thread_prefs_scope_hash(exclude_thread_id=normalized_thread) == before_other_threads_hash
+        )
+        journal.mark_verification(
+            ok=verification_ok,
+            scope="thread_preference",
+            thread_hash=thread_hash,
+            target_keys=normalized_keys,
+            target_keys_still_present=target_present,
+            unrelated_scopes_unchanged=(
+                self._preferences_scope_hash(self.list_user_prefs()) == before_user_hash
+                and self._preferences_scope_hash(self.list_preferences()) == before_global_hash
+                and self._thread_prefs_scope_hash(exclude_thread_id=normalized_thread) == before_other_threads_hash
+            ),
+        )
+        if verification_ok:
+            for key in normalized_keys:
+                if key in previous_target_rows:
+                    journal.record_changed_resource(
+                        "memory_thread_preference",
+                        key,
+                        rollback_supported=True,
+                        deleted=True,
+                        thread_hash=thread_hash,
+                    )
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            return {
+                "ok": True,
+                "scope": "thread_preference",
+                "deleted_keys": normalized_keys,
+                "deleted_count": deleted,
+                "managed_action_journal": journal.to_dict(),
+            }
+        rollback_ok, rollback_summary = self._restore_thread_prefs_snapshot(
+            normalized_thread,
+            previous_target_rows,
+            normalized_keys,
+            journal=journal,
+        )
+        return {
+            "ok": False,
+            "error": "thread_preference_clear_verification_failed",
+            "scope": "thread_preference",
+            "deleted_keys": normalized_keys,
+            "deleted_count": deleted,
+            "rollback_ok": rollback_ok,
+            "rollback_summary": rollback_summary,
+            "message": self._clear_failure_message("thread preference reset/clear", rollback_ok, rollback_summary),
+            "managed_action_journal": journal.to_dict(),
+        }
+
+    def clear_thread_prefs(self, thread_id: str, keys: list[str] | tuple[str, ...]) -> None:
+        result = self.clear_thread_prefs_reliable(thread_id, keys)
+        if not bool(result.get("ok", False)):
+            raise RuntimeError(str(result.get("message") or "thread preference reset/clear did not finish"))
 
     def _rollback_preference(
         self,

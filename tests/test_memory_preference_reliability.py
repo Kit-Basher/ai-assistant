@@ -146,6 +146,97 @@ class TestMemoryPreferenceReliability(unittest.TestCase):
         self.assertNotIn("sk-test", payload)
         self.assertNotIn("/home/c/private/history.json", payload)
 
+    def test_global_preference_clear_journals_verifies_and_restores_on_failure(self) -> None:
+        self.db.set_preference("response_style", "private-global-value")
+        self.db.set_preference("unrelated_global", "keep-global")
+
+        with patch.object(
+            self.db,
+            "_verify_preference_clear_rows",
+            return_value={
+                "ok": False,
+                "target_keys": ["response_style"],
+                "target_keys_still_present": ["response_style"],
+                "unrelated_scope_unchanged": True,
+            },
+        ):
+            result = self.db.clear_preferences_reliable(["response_style"])
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rollback_ok"])
+        self.assertEqual("private-global-value", self.db.get_preference("response_style"))
+        self.assertEqual("keep-global", self.db.get_preference("unrelated_global"))
+        journal = result["managed_action_journal"]
+        self.assertEqual("memory.preference.clear", journal["action_type"])
+        self.assertIn("previous_snapshot_hash", json.dumps(journal, sort_keys=True))
+        payload = json.dumps(result, sort_keys=True)
+        self.assertNotIn("private-global-value", payload)
+        self.assertNotIn("keep-global", payload)
+
+    def test_user_preference_clear_removes_only_allowed_keys_and_not_thread_prefs(self) -> None:
+        self.db.set_user_pref("show_summary", "off")
+        self.db.set_user_pref("profile_summary", "private-user-value")
+        self.db.set_thread_pref("thread-a", "show_summary", "off")
+
+        result = self.db.clear_user_prefs_reliable(["show_summary"])
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(self.db.get_user_pref("show_summary"))
+        self.assertEqual("private-user-value", self.db.get_user_pref("profile_summary"))
+        self.assertEqual("off", self.db.get_thread_pref("thread-a", "show_summary"))
+        payload = json.dumps(result, sort_keys=True)
+        self.assertNotIn("private-user-value", payload)
+
+    def test_thread_preference_clear_does_not_touch_global_or_user_prefs(self) -> None:
+        self.db.set_preference("response_style", "global-private")
+        self.db.set_user_pref("show_summary", "off")
+        self.db.set_thread_pref("thread-a", "show_summary", "off")
+        self.db.set_thread_pref("thread-b", "show_summary", "on")
+
+        result = self.db.clear_thread_prefs_reliable("thread-a", ["show_summary"])
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(self.db.get_thread_pref("thread-a", "show_summary"))
+        self.assertEqual("on", self.db.get_thread_pref("thread-b", "show_summary"))
+        self.assertEqual("off", self.db.get_user_pref("show_summary"))
+        self.assertEqual("global-private", self.db.get_preference("response_style"))
+        payload = json.dumps(result, sort_keys=True)
+        self.assertNotIn("thread-a", payload)
+        self.assertIn("thread_hash", payload)
+        self.assertNotIn("global-private", payload)
+
+    def test_thread_preference_clear_failed_verification_restores_snapshot(self) -> None:
+        self.db.set_thread_pref("thread-a", "show_summary", "off")
+        original_thread_rows = self.db._thread_pref_rows("thread-a")  # noqa: SLF001 - focused rollback regression.
+
+        with patch.object(self.db, "_thread_pref_rows", side_effect=[original_thread_rows, original_thread_rows]):
+            result = self.db.clear_thread_prefs_reliable("thread-a", ["show_summary"])
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["rollback_ok"])
+        self.assertEqual("off", self.db.get_thread_pref("thread-a", "show_summary"))
+        self.assertIn("thread preference reset/clear did not finish", result["message"])
+
+    def test_reset_rejects_implicit_or_unknown_preference_targets(self) -> None:
+        with self.assertRaises(ValueError):
+            self.db.clear_user_prefs_reliable([])
+        with self.assertRaises(ValueError):
+            self.db.clear_user_prefs_reliable(["../unsafe"])
+
+    def test_prefix_clear_uses_allowed_prefix_and_redacted_journal(self) -> None:
+        self.db.set_user_pref("memory_runtime:u1:working_memory_state", "private memory text")
+        self.db.set_user_pref("show_summary", "off")
+
+        result = self.db.delete_user_prefs_by_prefix_reliable("memory_runtime:")
+
+        self.assertTrue(result["ok"])
+        self.assertIsNone(self.db.get_user_pref("memory_runtime:u1:working_memory_state"))
+        self.assertEqual("off", self.db.get_user_pref("show_summary"))
+        payload = json.dumps(result, sort_keys=True)
+        self.assertNotIn("private memory text", payload)
+        with self.assertRaises(ValueError):
+            self.db.delete_user_prefs_by_prefix_reliable("show_")
+
 
 if __name__ == "__main__":
     unittest.main()
