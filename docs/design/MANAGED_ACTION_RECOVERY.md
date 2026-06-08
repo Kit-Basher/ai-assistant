@@ -36,6 +36,13 @@ The journal should record:
 
 The journal is not permission to touch arbitrary state. It is evidence for owned changes and bounded cleanup.
 
+Persistent storage is designed separately in
+`docs/design/PERSISTENT_MANAGED_ACTION_JOURNAL.md`. A minimal SQLite helper now
+exists for redacted journal rows and read-only incomplete-action status, but
+existing flows are not converted yet. Do not claim crash/restart recovery is
+complete until each flow persists status transitions and has restart/status
+tests.
+
 ## Rollback Rules
 
 Rollback must be conservative:
@@ -77,4 +84,3 @@ Future mutating flows should use the same pattern:
 - managed local service setup, stop, restart, and removal
 
 Each future flow needs tests proving owned rollback, pre-existing resource protection, stale confirmation rejection, and clear user-facing recovery messages.
-
