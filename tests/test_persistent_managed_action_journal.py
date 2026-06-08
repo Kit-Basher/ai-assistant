@@ -99,6 +99,8 @@ class TestPersistentManagedActionJournal(unittest.TestCase):
                 "secret_name": "openai",
                 "details": {"memory_value": "private profile text", "count": 2},
                 "messages": [{"body": "raw notification text"}],
+                "deleted_keys": ["show_summary"],
+                "deleted_key_hashes": ["09fede995ea382ddefc07e4e7c5fa9d2dd7dbde0a4b24b0fa9656f2f44600d99"],
             }
         )
 
@@ -106,6 +108,11 @@ class TestPersistentManagedActionJournal(unittest.TestCase):
         self.assertEqual("***redacted***", redacted["details"]["memory_value"])
         self.assertEqual(2, redacted["details"]["count"])
         self.assertEqual("***redacted***", redacted["messages"][0]["body"])
+        self.assertEqual("***redacted***", redacted["deleted_keys"])
+        self.assertEqual(
+            ["09fede995ea382ddefc07e4e7c5fa9d2dd7dbde0a4b24b0fa9656f2f44600d99"],
+            redacted["deleted_key_hashes"],
+        )
 
 
 if __name__ == "__main__":

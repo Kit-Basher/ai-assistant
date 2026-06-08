@@ -8,9 +8,11 @@ import sqlite3
 from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 
 _PREFERENCE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,159}$")
 _PREFERENCE_SCOPES = {
@@ -74,12 +76,20 @@ class MemoryDB:
     GRAPH_IMPORT_MAX_ALIASES = 300
     GRAPH_PACK_MAX_THREADS = 10
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(
+        self,
+        db_path: str,
+        *,
+        managed_action_journal_store: PersistentManagedActionJournalStore | None = None,
+        managed_action_journal_db_path: str | None = None,
+    ) -> None:
         self.db_path = db_path
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._tx_depth = 0
+        journal_path = managed_action_journal_db_path or str(Path(db_path).with_name("managed_actions.db"))
+        self._managed_action_journal_store = managed_action_journal_store or PersistentManagedActionJournalStore(journal_path)
 
     def close(self) -> None:
         self._conn.close()
@@ -101,6 +111,30 @@ class MemoryDB:
     def _commit_if_needed(self) -> None:
         if self._tx_depth == 0:
             self._conn.commit()
+
+    def managed_action_journal_store(self) -> PersistentManagedActionJournalStore:
+        return self._managed_action_journal_store
+
+    @staticmethod
+    def _preference_key_hash(key: str) -> str:
+        return hashlib.sha256(str(key or "").encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _preference_key_hashes(keys: list[str] | tuple[str, ...]) -> list[str]:
+        return [MemoryDB._preference_key_hash(key) for key in keys]
+
+    def _persist_managed_action_journal(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        status: str,
+        recovery_hint: str | None = None,
+    ) -> None:
+        try:
+            self._managed_action_journal_store.upsert(journal, status=status, recovery_hint=recovery_hint)
+        except Exception:
+            # Persistence must not weaken or block the already-scoped managed action.
+            pass
 
     def init_schema(self, schema_path: str) -> None:
         with open(schema_path, "r", encoding="utf-8") as handle:
@@ -591,23 +625,42 @@ class MemoryDB:
             resource=scope,
             scope=scope,
             target_keys=normalized_keys,
+            target_key_hashes=self._preference_key_hashes(normalized_keys),
             previous_snapshot_hash=self._preferences_scope_hash(previous_rows.values()),
             previous_count=len(previous_rows),
         )
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         deleted = self._delete_preferences_by_keys(normalized_keys)
-        journal.record_step("clear_preferences", ok=True, resource=scope, deleted_keys=normalized_keys, deleted_count=deleted)
+        journal.record_step(
+            "clear_preferences",
+            ok=True,
+            resource=scope,
+            deleted_keys=normalized_keys,
+            deleted_key_hashes=self._preference_key_hashes(normalized_keys),
+            deleted_count=deleted,
+        )
+        self._persist_managed_action_journal(journal, status="running")
         after_rows = self.list_preferences()
         verification = self._verify_preference_clear_rows(
             after_rows,
             target_keys=normalized_keys,
             unrelated_hash=before_unrelated_hash,
         )
+        verification["target_key_hashes"] = self._preference_key_hashes(normalized_keys)
         journal.mark_verification(**verification)
         if bool(verification.get("ok", False)):
             for key in normalized_keys:
                 if key in previous_rows:
-                    journal.record_changed_resource("memory_preference", key, rollback_supported=True, deleted=True)
+                    journal.record_changed_resource(
+                        "memory_preference",
+                        key,
+                        identifier_hash=self._preference_key_hash(key),
+                        rollback_supported=True,
+                        deleted=True,
+                    )
             journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return {
                 "ok": True,
                 "scope": scope,
@@ -619,6 +672,11 @@ class MemoryDB:
             previous_rows,
             normalized_keys,
             journal=journal,
+        )
+        self._persist_managed_action_journal(
+            journal,
+            status="rolled_back" if rollback_ok else "recovery_needed",
+            recovery_hint=self._clear_failure_message("preference reset/clear", rollback_ok, rollback_summary),
         )
         return {
             "ok": False,
@@ -874,29 +932,42 @@ class MemoryDB:
             resource=scope,
             scope=scope,
             target_keys=normalized_keys,
+            target_key_hashes=self._preference_key_hashes(normalized_keys),
             previous_snapshot_hash=self._preferences_scope_hash(previous_rows.values()),
             previous_count=len(previous_rows),
         )
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         deleted = self._delete_user_prefs_by_keys(normalized_keys)
         journal.record_step(
             "clear_user_preferences",
             ok=True,
             resource=scope,
             deleted_keys=normalized_keys,
+            deleted_key_hashes=self._preference_key_hashes(normalized_keys),
             deleted_count=deleted,
         )
+        self._persist_managed_action_journal(journal, status="running")
         after_rows = self.list_user_prefs()
         verification = self._verify_preference_clear_rows(
             after_rows,
             target_keys=normalized_keys,
             unrelated_hash=before_unrelated_hash,
         )
+        verification["target_key_hashes"] = self._preference_key_hashes(normalized_keys)
         journal.mark_verification(**verification)
         if bool(verification.get("ok", False)):
             for key in normalized_keys:
                 if key in previous_rows:
-                    journal.record_changed_resource("memory_user_preference", key, rollback_supported=True, deleted=True)
+                    journal.record_changed_resource(
+                        "memory_user_preference",
+                        key,
+                        identifier_hash=self._preference_key_hash(key),
+                        rollback_supported=True,
+                        deleted=True,
+                    )
             journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return {
                 "ok": True,
                 "scope": scope,
@@ -908,6 +979,11 @@ class MemoryDB:
             previous_rows,
             normalized_keys,
             journal=journal,
+        )
+        self._persist_managed_action_journal(
+            journal,
+            status="rolled_back" if rollback_ok else "recovery_needed",
+            recovery_hint=self._clear_failure_message("preference reset/clear", rollback_ok, rollback_summary),
         )
         return {
             "ok": False,
@@ -1312,17 +1388,22 @@ class MemoryDB:
             scope="thread_preference",
             thread_hash=thread_hash,
             target_keys=normalized_keys,
+            target_key_hashes=self._preference_key_hashes(normalized_keys),
             previous_snapshot_hash=self._preferences_scope_hash(previous_target_rows.values()),
             previous_count=len(previous_target_rows),
         )
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         deleted = self._delete_thread_prefs_by_keys(normalized_thread, normalized_keys)
         journal.record_step(
             "clear_thread_preferences",
             ok=True,
             resource="thread_preference",
             deleted_keys=normalized_keys,
+            deleted_key_hashes=self._preference_key_hashes(normalized_keys),
             deleted_count=deleted,
         )
+        self._persist_managed_action_journal(journal, status="running")
         after_rows = self._thread_pref_rows(normalized_thread)
         target_present = sorted(str(row.get("key")) for row in after_rows if str(row.get("key")) in normalized_keys)
         verification_ok = (
@@ -1336,6 +1417,7 @@ class MemoryDB:
             scope="thread_preference",
             thread_hash=thread_hash,
             target_keys=normalized_keys,
+            target_key_hashes=self._preference_key_hashes(normalized_keys),
             target_keys_still_present=target_present,
             unrelated_scopes_unchanged=(
                 self._preferences_scope_hash(self.list_user_prefs()) == before_user_hash
@@ -1349,11 +1431,13 @@ class MemoryDB:
                     journal.record_changed_resource(
                         "memory_thread_preference",
                         key,
+                        identifier_hash=self._preference_key_hash(key),
                         rollback_supported=True,
                         deleted=True,
                         thread_hash=thread_hash,
                     )
             journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return {
                 "ok": True,
                 "scope": "thread_preference",
@@ -1366,6 +1450,11 @@ class MemoryDB:
             previous_target_rows,
             normalized_keys,
             journal=journal,
+        )
+        self._persist_managed_action_journal(
+            journal,
+            status="rolled_back" if rollback_ok else "recovery_needed",
+            recovery_hint=self._clear_failure_message("thread preference reset/clear", rollback_ok, rollback_summary),
         )
         return {
             "ok": False,

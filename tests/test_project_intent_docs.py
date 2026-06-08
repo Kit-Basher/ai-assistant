@@ -153,6 +153,8 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     assert "do not mutate" in text
     assert "not implemented now" in text
     assert "crash/restart recovery is not complete" in text
+    assert "preference reset/clear" in text
+    assert "first converted reference flow" in text
 
 
 def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> None:
@@ -197,7 +199,8 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         assert remaining_gap in audit_text
     assert "persistent managed-action journal storage" in audit_text
     assert "minimal sqlite" in audit_text
-    assert "existing managed-action flows are not converted" in audit_text
+    assert "preference reset/clear is converted as the first reference flow" in audit_text
+    assert "raw preference values and raw persisted keys" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -207,11 +210,12 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     text = path.read_text(encoding="utf-8")
     lowered = text.lower()
     assert "yellow" in lowered
-    assert "d807cb0" in text
+    assert "aac06ba" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
-    assert "current flows are not converted" in lowered
+    assert "preference reset/clear is converted as the first reference flow" in lowered
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
+    assert "persistent redacted status rows" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered

@@ -173,6 +173,16 @@ class TestMemoryPreferenceReliability(unittest.TestCase):
         self.assertNotIn("private-global-value", payload)
         self.assertNotIn("keep-global", payload)
 
+        persisted = self.db.managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn("private-global-value", persisted_payload)
+        self.assertNotIn("keep-global", persisted_payload)
+        self.assertNotIn("response_style", persisted_payload)
+        self.assertIn("target_key_hashes", persisted_payload)
+
     def test_user_preference_clear_removes_only_allowed_keys_and_not_thread_prefs(self) -> None:
         self.db.set_user_pref("show_summary", "off")
         self.db.set_user_pref("profile_summary", "private-user-value")
@@ -186,6 +196,24 @@ class TestMemoryPreferenceReliability(unittest.TestCase):
         self.assertEqual("off", self.db.get_thread_pref("thread-a", "show_summary"))
         payload = json.dumps(result, sort_keys=True)
         self.assertNotIn("private-user-value", payload)
+
+    def test_successful_user_preference_reset_persists_verified_journal(self) -> None:
+        self.db.set_user_pref("show_summary", "private-user-reset-value")
+
+        result = self.db.clear_user_prefs_reliable(["show_summary"])
+
+        self.assertTrue(result["ok"])
+        journal = result["managed_action_journal"]
+        persisted = self.db.managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        self.assertEqual("memory.user_preference.clear", persisted["action_type"])
+        self.assertEqual("No rollback needed.", persisted["rollback_result"]["summary"])
+        payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn("private-user-reset-value", payload)
+        self.assertNotIn("show_summary", payload)
+        self.assertIn("target_key_hashes", payload)
 
     def test_thread_preference_clear_does_not_touch_global_or_user_prefs(self) -> None:
         self.db.set_preference("response_style", "global-private")
@@ -204,6 +232,16 @@ class TestMemoryPreferenceReliability(unittest.TestCase):
         self.assertNotIn("thread-a", payload)
         self.assertIn("thread_hash", payload)
         self.assertNotIn("global-private", payload)
+
+        persisted = self.db.managed_action_journal_store().get(result["managed_action_journal"]["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        self.assertEqual("memory.thread_preference.clear", persisted["action_type"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn("thread-a", persisted_payload)
+        self.assertNotIn("global-private", persisted_payload)
+        self.assertNotIn("show_summary", persisted_payload)
 
     def test_thread_preference_clear_failed_verification_restores_snapshot(self) -> None:
         self.db.set_thread_pref("thread-a", "show_summary", "off")
@@ -234,6 +272,13 @@ class TestMemoryPreferenceReliability(unittest.TestCase):
         self.assertEqual("off", self.db.get_user_pref("show_summary"))
         payload = json.dumps(result, sort_keys=True)
         self.assertNotIn("private memory text", payload)
+        persisted = self.db.managed_action_journal_store().get(result["managed_action_journal"]["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertEqual("verified", persisted["status"])
+        self.assertNotIn("private memory text", persisted_payload)
+        self.assertNotIn("memory_runtime:u1:working_memory_state", persisted_payload)
         with self.assertRaises(ValueError):
             self.db.delete_user_prefs_by_prefix_reliable("show_")
 

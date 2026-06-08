@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
 Date: 2026-06-08
-Checkpoint: `d807cb0` Update preference reset API reliability tests
-Updated after persistent managed-action journal storage design/skeleton work.
+Checkpoint: `aac06ba` Update managed action recovery journal docs
+Updated after preference reset/clear persistent managed-action journal conversion.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -58,7 +58,7 @@ surface:
 
 1. Persistent managed-action journal storage is still missing. Many mutating
    flows have in-memory journals and readback verification, and a minimal
-   SQLite journal skeleton now exists, but current flows are not converted and
+   SQLite journal skeleton now exists. Preference reset/clear is converted as the first reference flow, but most current flows are not converted and
    post-crash recovery is not yet a uniform product guarantee.
 2. Package install and directory creation shell flows are not covered as
    runtime managed actions. They must stay out of normal assistant actions.
@@ -74,9 +74,9 @@ surface:
    require operator cleanup.
 7. Provider setup transaction coverage does not yet span every later
    model/default mutation after provider verification.
-8. Scoped bulk preference reset/clear now has in-memory journal, verification,
-   redaction, and scoped rollback coverage, but it still lacks persistent
-   post-crash journal storage.
+8. Scoped bulk preference reset/clear now has in-memory journal, persistent
+   redacted status rows, verification, redaction, and scoped rollback coverage,
+   but read-only restart/status surfacing is not yet implemented.
 9. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
@@ -138,8 +138,9 @@ other write paths now have journals, verification, and scoped rollback where
 ownership is proven. Remaining gaps are clearly tracked in
 `MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
-Remaining risk: converting flows to persistent journal writes and adding a
-read-only recovery/status surface is the next reliability target.
+Remaining risk: adding a read-only recovery/status surface and converting the
+next managed-action family to persistent journal writes is the next reliability
+target.
 
 ### Safety / Security
 
@@ -218,11 +219,10 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Convert existing managed-action flows to the persistent journal store before
-making crash/restart recovery claims for mutating managed actions. Scoped
-preference reset/clear now has in-memory journal, verification, redaction, and
-rollback coverage; persistent storage infrastructure exists but is not yet wired
-through those flows.
+Add read-only restart/status surfacing and convert the next managed-action
+family to the persistent journal store before making broader crash/restart
+recovery claims. Scoped preference reset/clear now has in-memory journal,
+persistent redacted status rows, verification, redaction, and rollback coverage.
 
 ## Required Verification
 

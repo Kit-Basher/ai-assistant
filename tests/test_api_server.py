@@ -32,6 +32,7 @@ from agent.modelops.discovery import ModelInfo
 from agent.orchestrator import OrchestratorResponse
 from agent.memory_runtime import MemoryRuntime
 from agent.safe_mode_ux import build_safe_mode_paused_message
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from memory.db import MemoryDB
 
 
@@ -220,6 +221,13 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("private memory payload", check.get_user_pref("memory_runtime:u1:working_memory_state"))
         self.assertEqual("off", check.get_user_pref("show_summary"))
         check.close()
+        journal_store = PersistentManagedActionJournalStore(Path(self.db_path).with_name("managed_actions.db"))
+        preference_actions = [
+            row
+            for row in journal_store.recent(limit=20)
+            if str(row.get("action_type") or "").startswith("memory.") and "preference" in str(row.get("action_type") or "")
+        ]
+        self.assertEqual([], preference_actions)
 
     def test_ready_and_state_expose_chat_usability_when_llm_is_available(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
