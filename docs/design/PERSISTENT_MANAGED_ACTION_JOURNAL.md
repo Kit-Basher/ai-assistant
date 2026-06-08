@@ -1,8 +1,9 @@
 # Persistent Managed-Action Journal
 
-Status: design plus minimal shared skeleton, with preference reset/clear and
-support bundle creation as the first converted reference flows. This is not yet
-a claim that every managed action survives crash/restart with complete recovery.
+Status: design plus minimal shared skeleton, with preference reset/clear,
+support bundle creation, and provider/API key config as converted reference
+flows. This is not yet a claim that every managed action survives crash/restart
+with complete recovery.
 
 ## Problem
 
@@ -33,9 +34,9 @@ dedicated state database at:
 ~/.local/share/personal-agent/managed_actions.db
 ```
 
-Preference reset/clear and support bundle creation now opt into the store at
-existing journal creation/update points. Other managed-action callers remain
-follow-up work.
+Preference reset/clear, support bundle creation, and provider/API key config now
+opt into the store at existing journal creation/update points. These are
+converted reference flows. Other managed-action callers remain follow-up work.
 
 ## Schema
 
@@ -177,7 +178,9 @@ Adopt in this order:
    approved `memory_runtime:` prefix clears.
 2. support bundle creation: converted for redacted doctor bundle artifacts and
    owned incomplete `agent-support-*` cleanup.
-3. provider/API key writes;
+3. provider/API key writes and provider config update: converted for provider
+   secret save, save-and-test, config update, and the provider config/secret
+   portions of OpenRouter setup.
 4. Telegram token, drop-in, and service state actions;
 5. model acquisition/import/default switching;
 6. managed local services/SearXNG;
@@ -219,9 +222,12 @@ Implemented now:
   prefix clear paths;
 - support bundle creation persistent status transitions for planned/running,
   verified, rolled-back cleanup, and recovery-needed cleanup failure states;
+- provider/API key config persistent status transitions for provider secret
+  save, save-and-test, provider config update, and OpenRouter provider
+  config/secret setup rollback states;
 - focused tests for redaction, read-only recovery-needed reads, verified
-  preference reset rows, support bundle verified rows, rollback rows,
-  recovery-needed rows, and preview-only non-mutation.
+  preference reset rows, support bundle verified rows, provider secret/config
+  rows, rollback rows, recovery-needed rows, and preview-only non-mutation.
 
 Not implemented now:
 
@@ -231,5 +237,6 @@ Not implemented now:
 - complete product-wide crash/restart recovery tests.
 
 Therefore the correct claim after this pass is: persistent journal storage
-infrastructure exists, preference reset/clear persists journal transitions, and
-support bundle creation persists journal transitions. Product crash/restart recovery is not complete until the remaining flows are converted and restart/status surfacing is tested.
+infrastructure exists, preference reset/clear persists journal transitions,
+support bundle creation persists journal transitions, and provider/API key
+config persists journal transitions. Product crash/restart recovery is not complete until the remaining flows are converted and restart/status surfacing is tested.

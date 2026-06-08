@@ -97,6 +97,9 @@ class TestAPIServerRuntime(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
+    def _managed_action_journal_store(self) -> PersistentManagedActionJournalStore:
+        return PersistentManagedActionJournalStore(Path(self.db_path).with_name("managed_actions.db"))
+
     def test_health_includes_safe_mode_fields(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._autopilot_safety_state.enter_safe_mode(reason="churn_detected", now_epoch=1_700_000_000)
@@ -571,6 +574,13 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(journal.get("changed_resources"))
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn(raw_secret, persisted_payload)
+        self.assertIn("provider_api_key_config", persisted_payload)
 
     def test_provider_secret_failed_provider_verification_restores_previous_key(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -608,6 +618,13 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(journal.get("verification_result", {}).get("ok"))
         rollback_steps = journal.get("rollback_steps", [])
         self.assertTrue(any(step.get("name") == "restore_provider_secret" and step.get("status") == "ok" for step in rollback_steps))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn(old_secret, persisted_payload)
+        self.assertNotIn(bad_secret, persisted_payload)
 
     def test_provider_secret_failed_new_key_verification_removes_owned_key_only(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -639,6 +656,73 @@ class TestAPIServerRuntime(unittest.TestCase):
         source = runtime.registry_document["providers"]["openrouter"]["api_key_source"]
         self.assertEqual("env", source["type"])
         self.assertNotIn(bad_secret, json.dumps(response, sort_keys=True))
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        self.assertNotIn(bad_secret, json.dumps(persisted, sort_keys=True))
+
+    def test_provider_secret_save_and_test_persists_verified_journal_and_redacts_response(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        raw_secret = "sk-openrouter-verified-secret"
+        response_body = {
+            "ok": True,
+            "provider": "openrouter",
+            "model": "openrouter:test",
+            "message": f"Authorization Bearer {raw_secret}",
+            "response_body": f"raw provider body {raw_secret}",
+        }
+
+        with patch.object(runtime, "test_provider", return_value=(True, response_body)):
+            ok, response = runtime.set_provider_secret(
+                "openrouter",
+                {"api_key": raw_secret, "verify_provider": True, "model": "openrouter:test"},
+            )
+
+        self.assertTrue(ok)
+        journal = response.get("managed_action_journal", {})
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn(raw_secret, persisted_payload)
+        self.assertNotIn("Authorization Bearer", persisted_payload)
+        self.assertNotIn("raw provider body", persisted_payload)
+        self.assertIn("openrouter:test", persisted_payload)
+
+    def test_provider_secret_rollback_failure_persists_recovery_needed(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        bad_secret = "sk-openrouter-recovery-secret"
+
+        def _failed_restore(**kwargs: object) -> tuple[bool, str]:
+            journal = kwargs["journal"]
+            assert hasattr(journal, "record_rollback_step")
+            journal.record_rollback_step("restore_provider_secret", ok=False, resource="provider:openrouter:api_key", error="forced")
+            journal.mark_rollback(ok=False, attempted=True, summary="could not restore provider secret")
+            return False, "could not restore provider secret"
+
+        with patch.object(
+            runtime,
+            "test_provider",
+            return_value=(False, {"ok": False, "error": "auth_error", "error_kind": "auth_error"}),
+        ), patch.object(runtime, "_restore_provider_secret_state", side_effect=_failed_restore):
+            ok, response = runtime.set_provider_secret(
+                "openrouter",
+                {"api_key": bad_secret, "verify_provider": True},
+            )
+
+        self.assertFalse(ok)
+        self.assertFalse(response["rollback_ok"])
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("recovery_needed", persisted["status"])
+        self.assertTrue(persisted["recovery_needed"])
+        self.assertNotIn(bad_secret, json.dumps(persisted, sort_keys=True))
 
     def test_provider_secret_unknown_provider_rejected_before_mutation(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -649,6 +733,11 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("provider not found", response["error"])
         self.assertIsNone(runtime.secret_store.get_secret("provider:missing-provider:api_key"))
         self.assertEqual([], response.get("managed_action_journal", {}).get("changed_resources"))
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("failed", persisted["status"])
 
     def test_provider_secret_save_path_does_not_shell_out(self) -> None:
         source = inspect.getsource(AgentRuntime.set_provider_secret)
@@ -757,6 +846,11 @@ class TestAPIServerRuntime(unittest.TestCase):
         journal = response.get("managed_action_journal", {})
         self.assertEqual("provider_openrouter_config", journal.get("action_type"))
         self.assertTrue(any(step.get("name") == "restore_openrouter_provider_config" for step in journal.get("rollback_steps", [])))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        self.assertNotIn("sk-openrouter-bad-secret", json.dumps(persisted, sort_keys=True))
 
     def test_update_provider_persists_and_survives_restart(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -768,7 +862,7 @@ class TestAPIServerRuntime(unittest.TestCase):
                 "chat_path": "v2/chat/completions",
                 "enabled": True,
                 "local": False,
-                "default_headers": {"X-Test": "1"},
+                "default_headers": {"Authorization": "Bearer sk-provider-header-secret", "X-Test": "1"},
             },
         )
         self.assertTrue(ok)
@@ -780,17 +874,26 @@ class TestAPIServerRuntime(unittest.TestCase):
         provider_disk = on_disk["providers"]["openrouter"]
         self.assertEqual("https://openrouter.example/api", provider_disk["base_url"])
         self.assertEqual("/v2/chat/completions", provider_disk["chat_path"])
-        self.assertEqual({"X-Test": "1"}, provider_disk["default_headers"])
+        self.assertEqual({"Authorization": "Bearer sk-provider-header-secret", "X-Test": "1"}, provider_disk["default_headers"])
 
         restarted = AgentRuntime(_config(self.registry_path, self.db_path))
         provider_after_restart = restarted.registry_document["providers"]["openrouter"]
         self.assertEqual("https://openrouter.example/api", provider_after_restart["base_url"])
         self.assertEqual("/v2/chat/completions", provider_after_restart["chat_path"])
-        self.assertEqual({"X-Test": "1"}, provider_after_restart["default_headers"])
+        self.assertEqual({"Authorization": "Bearer sk-provider-header-secret", "X-Test": "1"}, provider_after_restart["default_headers"])
         self.assertEqual(
             "https://openrouter.example/api",
             restarted._router.registry.providers["openrouter"].base_url,  # type: ignore[attr-defined]
         )
+        journal = updated.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertIn("default_headers", persisted_payload)
+        self.assertNotIn("sk-provider-header-secret", persisted_payload)
+        self.assertNotIn("Authorization", persisted_payload)
 
     def test_update_provider_returns_clear_error_when_registry_not_writable(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
