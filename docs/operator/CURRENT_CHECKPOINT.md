@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
-Date: 2026-06-06
-Checkpoint: `295b578` Harden semantic memory indexing reliability
-Latest clean checkpoint before this pass: `4e794d2` Add release readiness audit
+Date: 2026-06-08
+Checkpoint: `d807cb0` Update preference reset API reliability tests
+Latest clean checkpoint before this pass: `d807cb0` Update preference reset API reliability tests
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -19,6 +19,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 
 ## Latest Known Commits
 
+- `d807cb0` Update preference reset API reliability tests
 - `295b578` Harden semantic memory indexing reliability
 - `9989002` Split external pack review approval confirmation
 - `3dc123f` Add imported pack review state UX
@@ -52,8 +53,8 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Support bundle artifacts now write a redacted managed-action journal inside the owned temp bundle, verify expected files by readback, and remove only the newly created `agent-support-*` directory on failed verification. Notification test/send/prune now journal policy/target metadata, verify local notification history writes and prune count/window results, restore prior notification history on failed local verification where a snapshot exists, and verify action-ledger appends by readback.
 - Pack removal/source deletion cleanup now attaches managed-action journals, verifies removed/tombstoned/source-policy state by readback, restores prior owned metadata on verification failure, and keeps hostile imported text redacted from tombstones/support output.
 - Semantic memory remains disabled by default and release-gated, but optional semantic ingest/rebuild/repair paths now attach redacted managed-action journals, verify source/chunk/vector/index-state readback, keep duplicate observe writes idempotent through deterministic source hashes, remove only owned failed new ingest rows, preserve prior usable index state on failed repair, and expose a read-only semantic doctor plus confirmed repair path.
-- Remaining managed-action reliability gaps are audited. Highest priority next target is persistent managed-action journal storage; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
-- Release readiness is Yellow at `295b578`: suitable for a controlled public trial only after clean install verification, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, but existing flows are not converted yet. Highest priority next target is converting managed-action flows to persistent journal writes plus read-only restart/status surfacing; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
+- Release readiness is Yellow at `d807cb0`: suitable for a controlled public trial only after clean install verification, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -116,7 +117,7 @@ Run this after external-pack, search, acquisition, or routing changes:
 
 ## Next Likely Work
 
-- Add persistent managed-action journal storage for crash/restart recovery claims.
+- Convert managed-action flows to persistent journal storage before making crash/restart recovery claims.
 - Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.
 - Add future core-owned content operations only after separate preview/confirmation and safety tests.

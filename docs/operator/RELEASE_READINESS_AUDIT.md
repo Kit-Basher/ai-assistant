@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
-Date: 2026-06-06
-Checkpoint: `295b578` Harden semantic memory indexing reliability
-Updated after `4e794d2` Add release readiness audit for scoped bulk preference reset/clear reliability.
+Date: 2026-06-08
+Checkpoint: `d807cb0` Update preference reset API reliability tests
+Updated after persistent managed-action journal storage design/skeleton work.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -57,8 +57,9 @@ These block broad public release unless explicitly scoped out of the public
 surface:
 
 1. Persistent managed-action journal storage is still missing. Many mutating
-   flows have in-memory journals and readback verification, but post-crash
-   recovery is not yet a uniform product guarantee.
+   flows have in-memory journals and readback verification, and a minimal
+   SQLite journal skeleton now exists, but current flows are not converted and
+   post-crash recovery is not yet a uniform product guarantee.
 2. Package install and directory creation shell flows are not covered as
    runtime managed actions. They must stay out of normal assistant actions.
 3. Future filesystem writes have no transaction design. Current native
@@ -137,7 +138,8 @@ other write paths now have journals, verification, and scoped rollback where
 ownership is proven. Remaining gaps are clearly tracked in
 `MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
-Remaining risk: persistent journal storage is the next reliability target.
+Remaining risk: converting flows to persistent journal writes and adding a
+read-only recovery/status surface is the next reliability target.
 
 ### Safety / Security
 
@@ -216,9 +218,11 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Add persistent managed-action journal storage before making crash/restart
-recovery claims for mutating managed actions. Scoped preference reset/clear now
-has in-memory journal, verification, redaction, and rollback coverage.
+Convert existing managed-action flows to the persistent journal store before
+making crash/restart recovery claims for mutating managed actions. Scoped
+preference reset/clear now has in-memory journal, verification, redaction, and
+rollback coverage; persistent storage infrastructure exists but is not yet wired
+through those flows.
 
 ## Required Verification
 

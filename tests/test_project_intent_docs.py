@@ -135,6 +135,24 @@ def test_managed_action_recovery_doc_exists_and_states_rollback_boundary() -> No
     assert "never silently mutate pre-existing user resources" in text
     assert "shell=false" in text
     assert "searxng" in text
+    assert "persistent_managed_action_journal.md" in text
+
+
+def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims() -> None:
+    path = REPO_ROOT / "docs" / "design" / "PERSISTENT_MANAGED_ACTION_JOURNAL.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8").lower()
+    assert "use sqlite, not jsonl" in text
+    assert "planned" in text
+    assert "running" in text
+    assert "verified" in text
+    assert "rolled_back" in text
+    assert "failed" in text
+    assert "recovery_needed" in text
+    assert "never store" in text
+    assert "do not mutate" in text
+    assert "not implemented now" in text
+    assert "crash/restart recovery is not complete" in text
 
 
 def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> None:
@@ -178,6 +196,8 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     ):
         assert remaining_gap in audit_text
     assert "persistent managed-action journal storage" in audit_text
+    assert "minimal sqlite" in audit_text
+    assert "existing managed-action flows are not converted" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -187,9 +207,10 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     text = path.read_text(encoding="utf-8")
     lowered = text.lower()
     assert "yellow" in lowered
-    assert "295b578" in text
+    assert "d807cb0" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
+    assert "current flows are not converted" in lowered
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered

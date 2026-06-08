@@ -6,7 +6,7 @@ This audit is a checkpoint, not a claim that every flow already meets the full s
 
 Highest-confidence flow today: managed SearXNG setup/cleanup. It has preflight, preview, confirmation, journal, verification, owned rollback, and tests.
 
-Main gaps: persistent managed-action journal storage and full quarantine artifact cleanup. Provider/API key writes, model downloads/imports, default model changes, Telegram token/drop-in/service configuration, pack lifecycle metadata mutations including removal/source deletion, registry/autoconfig/self-heal/hygiene/apply flows, normal user memory/onboarding/preference markers, scoped preference reset/clear paths, semantic-memory ingest/rebuild/repair paths, support bundle artifacts, notification send/test/prune, and action-ledger appends now have in-memory managed-action journals or readback verification where ownership is proven.
+Main gaps: conversion of current flows to persistent managed-action journal storage and full quarantine artifact cleanup. A minimal SQLite persistence skeleton now exists, but provider/API key writes, model downloads/imports, default model changes, Telegram token/drop-in/service configuration, pack lifecycle metadata mutations including removal/source deletion, registry/autoconfig/self-heal/hygiene/apply flows, normal user memory/onboarding/preference markers, scoped preference reset/clear paths, semantic-memory ingest/rebuild/repair paths, support bundle artifacts, notification send/test/prune, and action-ledger appends still need to write persistent rows before crash/restart recovery can be claimed. These flows currently have in-memory managed-action journals or readback verification where ownership is proven.
 
 ## Audit Table
 
@@ -36,6 +36,7 @@ Main gaps: persistent managed-action journal storage and full quarantine artifac
 
 ## Findings
 
+- Persistent managed-action journal storage now has a minimal SQLite design and helper skeleton in `agent/actions/persistent_journal.py`; see `docs/design/PERSISTENT_MANAGED_ACTION_JOURNAL.md`. It provides schema creation, lifecycle status values, redaction, and read helpers for recent/incomplete rows. Existing managed-action flows are not converted in this pass, so crash/restart recovery remains a follow-up.
 - SearXNG is the reference implementation for the standard.
 - External pack lifecycle gates are strong on safety and one-step confirmation. Source approval, import record, review approval, enablement, and permission grant metadata now carry in-memory journals, readback verification, and scoped metadata rollback where ownership is clear.
 - Model acquisition now records managed-action journals and verifies inventory after pulls/imports. It still needs persistent journals, disk-space preflight, and provable model/cache ownership before any automated cache/model deletion.
@@ -67,11 +68,11 @@ These are the remaining write surfaces found in the audit pass. They are not all
 - Low to medium risk improved but still append-only by nature: remote notification delivery and action ledger appends. They now verify local records/readback, but delivered messages and audit records are not rolled back.
 - Low risk/read-only: current native filesystem reads and support status inspection paths.
 
-The exact next recommended reliability target is **persistent managed-action journal storage**, followed by more semantic-memory soak coverage before any default-on promotion.
+The exact next recommended reliability target is **converting managed-action flows to persistent journal writes plus read-only restart/status surfacing**, followed by more semantic-memory soak coverage before any default-on promotion.
 
 ## Required Follow-Up Order
 
-1. Add persistent managed-action journal storage across provider/API key, Telegram, model, pack, registry maintenance, memory/preference, semantic-memory, support bundle, and notification flows.
+1. Convert provider/API key, Telegram, model, pack, registry maintenance, memory/preference, semantic-memory, support bundle, and notification flows to the persistent managed-action journal store.
 2. Keep semantic memory release-gated/off-by-default until soak coverage proves ingest, observe, repair, and status behavior across restarts and provider failures.
 3. Keep notification delivery and action ledger append semantics explicitly append-only; verify local readback and redact payloads.
 4. Extend provider setup transaction coverage to model mutations after provider verification.
