@@ -154,7 +154,8 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     assert "not implemented now" in text
     assert "crash/restart recovery is not complete" in text
     assert "preference reset/clear" in text
-    assert "first converted reference flow" in text
+    assert "support bundle creation" in text
+    assert "first converted reference flows" in text
 
 
 def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> None:
@@ -199,8 +200,10 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         assert remaining_gap in audit_text
     assert "persistent managed-action journal storage" in audit_text
     assert "minimal sqlite" in audit_text
-    assert "preference reset/clear is converted as the first reference flow" in audit_text
+    assert "preference reset/clear plus support bundle creation are the first converted reference flows" in audit_text
     assert "raw preference values and raw persisted keys" in audit_text
+    assert "support bundle generation now writes a redacted managed-action journal artifact" in audit_text
+    assert "recovery_needed if owned cleanup cannot complete" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -210,12 +213,13 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     text = path.read_text(encoding="utf-8")
     lowered = text.lower()
     assert "yellow" in lowered
-    assert "aac06ba" in text
+    assert "7397f02" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
-    assert "preference reset/clear is converted as the first reference flow" in lowered
+    assert "preference reset/clear and support bundle creation are converted reference flows" in lowered
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
     assert "persistent redacted status rows" in lowered
+    assert "support bundle creation now has persistent redacted status rows" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered

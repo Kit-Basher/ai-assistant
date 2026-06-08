@@ -1,8 +1,8 @@
 # Persistent Managed-Action Journal
 
-Status: design plus minimal shared skeleton, with preference reset/clear as the
-first converted reference flow. This is not yet a claim that every managed
-action survives crash/restart with complete recovery.
+Status: design plus minimal shared skeleton, with preference reset/clear and
+support bundle creation as the first converted reference flows. This is not yet
+a claim that every managed action survives crash/restart with complete recovery.
 
 ## Problem
 
@@ -33,8 +33,9 @@ dedicated state database at:
 ~/.local/share/personal-agent/managed_actions.db
 ```
 
-Preference reset/clear now opts into the store at existing journal
-creation/update points. Other managed-action callers remain follow-up work.
+Preference reset/clear and support bundle creation now opt into the store at
+existing journal creation/update points. Other managed-action callers remain
+follow-up work.
 
 ## Schema
 
@@ -130,7 +131,7 @@ Examples:
 
 ## Read-Only Status Surface
 
-Add an operator/read-only surface after the first flow conversion:
+Add an operator/read-only surface after these reference flow conversions:
 
 - recent actions: newest journal rows with action id, type, status, timestamps,
   redacted target, resource summary, verification result, rollback result, and
@@ -174,13 +175,15 @@ Adopt in this order:
 
 1. memory/preference reset and clear: converted for global, user, thread, and
    approved `memory_runtime:` prefix clears.
-2. provider/API key writes;
-3. Telegram token, drop-in, and service state actions;
-4. model acquisition/import/default switching;
-5. managed local services/SearXNG;
-6. pack lifecycle/removal/source deletion and registry maintenance;
-7. semantic-memory ingest/repair;
-8. support bundle, notifications, and action ledger status reads.
+2. support bundle creation: converted for redacted doctor bundle artifacts and
+   owned incomplete `agent-support-*` cleanup.
+3. provider/API key writes;
+4. Telegram token, drop-in, and service state actions;
+5. model acquisition/import/default switching;
+6. managed local services/SearXNG;
+7. pack lifecycle/removal/source deletion and registry maintenance;
+8. semantic-memory ingest/repair;
+9. notifications and action ledger status reads.
 
 For each flow:
 
@@ -214,8 +217,11 @@ Implemented now:
 - preference reset/clear persistent status transitions for global, user,
   thread, `/prefs_reset`, `/prefs_thread_reset`, and approved `memory_runtime:`
   prefix clear paths;
+- support bundle creation persistent status transitions for planned/running,
+  verified, rolled-back cleanup, and recovery-needed cleanup failure states;
 - focused tests for redaction, read-only recovery-needed reads, verified
-  preference reset rows, rollback rows, and preview-only non-mutation.
+  preference reset rows, support bundle verified rows, rollback rows,
+  recovery-needed rows, and preview-only non-mutation.
 
 Not implemented now:
 
@@ -225,6 +231,5 @@ Not implemented now:
 - complete product-wide crash/restart recovery tests.
 
 Therefore the correct claim after this pass is: persistent journal storage
-infrastructure exists and preference reset/clear persists journal transitions,
-but product crash/restart recovery is not complete until the remaining flows are
-converted and restart/status surfacing is tested.
+infrastructure exists, preference reset/clear persists journal transitions, and
+support bundle creation persists journal transitions. Product crash/restart recovery is not complete until the remaining flows are converted and restart/status surfacing is tested.

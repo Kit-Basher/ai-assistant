@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-08
-Checkpoint: `aac06ba` Update managed action recovery journal docs
-Latest clean checkpoint before this pass: `aac06ba` Update managed action recovery journal docs
+Checkpoint: `7397f02` Update persistent journal helper for preference reset
+Latest clean checkpoint before this pass: `7397f02` Update persistent journal helper for preference reset
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -20,6 +20,8 @@ This checkpoint captures the current operator/project baseline so future chats a
 ## Latest Known Commits
 
 - `aac06ba` Update managed action recovery journal docs
+- `7397f02` Update persistent journal helper for preference reset
+- `042c98e` Persist journals for preference reset cleanup
 - `b4952f3` Add persistent managed action journal skeleton
 - `d807cb0` Update preference reset API reliability tests
 - `b662821` Add reliability journaling for preference reset cleanup
@@ -53,11 +55,11 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Registry/autoconfig/self-heal/hygiene/cleanup/capabilities reconcile/bootstrap/rollback flows now attach managed-action journals through the transactional registry path, verify registry state by readback/hash, and restore the pre-action registry snapshot when verification fails and ownership is proven.
 - Preference-backed memory/bootstrap markers and onboarding/preferences writes now attach managed-action journals, verify by readback, restore/remove only the owned target key on verification failure, keep global and per-thread preference scopes separate, and redact raw preference/memory content from journals.
 - Bulk preference reset/clear paths now attach managed-action journals for explicit global/user/thread target keys and approved user-pref prefixes, record redacted scoped snapshot hashes, persist redacted managed-action journal status transitions, verify target keys are removed while unrelated scopes stay unchanged, restore the previous scoped preference snapshot on failed verification, and keep raw preference values and raw persisted keys out of persistent journal rows.
-- Support bundle artifacts now write a redacted managed-action journal inside the owned temp bundle, verify expected files by readback, and remove only the newly created `agent-support-*` directory on failed verification. Notification test/send/prune now journal policy/target metadata, verify local notification history writes and prune count/window results, restore prior notification history on failed local verification where a snapshot exists, and verify action-ledger appends by readback.
+- Support bundle artifacts now write a redacted managed-action journal inside the owned temp bundle, persist redacted managed-action journal status transitions, verify expected files by readback, remove only the newly created `agent-support-*` directory on failed verification, and record recovery_needed if owned cleanup cannot complete. Notification test/send/prune now journal policy/target metadata, verify local notification history writes and prune count/window results, restore prior notification history on failed local verification where a snapshot exists, and verify action-ledger appends by readback.
 - Pack removal/source deletion cleanup now attaches managed-action journals, verifies removed/tombstoned/source-policy state by readback, restores prior owned metadata on verification failure, and keeps hostile imported text redacted from tombstones/support output.
 - Semantic memory remains disabled by default and release-gated, but optional semantic ingest/rebuild/repair paths now attach redacted managed-action journals, verify source/chunk/vector/index-state readback, keep duplicate observe writes idempotent through deterministic source hashes, remove only owned failed new ingest rows, preserve prior usable index state on failed repair, and expose a read-only semantic doctor plus confirmed repair path.
-- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear is the first converted reference flow. Highest priority next target is read-only restart/status surfacing plus converting the next managed-action family to persistent journal writes; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
-- Release readiness is Yellow at `aac06ba`: suitable for a controlled public trial only after clean install verification, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear plus support bundle creation are converted reference flows. Highest priority next target is read-only restart/status surfacing plus converting the next managed-action family to persistent journal writes; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
+- Release readiness is Yellow at `7397f02`: suitable for a controlled public trial only after clean install verification, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 

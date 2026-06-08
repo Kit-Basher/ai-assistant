@@ -20,6 +20,7 @@ from typing import Any, Callable
 
 from memory.db import MemoryDB
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.cards import validate_cards_payload
 from agent.nl_router import build_cards_payload
 from skills.observe_now.handler import observe_now
@@ -2829,12 +2830,15 @@ def _safe_support_bundle(
     *,
     repo_root: Path,
     api_base_url: str,
+    managed_action_journal_store: PersistentManagedActionJournalStore | None = None,
 ) -> str | None:
     journal = ManagedActionJournal(action_type="doctor.support_bundle.write", target="temp:agent-support")
     journal.plan_step("preflight_support_bundle_path", resource="support_bundle")
     journal.plan_step("write_support_bundle_artifacts", resource="support_bundle")
     journal.plan_step("verify_support_bundle_artifacts", resource="support_bundle")
+    journal_store = managed_action_journal_store or PersistentManagedActionJournalStore()
     bundle_dir: Path | None = None
+    _persist_support_bundle_journal(journal_store, journal, status="planned")
     try:
         bundle_dir = Path(tempfile.mkdtemp(prefix="agent-support-"))
         temp_root = Path(tempfile.gettempdir()).resolve()
@@ -2849,8 +2853,10 @@ def _safe_support_bundle(
             ok=True,
             resource="support_bundle",
             path_hash=_support_bundle_path_hash(bundle_dir),
-            temp_root=str(temp_root),
+            basename=resolved_bundle_dir.name,
+            temp_root_hash=hashlib.sha256(str(temp_root).encode("utf-8")).hexdigest(),
         )
+        _persist_support_bundle_journal(journal_store, journal, status="running")
         payload = {
             "trace_id": report.trace_id,
             "generated_at": report.generated_at,
@@ -2869,9 +2875,16 @@ def _safe_support_bundle(
             ok=True,
             resource="support_bundle",
             files=["doctor_support_bundle.json", "SUMMARY.txt", "managed_action_journal.json"],
+            basename=resolved_bundle_dir.name,
         )
+        _persist_support_bundle_journal(journal_store, journal, status="running")
         verification_ok = _verify_support_bundle_artifacts(bundle_dir)
-        journal.mark_verification(ok=verification_ok, files=["doctor_support_bundle.json", "SUMMARY.txt"])
+        journal.mark_verification(
+            ok=verification_ok,
+            files=["doctor_support_bundle.json", "SUMMARY.txt"],
+            basename=resolved_bundle_dir.name,
+            path_hash=_support_bundle_path_hash(bundle_dir),
+        )
         if not verification_ok:
             cleanup_ok, cleanup_summary = _cleanup_owned_support_bundle(bundle_dir)
             journal.record_rollback_step(
@@ -2881,14 +2894,22 @@ def _safe_support_bundle(
                 summary=cleanup_summary,
             )
             journal.mark_rollback(ok=cleanup_ok, attempted=True, summary=cleanup_summary)
+            _persist_support_bundle_journal(
+                journal_store,
+                journal,
+                status="rolled_back" if cleanup_ok else "recovery_needed",
+                recovery_hint=_support_bundle_recovery_hint(cleanup_ok, cleanup_summary),
+            )
             return None
         journal.record_created_resource(
             "support_bundle",
             _support_bundle_path_hash(bundle_dir),
             rollback_supported=True,
             files=["doctor_support_bundle.json", "SUMMARY.txt", "managed_action_journal.json"],
+            basename=resolved_bundle_dir.name,
         )
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        _persist_support_bundle_journal(journal_store, journal, status="verified")
         journal_path.write_text(
             json.dumps(journal.to_dict(), ensure_ascii=True, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
@@ -2904,7 +2925,40 @@ def _safe_support_bundle(
                 summary=cleanup_summary,
             )
             journal.mark_rollback(ok=cleanup_ok, attempted=True, summary=cleanup_summary)
+            _persist_support_bundle_journal(
+                journal_store,
+                journal,
+                status="rolled_back" if cleanup_ok else "recovery_needed",
+                recovery_hint=_support_bundle_recovery_hint(cleanup_ok, cleanup_summary),
+            )
+        else:
+            _persist_support_bundle_journal(
+                journal_store,
+                journal,
+                status="failed",
+                recovery_hint="Support bundle creation failed before an owned bundle directory was created.",
+            )
         return None
+
+
+def _persist_support_bundle_journal(
+    store: PersistentManagedActionJournalStore,
+    journal: ManagedActionJournal,
+    *,
+    status: str,
+    recovery_hint: str | None = None,
+) -> None:
+    try:
+        store.upsert(journal, status=status, recovery_hint=recovery_hint)
+    except Exception:
+        pass
+
+
+def _support_bundle_recovery_hint(cleanup_ok: bool, cleanup_summary: str) -> str:
+    if cleanup_ok:
+        return "Support bundle verification failed; the incomplete owned bundle was removed. Safe next step: rerun doctor diagnostics if needed."
+    summary = str(cleanup_summary or "cleanup did not complete").strip()
+    return f"Support bundle verification failed and cleanup needs attention: {summary}. Safe next step: inspect only the owned agent-support-* temp directory."
 
 
 def _support_bundle_path_hash(path: Path) -> str:

@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
 Date: 2026-06-08
-Checkpoint: `aac06ba` Update managed action recovery journal docs
-Updated after preference reset/clear persistent managed-action journal conversion.
+Checkpoint: `7397f02` Update persistent journal helper for preference reset
+Updated after support bundle persistent managed-action journal conversion.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -56,9 +56,9 @@ below are resolved or explicitly scoped out of the public build.
 These block broad public release unless explicitly scoped out of the public
 surface:
 
-1. Persistent managed-action journal storage is still missing. Many mutating
+1. Uniform persistent managed-action journal storage is still incomplete. Many mutating
    flows have in-memory journals and readback verification, and a minimal
-   SQLite journal skeleton now exists. Preference reset/clear is converted as the first reference flow, but most current flows are not converted and
+   SQLite journal skeleton now exists. Preference reset/clear and support bundle creation are converted reference flows, but most current flows are not converted and
    post-crash recovery is not yet a uniform product guarantee.
 2. Package install and directory creation shell flows are not covered as
    runtime managed actions. They must stay out of normal assistant actions.
@@ -77,10 +77,13 @@ surface:
 8. Scoped bulk preference reset/clear now has in-memory journal, persistent
    redacted status rows, verification, redaction, and scoped rollback coverage,
    but read-only restart/status surfacing is not yet implemented.
-9. Live behavior barrage is good smoke coverage only. It catches boundary,
+9. Support bundle creation now has persistent redacted status rows, verification,
+   and owned incomplete-bundle cleanup, but read-only restart/status surfacing is
+   not yet implemented.
+10. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
-10. Public install/update/rollback needs one clean end-to-end pass on a clean
+11. Public install/update/rollback needs one clean end-to-end pass on a clean
     user-local environment or VM before any unassisted public trial.
 
 ## Non-Blocking Polish Items
@@ -223,6 +226,8 @@ Add read-only restart/status surfacing and convert the next managed-action
 family to the persistent journal store before making broader crash/restart
 recovery claims. Scoped preference reset/clear now has in-memory journal,
 persistent redacted status rows, verification, redaction, and rollback coverage.
+Support bundle creation now has persistent redacted status rows, verification,
+and owned incomplete-bundle cleanup coverage.
 
 ## Required Verification
 
