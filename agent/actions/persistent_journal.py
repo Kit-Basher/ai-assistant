@@ -25,6 +25,8 @@ _SENSITIVE_KEY_TOKENS = {
     "body",
     "content",
     "credential",
+    "deleted_keys",
+    "identifier",
     "memory",
     "password",
     "private",
@@ -53,7 +55,9 @@ def redact_journal_value(value: Any) -> Any:
         for key, item in value.items():
             normalized_key = str(key)
             lowered = normalized_key.lower()
-            if any(token in lowered for token in _SENSITIVE_KEY_TOKENS):
+            if lowered.endswith("_hash") or lowered.endswith("_hashes"):
+                redacted[normalized_key] = redact_journal_value(item)
+            elif any(token in lowered for token in _SENSITIVE_KEY_TOKENS):
                 redacted[normalized_key] = "***redacted***"
             else:
                 redacted[normalized_key] = redact_journal_value(item)
