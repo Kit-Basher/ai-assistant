@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 
 from agent.secret_store import SecretStore
 
@@ -434,9 +435,10 @@ def write_telegram_enablement_managed(
     env: Mapping[str, str] | None = None,
     home: Path | None = None,
     secret_store_path: str | None = None,
+    managed_action_journal_store: PersistentManagedActionJournalStore | str | Path | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     path = telegram_dropin_path(home=home)
-    journal = ManagedActionJournal(action_type="telegram_enablement_config", target=str(path))
+    journal = ManagedActionJournal(action_type="telegram_enablement_config", target="telegram_service_dropin")
     journal.plan_step("preflight_telegram_dropin_path", resource=str(path))
     journal.plan_step("capture_previous_telegram_dropin", resource=str(path))
     journal.plan_step("write_telegram_enablement", resource=str(path))
@@ -444,6 +446,13 @@ def write_telegram_enablement_managed(
 
     if not is_personal_agent_telegram_dropin_path(path, home=home):
         journal.record_step("preflight_telegram_dropin_path", ok=False, resource=str(path), reason="unexpected_dropin_path")
+        journal.mark_verification(ok=False, dropin_write_verified=False)
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="failed",
+            recovery_hint="Retry only against the known Personal Agent Telegram service drop-in path.",
+        )
         return False, {
             "ok": False,
             "error": "telegram_dropin_path_invalid",
@@ -452,6 +461,7 @@ def write_telegram_enablement_managed(
             "managed_action_journal": journal.to_dict(),
         }
     journal.record_step("preflight_telegram_dropin_path", ok=True, resource=str(path))
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="planned")
 
     previous_exists = path.is_file()
     previous_content = ""
@@ -467,6 +477,7 @@ def write_telegram_enablement_managed(
         previous_exists=previous_exists,
         previous_length=len(previous_content),
     )
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="running")
 
     try:
         written_path = write_telegram_enablement(
@@ -478,6 +489,12 @@ def write_telegram_enablement_managed(
     except Exception as exc:
         journal.record_step("write_telegram_enablement", ok=False, resource=str(path), error=exc.__class__.__name__)
         journal.mark_verification(ok=False, dropin_write_verified=False)
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="failed",
+            recovery_hint="Check write access to the Telegram service drop-in, then retry setup.",
+        )
         return False, {
             "ok": False,
             "error": "telegram_dropin_write_failed",
@@ -493,6 +510,7 @@ def write_telegram_enablement_managed(
         rollback_supported=True,
         previous_exists=previous_exists,
     )
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="running")
 
     try:
         current = path.read_text(encoding="utf-8")
@@ -525,6 +543,12 @@ def write_telegram_enablement_managed(
         )
         journal.mark_verification(ok=False, dropin_write_verified=False)
         journal.mark_rollback(ok=rollback_ok, attempted=True, summary=summary)
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="rolled_back" if rollback_ok else "recovery_needed",
+            recovery_hint="Confirm the Telegram drop-in contents before retrying service setup.",
+        )
         return False, {
             "ok": False,
             "error": "telegram_dropin_write_verification_failed",
@@ -537,6 +561,7 @@ def write_telegram_enablement_managed(
 
     journal.mark_verification(ok=True, dropin_write_verified=True)
     journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="verified")
     return True, {
         "ok": True,
         "path": str(path),
@@ -552,6 +577,7 @@ def manage_telegram_service_state(
     home: Path | None = None,
     secret_store_path: str | None = None,
     run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    managed_action_journal_store: PersistentManagedActionJournalStore | str | Path | None = None,
 ) -> tuple[bool, dict[str, Any]]:
     action_name = "telegram_service_enable" if enabled else "telegram_service_disable"
     journal = ManagedActionJournal(action_type=action_name, target=TELEGRAM_SERVICE_NAME)
@@ -566,6 +592,13 @@ def manage_telegram_service_state(
 
     if not is_personal_agent_telegram_dropin_path(path, home=home):
         journal.record_step("preflight_telegram_dropin_path", ok=False, resource=str(path), reason="unexpected_dropin_path")
+        journal.mark_verification(ok=False, dropin_path_valid=False)
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="failed",
+            recovery_hint="Retry only against the known Personal Agent Telegram service drop-in path.",
+        )
         return False, {
             "ok": False,
             "error": "telegram_dropin_path_invalid",
@@ -574,6 +607,7 @@ def manage_telegram_service_state(
             "managed_action_journal": journal.to_dict(),
         }
     journal.record_step("preflight_telegram_dropin_path", ok=True, resource=str(path))
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="planned")
 
     version_proc = _run_approved_systemctl_user(
         ["--version"],
@@ -584,6 +618,12 @@ def manage_telegram_service_state(
     )
     if version_proc is None or version_proc.returncode != 0:
         journal.mark_verification(ok=False, systemd_user_available=False)
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="failed",
+            recovery_hint="Check the user systemd manager, then retry Telegram service setup.",
+        )
         return False, {
             "ok": False,
             "error": "systemd_user_unavailable",
@@ -607,12 +647,14 @@ def manage_telegram_service_state(
         previous_dropin_exists=previous_exists,
         previous_state=_safe_status_snapshot(state_before),
     )
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="running")
 
     write_ok, write_body = write_telegram_enablement_managed(
         enabled,
         env=env,
         home=home,
         secret_store_path=secret_store_path,
+        managed_action_journal_store=managed_action_journal_store,
     )
     journal.record_step(
         "write_telegram_enablement",
@@ -622,6 +664,12 @@ def manage_telegram_service_state(
     )
     if not write_ok:
         journal.mark_verification(ok=False, dropin_write_verified=False)
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="failed",
+            recovery_hint="Resolve the Telegram drop-in write failure, then retry service setup.",
+        )
         body = dict(write_body)
         body["managed_action_journal"] = journal.to_dict()
         return False, body
@@ -645,6 +693,12 @@ def manage_telegram_service_state(
             ok=rollback_ok,
             attempted=True,
             summary=_telegram_dropin_rollback_summary(previous_exists, rollback_ok),
+        )
+        _persist_telegram_managed_action_journal(
+            journal,
+            managed_action_journal_store,
+            status="rolled_back" if rollback_ok else "recovery_needed",
+            recovery_hint="Confirm Telegram service config before retrying setup.",
         )
         return _telegram_service_failure_response(
             journal=journal,
@@ -684,6 +738,7 @@ def manage_telegram_service_state(
                 previous_content=previous_content,
                 state_before=state_before,
                 run=run,
+                managed_action_journal_store=managed_action_journal_store,
                 error_kind="telegram_service_restart_failed",
                 detail="I could not restart the Personal Agent Telegram service.",
             )
@@ -703,6 +758,7 @@ def manage_telegram_service_state(
                 previous_content=previous_content,
                 state_before=state_before,
                 run=run,
+                managed_action_journal_store=managed_action_journal_store,
                 error_kind="telegram_service_stop_failed",
                 detail="I could not stop the Personal Agent Telegram service.",
             )
@@ -736,12 +792,14 @@ def manage_telegram_service_state(
             previous_content=previous_content,
             state_before=state_before,
             run=run,
+            managed_action_journal_store=managed_action_journal_store,
             error_kind="telegram_service_verification_failed",
             detail="I could not verify the Telegram service state after the change.",
         )
 
     journal.mark_verification(ok=True, current_state=_safe_status_snapshot(state_after), online_getme_required=False)
     journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+    _persist_telegram_managed_action_journal(journal, managed_action_journal_store, status="verified")
     return True, {
         "ok": True,
         "enabled": bool(enabled),
@@ -778,6 +836,7 @@ def _recover_failed_telegram_service_action(
     previous_content: str,
     state_before: Mapping[str, Any],
     run: Callable[..., subprocess.CompletedProcess[str]] | None,
+    managed_action_journal_store: PersistentManagedActionJournalStore | str | Path | None = None,
     error_kind: str,
     detail: str,
 ) -> tuple[bool, dict[str, Any]]:
@@ -801,6 +860,12 @@ def _recover_failed_telegram_service_action(
         summary = f"{summary}; the Telegram service config may still need manual attention"
     journal.mark_verification(ok=False, error_kind=error_kind, previous_state=_safe_status_snapshot(state_before))
     journal.mark_rollback(ok=rollback_ok, attempted=True, summary=summary)
+    _persist_telegram_managed_action_journal(
+        journal,
+        managed_action_journal_store,
+        status="rolled_back" if rollback_ok else "recovery_needed",
+        recovery_hint="Confirm Telegram service status and drop-in contents before retrying setup.",
+    )
     return _telegram_service_failure_response(
         journal=journal,
         error_kind=error_kind,
@@ -870,6 +935,24 @@ def _rollback_telegram_dropin(
             error=exc.__class__.__name__,
         )
         return False
+
+
+def _persist_telegram_managed_action_journal(
+    journal: ManagedActionJournal,
+    managed_action_journal_store: PersistentManagedActionJournalStore | str | Path | None,
+    *,
+    status: str,
+    recovery_hint: str | None = None,
+) -> None:
+    try:
+        store = (
+            managed_action_journal_store
+            if isinstance(managed_action_journal_store, PersistentManagedActionJournalStore)
+            else PersistentManagedActionJournalStore(managed_action_journal_store)
+        )
+        store.upsert(journal, status=status, recovery_hint=recovery_hint)
+    except Exception:
+        pass
 
 
 __all__ = [

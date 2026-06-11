@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.secret_store import SecretStore
 from agent.telegram_runtime_state import (
     clear_stale_telegram_locks,
@@ -27,6 +29,10 @@ def _completed(args: list[str], returncode: int, stdout: str = "", stderr: str =
 
 
 class TestTelegramRuntimeState(unittest.TestCase):
+    @staticmethod
+    def _journal_store(home: Path) -> PersistentManagedActionJournalStore:
+        return PersistentManagedActionJournalStore(home / "managed_actions.db")
+
     def _run_stub(self, *, installed: bool, active: bool, enabled: bool):
         def _runner(args, **_kwargs):  # type: ignore[no-untyped-def]
             cmd = list(args)
@@ -146,8 +152,14 @@ class TestTelegramRuntimeState(unittest.TestCase):
     def test_managed_enablement_write_journals_and_verifies_owned_dropin(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            store = self._journal_store(home)
 
-            ok, response = write_telegram_enablement_managed(True, home=home, env={})
+            ok, response = write_telegram_enablement_managed(
+                True,
+                home=home,
+                env={},
+                managed_action_journal_store=store,
+            )
 
             self.assertTrue(ok)
             self.assertTrue(response["ok"])
@@ -160,17 +172,28 @@ class TestTelegramRuntimeState(unittest.TestCase):
             self.assertTrue(journal.get("changed_resources"))
             self.assertTrue(journal.get("verification_result", {}).get("ok"))
             self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+            persisted = store.get(journal["action_id"])
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("verified", persisted["status"])
+            self.assertNotIn(str(home), json.dumps(persisted, sort_keys=True))
 
     def test_managed_enablement_rollback_restores_owned_dropin(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            store = self._journal_store(home)
             path = telegram_dropin_path(home=home)
             path.parent.mkdir(parents=True, exist_ok=True)
             original = "[Service]\nEnvironment=TELEGRAM_ENABLED=0\n"
             path.write_text(original, encoding="utf-8")
 
             with patch.object(Path, "read_text", side_effect=[original, "[Service]\n"]):
-                ok, response = write_telegram_enablement_managed(True, home=home, env={})
+                ok, response = write_telegram_enablement_managed(
+                    True,
+                    home=home,
+                    env={},
+                    managed_action_journal_store=store,
+                )
 
             self.assertFalse(ok)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
@@ -178,6 +201,11 @@ class TestTelegramRuntimeState(unittest.TestCase):
             journal = response.get("managed_action_journal", {})
             rollback_steps = journal.get("rollback_steps", [])
             self.assertTrue(any(step.get("name") == "restore_telegram_dropin" and step.get("status") == "ok" for step in rollback_steps))
+            persisted = store.get(journal["action_id"])
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("rolled_back", persisted["status"])
+            self.assertNotIn(str(home), json.dumps(persisted, sort_keys=True))
 
     def test_telegram_dropin_path_validator_rejects_unrelated_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -197,6 +225,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
     def test_manage_telegram_service_enable_journals_and_verifies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            store = self._journal_store(home)
             secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
             secret_path.parent.mkdir(parents=True, exist_ok=True)
             SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
@@ -207,20 +236,28 @@ class TestTelegramRuntimeState(unittest.TestCase):
                 home=home,
                 env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
                 run=runner,
+                managed_action_journal_store=store,
             )
 
-        self.assertTrue(ok)
-        self.assertTrue(response["ok"])
-        commands = [call[-2:] for call in calls]
-        self.assertIn(["restart", "personal-agent-telegram.service"], commands)
-        journal = response.get("managed_action_journal", {})
-        self.assertEqual("telegram_service_enable", journal.get("action_type"))
-        self.assertTrue(journal.get("verification_result", {}).get("ok"))
-        self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+            self.assertTrue(ok)
+            self.assertTrue(response["ok"])
+            commands = [call[-2:] for call in calls]
+            self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+            journal = response.get("managed_action_journal", {})
+            self.assertEqual("telegram_service_enable", journal.get("action_type"))
+            self.assertTrue(journal.get("verification_result", {}).get("ok"))
+            self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+            persisted = store.get(journal["action_id"])
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("verified", persisted["status"])
+            self.assertNotIn(str(home), json.dumps(persisted, sort_keys=True))
+            self.assertEqual([], store.incomplete())
 
     def test_manage_telegram_service_verification_failure_rolls_back_dropin(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            store = self._journal_store(home)
             secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
             secret_path.parent.mkdir(parents=True, exist_ok=True)
             SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
@@ -235,32 +272,79 @@ class TestTelegramRuntimeState(unittest.TestCase):
                 home=home,
                 env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
                 run=runner,
+                managed_action_journal_store=store,
             )
 
             self.assertFalse(ok)
             self.assertEqual(original, path.read_text(encoding="utf-8"))
-        self.assertEqual("telegram_service_restart_failed", response["error_kind"])
-        self.assertIn("restored previous Telegram service config", response["message"])
-        commands = [call[-2:] for call in calls]
-        self.assertIn(["restart", "personal-agent-telegram.service"], commands)
-        self.assertIn(["stop", "personal-agent-telegram.service"], commands)
-        journal = response.get("managed_action_journal", {})
-        self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
-        self.assertTrue(any(step.get("name") == "restore_telegram_dropin" for step in journal.get("rollback_steps", [])))
+            self.assertEqual("telegram_service_restart_failed", response["error_kind"])
+            self.assertIn("restored previous Telegram service config", response["message"])
+            commands = [call[-2:] for call in calls]
+            self.assertIn(["restart", "personal-agent-telegram.service"], commands)
+            self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+            journal = response.get("managed_action_journal", {})
+            self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+            self.assertTrue(
+                any(step.get("name") == "restore_telegram_dropin" for step in journal.get("rollback_steps", []))
+            )
+            persisted = store.get(journal["action_id"])
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("rolled_back", persisted["status"])
+            self.assertNotIn(str(home), json.dumps(persisted, sort_keys=True))
+
+    def test_manage_telegram_service_rollback_failure_persists_recovery_needed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            store = self._journal_store(home)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            runner, _calls = self._service_action_runner(active_after_restart=False)
+
+            with patch("agent.telegram_runtime_state._rollback_telegram_dropin", return_value=False):
+                ok, response = manage_telegram_service_state(
+                    True,
+                    home=home,
+                    env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                    run=runner,
+                    managed_action_journal_store=store,
+                )
+
+            self.assertFalse(ok)
+            journal = response.get("managed_action_journal", {})
+            persisted = store.get(journal["action_id"])
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("recovery_needed", persisted["status"])
+            self.assertTrue(persisted["recovery_needed"])
+            self.assertNotIn(str(home), json.dumps(persisted, sort_keys=True))
 
     def test_manage_telegram_service_disable_stops_and_verifies(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            store = self._journal_store(home)
             write_telegram_enablement(True, home=home, env={})
             runner, calls = self._service_action_runner(active_after_stop=False)
 
-            ok, response = manage_telegram_service_state(False, home=home, env={}, run=runner)
+            ok, response = manage_telegram_service_state(
+                False,
+                home=home,
+                env={},
+                run=runner,
+                managed_action_journal_store=store,
+            )
 
-        self.assertTrue(ok)
-        commands = [call[-2:] for call in calls]
-        self.assertIn(["stop", "personal-agent-telegram.service"], commands)
-        self.assertFalse(bool(response["state"]["enabled"]))
-        self.assertFalse(bool(response["state"]["service_active"]))
+            self.assertTrue(ok)
+            commands = [call[-2:] for call in calls]
+            self.assertIn(["stop", "personal-agent-telegram.service"], commands)
+            self.assertFalse(bool(response["state"]["enabled"]))
+            self.assertFalse(bool(response["state"]["service_active"]))
+            journal = response.get("managed_action_journal", {})
+            persisted = store.get(journal["action_id"])
+            self.assertIsNotNone(persisted)
+            assert persisted is not None
+            self.assertEqual("verified", persisted["status"])
 
     def test_approved_telegram_systemctl_actions_reject_arbitrary_service(self) -> None:
         self.assertTrue(is_approved_telegram_systemctl_user_action(["restart", "personal-agent-telegram.service"]))
@@ -270,6 +354,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
     def test_manage_telegram_service_does_not_require_online_getme(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             home = Path(tmpdir)
+            store = self._journal_store(home)
             secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
             secret_path.parent.mkdir(parents=True, exist_ok=True)
             SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
@@ -280,6 +365,7 @@ class TestTelegramRuntimeState(unittest.TestCase):
                 home=home,
                 env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
                 run=runner,
+                managed_action_journal_store=store,
             )
 
         self.assertTrue(ok)

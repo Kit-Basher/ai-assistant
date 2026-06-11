@@ -1,9 +1,9 @@
 # Persistent Managed-Action Journal
 
 Status: design plus minimal shared skeleton, with preference reset/clear,
-support bundle creation, and provider/API key config as converted reference
-flows. This is not yet a claim that every managed action survives crash/restart
-with complete recovery.
+support bundle creation, provider/API key config, and Telegram token/service
+setup as converted reference flows. This is not yet a claim that every managed
+action survives crash/restart with complete recovery.
 
 ## Problem
 
@@ -34,9 +34,10 @@ dedicated state database at:
 ~/.local/share/personal-agent/managed_actions.db
 ```
 
-Preference reset/clear, support bundle creation, and provider/API key config now
-opt into the store at existing journal creation/update points. These are
-converted reference flows. Other managed-action callers remain follow-up work.
+Preference reset/clear, support bundle creation, provider/API key config, and
+Telegram token/service setup now opt into the store at existing journal
+creation/update points. These are converted reference flows. Other
+managed-action callers remain follow-up work.
 
 ## Schema
 
@@ -178,15 +179,20 @@ Adopt in this order:
    approved `memory_runtime:` prefix clears.
 2. support bundle creation: converted for redacted doctor bundle artifacts and
    owned incomplete `agent-support-*` cleanup.
-3. provider/API key writes and provider config update: converted for provider
-   secret save, save-and-test, config update, and the provider config/secret
+3. provider/API key writes and config update: converted for provider secret
+   save, save-and-test, provider config update, and the provider config/secret
    portions of OpenRouter setup.
-4. Telegram token, drop-in, and service state actions;
-5. model acquisition/import/default switching;
+4. Telegram token/service setup: converted for token save, enablement drop-in
+   writes, and `personal-agent-telegram.service` enable/disable state
+   management. Persisted rows keep only redacted token metadata, service/drop-in
+   ownership metadata, verification summaries, and rollback results. Online
+   Telegram `getMe` remains optional, and no startup auto-recovery is added.
+5. default model changes and temporary chat model override;
 6. managed local services/SearXNG;
 7. pack lifecycle/removal/source deletion and registry maintenance;
 8. semantic-memory ingest/repair;
-9. notifications and action ledger status reads.
+9. model acquisition/import;
+10. notifications and action ledger status reads.
 
 For each flow:
 
@@ -225,9 +231,13 @@ Implemented now:
 - provider/API key config persistent status transitions for provider secret
   save, save-and-test, provider config update, and OpenRouter provider
   config/secret setup rollback states;
+- Telegram token/service setup persistent status transitions for token save,
+  enablement drop-in writes, service enable/disable verification, scoped
+  token/drop-in rollback, and recovery-needed cleanup failure states;
 - focused tests for redaction, read-only recovery-needed reads, verified
   preference reset rows, support bundle verified rows, provider secret/config
-  rows, rollback rows, recovery-needed rows, and preview-only non-mutation.
+  rows, Telegram token/service rows, rollback rows, recovery-needed rows, and
+  preview-only non-mutation.
 
 Not implemented now:
 
@@ -239,4 +249,6 @@ Not implemented now:
 Therefore the correct claim after this pass is: persistent journal storage
 infrastructure exists, preference reset/clear persists journal transitions,
 support bundle creation persists journal transitions, and provider/API key
-config persists journal transitions. Product crash/restart recovery is not complete until the remaining flows are converted and restart/status surfacing is tested.
+config and Telegram token/service setup persist journal transitions. Product
+crash/restart recovery is not complete until the remaining flows are converted
+and restart/status surfacing is tested.

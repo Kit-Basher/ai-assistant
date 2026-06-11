@@ -578,6 +578,11 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIsNotNone(persisted)
         assert persisted is not None
         self.assertEqual("verified", persisted["status"])
+        self.assertNotIn(raw_token, json.dumps(persisted, sort_keys=True))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
         persisted_payload = json.dumps(persisted, sort_keys=True)
         self.assertNotIn(raw_secret, persisted_payload)
         self.assertIn("provider_api_key_config", persisted_payload)
@@ -783,6 +788,12 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
         rollback_steps = journal.get("rollback_steps", [])
         self.assertTrue(any(step.get("name") == "restore_telegram_secret" and step.get("status") == "ok" for step in rollback_steps))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        self.assertNotIn(old_token, json.dumps(persisted, sort_keys=True))
+        self.assertNotIn(bad_token, json.dumps(persisted, sort_keys=True))
 
     def test_telegram_secret_failed_new_token_verification_removes_owned_token_only(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -797,6 +808,35 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("sk-other-secret", runtime.secret_store.get_secret("provider:other:api_key"))
         self.assertNotIn(bad_token, json.dumps(response, sort_keys=True))
         self.assertIn("removed failed new Telegram token", response["rollback_summary"])
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        self.assertNotIn(bad_token, json.dumps(persisted, sort_keys=True))
+
+    def test_telegram_secret_rollback_failure_persists_recovery_needed(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        bad_token = "123456789:bad-telegram-recovery-token"
+
+        with patch.object(runtime.secret_store, "get_secret", side_effect=[None, "wrong-token"]), patch.object(
+            runtime,
+            "_restore_telegram_secret_state",
+            side_effect=lambda secret_key, previous_token, journal: (
+                journal.mark_rollback(ok=False, attempted=True, summary="could not restore the previous Telegram token automatically")
+                or (False, "could not restore the previous Telegram token automatically")
+            ),
+        ):
+            ok, response = runtime.set_telegram_secret({"bot_token": bad_token})
+
+        self.assertFalse(ok)
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("recovery_needed", persisted["status"])
+        self.assertTrue(persisted["recovery_needed"])
+        self.assertNotIn(bad_token, json.dumps(persisted, sort_keys=True))
 
     def test_telegram_secret_empty_token_rejected_before_mutation(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -806,6 +846,12 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual("bot_token is required", response["error"])
         self.assertIsNone(runtime.secret_store.get_secret("telegram:bot_token"))
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("failed", persisted["status"])
+        self.assertEqual([], journal.get("changed_resources"))
 
     def test_telegram_secret_save_path_does_not_shell_out(self) -> None:
         source = inspect.getsource(AgentRuntime.set_telegram_secret)

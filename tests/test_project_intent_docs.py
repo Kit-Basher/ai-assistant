@@ -156,6 +156,7 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     assert "preference reset/clear" in text
     assert "support bundle creation" in text
     assert "provider/api key config" in text
+    assert "telegram token/service setup" in text
     assert "converted reference flows" in text
 
 
@@ -201,12 +202,17 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
         assert remaining_gap in audit_text
     assert "persistent managed-action journal storage" in audit_text
     assert "minimal sqlite" in audit_text
-    assert "preference reset/clear, support bundle creation, and provider/api key config are converted reference flows" in audit_text
+    assert (
+        "preference reset/clear, support bundle creation, provider/api key config, and telegram token/service setup are converted reference flows"
+        in audit_text
+    )
     assert "raw preference values and raw persisted keys" in audit_text
     assert "support bundle generation now writes a redacted managed-action journal artifact" in audit_text
     assert "recovery_needed if owned cleanup cannot complete" in audit_text
     assert "provider/api key setup now journals redacted previous/new secret metadata" in audit_text
     assert "provider-test summaries" in audit_text
+    assert "telegram token setup now records managed-action journals" in audit_text
+    assert "persists redacted status rows for the known personal agent drop-in" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -215,15 +221,20 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert path.is_file()
     text = path.read_text(encoding="utf-8")
     lowered = text.lower()
+    lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "5195f6a" in text
+    assert "8e7f80e" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
-    assert "preference reset/clear, support bundle creation, and provider/api key config are converted reference flows" in lowered
+    assert (
+        "preference reset/clear, support bundle creation, provider/api key config, and telegram token/service setup are converted reference flows"
+        in lowered_flat
+    )
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
     assert "persistent redacted status rows" in lowered
     assert "support bundle creation now has persistent redacted status rows" in lowered
     assert "provider/api key config now has persistent redacted status rows" in lowered
+    assert "telegram token/service setup now has persistent redacted status rows" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered

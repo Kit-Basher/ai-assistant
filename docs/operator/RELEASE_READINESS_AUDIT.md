@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
 Date: 2026-06-08
-Checkpoint: `5195f6a` Persist journals for support bundle creation
-Updated after provider/API key persistent managed-action journal conversion.
+Checkpoint: `8e7f80e` Persist journals for provider configuration
+Updated after Telegram token/service persistent managed-action journal conversion.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -58,7 +58,9 @@ surface:
 
 1. Uniform persistent managed-action journal storage is still incomplete. Many mutating
    flows have in-memory journals and readback verification, and a minimal
-   SQLite journal skeleton now exists. Preference reset/clear, support bundle creation, and provider/API key config are converted reference flows, but most current flows are not converted and
+   SQLite journal skeleton now exists. Preference reset/clear, support bundle
+   creation, provider/API key config, and Telegram token/service setup are
+   converted reference flows, but most current flows are not converted and
    post-crash recovery is not yet a uniform product guarantee.
 2. Package install and directory creation shell flows are not covered as
    runtime managed actions. They must stay out of normal assistant actions.
@@ -75,7 +77,11 @@ surface:
 7. Provider/API key config now has persistent redacted status rows, but provider
    setup transaction coverage does not yet span every later model/default
    mutation after provider verification.
-8. Scoped bulk preference reset/clear now has in-memory journal, persistent
+8. Telegram token/service setup now has persistent redacted status rows for
+   token save, drop-in writes, service enable/disable verification, and scoped
+   rollback/recovery-needed results, but read-only restart/status surfacing is
+   not yet implemented.
+9. Scoped bulk preference reset/clear now has in-memory journal, persistent
    redacted status rows, verification, redaction, and scoped rollback coverage,
    but read-only restart/status surfacing is not yet implemented.
 9. Support bundle creation now has persistent redacted status rows, verification,

@@ -32,6 +32,7 @@ _SENSITIVE_KEY_TOKENS = {
     "private",
     "prompt",
     "raw",
+    "resource",
     "secret",
     "source_ref",
     "target",

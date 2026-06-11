@@ -6037,9 +6037,6 @@ class AgentRuntime:
 
     def set_telegram_secret(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         token = str(payload.get("bot_token") or "").strip()
-        if not token:
-            return False, {"ok": False, "error": "bot_token is required"}
-
         secret_key = _TELEGRAM_BOT_TOKEN_SECRET_KEY
         journal = ManagedActionJournal(action_type="telegram_token_config", target=secret_key)
         journal.plan_step("preflight_telegram_secret", resource=secret_key)
@@ -6047,8 +6044,28 @@ class AgentRuntime:
         journal.plan_step("write_telegram_secret", resource=secret_key)
         journal.plan_step("verify_telegram_secret_write", resource=secret_key)
 
+        if not token:
+            journal.record_step("preflight_telegram_secret", ok=False, resource=secret_key, reason="missing_token")
+            journal.mark_verification(ok=False, secret_write_verified=False)
+            self._persist_managed_action_journal(
+                journal,
+                status="failed",
+                recovery_hint="Paste a Telegram bot token, then retry Telegram setup.",
+            )
+            return False, {
+                "ok": False,
+                "error": "bot_token is required",
+                "managed_action_journal": journal.to_dict(),
+            }
+
         if secret_key != "telegram:bot_token":
             journal.record_step("preflight_telegram_secret", ok=False, resource=secret_key, reason="unexpected_secret_key")
+            journal.mark_verification(ok=False, secret_write_verified=False)
+            self._persist_managed_action_journal(
+                journal,
+                status="failed",
+                recovery_hint="Retry Telegram setup only against the known Telegram token secret key.",
+            )
             return False, {
                 "ok": False,
                 "error": "telegram_secret_target_invalid",
@@ -6057,6 +6074,7 @@ class AgentRuntime:
                 "managed_action_journal": journal.to_dict(),
             }
         journal.record_step("preflight_telegram_secret", ok=True, resource=secret_key)
+        self._persist_managed_action_journal(journal, status="planned")
 
         previous_token = self.secret_store.get_secret(secret_key)
         journal.record_step(
@@ -6065,12 +6083,18 @@ class AgentRuntime:
             resource=secret_key,
             previous_secret=self._secret_metadata(previous_token),
         )
+        self._persist_managed_action_journal(journal, status="running")
 
         try:
             self.secret_store.set_secret(secret_key, token)
         except Exception as exc:
             journal.record_step("write_telegram_secret", ok=False, resource=secret_key, error=exc.__class__.__name__)
             journal.mark_verification(ok=False, secret_write_verified=False)
+            self._persist_managed_action_journal(
+                journal,
+                status="failed",
+                recovery_hint="Check secret-store access, then retry Telegram token setup.",
+            )
             return False, {
                 "ok": False,
                 "error": "telegram_secret_write_failed",
@@ -6087,6 +6111,7 @@ class AgentRuntime:
             previous_secret=self._secret_metadata(previous_token),
             new_secret=self._secret_metadata(token),
         )
+        self._persist_managed_action_journal(journal, status="running")
 
         stored_token = self.secret_store.get_secret(secret_key)
         secret_verified = str(stored_token or "").strip() == token
@@ -6103,6 +6128,11 @@ class AgentRuntime:
                 journal=journal,
             )
             journal.mark_verification(ok=False, secret_write_verified=False)
+            self._persist_managed_action_journal(
+                journal,
+                status="rolled_back" if cleanup_ok else "recovery_needed",
+                recovery_hint="Confirm the Telegram token state before retrying setup.",
+            )
             return False, {
                 "ok": False,
                 "error": "telegram_secret_write_verification_failed",
@@ -6118,6 +6148,7 @@ class AgentRuntime:
 
         journal.mark_verification(ok=True, secret_write_verified=True, telegram_status="not_checked")
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         return True, {
             "ok": True,
             "secret": self._secret_metadata(token),
