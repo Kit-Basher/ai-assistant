@@ -6560,6 +6560,22 @@ class AgentRuntime:
         except Exception:
             pass
 
+    def _failed_default_model_preflight_journal(self, requested_model: str, error_kind: str) -> ManagedActionJournal:
+        journal = ManagedActionJournal(action_type="default_model_config", target=requested_model or "default_model")
+        journal.plan_step("preflight_defaults_request", resource="defaults")
+        self._persist_managed_action_journal(journal, status="planned")
+        journal.record_step(
+            "preflight_defaults_request",
+            ok=False,
+            resource="defaults",
+            requested_model_id=requested_model,
+            reason=error_kind,
+        )
+        journal.mark_verification(ok=False, error_kind=error_kind)
+        journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+        self._persist_managed_action_journal(journal, status="failed")
+        return journal
+
     def add_provider_model(self, provider_id: str, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         provider_key = provider_id.strip().lower()
         document = self.registry_document
@@ -7543,11 +7559,15 @@ class AgentRuntime:
             resource="defaults",
             previous_defaults=self._defaults_metadata(previous_defaults),
         )
+        self._persist_managed_action_journal(journal, status="planned")
 
         if "routing_mode" in requested_payload:
             mode = str(requested_payload.get("routing_mode") or "").strip().lower()
             if mode not in valid_modes:
                 journal.record_step("preflight_defaults_request", ok=False, resource="defaults", reason="invalid_routing_mode")
+                journal.mark_verification(ok=False, error_kind="invalid_routing_mode")
+                journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                self._persist_managed_action_journal(journal, status="failed")
                 return False, {
                     "ok": False,
                     "error": "invalid routing_mode",
@@ -7560,6 +7580,9 @@ class AgentRuntime:
             provider = provider_override or None
             if provider and provider not in provider_ids:
                 journal.record_step("preflight_defaults_request", ok=False, resource=str(provider or ""), reason="default_provider_not_found")
+                journal.mark_verification(ok=False, error_kind="default_provider_not_found")
+                journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                self._persist_managed_action_journal(journal, status="failed")
                 return False, {
                     "ok": False,
                     "error": "default_provider not found",
@@ -7574,6 +7597,12 @@ class AgentRuntime:
                     resource=str(provider or ""),
                     reason=str(provider_preflight.get("error_kind") or provider_preflight.get("error") or "provider_not_usable"),
                 )
+                journal.mark_verification(
+                    ok=False,
+                    error_kind=str(provider_preflight.get("error_kind") or provider_preflight.get("error") or "provider_not_usable"),
+                )
+                journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                self._persist_managed_action_journal(journal, status="failed")
                 provider_preflight["managed_action_journal"] = journal.to_dict()
                 return False, provider_preflight
             defaults["default_provider"] = provider
@@ -7595,6 +7624,9 @@ class AgentRuntime:
                 )
                 if canonical_model is None:
                     journal.record_step("preflight_defaults_request", ok=False, resource=model, reason="default_model_not_found")
+                    journal.mark_verification(ok=False, error_kind="default_model_not_found")
+                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                    self._persist_managed_action_journal(journal, status="failed")
                     return False, {
                         "ok": False,
                         "error": "default_model not found",
@@ -7625,6 +7657,12 @@ class AgentRuntime:
                         resource=canonical_model,
                         reason=str(legacy_error.get("error_kind") or legacy_error.get("error") or "chat_model_not_chat_capable"),
                     )
+                    journal.mark_verification(
+                        ok=False,
+                        error_kind=str(legacy_error.get("error_kind") or legacy_error.get("error") or "chat_model_not_chat_capable"),
+                    )
+                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                    self._persist_managed_action_journal(journal, status="failed")
                     legacy_error["managed_action_journal"] = journal.to_dict()
                     return False, legacy_error
                 model_preflight = self._default_chat_model_preflight(
@@ -7640,6 +7678,12 @@ class AgentRuntime:
                         resource=validated_model,
                         reason=str(model_preflight.get("error_kind") or model_preflight.get("error") or "chat_model_not_usable"),
                     )
+                    journal.mark_verification(
+                        ok=False,
+                        error_kind=str(model_preflight.get("error_kind") or model_preflight.get("error") or "chat_model_not_usable"),
+                    )
+                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                    self._persist_managed_action_journal(journal, status="failed")
                     model_preflight["managed_action_journal"] = journal.to_dict()
                     return False, model_preflight
                 defaults["chat_model"] = validated_model
@@ -7659,6 +7703,9 @@ class AgentRuntime:
                 )
                 if canonical_model is None:
                     journal.record_step("preflight_defaults_request", ok=False, resource=model, reason="embed_model_not_found")
+                    journal.mark_verification(ok=False, error_kind="embed_model_not_found")
+                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                    self._persist_managed_action_journal(journal, status="failed")
                     return False, {
                         "ok": False,
                         "error": "embed_model not found",
@@ -7689,6 +7736,9 @@ class AgentRuntime:
                         resource=canonical_model,
                         reason=str(error_payload.get("error_kind") or "embed_model_not_embedding_capable"),
                     )
+                    journal.mark_verification(ok=False, error_kind=str(error_payload.get("error_kind") or "embed_model_not_embedding_capable"))
+                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                    self._persist_managed_action_journal(journal, status="failed")
                     error_payload["managed_action_journal"] = journal.to_dict()
                     return False, error_payload
                 defaults["embed_model"] = validated_model
@@ -7723,10 +7773,14 @@ class AgentRuntime:
             resource="defaults",
             requested_defaults=self._defaults_metadata(defaults),
         )
+        self._persist_managed_action_journal(journal, status="running")
         saved, error = self._persist_registry_document(document)
         if not saved:
             assert error is not None
             journal.record_step("persist_defaults", ok=False, resource="defaults", reason=str(error.get("error") or "persist_failed"))
+            journal.mark_verification(ok=False, error_kind=str(error.get("error") or "persist_failed"))
+            journal.mark_rollback(ok=True, attempted=False, summary="Registry write did not complete.")
+            self._persist_managed_action_journal(journal, status="failed")
             response = dict(error)
             response.setdefault("error_kind", str(response.get("error") or "persist_failed"))
             response["managed_action_journal"] = journal.to_dict()
@@ -7754,6 +7808,11 @@ class AgentRuntime:
         if not bool(verification.get("ok")):
             rollback_ok, rollback_summary = self._restore_defaults_state(previous_defaults, journal=journal)
             journal.mark_verification(ok=False, verification=verification)
+            self._persist_managed_action_journal(
+                journal,
+                status="rolled_back" if rollback_ok else "recovery_needed",
+                recovery_hint=None if rollback_ok else "Inspect default model settings before retrying the switch.",
+            )
             return False, {
                 "ok": False,
                 "error": str(verification.get("error_kind") or "default_model_verification_failed"),
@@ -7768,6 +7827,7 @@ class AgentRuntime:
             }
         journal.mark_verification(ok=True, verification=verification)
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         current_defaults = self.get_defaults()
         current_default_provider = str(current_defaults.get("default_provider") or "").strip().lower() or None
         current_chat_model = (
@@ -10034,17 +10094,30 @@ class AgentRuntime:
             require_available=False,
         )
         if not resolved_ok:
-            return False, resolved_body if isinstance(resolved_body, dict) else {"ok": False, "error": "default_model not found"}
+            error_kind = str(
+                (resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind")
+                or (resolved_body if isinstance(resolved_body, dict) else {}).get("error")
+                or "default_model_not_found"
+            )
+            journal = self._failed_default_model_preflight_journal(requested_model, error_kind)
+            response = resolved_body if isinstance(resolved_body, dict) else {"ok": False, "error": "default_model not found"}
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         normalized_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         provider_id = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         if not normalized_model or not provider_id:
-            return False, {"ok": False, "error": "default_model not found"}
+            journal = self._failed_default_model_preflight_journal(requested_model, "default_model_not_found")
+            return False, {"ok": False, "error": "default_model not found", "managed_action_journal": journal.to_dict()}
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
             resolved_body if isinstance(resolved_body, dict) else {},
             requested_model=normalized_model,
         )
         if not switch_allowed:
-            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(normalized_model)
+            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(normalized_model)
+            error_kind = str(response.get("error_kind") or response.get("error") or "default_model_blocked")
+            journal = self._failed_default_model_preflight_journal(normalized_model or requested_model, error_kind)
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         previous_default = self._stored_chat_default_target() or {}
         previous_model = str(previous_default.get("model") or "").strip() or "none"
         ok, body = self.update_defaults(
@@ -10079,11 +10152,20 @@ class AgentRuntime:
             require_usable=True,
         )
         if not resolved_ok:
-            return False, resolved_body if isinstance(resolved_body, dict) else {
+            requested_model = str(model_id or "").strip()
+            error_kind = str(
+                (resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind")
+                or (resolved_body if isinstance(resolved_body, dict) else {}).get("error")
+                or "switch_target_unavailable"
+            )
+            journal = self._failed_default_model_preflight_journal(requested_model, error_kind)
+            response = resolved_body if isinstance(resolved_body, dict) else {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
@@ -10091,12 +10173,18 @@ class AgentRuntime:
             requested_model=applied_model or model_id,
         )
         if not switch_allowed:
-            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+            error_kind = str(response.get("error_kind") or response.get("error") or "switch_target_blocked")
+            journal = self._failed_default_model_preflight_journal(applied_model or str(model_id or "").strip(), error_kind)
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         if not applied_model or not applied_provider:
+            journal = self._failed_default_model_preflight_journal(str(model_id or "").strip(), "switch_target_unavailable")
             return False, {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
+                "managed_action_journal": journal.to_dict(),
             }
         previous_default = self._stored_chat_default_target() or {}
         previous_model = str(previous_default.get("model") or "").strip() or "none"
@@ -10143,6 +10231,13 @@ class AgentRuntime:
         *,
         provider_id: str | None = None,
     ) -> tuple[bool, dict[str, Any]]:
+        requested_model = str(model_id or "").strip()
+        journal = ManagedActionJournal(action_type="temporary_chat_model_override", target=requested_model or "temporary_chat_target")
+        journal.plan_step("preflight_temporary_chat_target", resource="temporary_chat_target")
+        journal.plan_step("capture_previous_temporary_target", resource="temporary_chat_target")
+        journal.plan_step("apply_temporary_chat_target", resource="temporary_chat_target")
+        journal.plan_step("verify_temporary_chat_target", resource="temporary_chat_target")
+        self._persist_managed_action_journal(journal, status="planned")
         resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
             model_id,
             provider_id=provider_id,
@@ -10150,11 +10245,20 @@ class AgentRuntime:
             require_usable=True,
         )
         if not resolved_ok:
-            return False, resolved_body if isinstance(resolved_body, dict) else {
+            error_kind = (
+                str((resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind") or (resolved_body if isinstance(resolved_body, dict) else {}).get("error") or "switch_target_unavailable")
+            )
+            journal.record_step("preflight_temporary_chat_target", ok=False, resource="temporary_chat_target", reason=error_kind)
+            journal.mark_verification(ok=False, error_kind=error_kind)
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            response = resolved_body if isinstance(resolved_body, dict) else {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
@@ -10162,17 +10266,25 @@ class AgentRuntime:
             requested_model=applied_model or model_id,
         )
         if not switch_allowed:
-            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+            error_kind = str(response.get("error_kind") or response.get("error") or "switch_target_blocked")
+            journal.record_step("preflight_temporary_chat_target", ok=False, resource="temporary_chat_target", reason=error_kind)
+            journal.mark_verification(ok=False, error_kind=error_kind)
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         if not applied_model or not applied_provider:
+            journal.record_step("preflight_temporary_chat_target", ok=False, resource="temporary_chat_target", reason="switch_target_unavailable")
+            journal.mark_verification(ok=False, error_kind="switch_target_unavailable")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
             return False, {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
+                "managed_action_journal": journal.to_dict(),
             }
-        journal = ManagedActionJournal(action_type="temporary_chat_model_override", target=applied_model)
-        journal.plan_step("capture_previous_temporary_target", resource="temporary_chat_target")
-        journal.plan_step("apply_temporary_chat_target", resource="temporary_chat_target")
-        journal.plan_step("verify_temporary_chat_target", resource="temporary_chat_target")
         previous_safe_override = (
             dict(self._safe_mode_explicit_chat_target_override)
             if isinstance(self._safe_mode_explicit_chat_target_override, dict)
@@ -10190,6 +10302,14 @@ class AgentRuntime:
             previous_safe_override=self._temporary_target_metadata(previous_safe_override),
             previous_temporary_override=self._temporary_target_metadata(previous_temporary_override),
         )
+        journal.record_step(
+            "preflight_temporary_chat_target",
+            ok=True,
+            resource="temporary_chat_target",
+            requested_model_id=applied_model,
+            requested_provider_id=applied_provider,
+        )
+        self._persist_managed_action_journal(journal, status="running")
         if self._safe_mode_enabled():
             self._safe_mode_explicit_chat_target_override = {
                 "provider": applied_provider,
@@ -10214,6 +10334,7 @@ class AgentRuntime:
                 )
                 journal.mark_verification(ok=False, target=applied_model)
                 journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
+                self._persist_managed_action_journal(journal, status="rolled_back")
                 return False, {
                     "ok": False,
                     "error": "temporary_chat_target_verification_failed",
@@ -10223,6 +10344,7 @@ class AgentRuntime:
                 }
             journal.mark_verification(ok=True, target=applied_model)
             journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return True, {
                 "ok": True,
                 "provider": applied_provider,
@@ -10266,6 +10388,7 @@ class AgentRuntime:
             )
             journal.mark_verification(ok=False, target=applied_model)
             journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
+            self._persist_managed_action_journal(journal, status="rolled_back")
             return False, {
                 "ok": False,
                 "error": "temporary_chat_target_verification_failed",
@@ -10278,6 +10401,7 @@ class AgentRuntime:
             invalidate_truth_cache()
         journal.mark_verification(ok=True, target=applied_model)
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         return True, {
             "ok": True,
             "provider": applied_provider,
@@ -10304,6 +10428,13 @@ class AgentRuntime:
         *,
         provider_id: str | None = None,
     ) -> tuple[bool, dict[str, Any]]:
+        requested_model = str(model_id or "").strip()
+        journal = ManagedActionJournal(action_type="temporary_chat_model_restore", target=requested_model or "temporary_chat_target")
+        journal.plan_step("preflight_temporary_chat_target_restore", resource="temporary_chat_target")
+        journal.plan_step("capture_previous_temporary_target", resource="temporary_chat_target")
+        journal.plan_step("apply_temporary_chat_target_restore", resource="temporary_chat_target")
+        journal.plan_step("verify_temporary_chat_target_restore", resource="temporary_chat_target")
+        self._persist_managed_action_journal(journal, status="planned")
         resolved_ok, resolved_body = self._resolve_switch_target_with_policy_guard(
             model_id,
             provider_id=provider_id,
@@ -10311,11 +10442,18 @@ class AgentRuntime:
             require_usable=True,
         )
         if not resolved_ok:
-            return False, resolved_body if isinstance(resolved_body, dict) else {
+            error_kind = str((resolved_body if isinstance(resolved_body, dict) else {}).get("error_kind") or (resolved_body if isinstance(resolved_body, dict) else {}).get("error") or "switch_target_unavailable")
+            journal.record_step("preflight_temporary_chat_target_restore", ok=False, resource="temporary_chat_target", reason=error_kind)
+            journal.mark_verification(ok=False, error_kind=error_kind)
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            response = resolved_body if isinstance(resolved_body, dict) else {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
             }
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         applied_model = str((resolved_body if isinstance(resolved_body, dict) else {}).get("model_id") or "").strip()
         applied_provider = str((resolved_body if isinstance(resolved_body, dict) else {}).get("provider") or "").strip().lower()
         switch_allowed, blocked_response = self._guard_switch_target_allowed(
@@ -10323,13 +10461,50 @@ class AgentRuntime:
             requested_model=applied_model or model_id,
         )
         if not switch_allowed:
-            return False, blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+            response = blocked_response if isinstance(blocked_response, dict) else self._safe_mode_remote_switch_response(applied_model or model_id)
+            error_kind = str(response.get("error_kind") or response.get("error") or "switch_target_blocked")
+            journal.record_step("preflight_temporary_chat_target_restore", ok=False, resource="temporary_chat_target", reason=error_kind)
+            journal.mark_verification(ok=False, error_kind=error_kind)
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            response["managed_action_journal"] = journal.to_dict()
+            return False, response
         if not applied_model or not applied_provider:
+            journal.record_step("preflight_temporary_chat_target_restore", ok=False, resource="temporary_chat_target", reason="switch_target_unavailable")
+            journal.mark_verification(ok=False, error_kind="switch_target_unavailable")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
             return False, {
                 "ok": False,
                 "error": "switch_target_unavailable",
                 "message": "That model is no longer available, so I couldn't switch to it.",
+                "managed_action_journal": journal.to_dict(),
             }
+        previous_safe_override = (
+            dict(self._safe_mode_explicit_chat_target_override)
+            if isinstance(self._safe_mode_explicit_chat_target_override, dict)
+            else None
+        )
+        previous_temporary_override = (
+            dict(self._temporary_chat_target_override)
+            if isinstance(self._temporary_chat_target_override, dict)
+            else None
+        )
+        journal.record_step(
+            "capture_previous_temporary_target",
+            ok=True,
+            resource="temporary_chat_target",
+            previous_safe_override=self._temporary_target_metadata(previous_safe_override),
+            previous_temporary_override=self._temporary_target_metadata(previous_temporary_override),
+        )
+        journal.record_step(
+            "preflight_temporary_chat_target_restore",
+            ok=True,
+            resource="temporary_chat_target",
+            requested_model_id=applied_model,
+            requested_provider_id=applied_provider,
+        )
+        self._persist_managed_action_journal(journal, status="running")
         if self._safe_mode_enabled():
             document = self.registry_document if isinstance(self.registry_document, dict) else {}
             defaults = self._ensure_defaults(document)
@@ -10351,11 +10526,42 @@ class AgentRuntime:
             )
             if applied_model == default_model and applied_provider == default_provider:
                 self._safe_mode_explicit_chat_target_override = None
+                expected_override = None
             else:
                 self._safe_mode_explicit_chat_target_override = {
                     "provider": applied_provider,
                     "model": applied_model,
                 }
+                expected_override = dict(self._safe_mode_explicit_chat_target_override)
+            verified = self._safe_mode_explicit_chat_target_override == expected_override
+            journal.record_step(
+                "apply_temporary_chat_target_restore",
+                ok=True,
+                resource="safe_mode_explicit_chat_target",
+                new_override=self._temporary_target_metadata(expected_override),
+            )
+            journal.record_step("verify_temporary_chat_target_restore", ok=verified, resource="safe_mode_explicit_chat_target")
+            if not verified:
+                self._safe_mode_explicit_chat_target_override = previous_safe_override
+                journal.record_rollback_step(
+                    "restore_temporary_chat_target",
+                    ok=True,
+                    resource="safe_mode_explicit_chat_target",
+                    restored_override=self._temporary_target_metadata(previous_safe_override),
+                )
+                journal.mark_verification(ok=False, target=applied_model)
+                journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
+                self._persist_managed_action_journal(journal, status="rolled_back")
+                return False, {
+                    "ok": False,
+                    "error": "temporary_chat_target_verification_failed",
+                    "error_kind": "temporary_chat_target_verification_failed",
+                    "message": "The temporary model switch did not finish, so I restored the previous chat target.",
+                    "managed_action_journal": journal.to_dict(),
+                }
+            journal.mark_verification(ok=True, target=applied_model)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return True, {
                 "ok": True,
                 "provider": applied_provider,
@@ -10364,12 +10570,14 @@ class AgentRuntime:
                     f"Temporary chat model switched to {applied_model}. "
                     "This does not change your default model."
                 ),
+                "managed_action_journal": journal.to_dict(),
             }
         stored_default = self._stored_chat_default_target()
         default_model = str((stored_default or {}).get("model") or "").strip() or None
         default_provider = str((stored_default or {}).get("provider") or "").strip().lower() or None
         if applied_model == default_model and applied_provider == default_provider:
             self._temporary_chat_target_override = None
+            expected_override = None
         else:
             self._temporary_chat_target_override = {
                 "provider": applied_provider,
@@ -10377,9 +10585,40 @@ class AgentRuntime:
                 "user_id": str((self._active_chat_scope or {}).get("user_id") or "").strip(),
                 "thread_id": str((self._active_chat_scope or {}).get("thread_id") or "").strip(),
             }
+            expected_override = dict(self._temporary_chat_target_override)
+        verified = self._temporary_chat_target_override == expected_override
+        journal.record_step(
+            "apply_temporary_chat_target_restore",
+            ok=True,
+            resource="temporary_chat_target",
+            new_override=self._temporary_target_metadata(expected_override),
+        )
+        journal.record_step("verify_temporary_chat_target_restore", ok=verified, resource="temporary_chat_target")
+        if not verified:
+            self._safe_mode_explicit_chat_target_override = previous_safe_override
+            self._temporary_chat_target_override = previous_temporary_override
+            journal.record_rollback_step(
+                "restore_temporary_chat_target",
+                ok=True,
+                resource="temporary_chat_target",
+                restored_override=self._temporary_target_metadata(previous_temporary_override),
+            )
+            journal.mark_verification(ok=False, target=applied_model)
+            journal.mark_rollback(ok=True, attempted=True, summary="restored previous temporary chat target")
+            self._persist_managed_action_journal(journal, status="rolled_back")
+            return False, {
+                "ok": False,
+                "error": "temporary_chat_target_verification_failed",
+                "error_kind": "temporary_chat_target_verification_failed",
+                "message": "The temporary model switch did not finish, so I restored the previous chat target.",
+                "managed_action_journal": journal.to_dict(),
+            }
         invalidate_truth_cache = getattr(self._runtime_truth_service, "_invalidate_snapshot_cache", None)
         if callable(invalidate_truth_cache):
             invalidate_truth_cache()
+        journal.mark_verification(ok=True, target=applied_model)
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         return True, {
             "ok": True,
             "provider": applied_provider,
@@ -10388,6 +10627,7 @@ class AgentRuntime:
                 f"Temporary chat model switched to {applied_model}. "
                 "This does not change your default model."
             ),
+            "managed_action_journal": journal.to_dict(),
         }
 
     def configure_local_chat_model(self, model_id: str) -> tuple[bool, dict[str, Any]]:

@@ -578,11 +578,6 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertIsNotNone(persisted)
         assert persisted is not None
         self.assertEqual("verified", persisted["status"])
-        self.assertNotIn(raw_token, json.dumps(persisted, sort_keys=True))
-        persisted = self._managed_action_journal_store().get(journal["action_id"])
-        self.assertIsNotNone(persisted)
-        assert persisted is not None
-        self.assertEqual("verified", persisted["status"])
         persisted_payload = json.dumps(persisted, sort_keys=True)
         self.assertNotIn(raw_secret, persisted_payload)
         self.assertIn("provider_api_key_config", persisted_payload)
@@ -1321,6 +1316,14 @@ class TestAPIServerRuntime(unittest.TestCase):
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         document = runtime.registry_document
         models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:llama3"] = {
+            "provider": "ollama",
+            "model": "llama3",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
         models["ollama:qwen2.5:3b-instruct"] = {
             "provider": "ollama",
             "model": "qwen2.5:3b-instruct",
@@ -1404,6 +1407,46 @@ class TestAPIServerRuntime(unittest.TestCase):
         journal = response.get("managed_action_journal", {})
         self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
         self.assertTrue(any(step.get("name") == "restore_registry_defaults" for step in journal.get("rollback_steps", [])))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+
+    def test_defaults_rollback_failure_persists_recovery_needed(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+
+        def _failed_restore(previous_defaults, *, journal):  # type: ignore[no-untyped-def]
+            journal.record_rollback_step("restore_registry_defaults", ok=False, resource="defaults", error="forced")
+            journal.mark_rollback(ok=False, attempted=True, summary="could not restore defaults")
+            return False, "could not restore defaults"
+
+        with patch.object(
+            runtime,
+            "_verify_defaults_update",
+            return_value={"ok": False, "error_kind": "default_model_verification_failed", "mismatch": "chat_model"},
+        ), patch.object(runtime, "_restore_defaults_state", side_effect=_failed_restore):
+            ok, response = runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:qwen2.5:3b-instruct"})
+
+        self.assertFalse(ok)
+        self.assertFalse(response["rollback_ok"])
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("recovery_needed", persisted["status"])
+        self.assertTrue(persisted["recovery_needed"])
 
     def test_defaults_rejects_embedding_only_chat_default_before_mutation(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1427,6 +1470,11 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("chat_model_not_chat_capable", response["error_kind"])
         self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
         self.assertEqual([], response.get("managed_action_journal", {}).get("changed_resources"))
+        journal = response.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("failed", persisted["status"])
 
     def test_defaults_rejects_disabled_provider_before_mutation(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1442,6 +1490,23 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual("default_provider_disabled", response["error_kind"])
         self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+
+    def test_default_model_preflight_failure_persists_failed_journal_without_mutation(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        previous_defaults = copy.deepcopy(runtime.registry_document["defaults"])
+
+        ok, response = runtime.set_default_chat_model("ollama:not-installed")
+
+        self.assertFalse(ok)
+        self.assertEqual(previous_defaults, runtime.registry_document["defaults"])
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("default_model_config", journal.get("action_type"))
+        self.assertFalse(journal.get("verification_result", {}).get("ok"))
+        self.assertEqual([], journal.get("changed_resources"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("failed", persisted["status"])
 
     def test_defaults_rejects_unavailable_chat_model_before_mutation(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -1494,6 +1559,55 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("temporary_chat_model_override", journal.get("action_type"))
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertIn("temporary_chat_model_override", persisted_payload)
+        self.assertIn("ollama:qwen2.5:3b-instruct", persisted_payload)
+        self.assertNotIn("private prompt", persisted_payload)
+        self.assertNotIn("sk-secret", persisted_payload)
+
+    def test_temporary_chat_model_restore_to_default_clears_override_and_persists_verified_journal(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        document = runtime.registry_document
+        models = document.get("models") if isinstance(document.get("models"), dict) else {}
+        models["ollama:qwen2.5:3b-instruct"] = {
+            "provider": "ollama",
+            "model": "qwen2.5:3b-instruct",
+            "capabilities": ["chat"],
+            "enabled": True,
+            "available": True,
+            "routable": True,
+        }
+        document["models"] = models
+        runtime._save_registry_document(document)
+        ok_default, _default = runtime.update_defaults({"default_provider": "ollama", "chat_model": "ollama:llama3"})
+        self.assertTrue(ok_default)
+        ok_temp, _temp = runtime.set_temporary_chat_model_target("ollama:qwen2.5:3b-instruct")
+        self.assertTrue(ok_temp)
+        self.assertIsNotNone(runtime._temporary_chat_target_override)
+
+        ok, response = runtime.restore_temporary_chat_model_target("ollama:llama3")
+
+        self.assertTrue(ok)
+        self.assertIsNone(runtime._temporary_chat_target_override)
+        journal = response.get("managed_action_journal", {})
+        self.assertEqual("temporary_chat_model_restore", journal.get("action_type"))
+        self.assertTrue(journal.get("verification_result", {}).get("ok"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+
+    def test_defaults_status_only_paths_do_not_create_mutating_journals(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+
+        defaults = runtime.get_defaults()
+
+        self.assertIn("default_model", defaults)
+        self.assertEqual([], self._managed_action_journal_store().recent())
 
     def test_defaults_rollback_swaps_chat_and_last_chat_model(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

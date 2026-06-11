@@ -1,9 +1,10 @@
 # Persistent Managed-Action Journal
 
 Status: design plus minimal shared skeleton, with preference reset/clear,
-support bundle creation, provider/API key config, and Telegram token/service
-setup as converted reference flows. This is not yet a claim that every managed
-action survives crash/restart with complete recovery.
+support bundle creation, provider/API key config, Telegram token/service setup,
+and default model/temporary chat override as converted reference flows. This is
+not yet a claim that every managed action survives crash/restart with complete
+recovery.
 
 ## Problem
 
@@ -34,10 +35,10 @@ dedicated state database at:
 ~/.local/share/personal-agent/managed_actions.db
 ```
 
-Preference reset/clear, support bundle creation, provider/API key config, and
-Telegram token/service setup now opt into the store at existing journal
-creation/update points. These are converted reference flows. Other
-managed-action callers remain follow-up work.
+Preference reset/clear, support bundle creation, provider/API key config,
+Telegram token/service setup, and default model/temporary chat override now opt
+into the store at existing journal creation/update points. These are converted
+reference flows. Other managed-action callers remain follow-up work.
 
 ## Schema
 
@@ -187,11 +188,16 @@ Adopt in this order:
    management. Persisted rows keep only redacted token metadata, service/drop-in
    ownership metadata, verification summaries, and rollback results. Online
    Telegram `getMe` remains optional, and no startup auto-recovery is added.
-5. default model changes and temporary chat model override;
-6. managed local services/SearXNG;
-7. pack lifecycle/removal/source deletion and registry maintenance;
-8. semantic-memory ingest/repair;
-9. model acquisition/import;
+5. default model changes and temporary chat model override: converted for
+   persisted default chat model changes, temporary override assignment, and
+   clearing/restoring temporary overrides. Persisted rows keep previous/requested
+   provider/model ids, changed setting names, readback/effective routing
+   summaries, and verification/rollback status without prompts, raw chat text,
+   provider response bodies, or secrets.
+6. model acquisition/import;
+7. managed local services/SearXNG;
+8. pack lifecycle/removal/source deletion and registry maintenance;
+9. semantic-memory ingest/repair;
 10. notifications and action ledger status reads.
 
 For each flow:
@@ -234,10 +240,13 @@ Implemented now:
 - Telegram token/service setup persistent status transitions for token save,
   enablement drop-in writes, service enable/disable verification, scoped
   token/drop-in rollback, and recovery-needed cleanup failure states;
+- default model and temporary chat override persistent status transitions for
+  planned/running, verified, rolled-back verification failure, recovery-needed
+  default restore failure, and pre-mutation failed preflight states;
 - focused tests for redaction, read-only recovery-needed reads, verified
   preference reset rows, support bundle verified rows, provider secret/config
-  rows, Telegram token/service rows, rollback rows, recovery-needed rows, and
-  preview-only non-mutation.
+  rows, Telegram token/service rows, default model/temporary override rows,
+  rollback rows, recovery-needed rows, and preview-only non-mutation.
 
 Not implemented now:
 
@@ -249,6 +258,6 @@ Not implemented now:
 Therefore the correct claim after this pass is: persistent journal storage
 infrastructure exists, preference reset/clear persists journal transitions,
 support bundle creation persists journal transitions, and provider/API key
-config and Telegram token/service setup persist journal transitions. Product
-crash/restart recovery is not complete until the remaining flows are converted
-and restart/status surfacing is tested.
+config, Telegram token/service setup, and default model/temporary chat override
+persist journal transitions. Product crash/restart recovery is not complete
+until the remaining flows are converted and restart/status surfacing is tested.

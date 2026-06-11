@@ -157,6 +157,7 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     assert "support bundle creation" in text
     assert "provider/api key config" in text
     assert "telegram token/service setup" in text
+    assert "default model/temporary chat override" in text
     assert "converted reference flows" in text
 
 
@@ -203,7 +204,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     assert "persistent managed-action journal storage" in audit_text
     assert "minimal sqlite" in audit_text
     assert (
-        "preference reset/clear, support bundle creation, provider/api key config, and telegram token/service setup are converted reference flows"
+        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override are converted reference flows"
         in audit_text
     )
     assert "raw preference values and raw persisted keys" in audit_text
@@ -213,6 +214,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     assert "provider-test summaries" in audit_text
     assert "telegram token setup now records managed-action journals" in audit_text
     assert "persists redacted status rows for the known personal agent drop-in" in audit_text
+    assert "persistent default model changes and temporary chat overrides now journal" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -223,11 +225,11 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     lowered = text.lower()
     lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "8e7f80e" in text
+    assert "82f9f30" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
     assert (
-        "preference reset/clear, support bundle creation, provider/api key config, and telegram token/service setup are converted reference flows"
+        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override are converted reference flows"
         in lowered_flat
     )
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
@@ -235,6 +237,7 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "support bundle creation now has persistent redacted status rows" in lowered
     assert "provider/api key config now has persistent redacted status rows" in lowered
     assert "telegram token/service setup now has persistent redacted status rows" in lowered
+    assert "default model changes and temporary chat overrides now have persistent redacted status rows" in lowered_flat
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered
