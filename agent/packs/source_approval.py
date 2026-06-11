@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.packs.registry_discovery import REGISTRY_KIND_GENERIC_API, REGISTRY_KIND_GITHUB_INDEX
 from agent.packs.remote_fetch import (
     REMOTE_KIND_GENERIC_ARCHIVE_URL,
@@ -69,8 +70,20 @@ class SourceApprovalResult:
 class SourceApprovalController:
     """Records explicit source trust without fetching or importing content."""
 
-    def __init__(self, *, pack_registry_discovery: Any) -> None:
+    def __init__(self, *, pack_registry_discovery: Any, journal_store: PersistentManagedActionJournalStore | None = None) -> None:
         self.pack_registry_discovery = pack_registry_discovery
+        self.journal_store = journal_store
+
+    def _persist_managed_action_journal(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        status: str,
+        recovery_hint: str | None = None,
+    ) -> None:
+        if self.journal_store is None:
+            return
+        self.journal_store.upsert(journal, status=status, recovery_hint=recovery_hint)
 
     def preview(self, lead: SourceLead | dict[str, Any]) -> SourceApprovalPreview:
         row = lead.to_dict() if isinstance(lead, SourceLead) else dict(lead or {})
@@ -191,7 +204,11 @@ class SourceApprovalController:
             resource=source_id,
             source_existed=isinstance(previous_source, dict) and bool(previous_source.get("source")),
             policy_existed=isinstance(previous_policy, dict) and bool(previous_policy.get("persisted_override")),
+            source_kind=source_kind,
+            registry_kind=registry_kind,
         )
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         source_payload = {
             "source_id": source_id,
             "name": _short_text(row.get("title"), default=source_id, limit=80),
@@ -265,6 +282,11 @@ class SourceApprovalController:
                     changed_by=changed_by or "assistant_source_approval_rollback",
                     journal=journal,
                 )
+                self._persist_managed_action_journal(
+                    journal,
+                    status="rolled_back" if rollback_ok else "recovery_needed",
+                    recovery_hint="Inspect pack source catalog and policy state before retrying source approval.",
+                )
                 return SourceApprovalResult(
                     ok=False,
                     approved=False,
@@ -283,6 +305,12 @@ class SourceApprovalController:
         except Exception as exc:
             journal.record_step("write_source_policy_record", ok=False, resource=source_id, error=exc.__class__.__name__)
             journal.mark_verification(ok=False, source_id=source_id, error=exc.__class__.__name__)
+            journal.mark_rollback(ok=False, attempted=False, summary="Approval write failed before rollback scope was established.")
+            self._persist_managed_action_journal(
+                journal,
+                status="failed",
+                recovery_hint="Inspect pack source catalog and policy state before retrying source approval.",
+            )
             return SourceApprovalResult(
                 ok=False,
                 approved=False,
@@ -298,6 +326,7 @@ class SourceApprovalController:
         journal.record_changed_resource("pack_source_policy", source_id, rollback_supported=True)
         journal.mark_verification(ok=True, source_id=source_id)
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         message = (
             f"I recorded source approval for {source_id}. No pack was fetched, imported, installed, approved, enabled, or granted permissions. "
             "The source content remains hostile and must still go through preview/fetch into quarantine, normalization, review, approval, enablement, and any required permissions before use. "

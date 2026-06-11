@@ -94,6 +94,7 @@ from agent.packs.source_approval import SourceApprovalController
 from agent.packs.source_fetch_preview import SourceFetchController
 from agent.packs.review_state_ux import build_pack_review_state_summary, render_pack_review_state
 from agent.packs.store import PackStore
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
 from agent.resource_insights import summarize_resource_report
@@ -629,7 +630,10 @@ class Orchestrator:
         self._skill_governance_store = SkillGovernanceStore(db.db_path)
         self._skill_governance_decisions: dict[str, dict[str, Any]] = {}
         self._blocked_skill_governance: dict[str, dict[str, Any]] = {}
-        self._pack_store = PackStore(db.db_path)
+        self._managed_action_journal_store = PersistentManagedActionJournalStore(
+            Path(db.db_path).expanduser().resolve().parent / "managed_actions.db"
+        )
+        self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
         for skill in self.skills.values():
             if str(skill.pack_trust).strip().lower() != "native":
                 continue
@@ -8530,6 +8534,7 @@ class Orchestrator:
         discovery = PackRegistryDiscoveryService(
             pack_store=self._pack_store,
             storage_root=self._pack_store.external_storage_root(),
+            journal_store=self._managed_action_journal_store,
         )
         self._pack_registry_discovery_cache = discovery
         return discovery
@@ -9603,7 +9608,10 @@ class Orchestrator:
                 used_tools=["pack_acquisition"],
                 payload={"type": "source_approval_preview", "ok": False, "summary": message},
             )
-        controller = SourceApprovalController(pack_registry_discovery=self._pack_registry_discovery())
+        controller = SourceApprovalController(
+            pack_registry_discovery=self._pack_registry_discovery(),
+            journal_store=self._managed_action_journal_store,
+        )
         preview = controller.preview(leads[0]).to_dict()
         if bool(preview.get("ok")):
             pending_id = str(uuid.uuid4())
@@ -9671,7 +9679,10 @@ class Orchestrator:
                 used_tools=["pack_acquisition"],
                 payload={"type": "source_approval", "ok": False, "summary": message},
             )
-        result = SourceApprovalController(pack_registry_discovery=self._pack_registry_discovery()).approve(
+            result = SourceApprovalController(
+                pack_registry_discovery=self._pack_registry_discovery(),
+                journal_store=self._managed_action_journal_store,
+            ).approve(
             preview,
             changed_by="assistant_source_approval",
         )

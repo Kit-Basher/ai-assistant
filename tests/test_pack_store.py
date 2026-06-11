@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.store import PackStore
 
@@ -16,7 +17,8 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         self.storage_root = self.root / "external_packs"
-        self.store = PackStore(str(self.root / "packs.db"))
+        self.journal_store = PersistentManagedActionJournalStore(self.root / "managed_actions.db")
+        self.store = PackStore(str(self.root / "packs.db"), journal_store=self.journal_store)
         self.ingestor = ExternalPackIngestor(str(self.storage_root))
 
     def tearDown(self) -> None:
@@ -54,6 +56,8 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         audit = review_envelope.get("removed_skill_text") if isinstance(review_envelope.get("removed_skill_text"), dict) else {}
         self.assertTrue(audit.get("sha256"))
         self.assertFalse(bool(audit.get("stored", True)))
+        persisted_journals = json.dumps(self.journal_store.recent(limit=10), ensure_ascii=True, sort_keys=True)
+        self.assertNotIn(hostile_marker, persisted_journals)
 
     def _record_basic_external_pack(self) -> dict[str, object]:
         index = len(list(self.root.glob("source-basic-*")))
@@ -78,6 +82,10 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertEqual("external_pack_import_record", journal.get("action_type"))
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("verified", persisted.get("status"))
+        self.assertEqual("external_pack_import_record", persisted.get("action_type"))
 
     def test_pack_removal_journals_and_verifies_tombstone_state(self) -> None:
         row = self._record_basic_external_pack()
@@ -94,6 +102,9 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertFalse(journal.get("verification_result", {}).get("usable"))
         self.assertIsNone(self.store.get_external_pack(pack_id))
         self.assertIsNotNone(self.store.get_external_pack_removal(pack_id))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("verified", persisted.get("status"))
 
     def test_failed_pack_removal_verification_restores_previous_metadata(self) -> None:
         row = self._record_basic_external_pack()
@@ -110,6 +121,9 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertEqual("external_pack_removal_verification_failed", failed.get("error_kind"))
         self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
         self.assertTrue(journal.get("rollback_result", {}).get("ok"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted.get("status"))
         restored = self.store.get_external_pack(pack_id)
         assert restored is not None
         self.assertEqual(pack_id, restored.get("pack_id"))
@@ -168,6 +182,9 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         canonical = updated.get("canonical_pack") if isinstance(updated.get("canonical_pack"), dict) else {}
         trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
         self.assertEqual("approved", trust.get("local_review_status"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("verified", persisted.get("status"))
 
     def test_review_approval_verification_failure_restores_previous_state(self) -> None:
         row = self._record_basic_external_pack()
@@ -188,6 +205,9 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertFalse(failed.get("metadata_update_ok"))
         self.assertEqual("pack_review_state_verification_failed", failed.get("error_kind"))
         self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted.get("status"))
         restored = self.store.get_external_pack(pack_id)
         assert restored is not None
         canonical = restored.get("canonical_pack") if isinstance(restored.get("canonical_pack"), dict) else {}
@@ -214,6 +234,9 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         canonical = updated.get("canonical_pack") if isinstance(updated.get("canonical_pack"), dict) else {}
         runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
         self.assertTrue(runtime.get("enabled"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("verified", persisted.get("status"))
 
     def test_enablement_verification_failure_restores_previous_state(self) -> None:
         row = self._record_basic_external_pack()
@@ -230,6 +253,9 @@ class TestPackStoreExternalPackRedaction(unittest.TestCase):
         self.assertFalse(failed.get("metadata_update_ok"))
         self.assertEqual("pack_enablement_verification_failed", failed.get("error_kind"))
         self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted.get("status"))
         restored = self.store.get_external_pack(pack_id)
         assert restored is not None
         canonical = restored.get("canonical_pack") if isinstance(restored.get("canonical_pack"), dict) else {}

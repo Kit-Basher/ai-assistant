@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.llm.support import sanitize_support_payload
 from agent.packs.diffing import build_pack_diff, build_pack_version_ref
 from agent.packs.manifest import PackManifest, compute_permissions_hash, normalize_permissions
@@ -28,8 +29,9 @@ _EXTERNAL_PACK_REMOVAL_CACHE_LOCK = threading.RLock()
 
 
 class PackStore:
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, journal_store: PersistentManagedActionJournalStore | None = None) -> None:
         self.db_path = db_path
+        self.journal_store = journal_store
         parent = os.path.dirname(db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
@@ -37,6 +39,17 @@ class PackStore:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._ensure_schema()
+
+    def _persist_managed_action_journal(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        status: str,
+        recovery_hint: str | None = None,
+    ) -> None:
+        if self.journal_store is None:
+            return
+        self.journal_store.upsert(journal, status=status, recovery_hint=recovery_hint)
 
     def _ensure_schema(self) -> None:
         with self._lock:
@@ -590,8 +603,11 @@ class PackStore:
                 journal.record_step("preflight_external_pack_removal", ok=False, resource=pack_id, reason="pack_not_found")
                 journal.mark_verification(ok=False, pack_id=pack_id, reason="pack_not_found")
                 journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+                self._persist_managed_action_journal(journal, status="failed")
                 return None
             journal.record_step("preflight_external_pack_removal", ok=True, resource=pack_id, already_removed=True)
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="running")
             normalized_root = Path(self.external_storage_root())
             normalized_path = self._path_within_root(existing_removal.get("normalized_path"), normalized_root)
             quarantine_path = self._path_within_root(existing_removal.get("quarantine_path"), normalized_root)
@@ -601,6 +617,7 @@ class PackStore:
             journal.record_step("verify_external_pack_removal", ok=True, resource=pack_id, already_removed=True)
             journal.mark_verification(ok=True, pack_id=pack_id, already_removed=True)
             journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return {
                 "removed": False,
                 "already_removed": True,
@@ -613,6 +630,7 @@ class PackStore:
             journal.record_step("preflight_external_pack_removal", ok=False, resource=pack_id, reason="native_pack_not_external")
             journal.mark_verification(ok=False, pack_id=pack_id, reason="native_pack_not_external")
             journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+            self._persist_managed_action_journal(journal, status="failed")
             return {
                 "removed": False,
                 "pack": current,
@@ -622,6 +640,8 @@ class PackStore:
                 "managed_action_journal": journal.to_dict(),
             }
         journal.record_step("preflight_external_pack_removal", ok=True, resource=pack_id, external_pack=True)
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         now_ts = self._now_ts()
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         risk_report = current.get("risk_report") if isinstance(current.get("risk_report"), dict) else {}
@@ -724,6 +744,11 @@ class PackStore:
                 journal=journal,
             )
             journal.mark_verification(ok=False, pack_id=pack_id, expected_removed=True)
+            self._persist_managed_action_journal(
+                journal,
+                status="rolled_back" if rollback_ok else "recovery_needed",
+                recovery_hint="Use /packs to inspect whether the external pack record and removal tombstone need manual repair.",
+            )
             return {
                 "removed": False,
                 "pack": self.get_external_pack(pack_id) or current,
@@ -748,6 +773,7 @@ class PackStore:
         )
         journal.mark_verification(ok=True, pack_id=pack_id, tombstone_present=True, usable=False)
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         self._remove_tree(normalized_path)
         self._remove_tree(quarantine_path)
         return {
@@ -1207,6 +1233,8 @@ class PackStore:
         ):
             self._forget_external_pack_removed(pack_id)
             return existing
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         def _write() -> None:
             with self._lock:
                 self._conn.execute(
@@ -1271,6 +1299,11 @@ class PackStore:
         if not verify_ok:
             rollback_ok, rollback_summary = self._restore_external_pack_record(pack_id, existing, journal=journal)
             journal.mark_verification(ok=False, pack_id=pack_id, expected_status=str(status or "").strip() or "blocked")
+            self._persist_managed_action_journal(
+                journal,
+                status="rolled_back" if rollback_ok else "recovery_needed",
+                recovery_hint="Inspect the external pack record and quarantine artifacts before retrying import.",
+            )
             updated = self.get_external_pack(pack_id) or updated
             updated["metadata_update_ok"] = False
             updated["error_kind"] = "external_pack_record_verification_failed"
@@ -1280,6 +1313,7 @@ class PackStore:
             return updated
         journal.mark_verification(ok=True, pack_id=pack_id)
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         updated["managed_action_journal"] = journal.to_dict()
         if prior_same_source is not None:
             previous_id = str(prior_same_source.get("canonical_id") or prior_same_source.get("pack_id") or "").strip()
@@ -1308,11 +1342,15 @@ class PackStore:
         if str(current.get("status") or "").strip().lower() in {"blocked", "removed"}:
             journal.record_step("preflight_review_state", ok=False, resource=canonical_id, reason="pack_blocked_or_removed")
             journal.mark_verification(ok=False, reason="pack_blocked_or_removed")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+            self._persist_managed_action_journal(journal, status="failed")
             current["metadata_update_ok"] = False
             current["error_kind"] = "pack_blocked_or_removed"
             current["managed_action_journal"] = journal.to_dict()
             return current
         journal.record_step("preflight_review_state", ok=True, resource=canonical_id)
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         trust_anchor = canonical_pack.get("trust_anchor") if isinstance(canonical_pack.get("trust_anchor"), dict) else {}
         content_hash = self._content_hash_from_pack(canonical_pack)
@@ -1369,6 +1407,11 @@ class PackStore:
                 rollback_step="restore_external_pack_review_state",
             )
             journal.mark_verification(ok=False, expected_review_status=expected_status)
+            self._persist_managed_action_journal(
+                journal,
+                status="rolled_back" if rollback_ok else "recovery_needed",
+                recovery_hint="Inspect the external pack review state before retrying approval.",
+            )
             restored = self.get_external_pack(canonical_id) or current
             restored["metadata_update_ok"] = False
             restored["error_kind"] = "pack_review_state_verification_failed"
@@ -1385,6 +1428,7 @@ class PackStore:
         )
         journal.mark_verification(ok=True, review_status=expected_status)
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         assert updated is not None
         updated["metadata_update_ok"] = True
         updated["managed_action_journal"] = journal.to_dict()
@@ -1405,11 +1449,15 @@ class PackStore:
         if str(current.get("status") or "").strip().lower() in {"blocked", "removed"}:
             journal.record_step("preflight_enablement_state", ok=False, resource=canonical_id, reason="pack_blocked_or_removed")
             journal.mark_verification(ok=False, reason="pack_blocked_or_removed")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+            self._persist_managed_action_journal(journal, status="failed")
             current["metadata_update_ok"] = False
             current["error_kind"] = "pack_blocked_or_removed"
             current["managed_action_journal"] = journal.to_dict()
             return current
         journal.record_step("preflight_enablement_state", ok=True, resource=canonical_id)
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
         canonical_pack = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else {}
         runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
         canonical_pack["runtime"] = {**runtime, "enabled": bool(enabled)}
@@ -1453,6 +1501,11 @@ class PackStore:
                 rollback_step="restore_external_pack_enablement_state",
             )
             journal.mark_verification(ok=False, expected_enabled=bool(enabled))
+            self._persist_managed_action_journal(
+                journal,
+                status="rolled_back" if rollback_ok else "recovery_needed",
+                recovery_hint="Inspect the external pack enablement state before retrying.",
+            )
             restored = self.get_external_pack(canonical_id) or current
             restored["metadata_update_ok"] = False
             restored["error_kind"] = "pack_enablement_verification_failed"
@@ -1469,6 +1522,7 @@ class PackStore:
         )
         journal.mark_verification(ok=True, enabled=bool(enabled))
         journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_managed_action_journal(journal, status="verified")
         assert updated is not None
         updated["metadata_update_ok"] = True
         updated["managed_action_journal"] = journal.to_dict()

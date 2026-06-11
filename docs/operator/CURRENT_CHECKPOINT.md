@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-11
-Checkpoint: `cd913e1` Persist journals for model selection changes
-Latest clean checkpoint before this pass: `cd913e1` Persist journals for model selection changes
+Checkpoint: `6d7fd86` Persist journals for model acquisition
+Latest clean checkpoint before this pass: `6d7fd86` Persist journals for model acquisition
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -19,6 +19,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 
 ## Latest Known Commits
 
+- `6d7fd86` Persist journals for model acquisition
 - `cd913e1` Persist journals for model selection changes
 - `82f9f30` Persist journals for Telegram setup
 - `aac06ba` Update managed action recovery journal docs
@@ -56,15 +57,15 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Provider/API key configuration now attaches managed-action journals, persists redacted managed-action journal status transitions, verifies secret/config writes, redacts secret metadata and provider-test response bodies from journals, and rolls back failed verified key saves to the previous key/source or removes the failed new key. Provider config update and the provider config/secret portions of OpenRouter setup also persist redacted journal rows; later OpenRouter model refresh/model registration remains separate follow-up work.
 - Default model changes and temporary chat model overrides now attach managed-action journals, persist redacted planned/running/verified/rolled_back/recovery_needed/failed status transitions, preflight chat capability/provider/model usability, verify persisted defaults or temporary override state after mutation, and roll back only previous defaults/temporary target state if verification fails. Persisted rows keep safe provider/model ids and setting names, not prompts, raw chat text, secrets, or provider response bodies.
 - Telegram token setup now attaches managed-action journals, persists redacted managed-action journal status transitions, verifies secret writes by readback, redacts token metadata, and rolls back failed token saves to the previous token or removes the failed new token. Telegram enable/disable now journals and persists redacted status transitions for the known Personal Agent drop-in, approved `systemctl --user` daemon-reload/restart/stop actions, runtime status verification, and restores/removes only the owned drop-in on service verification failure. Persisted Telegram rows redact raw tokens and full private paths.
-- Pack lifecycle metadata mutations now attach managed-action journals for source approval, import records, review approval, enablement, and selected-file permission grants. They verify metadata by readback and restore only owned prior pack/source/grant metadata when verification fails.
+- Pack lifecycle metadata mutations now attach managed-action journals for source approval, import records, review approval, enablement, and selected-file permission grants. Source approval, import records, review approval, enable/disable, external pack removal/tombstones, source catalog create/update/delete, source policy update, and source deletion policy-override cleanup now persist redacted planned/running/verified/rolled_back/recovery_needed/failed status transitions. They verify metadata by readback and restore only owned prior pack/source/grant metadata when verification fails. Persisted rows keep pack/source ids, hashes, source kind, status flags, verification, and rollback metadata, not hostile pack text, raw SKILL/AGENTS/catalog/archive contents, secrets, private paths, or remote response bodies.
 - Registry/autoconfig/self-heal/hygiene/cleanup/capabilities reconcile/bootstrap/rollback flows now attach managed-action journals through the transactional registry path, verify registry state by readback/hash, and restore the pre-action registry snapshot when verification fails and ownership is proven.
 - Preference-backed memory/bootstrap markers and onboarding/preferences writes now attach managed-action journals, verify by readback, restore/remove only the owned target key on verification failure, keep global and per-thread preference scopes separate, and redact raw preference/memory content from journals.
 - Bulk preference reset/clear paths now attach managed-action journals for explicit global/user/thread target keys and approved user-pref prefixes, record redacted scoped snapshot hashes, persist redacted managed-action journal status transitions, verify target keys are removed while unrelated scopes stay unchanged, restore the previous scoped preference snapshot on failed verification, and keep raw preference values and raw persisted keys out of persistent journal rows.
 - Support bundle artifacts now write a redacted managed-action journal inside the owned temp bundle, persist redacted managed-action journal status transitions, verify expected files by readback, remove only the newly created `agent-support-*` directory on failed verification, and record recovery_needed if owned cleanup cannot complete. Notification test/send/prune now journal policy/target metadata, verify local notification history writes and prune count/window results, restore prior notification history on failed local verification where a snapshot exists, and verify action-ledger appends by readback.
 - Pack removal/source deletion cleanup now attaches managed-action journals, verifies removed/tombstoned/source-policy state by readback, restores prior owned metadata on verification failure, and keeps hostile imported text redacted from tombstones/support output.
 - Semantic memory remains disabled by default and release-gated, but optional semantic ingest/rebuild/repair paths now attach redacted managed-action journals, verify source/chunk/vector/index-state readback, keep duplicate observe writes idempotent through deterministic source hashes, remove only owned failed new ingest rows, preserve prior usable index state on failed repair, and expose a read-only semantic doctor plus confirmed repair path.
-- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, and model acquisition/import are converted reference flows. Highest priority next target is read-only restart/status surfacing plus converting pack lifecycle/source cleanup to persistent journal writes; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
-- Release readiness is Yellow at `cd913e1`: suitable for a controlled public trial only after clean install verification, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows. Highest priority next target is the real acceptance proof plus read-only restart/status surfacing; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
+- Release readiness is Yellow at `6d7fd86`: suitable for a controlled public trial only after clean install verification and acceptance proof, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -127,7 +128,7 @@ Run this after external-pack, search, acquisition, or routing changes:
 
 ## Next Likely Work
 
-- Add read-only persistent-journal status surfacing and convert pack lifecycle/source cleanup before making broader crash/restart recovery claims.
+- Run the real acceptance proof, then add read-only persistent-journal status surfacing before making broader crash/restart recovery claims.
 - Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.
 - Add future core-owned content operations only after separate preview/confirmation and safety tests.

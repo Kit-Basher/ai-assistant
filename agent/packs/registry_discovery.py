@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 
 REGISTRY_KIND_CLAWHUB_TEXT = "clawhub_text_registry"
 REGISTRY_KIND_GITHUB_INDEX = "github_repo_index"
@@ -369,6 +370,7 @@ class PackRegistryDiscoveryService:
         policy_path: str | None = None,
         opener: Any | None = None,
         lock: threading.RLock | None = None,
+        journal_store: PersistentManagedActionJournalStore | None = None,
     ) -> None:
         self.pack_store = pack_store
         self.storage_root = Path(storage_root).expanduser().resolve()
@@ -384,6 +386,18 @@ class PackRegistryDiscoveryService:
         )
         self._opener = opener or urllib.request.build_opener(_HttpsOnlyRedirectHandler())
         self._lock = lock or threading.RLock()
+        self.journal_store = journal_store
+
+    def _persist_managed_action_journal(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        status: str,
+        recovery_hint: str | None = None,
+    ) -> None:
+        if self.journal_store is None:
+            return
+        self.journal_store.upsert(journal, status=status, recovery_hint=recovery_hint)
 
     def get_catalog(self) -> dict[str, Any]:
         document, persisted_exists = self._read_sources_document()
@@ -417,12 +431,31 @@ class PackRegistryDiscoveryService:
         *,
         changed_by: str | None = None,
     ) -> dict[str, Any]:
+        source_id_hint = str(payload.get("source_id") or payload.get("id") or "").strip()
+        journal = ManagedActionJournal(action_type="pack_source_catalog_create", target=source_id_hint or "pack_source_catalog")
+        journal.plan_step("preflight_pack_source_create", resource=source_id_hint or "pack_source_catalog")
+        journal.plan_step("write_pack_source_create", resource=source_id_hint or "pack_source_catalog")
+        journal.plan_step("verify_pack_source_create", resource=source_id_hint or "pack_source_catalog")
         with self._lock:
             normalized_row = self._normalize_source_write(payload, create=True)
+            normalized_id = str(normalized_row.get("id") or "").strip()
             existing_ids = {source.id for source in self._load_sources()}
-            if str(normalized_row.get("id") or "").strip() in existing_ids:
+            if normalized_id in existing_ids:
+                journal.record_step("preflight_pack_source_create", ok=False, resource=normalized_id, reason="duplicate_source_id")
+                journal.mark_verification(ok=False, source_id=normalized_id, reason="duplicate_source_id")
+                journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+                self._persist_managed_action_journal(journal, status="failed")
                 raise ValueError("duplicate_source_id")
             document, _ = self._read_sources_document()
+            journal.record_step(
+                "preflight_pack_source_create",
+                ok=True,
+                resource=normalized_id,
+                source_kind=str(normalized_row.get("kind") or ""),
+                previous_catalog_hash=self._catalog_hash(document),
+            )
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="running")
             next_sources = self._raw_sources(document)
             next_sources.append(normalized_row)
             next_document = self._with_catalog_audit_update(
@@ -434,7 +467,38 @@ class PackRegistryDiscoveryService:
                 operation="create",
             )
             self._write_sources_document(next_document)
-            return self.get_catalog_source(str(normalized_row.get("id") or ""))
+            journal.record_step(
+                "write_pack_source_create",
+                ok=True,
+                resource=normalized_id,
+                source_kind=str(normalized_row.get("kind") or ""),
+                new_catalog_hash=self._catalog_hash(next_document),
+            )
+            result = self.get_catalog_source(normalized_id)
+            persisted_source = result.get("persisted_source") if isinstance(result.get("persisted_source"), dict) else {}
+            verify_ok = str(persisted_source.get("id") or "").strip() == normalized_id
+            journal.record_step("verify_pack_source_create", ok=verify_ok, resource=normalized_id)
+            if not verify_ok:
+                self._write_sources_document(document)
+                journal.record_rollback_step("restore_pack_source_catalog", ok=True, resource=normalized_id)
+                journal.mark_verification(ok=False, source_id=normalized_id)
+                journal.mark_rollback(ok=True, attempted=True, summary="restored the previous source catalog document")
+                result["metadata_update_ok"] = False
+                result["error_kind"] = "pack_source_create_verification_failed"
+                result["managed_action_journal"] = journal.to_dict()
+                self._persist_managed_action_journal(journal, status="rolled_back")
+                return result
+            journal.mark_verification(ok=verify_ok, source_id=normalized_id)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            journal.record_created_resource(
+                "pack_source_catalog_record",
+                normalized_id,
+                rollback_supported=True,
+                current=self._source_metadata_snapshot(normalized_row),
+            )
+            self._persist_managed_action_journal(journal, status="verified")
+            result["managed_action_journal"] = journal.to_dict()
+            return result
 
     def update_catalog_source(
         self,
@@ -443,17 +507,31 @@ class PackRegistryDiscoveryService:
         *,
         changed_by: str | None = None,
     ) -> dict[str, Any]:
+        normalized = str(source_id or "").strip()
+        journal = ManagedActionJournal(action_type="pack_source_catalog_update", target=normalized)
+        journal.plan_step("capture_previous_pack_source", resource=normalized)
+        journal.plan_step("write_pack_source_update", resource=normalized)
+        journal.plan_step("verify_pack_source_update", resource=normalized)
         with self._lock:
             source = self._source_by_id(source_id)
-            normalized = str(source_id or "").strip()
             document, _ = self._read_sources_document()
             current_row = self._raw_source_for_id(document, normalized) or self._source_to_persisted_row(source)
+            previous_document = copy.deepcopy(document)
+            journal.record_step(
+                "capture_previous_pack_source",
+                ok=True,
+                resource=normalized,
+                previous_source=self._source_metadata_snapshot(current_row),
+                previous_catalog_hash=self._catalog_hash(previous_document),
+            )
             next_row = self._normalize_source_write(
                 payload,
                 create=False,
                 current_row=current_row,
                 source_id=normalized,
             )
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="running")
             next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
             next_sources.append(next_row)
             next_document = self._with_catalog_audit_update(
@@ -465,7 +543,40 @@ class PackRegistryDiscoveryService:
                 operation="update",
             )
             self._write_sources_document(next_document)
-            return self.get_catalog_source(normalized)
+            journal.record_step(
+                "write_pack_source_update",
+                ok=True,
+                resource=normalized,
+                source_kind=str(next_row.get("kind") or ""),
+                new_catalog_hash=self._catalog_hash(next_document),
+            )
+            result = self.get_catalog_source(normalized)
+            persisted_source = result.get("persisted_source") if isinstance(result.get("persisted_source"), dict) else {}
+            verify_ok = str(persisted_source.get("id") or "").strip() == normalized
+            journal.record_step("verify_pack_source_update", ok=verify_ok, resource=normalized)
+            if not verify_ok:
+                self._write_sources_document(previous_document)
+                journal.record_rollback_step("restore_pack_source_catalog", ok=True, resource=normalized)
+                journal.mark_verification(ok=False, source_id=normalized)
+                journal.mark_rollback(ok=True, attempted=True, summary="restored the previous source catalog document")
+                result = self.get_catalog_source(normalized)
+                result["metadata_update_ok"] = False
+                result["error_kind"] = "pack_source_update_verification_failed"
+                result["managed_action_journal"] = journal.to_dict()
+                self._persist_managed_action_journal(journal, status="rolled_back")
+                return result
+            journal.record_changed_resource(
+                "pack_source_catalog_record",
+                normalized,
+                rollback_supported=True,
+                previous=self._source_metadata_snapshot(current_row),
+                current=self._source_metadata_snapshot(next_row),
+            )
+            journal.mark_verification(ok=True, source_id=normalized)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
+            result["managed_action_journal"] = journal.to_dict()
+            return result
 
     def delete_catalog_source(self, source_id: str, *, changed_by: str | None = None) -> dict[str, Any]:
         journal = ManagedActionJournal(action_type="pack_source_catalog_delete", target=str(source_id or "").strip())
@@ -493,6 +604,7 @@ class PackRegistryDiscoveryService:
                 journal.record_step("preflight_pack_source_delete", ok=False, resource=normalized, reason="unknown_source_kind")
                 journal.mark_verification(ok=False, source_id=normalized, reason="unknown_source_kind")
                 journal.mark_rollback(ok=True, attempted=False, summary="No mutation performed.")
+                self._persist_managed_action_journal(journal, status="failed")
                 result = {
                     "path": str(self.sources_path),
                     "deleted_source_id": normalized,
@@ -503,6 +615,8 @@ class PackRegistryDiscoveryService:
                 }
                 return result
             journal.record_step("preflight_pack_source_delete", ok=True, resource=normalized, source_kind=str(current_row.get("kind") or ""))
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="running")
             next_sources = [row for row in self._raw_sources(document) if str(row.get("id") or "").strip() != normalized]
             next_document = self._with_catalog_audit_update(
                 current_document=document,
@@ -550,6 +664,11 @@ class PackRegistryDiscoveryService:
                     source_id=normalized,
                 )
                 journal.mark_verification(ok=False, source_id=normalized, source_removed=not source_still_present, policy_override_removed=not policy_still_present)
+                self._persist_managed_action_journal(
+                    journal,
+                    status="rolled_back" if rollback_ok else "recovery_needed",
+                    recovery_hint="Inspect the pack source catalog and source policy files before retrying source deletion.",
+                )
                 return {
                     "path": str(self.sources_path),
                     "deleted_source_id": normalized,
@@ -579,6 +698,7 @@ class PackRegistryDiscoveryService:
                 )
             journal.mark_verification(ok=True, source_id=normalized, source_removed=True, policy_override_removed=not policy_still_present)
             journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
             return {
                 "path": str(self.sources_path),
                 "deleted_source_id": normalized,
@@ -624,9 +744,23 @@ class PackRegistryDiscoveryService:
         }
 
     def update_global_policy(self, payload: dict[str, Any], *, changed_by: str | None = None) -> dict[str, Any]:
+        journal = ManagedActionJournal(action_type="pack_source_policy_update", target="defaults")
+        journal.plan_step("preflight_pack_source_policy_update", resource="defaults")
+        journal.plan_step("write_pack_source_policy_update", resource="defaults")
+        journal.plan_step("verify_pack_source_policy_update", resource="defaults")
         with self._lock:
             changed_fields = self._validate_policy_patch(payload)
             document, _ = self._read_policy_document()
+            previous_document = copy.deepcopy(document)
+            journal.record_step(
+                "preflight_pack_source_policy_update",
+                ok=True,
+                resource="defaults",
+                changed_fields=changed_fields,
+                previous_policy_hash=self._policy_hash(document),
+            )
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="running")
             next_defaults = dict(document.get("defaults")) if isinstance(document.get("defaults"), dict) else {}
             for field in changed_fields:
                 next_defaults[field] = payload.get(field)
@@ -639,7 +773,40 @@ class PackRegistryDiscoveryService:
                 scope="defaults",
             )
             self._write_policy_document(next_document)
-            return self.get_policy()
+            journal.record_step(
+                "write_pack_source_policy_update",
+                ok=True,
+                resource="defaults",
+                changed_fields=changed_fields,
+                new_policy_hash=self._policy_hash(next_document),
+            )
+            result = self.get_policy()
+            persisted = result.get("persisted_policy") if isinstance(result.get("persisted_policy"), dict) else {}
+            verify_ok = self._policy_hash(persisted) == self._policy_hash(next_document)
+            journal.record_step("verify_pack_source_policy_update", ok=verify_ok, resource="defaults")
+            if not verify_ok:
+                self._write_policy_document(previous_document)
+                journal.record_rollback_step("restore_pack_source_policy", ok=True, resource="defaults")
+                journal.mark_verification(ok=False, scope="defaults")
+                journal.mark_rollback(ok=True, attempted=True, summary="restored the previous source policy document")
+                result = self.get_policy()
+                result["metadata_update_ok"] = False
+                result["error_kind"] = "pack_source_policy_update_verification_failed"
+                result["managed_action_journal"] = journal.to_dict()
+                self._persist_managed_action_journal(journal, status="rolled_back")
+                return result
+            journal.record_changed_resource(
+                "pack_source_policy_defaults",
+                "defaults",
+                rollback_supported=True,
+                previous_policy_hash=self._policy_hash(previous_document),
+                current_policy_hash=self._policy_hash(next_document),
+            )
+            journal.mark_verification(ok=True, scope="defaults")
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
+            result["managed_action_journal"] = journal.to_dict()
+            return result
 
     def update_source_policy(
         self,
@@ -648,12 +815,28 @@ class PackRegistryDiscoveryService:
         *,
         changed_by: str | None = None,
     ) -> dict[str, Any]:
+        normalized = str(source_id or "").strip()
+        journal = ManagedActionJournal(action_type="pack_source_policy_update", target=f"source:{normalized}")
+        journal.plan_step("preflight_pack_source_policy_update", resource=normalized)
+        journal.plan_step("write_pack_source_policy_update", resource=normalized)
+        journal.plan_step("verify_pack_source_policy_update", resource=normalized)
         with self._lock:
             source = self._source_by_id(source_id)
             changed_fields = self._validate_policy_patch(payload)
             document, _ = self._read_policy_document()
+            previous_document = copy.deepcopy(document)
             overrides = self._raw_overrides(document)
             existing = self._raw_override_for_source(document, source.id) or {"source_id": source.id}
+            journal.record_step(
+                "preflight_pack_source_policy_update",
+                ok=True,
+                resource=source.id,
+                changed_fields=changed_fields,
+                previous_policy_hash=self._policy_hash(previous_document),
+                source_kind=str(source.kind or ""),
+            )
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="running")
             next_override = dict(existing)
             next_override["source_id"] = source.id
             for field in changed_fields:
@@ -669,7 +852,40 @@ class PackRegistryDiscoveryService:
                 scope=f"source:{source.id}",
             )
             self._write_policy_document(next_document)
-            return self.get_source_policy(source.id)
+            journal.record_step(
+                "write_pack_source_policy_update",
+                ok=True,
+                resource=source.id,
+                changed_fields=changed_fields,
+                new_policy_hash=self._policy_hash(next_document),
+            )
+            result = self.get_source_policy(source.id)
+            persisted_override = result.get("persisted_override") if isinstance(result.get("persisted_override"), dict) else {}
+            verify_ok = str(persisted_override.get("source_id") or "").strip() == source.id
+            journal.record_step("verify_pack_source_policy_update", ok=verify_ok, resource=source.id)
+            if not verify_ok:
+                self._write_policy_document(previous_document)
+                journal.record_rollback_step("restore_pack_source_policy", ok=True, resource=source.id)
+                journal.mark_verification(ok=False, source_id=source.id)
+                journal.mark_rollback(ok=True, attempted=True, summary="restored the previous source policy document")
+                result = self.get_source_policy(source.id)
+                result["metadata_update_ok"] = False
+                result["error_kind"] = "pack_source_policy_update_verification_failed"
+                result["managed_action_journal"] = journal.to_dict()
+                self._persist_managed_action_journal(journal, status="rolled_back")
+                return result
+            journal.record_changed_resource(
+                "pack_source_policy_override",
+                source.id,
+                rollback_supported=True,
+                previous_policy_hash=self._policy_hash(previous_document),
+                current_policy_hash=self._policy_hash(next_document),
+            )
+            journal.mark_verification(ok=True, source_id=source.id)
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
+            result["managed_action_journal"] = journal.to_dict()
+            return result
 
     def list_sources(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

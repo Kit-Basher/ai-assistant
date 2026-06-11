@@ -314,8 +314,8 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         self.assertEqual("action_tool", meta.get("route"))
         message = str(payload.get("message") or payload.get("text") or "")
         self.assertIn("QR Code Creation Guidance", message)
-        self.assertIn("searched the approved starter catalog sources", message)
-        self.assertIn("Say yes to preview it.", message)
+        self.assertIn("approved catalog", message)
+        self.assertIn("Next safe step: preview", message)
         self.assertNotIn("lighter option", message.lower())
         self.assertNotIn("fetch and inspect", message.lower())
         setup = payload.get("setup") if isinstance(payload.get("setup"), dict) else {}

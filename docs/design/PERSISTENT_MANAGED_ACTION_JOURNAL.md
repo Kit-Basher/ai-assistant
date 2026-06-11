@@ -2,9 +2,9 @@
 
 Status: design plus minimal shared skeleton, with preference reset/clear,
 support bundle creation, provider/API key config, Telegram token/service setup,
-default model/temporary chat override, and model acquisition/import as converted
-reference flows. This is not yet a claim that every managed action survives
-crash/restart with complete recovery.
+default model/temporary chat override, model acquisition/import, and pack
+lifecycle/source cleanup as converted reference flows. This is not yet a claim
+that every managed action survives crash/restart with complete recovery.
 
 ## Problem
 
@@ -37,9 +37,9 @@ dedicated state database at:
 
 Preference reset/clear, support bundle creation, provider/API key config,
 Telegram token/service setup, default model/temporary chat override, and model
-acquisition/import now opt into the store at existing journal creation/update
-points. These are converted reference flows. Other managed-action callers
-remain follow-up work.
+acquisition/import, and pack lifecycle/source cleanup now opt into the store at
+existing journal creation/update points. These are converted reference flows.
+Other managed-action callers remain follow-up work.
 
 ## Schema
 
@@ -205,8 +205,17 @@ Adopt in this order:
    owned generated temp files such as Personal Agent Modelfiles/markers; it does
    not delete unrelated Ollama models, Ollama cache data, or user-provided GGUF
    or Modelfile paths.
-7. managed local services/SearXNG;
-8. pack lifecycle/removal/source deletion and registry maintenance;
+7. pack lifecycle/source cleanup: converted for external pack import records,
+   source approval, review approval, enable/disable metadata, external pack
+   removal/tombstones, source catalog create/update/delete, global source-policy
+   updates, per-source policy updates, and source deletion policy-override
+   cleanup. Persisted rows keep action id/type, pack/source ids, source kind,
+   content/policy/catalog hashes, status and enable/approval flags,
+   verification result, and rollback result. They do not store hostile imported
+   text, raw SKILL/AGENTS/catalog/archive contents, secrets, private paths, or
+   remote response bodies. Rollback restores only prior owned metadata or
+   removes failed new source/pack metadata where ownership is proven.
+8. managed local services/SearXNG;
 9. semantic-memory ingest/repair;
 10. notifications and action ledger status reads.
 
@@ -258,11 +267,17 @@ Implemented now:
   direct Ollama GGUF import. Verification reads back model inventory or artifact
   marker state; failed verification records rolled_back when owned generated
   cleanup succeeds and recovery_needed when cleanup cannot complete;
+- pack lifecycle/source cleanup persistent status transitions for source
+  approval, import records, review approval, enable/disable, removal/tombstones,
+  source catalog create/update/delete, source policy update, and source deletion
+  policy-override cleanup. Verification reads back pack/source/policy state;
+  failed verification records rolled_back when scoped metadata restore succeeds
+  and recovery_needed when rollback cannot complete;
 - focused tests for redaction, read-only recovery-needed reads, verified
   preference reset rows, support bundle verified rows, provider secret/config
   rows, Telegram token/service rows, default model/temporary override rows,
-  model acquisition/import rows, rollback rows, recovery-needed rows, and
-  preview-only non-mutation.
+  model acquisition/import rows, pack lifecycle/source cleanup rows, rollback
+  rows, recovery-needed rows, and preview-only non-mutation.
 
 Not implemented now:
 
@@ -274,7 +289,7 @@ Not implemented now:
 Therefore the correct claim after this pass is: persistent journal storage
 infrastructure exists, preference reset/clear persists journal transitions,
 support bundle creation persists journal transitions, and provider/API key
-config, Telegram token/service setup, default model/temporary chat override, and
-model acquisition/import persist journal transitions. Product crash/restart
-recovery is not complete until the remaining flows are converted and
-restart/status surfacing is tested.
+config, Telegram token/service setup, default model/temporary chat override,
+model acquisition/import, and pack lifecycle/source cleanup persist journal
+transitions. Product crash/restart recovery is not complete until restart/status
+surfacing and remaining lower-priority flows are tested.

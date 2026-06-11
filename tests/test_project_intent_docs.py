@@ -160,6 +160,7 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     assert "telegram token/service setup" in text
     assert "default model/temporary chat override" in text
     assert "model acquisition/import" in text
+    assert "pack lifecycle/source cleanup" in text
     assert "converted reference flows" in text
 
 
@@ -206,7 +207,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     assert "persistent managed-action journal storage" in audit_text
     assert "minimal sqlite" in audit_text
     assert (
-        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, default model/temporary chat override, and model acquisition/import are converted reference flows"
+        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows"
         in audit_text
     )
     assert "raw preference values and raw persisted keys" in audit_text
@@ -218,6 +219,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     assert "persists redacted status rows for the known personal agent drop-in" in audit_text
     assert "persistent default model changes and temporary chat overrides now journal" in audit_text
     assert "model acquisition/import now records managed-action journals" in audit_text
+    assert "source catalog create/update/delete and global/per-source policy updates also persist redacted journal rows" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -228,11 +230,11 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     lowered = text.lower()
     lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "cd913e1" in text
+    assert "6d7fd86" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
     assert (
-        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override, and model acquisition/import are converted reference flows"
+        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows"
         in lowered_flat
     )
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
@@ -242,6 +244,8 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "telegram token/service setup now has persistent redacted status rows" in lowered
     assert "default model changes and temporary chat overrides now have persistent redacted status rows" in lowered_flat
     assert "model acquisition/import now has persistent redacted status rows" in lowered_flat
+    assert "pack lifecycle/source cleanup now has persistent redacted status rows" in lowered_flat
+    assert "run the real acceptance proof" in lowered_flat
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered

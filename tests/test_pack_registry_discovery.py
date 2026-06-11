@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 from unittest import mock
 
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
 from agent.packs.remote_fetch import RemotePackFetcher, RemotePackSource
@@ -67,6 +68,7 @@ class TestPackRegistryDiscovery(unittest.TestCase):
         self.storage_root = self.root / "external_packs"
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.store = PackStore(str(self.root / "packs.db"))
+        self.journal_store = PersistentManagedActionJournalStore(self.root / "managed_actions.db")
         self.sources_path = self.storage_root / "registry_sources.json"
         self.policy_path = self.storage_root / "registry_source_policy.json"
 
@@ -85,6 +87,7 @@ class TestPackRegistryDiscovery(unittest.TestCase):
             storage_root=str(self.storage_root),
             sources_path=str(self.sources_path),
             policy_path=str(self.policy_path),
+            journal_store=self.journal_store,
         )
 
     def _record_remote_pack(self, source_url: str, files: dict[str, bytes], *, ref: str = "main") -> dict[str, object]:
@@ -197,9 +200,53 @@ class TestPackRegistryDiscovery(unittest.TestCase):
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertTrue(journal.get("verification_result", {}).get("source_removed"))
         self.assertTrue(journal.get("verification_result", {}).get("policy_override_removed"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("verified", persisted.get("status"))
+        self.assertNotIn("https://example.com/catalog.json", json.dumps(persisted, ensure_ascii=True))
         source_ids = {row["source"]["id"] for row in service.get_catalog()["normalized_sources"]}
         self.assertNotIn("generic-registry", source_ids)
         self.assertEqual([], service.get_policy()["persisted_policy"].get("overrides"))
+
+    def test_source_catalog_create_update_and_policy_updates_persist_verified_journals(self) -> None:
+        service = self._service()
+
+        created = service.create_catalog_source(
+            {
+                "source_id": "generic-registry",
+                "kind": "generic_registry_api",
+                "name": "Generic Registry",
+                "base_url": "https://example.com/catalog.json",
+                "enabled": True,
+            },
+            changed_by="test",
+        )
+        updated = service.update_catalog_source(
+            "generic-registry",
+            {"name": "Generic Registry Updated"},
+            changed_by="test",
+        )
+        global_policy = service.update_global_policy({"enabled": True, "max_results": 5}, changed_by="test")
+        source_policy = service.update_source_policy(
+            "generic-registry",
+            {"allowlisted": True, "denied": False},
+            changed_by="test",
+        )
+
+        for result, action_type in [
+            (created, "pack_source_catalog_create"),
+            (updated, "pack_source_catalog_update"),
+            (global_policy, "pack_source_policy_update"),
+            (source_policy, "pack_source_policy_update"),
+        ]:
+            journal = result.get("managed_action_journal") if isinstance(result.get("managed_action_journal"), dict) else {}
+            self.assertEqual(action_type, journal.get("action_type"))
+            persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+            assert persisted is not None
+            self.assertEqual("verified", persisted.get("status"))
+            serialized = json.dumps(persisted, ensure_ascii=True, sort_keys=True)
+            self.assertNotIn("https://example.com/catalog.json", serialized)
+            self.assertNotIn("Generic Registry Updated", serialized)
 
     def test_failed_source_deletion_verification_restores_previous_metadata(self) -> None:
         source_row = {
@@ -221,6 +268,9 @@ class TestPackRegistryDiscovery(unittest.TestCase):
         self.assertEqual("pack_source_delete_verification_failed", result.get("error_kind"))
         self.assertTrue(journal.get("rollback_result", {}).get("attempted"))
         self.assertTrue(journal.get("rollback_result", {}).get("ok"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted.get("status"))
         restored = service.get_catalog_source("generic-registry")
         self.assertEqual("generic-registry", restored["source"]["id"])
         self.assertEqual("generic-registry", service.get_policy()["persisted_policy"]["overrides"][0]["source_id"])

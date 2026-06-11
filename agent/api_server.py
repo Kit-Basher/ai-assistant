@@ -615,11 +615,11 @@ class AgentRuntime:
         _mark("runtime.init.registry_store", registry_path=self.registry_store.path)
         self.permission_store = PermissionStore(path=os.getenv("AGENT_PERMISSIONS_PATH", "").strip() or None)
         self.permission_policy = PermissionPolicy()
-        self.pack_store = PackStore(self.config.db_path)
-        self._skill_governance_store = SkillGovernanceStore(self.config.db_path)
-        self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
         managed_action_journal_path = self._runtime_state_path(config, None, "managed_actions.db")
         self._managed_action_journal_store = PersistentManagedActionJournalStore(managed_action_journal_path)
+        self.pack_store = PackStore(self.config.db_path, journal_store=self._managed_action_journal_store)
+        self._skill_governance_store = SkillGovernanceStore(self.config.db_path)
+        self.audit_log = AuditLog(path=os.getenv("AGENT_AUDIT_LOG_PATH", "").strip() or None)
         self.webui_dist_path = packaged_asset_root_path().resolve()
         self.webui_dev_proxy = _is_truthy(os.getenv("WEBUI_DEV_PROXY"))
         self.webui_dev_url = os.getenv("WEBUI_DEV_URL", "http://127.0.0.1:1420").strip() or "http://127.0.0.1:1420"
@@ -1359,6 +1359,7 @@ class AgentRuntime:
             pack_store=self.pack_store,
             storage_root=self.pack_store.external_storage_root(),
             lock=self._registry_lock,
+            journal_store=self._managed_action_journal_store,
         )
 
     def list_pack_sources(self) -> dict[str, Any]:

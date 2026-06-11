@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.packs.registry_discovery import REGISTRY_KIND_GENERIC_API, REGISTRY_KIND_GITHUB_INDEX, PackRegistryDiscoveryService
 from agent.packs.source_approval import SourceApprovalController
 from agent.packs.source_leads import SourceLead
@@ -15,11 +16,13 @@ class TestPackSourceApproval(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         self.store = PackStore(str(self.root / "packs.db"))
+        self.journal_store = PersistentManagedActionJournalStore(self.root / "managed_actions.db")
         self.discovery = PackRegistryDiscoveryService(
             pack_store=self.store,
             storage_root=str(self.root / "external_packs"),
+            journal_store=self.journal_store,
         )
-        self.controller = SourceApprovalController(pack_registry_discovery=self.discovery)
+        self.controller = SourceApprovalController(pack_registry_discovery=self.discovery, journal_store=self.journal_store)
 
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
@@ -111,6 +114,9 @@ class TestPackSourceApproval(unittest.TestCase):
         self.assertEqual("pack_source_approval", journal.get("action_type"))
         self.assertTrue(journal.get("verification_result", {}).get("ok"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self.journal_store.get(str(journal.get("action_id") or ""))
+        assert persisted is not None
+        self.assertEqual("verified", persisted.get("status"))
 
     def test_approval_result_says_content_remains_hostile(self) -> None:
         preview = self.controller.preview(
