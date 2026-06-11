@@ -9,6 +9,7 @@ import time
 from typing import Any, Callable
 
 from agent.actions.managed_action_recovery import ManagedActionJournal
+from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.error_response_ux import compose_actionable_message
 from agent.llm.model_inventory import build_model_inventory
 from agent.model_watch_hf import deterministic_ollama_model_name, hf_snapshot_download
@@ -390,6 +391,7 @@ class CanonicalModelManager:
         inventory_builder: InventoryBuilder = build_model_inventory,
         hf_snapshot_download_fn: SnapshotDownloadFn = hf_snapshot_download,
         subprocess_run_fn: SubprocessRunFn = subprocess.run,
+        managed_action_journal_store: PersistentManagedActionJournalStore | None = None,
     ) -> None:
         self.runtime = runtime
         self._install_planner_fn = install_planner_fn
@@ -398,6 +400,11 @@ class CanonicalModelManager:
         self._hf_snapshot_download_fn = hf_snapshot_download_fn
         self._subprocess_run_fn = subprocess_run_fn
         self._state_path = model_manager_state_path_for_runtime(runtime)
+        self._managed_action_journal_store = managed_action_journal_store or getattr(
+            runtime,
+            "_managed_action_journal_store",
+            None,
+        )
 
     def _load_state(self) -> dict[str, Any]:
         return load_model_manager_state(self._state_path)
@@ -506,6 +513,53 @@ class CanonicalModelManager:
         ok, body = refresher({"provider": "ollama"})
         return bool(ok), dict(body) if isinstance(body, dict) else {"ok": bool(ok)}
 
+    def _persist_journal(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        status: str,
+        recovery_hint: str | None = None,
+    ) -> None:
+        store = self._managed_action_journal_store
+        if store is None or not callable(getattr(store, "upsert", None)):
+            return
+        try:
+            store.upsert(journal, status=status, recovery_hint=recovery_hint)
+        except Exception:
+            pass
+
+    def _finish_journal(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        status: str,
+        recovery_hint: str | None = None,
+    ) -> None:
+        if not journal.rollback_result and status in {"verified", "failed"}:
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_journal(journal, status=status, recovery_hint=recovery_hint)
+
+    def _finish_after_cleanup(
+        self,
+        journal: ManagedActionJournal,
+        *,
+        cleanup_ok: bool,
+        recovery_hint: str,
+    ) -> None:
+        if not journal.verification_result:
+            journal.mark_verification(ok=False)
+        if not journal.rollback_result:
+            journal.mark_rollback(
+                ok=cleanup_ok,
+                attempted=True,
+                summary="Owned cleanup completed." if cleanup_ok else "Owned cleanup did not fully complete.",
+            )
+        self._persist_journal(
+            journal,
+            status="rolled_back" if cleanup_ok else "recovery_needed",
+            recovery_hint=None if cleanup_ok else recovery_hint,
+        )
+
     @staticmethod
     def _journal_model_preflight(journal: ManagedActionJournal, *, target: str, provider: str | None = None, disk_space_checked: bool = False) -> None:
         journal.plan_step("preflight_target", resource=target, provider=provider)
@@ -610,15 +664,23 @@ class CanonicalModelManager:
     ) -> dict[str, Any]:
         model_ref = _canonical_ollama_model_id(str(request.get("model_ref") or request.get("model") or "").strip())
         if not model_ref:
-            return {
+            journal = ManagedActionJournal(action_type="model_ollama_pull", target="ollama:model_required")
+            journal.plan_step("preflight_target", resource="ollama")
+            journal.record_step("preflight_target", ok=False, resource="ollama", reason="model_required")
+            journal.mark_verification(ok=False, error_kind="model_required")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_journal(journal, status="failed")
+            return _attach_journal({
                 "ok": False,
                 "executed": False,
                 "error_kind": "model_required",
                 "message": "model is required",
                 "source": source,
-            }
+            }, journal)
         journal = ManagedActionJournal(action_type="model_ollama_pull", target=model_ref)
         self._journal_model_preflight(journal, target=model_ref, provider="ollama")
+        if approve:
+            self._persist_journal(journal, status="planned")
         journal.plan_step("build_install_plan", resource=model_ref)
         plan = self._install_planner_fn(inventory=self._inventory(), model_ref=model_ref)
         journal.record_step("build_install_plan", ok=True, resource=model_ref)
@@ -633,6 +695,10 @@ class CanonicalModelManager:
         allow, blocked = self._guard_install_allowed(source=source)
         if not allow:
             journal.record_step("check_install_policy", ok=False, resource=model_id, reason=str((blocked or {}).get("error_kind") or "blocked"))
+            journal.mark_verification(ok=False, error_kind=str((blocked or {}).get("error_kind") or "blocked"))
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            if approve:
+                self._persist_journal(journal, status="failed")
             response = {
                 **dict(blocked or {}),
                 "model_id": model_id,
@@ -660,6 +726,7 @@ class CanonicalModelManager:
             )
         if approve:
             journal.plan_step("mark_downloading", resource=model_id)
+            self._persist_journal(journal, status="running")
             self._update_target_state(
                 target_key=model_id,
                 target_type="model",
@@ -736,6 +803,11 @@ class CanonicalModelManager:
                         "cleanup_summary": cleanup_summary,
                     }
                 )
+                self._finish_after_cleanup(
+                    journal,
+                    cleanup_ok=cleanup_ok,
+                    recovery_hint="Check Ollama status and model inventory before retrying the model pull.",
+                )
                 return _attach_journal(payload, journal)
             lifecycle_state = self._result_state_from_verification(verification)
             self._update_target_state(
@@ -751,6 +823,8 @@ class CanonicalModelManager:
                 error_kind=None,
                 source=source,
             )
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_journal(journal, status="verified")
         else:
             error_kind = str(payload.get("error_kind") or "install_failed").strip() or "install_failed"
             cleanup_ok, cleanup_summary = self._cleanup_owned_files(journal, [])
@@ -780,6 +854,17 @@ class CanonicalModelManager:
                 error_kind=None if lifecycle_state == "queued" else error_kind,
                 source=source,
             )
+            if approve:
+                if error_kind == "approval_required":
+                    journal.mark_verification(ok=False, error_kind=error_kind)
+                    journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+                    self._persist_journal(journal, status="failed")
+                else:
+                    self._finish_after_cleanup(
+                        journal,
+                        cleanup_ok=cleanup_ok,
+                        recovery_hint="Check Ollama status and disk space before retrying the model pull.",
+                    )
         if not journal.verification_result:
             journal.mark_verification(ok=bool(payload.get("ok")), model_id=model_id, verification=payload.get("verification") if isinstance(payload.get("verification"), dict) else {})
         return _attach_journal(payload, journal)
@@ -805,22 +890,34 @@ class CanonicalModelManager:
         ollama_model_name = str(request.get("ollama_model_name") or "").strip() or None
         download_only = bool(request.get("download_only", False))
         if not repo_id or not target_dir:
-            return {
+            journal = ManagedActionJournal(action_type="model_hf_local_download", target=repo_id or "hf:download")
+            journal.plan_step("validate_download_request", resource="hf:download")
+            journal.record_step("validate_download_request", ok=False, resource="hf:download", reason="repo_id_and_target_dir_required")
+            journal.mark_verification(ok=False, error_kind="repo_id_and_target_dir_required")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_journal(journal, status="failed")
+            return _attach_journal({
                 "ok": False,
                 "executed": False,
                 "error_kind": "repo_id_and_target_dir_required",
                 "message": "repo_id and target_dir are required",
                 "source": source,
-            }
+            }, journal)
         model_id = _canonical_ollama_model_id(ollama_model_name) if ollama_model_name else None
         artifact_id = _hf_artifact_id(repo_id, revision)
         target_key = model_id or artifact_id
         journal = ManagedActionJournal(action_type="model_hf_local_download", target=target_key)
         self._journal_model_preflight(journal, target=target_key, provider="huggingface")
+        if approve:
+            self._persist_journal(journal, status="planned")
         journal.record_step("validate_download_request", ok=True, resource=target_key, repo_id=repo_id, target_dir=target_dir)
         allow, blocked = self._guard_install_allowed(source=source)
         if not allow:
             journal.record_step("check_install_policy", ok=False, resource=target_key, reason=str((blocked or {}).get("error_kind") or "blocked"))
+            journal.mark_verification(ok=False, error_kind=str((blocked or {}).get("error_kind") or "blocked"))
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            if approve:
+                self._persist_journal(journal, status="failed")
             return _attach_journal({
                 **dict(blocked or {}),
                 "trace_id": str(trace_id or ""),
@@ -856,6 +953,7 @@ class CanonicalModelManager:
                 "source": source,
             }, journal)
         journal.plan_step("mark_downloading", resource=target_key)
+        self._persist_journal(journal, status="running")
         self._update_target_state(
             target_key=target_key,
             target_type="model" if model_id else "artifact",
@@ -896,6 +994,11 @@ class CanonicalModelManager:
                 message="Snapshot download failed.",
                 error_kind=error_kind,
                 source=source,
+            )
+            self._finish_after_cleanup(
+                journal,
+                cleanup_ok=cleanup_ok,
+                recovery_hint="Check network/backend availability and disk space before retrying the model download.",
             )
             return _attach_journal({
                 "ok": False,
@@ -942,6 +1045,11 @@ class CanonicalModelManager:
                     message="Selected GGUF file is missing after download.",
                     error_kind=error_kind,
                     source=source,
+                )
+                self._finish_after_cleanup(
+                    journal,
+                    cleanup_ok=cleanup_ok,
+                    recovery_hint="Choose an existing GGUF file from the downloaded artifact before retrying the import.",
                 )
                 return _attach_journal({
                     "ok": False,
@@ -1007,6 +1115,11 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
+                self._finish_after_cleanup(
+                    journal,
+                    cleanup_ok=cleanup_ok,
+                    recovery_hint="Check Modelfile write permissions before retrying the import.",
+                )
                 return _attach_journal({
                     "ok": False,
                     "executed": True,
@@ -1052,6 +1165,11 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
+                self._finish_after_cleanup(
+                    journal,
+                    cleanup_ok=cleanup_ok,
+                    recovery_hint="Check Ollama status before retrying the import.",
+                )
                 return _attach_journal({
                     "ok": False,
                     "executed": True,
@@ -1087,6 +1205,11 @@ class CanonicalModelManager:
                     message="Ollama create failed.",
                     error_kind=error_kind,
                     source=source,
+                )
+                self._finish_after_cleanup(
+                    journal,
+                    cleanup_ok=cleanup_ok,
+                    recovery_hint="Fix the Ollama import error before retrying.",
                 )
                 return _attach_journal({
                     "ok": False,
@@ -1136,6 +1259,11 @@ class CanonicalModelManager:
                     error_kind=error_kind,
                     source=source,
                 )
+                self._finish_after_cleanup(
+                    journal,
+                    cleanup_ok=cleanup_ok,
+                    recovery_hint="Check Ollama model inventory before retrying the import.",
+                )
                 return _attach_journal({
                     "ok": False,
                     "executed": True,
@@ -1169,6 +1297,8 @@ class CanonicalModelManager:
                 error_kind=None,
                 source=source,
             )
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_journal(journal, status="verified")
             return _attach_journal({
                 "ok": True,
                 "executed": True,
@@ -1215,6 +1345,11 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
+            self._finish_after_cleanup(
+                journal,
+                cleanup_ok=cleanup_ok,
+                recovery_hint="Inspect the target directory before retrying the download.",
+            )
             return _attach_journal({
                 "ok": False,
                 "executed": True,
@@ -1247,6 +1382,8 @@ class CanonicalModelManager:
             source=source,
         )
         journal.mark_verification(ok=True, artifact_id=artifact_id, download_path=str(downloaded_path), marker_path=str(marker_path))
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_journal(journal, status="verified")
         return _attach_journal({
             "ok": True,
             "executed": True,
@@ -1272,19 +1409,31 @@ class CanonicalModelManager:
         modelfile_path = str(request.get("modelfile_path") or "").strip()
         model_id = _canonical_ollama_model_id(model_name)
         if not model_id or not modelfile_path:
-            return {
+            journal = ManagedActionJournal(action_type="model_ollama_import_gguf", target=model_id or "ollama:import")
+            journal.plan_step("validate_import_request", resource="ollama:import")
+            journal.record_step("validate_import_request", ok=False, resource="ollama:import", reason="model_name_and_modelfile_path_required")
+            journal.mark_verification(ok=False, error_kind="model_name_and_modelfile_path_required")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_journal(journal, status="failed")
+            return _attach_journal({
                 "ok": False,
                 "executed": False,
                 "error_kind": "model_name_and_modelfile_path_required",
                 "message": "model_name and modelfile_path are required",
                 "source": source,
-            }
+            }, journal)
         journal = ManagedActionJournal(action_type="model_ollama_import_gguf", target=model_id)
         self._journal_model_preflight(journal, target=model_id, provider="ollama")
+        if approve:
+            self._persist_journal(journal, status="planned")
         journal.record_step("validate_import_request", ok=True, resource=model_id, modelfile_path=modelfile_path)
         allow, blocked = self._guard_install_allowed(source=source)
         if not allow:
             journal.record_step("check_install_policy", ok=False, resource=model_id, reason=str((blocked or {}).get("error_kind") or "blocked"))
+            journal.mark_verification(ok=False, error_kind=str((blocked or {}).get("error_kind") or "blocked"))
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            if approve:
+                self._persist_journal(journal, status="failed")
             return _attach_journal({
                 **dict(blocked or {}),
                 "trace_id": str(trace_id or ""),
@@ -1318,6 +1467,7 @@ class CanonicalModelManager:
                 "source": source,
             }, journal)
         journal.plan_step("mark_downloading", resource=model_id)
+        self._persist_journal(journal, status="running")
         self._update_target_state(
             target_key=model_id,
             target_type="model",
@@ -1358,6 +1508,11 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
+            self._finish_after_cleanup(
+                journal,
+                cleanup_ok=cleanup_ok,
+                recovery_hint="Check Ollama status and the Modelfile path before retrying the import.",
+            )
             return _attach_journal({
                 "ok": False,
                 "executed": True,
@@ -1392,6 +1547,11 @@ class CanonicalModelManager:
                 message="Ollama create failed.",
                 error_kind=error_kind,
                 source=source,
+            )
+            self._finish_after_cleanup(
+                journal,
+                cleanup_ok=cleanup_ok,
+                recovery_hint="Fix the Ollama import error before retrying.",
             )
             return _attach_journal({
                 "ok": False,
@@ -1440,6 +1600,11 @@ class CanonicalModelManager:
                 error_kind=error_kind,
                 source=source,
             )
+            self._finish_after_cleanup(
+                journal,
+                cleanup_ok=cleanup_ok,
+                recovery_hint="Check Ollama model inventory before retrying the import.",
+            )
             return _attach_journal({
                 "ok": False,
                 "executed": True,
@@ -1470,6 +1635,8 @@ class CanonicalModelManager:
             error_kind=None,
             source=source,
         )
+        journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+        self._persist_journal(journal, status="verified")
         return _attach_journal({
             "ok": True,
             "executed": True,

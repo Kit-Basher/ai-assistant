@@ -4351,6 +4351,16 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("safe_mode_blocked", hf_result["error_kind"])
         self.assertFalse(import_result["ok"])
         self.assertEqual("safe_mode_blocked", import_result["error_kind"])
+        hf_journal = hf_result.get("managed_action_journal", {})
+        import_journal = import_result.get("managed_action_journal", {})
+        hf_persisted = self._managed_action_journal_store().get(hf_journal["action_id"])
+        import_persisted = self._managed_action_journal_store().get(import_journal["action_id"])
+        self.assertIsNotNone(hf_persisted)
+        self.assertIsNotNone(import_persisted)
+        assert hf_persisted is not None
+        assert import_persisted is not None
+        self.assertEqual("failed", hf_persisted["status"])
+        self.assertEqual("failed", import_persisted["status"])
         download_mock.assert_not_called()
         subprocess_mock.assert_not_called()
 
@@ -4379,6 +4389,10 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertTrue(journal.get("planned_steps"))
         self.assertTrue(journal.get("executed_steps"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
 
     def test_canonical_model_manager_ollama_pull_preview_is_journaled_without_mutation(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4419,6 +4433,42 @@ class TestAPIServerRuntime(unittest.TestCase):
         executed_names = [step.get("name") for step in journal.get("executed_steps", [])]
         self.assertIn("preview_requires_confirmation", executed_names)
         self.assertFalse(journal.get("changed_resources"))
+        self.assertEqual([], self._managed_action_journal_store().recent())
+
+    def test_canonical_model_manager_ollama_pull_success_persists_verified_journal(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"needed": True, "approved": True, "candidates": [{"model_id": "ollama:qwen2.5:3b-instruct", "install_name": "qwen2.5:3b-instruct"}]},
+            install_executor_fn=lambda **_: {"ok": True, "executed": True, "message": "pulled"},
+            inventory_builder=lambda **_: [
+                {
+                    "id": "ollama:qwen2.5:3b-instruct",
+                    "installed": True,
+                    "available": True,
+                    "healthy": True,
+                    "provider": "ollama",
+                    "capabilities": ["chat"],
+                }
+            ],
+        )
+
+        result = manager.execute_request(
+            {"kind": "approved_ollama_pull", "model_ref": "qwen2.5:3b-instruct"},
+            approve=True,
+            trace_id="pull-success",
+            source="test",
+        )
+
+        self.assertTrue(result["ok"])
+        journal = result.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertIn("model_ollama_pull", persisted_payload)
+        self.assertIn("ollama:qwen2.5:3b-instruct", persisted_payload)
 
     def test_canonical_model_manager_hf_import_verification_failure_cleans_owned_modelfile(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4466,6 +4516,55 @@ class TestAPIServerRuntime(unittest.TestCase):
         self.assertEqual("model_hf_local_download", journal.get("action_type"))
         rollback_steps = journal.get("rollback_steps", [])
         self.assertTrue(any(step.get("name") == "remove_owned_file" and step.get("status") == "ok" for step in rollback_steps))
+        self.assertTrue((target_dir / "model.gguf").exists())
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+        persisted_payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn(str(target_dir), persisted_payload)
+        self.assertNotIn(str(target_dir / "Modelfile.personal-agent"), persisted_payload)
+
+    def test_canonical_model_manager_hf_cleanup_failure_persists_recovery_needed(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        target_dir = Path(self.tmpdir.name) / "hf-download-cleanup-fails"
+
+        def _download(**_: object) -> str:
+            target_dir.mkdir(parents=True, exist_ok=True)
+            (target_dir / "model.gguf").write_text("fake gguf", encoding="utf-8")
+            return str(target_dir)
+
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"ok": True},
+            install_executor_fn=lambda **_: {"ok": True},
+            hf_snapshot_download_fn=_download,
+            subprocess_run_fn=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="created", stderr=""),
+            inventory_builder=lambda **_: [],
+        )
+
+        with patch.object(manager, "_cleanup_owned_files", return_value=(False, "could not remove Modelfile.personal-agent")):
+            result = manager.execute_request(
+                {
+                    "kind": "hf_local_download",
+                    "repo_id": "example/model",
+                    "revision": "main",
+                    "target_dir": str(target_dir),
+                    "selected_gguf": "model.gguf",
+                    "ollama_model_name": "example-model",
+                },
+                approve=True,
+                trace_id="hf-cleanup-fail",
+                source="test",
+            )
+
+        self.assertFalse(result["ok"])
+        journal = result.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("recovery_needed", persisted["status"])
+        self.assertTrue(persisted["recovery_needed"])
 
     def test_canonical_model_manager_import_failure_does_not_delete_user_modelfile(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
@@ -4504,6 +4603,95 @@ class TestAPIServerRuntime(unittest.TestCase):
         journal = result.get("managed_action_journal", {})
         self.assertEqual("model_ollama_import_gguf", journal.get("action_type"))
         self.assertFalse(journal.get("rollback_result", {}).get("attempted"))
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("rolled_back", persisted["status"])
+
+    def test_canonical_model_manager_import_success_persists_verified_journal(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        modelfile = Path(self.tmpdir.name) / "ImportModelfile"
+        modelfile.write_text("FROM ./model.gguf\n", encoding="utf-8")
+
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"ok": True},
+            install_executor_fn=lambda **_: {"ok": True},
+            subprocess_run_fn=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, stdout="created", stderr=""),
+            inventory_builder=lambda **_: [
+                {
+                    "id": "ollama:verified-import",
+                    "installed": True,
+                    "available": True,
+                    "healthy": True,
+                    "provider": "ollama",
+                    "capabilities": ["chat"],
+                }
+            ],
+        )
+
+        result = manager.execute_request(
+            {
+                "kind": "ollama_import_gguf",
+                "model_name": "verified-import",
+                "modelfile_path": str(modelfile),
+            },
+            approve=True,
+            trace_id="import-success",
+            source="test",
+        )
+
+        self.assertTrue(result["ok"])
+        journal = result.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        self.assertEqual("verified", persisted["status"])
+
+    def test_canonical_model_manager_import_persistent_journal_redacts_paths_tokens_and_output(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        private_dir = Path(self.tmpdir.name) / "private"
+        private_dir.mkdir()
+        modelfile = private_dir / "UserModelfile"
+        modelfile.write_text("FROM /home/c/private/model.gguf\n", encoding="utf-8")
+
+        def _run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            return subprocess.CompletedProcess(
+                argv,
+                2,
+                stdout="provider body with private prompt",
+                stderr=f"bad token sk-secret-private and path {modelfile}",
+            )
+
+        manager = CanonicalModelManager(
+            runtime,
+            install_planner_fn=lambda **_: {"ok": True},
+            install_executor_fn=lambda **_: {"ok": True},
+            subprocess_run_fn=_run,
+            inventory_builder=lambda **_: [],
+        )
+
+        result = manager.execute_request(
+            {
+                "kind": "ollama_import_gguf",
+                "model_name": "private-import",
+                "modelfile_path": str(modelfile),
+            },
+            approve=True,
+            trace_id="import-redaction",
+            source="test",
+        )
+
+        self.assertFalse(result["ok"])
+        journal = result.get("managed_action_journal", {})
+        persisted = self._managed_action_journal_store().get(journal["action_id"])
+        self.assertIsNotNone(persisted)
+        assert persisted is not None
+        payload = json.dumps(persisted, sort_keys=True)
+        self.assertNotIn(str(modelfile), payload)
+        self.assertNotIn("sk-secret-private", payload)
+        self.assertNotIn("private prompt", payload)
+        self.assertNotIn("provider body", payload)
 
     def test_runtime_truth_surfaces_acquirable_local_model_without_treating_it_as_ready(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))

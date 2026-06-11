@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
-Date: 2026-06-10
-Checkpoint: `82f9f30` Persist journals for Telegram setup
-Updated after default model and temporary chat override persistent managed-action journal conversion.
+Date: 2026-06-11
+Checkpoint: `cd913e1` Persist journals for model selection changes
+Updated after model acquisition/import persistent managed-action journal conversion.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -60,9 +60,9 @@ surface:
    flows have in-memory journals and readback verification, and a minimal
    SQLite journal skeleton now exists. Preference reset/clear, support bundle
    creation, provider/API key config, Telegram token/service setup, and default
-   model/temporary chat override are converted reference flows, but most current
-   flows are not converted and post-crash recovery is not yet a uniform product
-   guarantee.
+   model/temporary chat override, and model acquisition/import are converted
+   reference flows, but most current flows are not converted and post-crash
+   recovery is not yet a uniform product guarantee.
 2. Package install and directory creation shell flows are not covered as
    runtime managed actions. They must stay out of normal assistant actions.
 3. Future filesystem writes have no transaction design. Current native
@@ -74,7 +74,9 @@ surface:
    metadata rollback is stronger than artifact cleanup.
 6. Model acquisition/import rollback remains conservative. It does not delete
    Ollama cache/model data without ownership proof, so failed acquisitions may
-   require operator cleanup.
+   require operator cleanup. It now has persistent redacted status rows for
+   approved Ollama pulls, Hugging Face GGUF download/import, download-only
+   markers, and direct Ollama GGUF import.
 7. Provider/API key config now has persistent redacted status rows, but provider
    setup transaction coverage does not yet span later OpenRouter model refresh
    and model registration after provider verification.
@@ -85,16 +87,19 @@ surface:
 9. Default model changes and temporary chat overrides now have persistent
    redacted status rows, verification, and scoped rollback coverage, but
    read-only restart/status surfacing is not yet implemented.
-10. Scoped bulk preference reset/clear now has in-memory journal, persistent
+10. Model acquisition/import now has persistent redacted status rows,
+   verification, and owned generated-file cleanup coverage, but read-only
+   restart/status surfacing is not yet implemented.
+11. Scoped bulk preference reset/clear now has in-memory journal, persistent
    redacted status rows, verification, redaction, and scoped rollback coverage,
    but read-only restart/status surfacing is not yet implemented.
-11. Support bundle creation now has persistent redacted status rows, verification,
+12. Support bundle creation now has persistent redacted status rows, verification,
    and owned incomplete-bundle cleanup, but read-only restart/status surfacing is
    not yet implemented.
-12. Live behavior barrage is good smoke coverage only. It catches boundary,
+13. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
-13. Public install/update/rollback needs one clean end-to-end pass on a clean
+14. Public install/update/rollback needs one clean end-to-end pass on a clean
     user-local environment or VM before any unassisted public trial.
 
 ## Non-Blocking Polish Items
@@ -152,8 +157,9 @@ other write paths now have journals, verification, and scoped rollback where
 ownership is proven. Remaining gaps are clearly tracked in
 `MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
-Remaining risk: adding a read-only recovery/status surface and converting model
-acquisition/import to persistent journal writes is the next reliability target.
+Remaining risk: adding a read-only recovery/status surface and converting pack
+lifecycle/source cleanup to persistent journal writes is the next reliability
+target.
 
 ### Safety / Security
 
@@ -232,8 +238,8 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Add read-only restart/status surfacing and convert model acquisition/import to
-the persistent journal store before making broader crash/restart recovery
+Add read-only restart/status surfacing and convert pack lifecycle/source cleanup
+to the persistent journal store before making broader crash/restart recovery
 claims. Scoped preference reset/clear now has in-memory journal, persistent
 redacted status rows, verification, redaction, and rollback coverage. Support
 bundle creation now has persistent redacted status rows, verification, and owned
@@ -241,7 +247,8 @@ incomplete-bundle cleanup coverage. Provider/API key config now has persistent
 redacted status rows for secret save, save-and-test, provider config update, and
 provider config/secret portions of OpenRouter setup. Default model changes and
 temporary chat overrides now have persistent redacted status rows, verification,
-and scoped rollback coverage.
+and scoped rollback coverage. Model acquisition/import now has persistent
+redacted status rows, verification, and owned generated-file cleanup coverage.
 
 ## Required Verification
 

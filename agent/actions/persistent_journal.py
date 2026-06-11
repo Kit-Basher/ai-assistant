@@ -35,6 +35,8 @@ _SENSITIVE_KEY_TOKENS = {
     "resource",
     "secret",
     "source_ref",
+    "stderr",
+    "stdout",
     "target",
     "text",
     "token",
@@ -43,6 +45,7 @@ _SENSITIVE_KEY_TOKENS = {
 }
 _TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{10,}\b")
+_PRIVATE_PATH_RE = re.compile(r"(?<!\S)(?:~|/(?:home|Users)/[^\s,;:]+|/tmp/[^\s,;:]+)")
 _LONG_STRING_LIMIT = 256
 
 
@@ -58,6 +61,8 @@ def redact_journal_value(value: Any) -> Any:
             lowered = normalized_key.lower()
             if lowered.endswith("_hash") or lowered.endswith("_hashes"):
                 redacted[normalized_key] = redact_journal_value(item)
+            elif lowered == "detail":
+                redacted[normalized_key] = "***redacted***"
             elif any(token in lowered for token in _SENSITIVE_KEY_TOKENS):
                 redacted[normalized_key] = "***redacted***"
             else:
@@ -69,6 +74,7 @@ def redact_journal_value(value: Any) -> Any:
         return [redact_journal_value(item) for item in value[:100]]
     if isinstance(value, str):
         scrubbed = _OPENAI_KEY_RE.sub("***redacted***", _TELEGRAM_TOKEN_RE.sub("***redacted***", value))
+        scrubbed = _PRIVATE_PATH_RE.sub("***redacted_path***", scrubbed)
         if len(scrubbed) > _LONG_STRING_LIMIT:
             return f"{scrubbed[:_LONG_STRING_LIMIT]}...[truncated]"
         return scrubbed

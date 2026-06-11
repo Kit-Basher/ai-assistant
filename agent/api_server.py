@@ -7394,6 +7394,7 @@ class AgentRuntime:
             inventory_builder=build_model_inventory,
             hf_snapshot_download_fn=hf_snapshot_download,
             subprocess_run_fn=subprocess.run,
+            managed_action_journal_store=self._managed_action_journal_store,
         )
 
     def pull_ollama_model(self, payload: dict[str, Any] | None = None) -> tuple[bool, dict[str, Any]]:
@@ -7448,6 +7449,8 @@ class AgentRuntime:
                 "why": str(install_result.get("why") or "").strip() or None,
                 "next_action": str(install_result.get("next_action") or "").strip() or None,
             }
+            if isinstance(install_result.get("managed_action_journal"), dict):
+                response["managed_action_journal"] = install_result["managed_action_journal"]
             self._log_request("/providers/ollama/pull", False, response)
             return False, response
 
@@ -7475,6 +7478,8 @@ class AgentRuntime:
             "verification": install_result.get("verification") if isinstance(install_result.get("verification"), dict) else {},
             "message": message,
         }
+        if isinstance(install_result.get("managed_action_journal"), dict):
+            response["managed_action_journal"] = install_result["managed_action_journal"]
         self._log_request("/providers/ollama/pull", True, response)
         return True, response
 

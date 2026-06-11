@@ -142,6 +142,7 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     path = REPO_ROOT / "docs" / "design" / "PERSISTENT_MANAGED_ACTION_JOURNAL.md"
     assert path.is_file()
     text = path.read_text(encoding="utf-8").lower()
+    text_flat = " ".join(text.split())
     assert "use sqlite, not jsonl" in text
     assert "planned" in text
     assert "running" in text
@@ -152,12 +153,13 @@ def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims
     assert "never store" in text
     assert "do not mutate" in text
     assert "not implemented now" in text
-    assert "crash/restart recovery is not complete" in text
+    assert "crash/restart recovery is not complete" in text_flat
     assert "preference reset/clear" in text
     assert "support bundle creation" in text
     assert "provider/api key config" in text
     assert "telegram token/service setup" in text
     assert "default model/temporary chat override" in text
+    assert "model acquisition/import" in text
     assert "converted reference flows" in text
 
 
@@ -204,7 +206,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     assert "persistent managed-action journal storage" in audit_text
     assert "minimal sqlite" in audit_text
     assert (
-        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override are converted reference flows"
+        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, default model/temporary chat override, and model acquisition/import are converted reference flows"
         in audit_text
     )
     assert "raw preference values and raw persisted keys" in audit_text
@@ -215,6 +217,7 @@ def test_managed_action_reliability_docs_exist_and_cover_required_flows() -> Non
     assert "telegram token setup now records managed-action journals" in audit_text
     assert "persists redacted status rows for the known personal agent drop-in" in audit_text
     assert "persistent default model changes and temporary chat overrides now journal" in audit_text
+    assert "model acquisition/import now records managed-action journals" in audit_text
     assert "bulk reset/clear paths are still not wrapped" not in audit_text
 
 
@@ -225,11 +228,11 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     lowered = text.lower()
     lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "82f9f30" in text
+    assert "cd913e1" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
     assert (
-        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override are converted reference flows"
+        "preference reset/clear, support bundle creation, provider/api key config, telegram token/service setup, and default model/temporary chat override, and model acquisition/import are converted reference flows"
         in lowered_flat
     )
     assert "scoped bulk preference reset/clear now has in-memory journal" in lowered
@@ -238,10 +241,28 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "provider/api key config now has persistent redacted status rows" in lowered
     assert "telegram token/service setup now has persistent redacted status rows" in lowered
     assert "default model changes and temporary chat overrides now have persistent redacted status rows" in lowered_flat
+    assert "model acquisition/import now has persistent redacted status rows" in lowered_flat
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered
     assert "python scripts/external_pack_safety_smoke.py" in text
+
+
+def test_local_model_provider_support_doc_states_current_boundaries() -> None:
+    path = REPO_ROOT / "docs" / "operator" / "LOCAL_MODEL_PROVIDER_SUPPORT.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8").lower()
+    text_flat = " ".join(text.split())
+    assert "ollama | supported" in text
+    assert "generic openai-compatible local server | supported" in text
+    assert "llama.cpp direct binary/library | absent" in text
+    assert "llama.cpp openai-compatible server | supported through openai-compatible provider path" in text
+    assert "lm studio | supported through openai-compatible provider path" in text
+    assert "vllm | supported through openai-compatible provider path" in text
+    assert "gguf discovery/import | partially supported" in text
+    assert "rtx 2060 6gb vram and 64gb ram" in text
+    assert "must not present huge local models as easy/default" in text_flat
+    assert "does not delete unrelated ollama models" in text_flat
 
 
 def test_known_limits_do_not_contradict_supported_packaging_paths() -> None:

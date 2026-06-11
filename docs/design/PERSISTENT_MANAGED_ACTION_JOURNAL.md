@@ -2,9 +2,9 @@
 
 Status: design plus minimal shared skeleton, with preference reset/clear,
 support bundle creation, provider/API key config, Telegram token/service setup,
-and default model/temporary chat override as converted reference flows. This is
-not yet a claim that every managed action survives crash/restart with complete
-recovery.
+default model/temporary chat override, and model acquisition/import as converted
+reference flows. This is not yet a claim that every managed action survives
+crash/restart with complete recovery.
 
 ## Problem
 
@@ -36,9 +36,10 @@ dedicated state database at:
 ```
 
 Preference reset/clear, support bundle creation, provider/API key config,
-Telegram token/service setup, and default model/temporary chat override now opt
-into the store at existing journal creation/update points. These are converted
-reference flows. Other managed-action callers remain follow-up work.
+Telegram token/service setup, default model/temporary chat override, and model
+acquisition/import now opt into the store at existing journal creation/update
+points. These are converted reference flows. Other managed-action callers
+remain follow-up work.
 
 ## Schema
 
@@ -194,7 +195,16 @@ Adopt in this order:
    provider/model ids, changed setting names, readback/effective routing
    summaries, and verification/rollback status without prompts, raw chat text,
    provider response bodies, or secrets.
-6. model acquisition/import;
+6. model acquisition/import: converted for approved Ollama pulls, Hugging Face
+   local GGUF download/import into Ollama, download-only artifact markers, and
+   direct Ollama GGUF import through an existing Modelfile. Persisted rows keep
+   provider/runtime name, model id/name, source type, artifact ids or basenames,
+   verification summaries, and cleanup/rollback status. They do not store raw
+   prompts, private paths, provider bodies, subprocess stdout/stderr, tokens, API
+   keys, raw GGUF contents, or unbounded file contents. Rollback removes only
+   owned generated temp files such as Personal Agent Modelfiles/markers; it does
+   not delete unrelated Ollama models, Ollama cache data, or user-provided GGUF
+   or Modelfile paths.
 7. managed local services/SearXNG;
 8. pack lifecycle/removal/source deletion and registry maintenance;
 9. semantic-memory ingest/repair;
@@ -243,10 +253,16 @@ Implemented now:
 - default model and temporary chat override persistent status transitions for
   planned/running, verified, rolled-back verification failure, recovery-needed
   default restore failure, and pre-mutation failed preflight states;
+- model acquisition/import persistent status transitions for approved Ollama
+  pulls, Hugging Face local GGUF download/import, download-only markers, and
+  direct Ollama GGUF import. Verification reads back model inventory or artifact
+  marker state; failed verification records rolled_back when owned generated
+  cleanup succeeds and recovery_needed when cleanup cannot complete;
 - focused tests for redaction, read-only recovery-needed reads, verified
   preference reset rows, support bundle verified rows, provider secret/config
   rows, Telegram token/service rows, default model/temporary override rows,
-  rollback rows, recovery-needed rows, and preview-only non-mutation.
+  model acquisition/import rows, rollback rows, recovery-needed rows, and
+  preview-only non-mutation.
 
 Not implemented now:
 
@@ -258,6 +274,7 @@ Not implemented now:
 Therefore the correct claim after this pass is: persistent journal storage
 infrastructure exists, preference reset/clear persists journal transitions,
 support bundle creation persists journal transitions, and provider/API key
-config, Telegram token/service setup, and default model/temporary chat override
-persist journal transitions. Product crash/restart recovery is not complete
-until the remaining flows are converted and restart/status surfacing is tested.
+config, Telegram token/service setup, default model/temporary chat override, and
+model acquisition/import persist journal transitions. Product crash/restart
+recovery is not complete until the remaining flows are converted and
+restart/status surfacing is tested.
