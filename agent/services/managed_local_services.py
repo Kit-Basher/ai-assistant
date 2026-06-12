@@ -765,26 +765,39 @@ class ManagedLocalServiceDetector:
         *,
         search_status_provider: Callable[[], dict[str, Any]] | None = None,
         command_finder: Callable[[str], str | None] | None = None,
+        command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         health_checker: Callable[[str], bool] | None = None,
         searxng_url_provider: Callable[[], str | None] | None = None,
         timeout_seconds: float = 1.0,
     ) -> None:
         self._search_status_provider = search_status_provider
         self._command_finder = command_finder or shutil.which
+        self._command_runner = command_runner or subprocess.run
         self._health_checker = health_checker
         self._searxng_url_provider = searxng_url_provider
         self._timeout_seconds = max(0.1, float(timeout_seconds or 1.0))
 
     def status(self) -> dict[str, Any]:
-        docker_available = bool(self._command_finder("docker"))
-        podman_available = bool(self._command_finder("podman"))
-        searxng = self._searxng_status(docker_available=docker_available, podman_available=podman_available)
+        docker_path = self._command_finder("docker")
+        podman_path = self._command_finder("podman")
+        docker_available = bool(docker_path)
+        podman_available = bool(podman_path)
+        podman_rootless = self._podman_rootless(podman_path) if podman_path else False
+        docker_rootless = self._docker_rootless(docker_path) if docker_path else False
+        searxng = self._searxng_status(
+            docker_available=docker_available,
+            podman_available=podman_available,
+            podman_rootless=podman_rootless,
+            docker_rootless=docker_rootless,
+        )
         return {
             "ok": True,
             "read_only": True,
             "mutating_actions_enabled": False,
             "docker_available": docker_available,
             "podman_available": podman_available,
+            "podman_rootless": podman_rootless,
+            "docker_rootless": docker_rootless,
             "services": [searxng],
         }
 
@@ -797,7 +810,14 @@ class ManagedLocalServiceDetector:
             return {}
         return dict(payload) if isinstance(payload, dict) else {}
 
-    def _searxng_status(self, *, docker_available: bool, podman_available: bool) -> dict[str, Any]:
+    def _searxng_status(
+        self,
+        *,
+        docker_available: bool,
+        podman_available: bool,
+        podman_rootless: bool | None,
+        docker_rootless: bool | None,
+    ) -> dict[str, Any]:
         spec = SERVICE_REGISTRY["searxng"]
         search_status = self._search_status()
         enabled = bool(search_status.get("enabled", False))
@@ -827,11 +847,49 @@ class ManagedLocalServiceDetector:
             "next_step": next_step,
             "docker_available": docker_available,
             "podman_available": podman_available,
+            "podman_rootless": podman_rootless,
+            "docker_rootless": docker_rootless,
+            "preferred_engine": "podman",
             "container_detection": {
                 "checked": False,
                 "reason": "read_only_v1_uses_cli_presence_only",
             },
         }
+
+    def _podman_rootless(self, podman_path: str | None) -> bool | None:
+        return self._runtime_rootless(podman_path, "podman")
+
+    def _docker_rootless(self, docker_path: str | None) -> bool | None:
+        return self._runtime_rootless(docker_path, "docker")
+
+    def _runtime_rootless(self, command_path: str | None, engine: str) -> bool | None:
+        if not command_path:
+            return False
+        argv = [command_path, "info", "--format", "{{.Host.Security.Rootless}}"]
+        if engine == "docker":
+            argv = [command_path, "info", "--format", "{{.SecurityOptions}}"]
+        try:
+            result = self._command_runner(
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=2,
+                shell=False,
+            )
+        except Exception:
+            return None
+        if int(getattr(result, "returncode", 1) or 0) != 0:
+            return None
+        output = " ".join(str(getattr(result, "stdout", "") or "").strip().lower().split())
+        if engine == "docker":
+            if "name=rootless" in output or "rootless" in output:
+                return True
+            return False if output else None
+        if output in {"true", "1", "yes"}:
+            return True
+        if output in {"false", "0", "no"}:
+            return False
+        return None
 
     def _check_reachable(self, url: str) -> bool:
         if not _is_loopback_http_url(url):

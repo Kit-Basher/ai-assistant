@@ -33,6 +33,17 @@ managed local service:
 - User-provided setup accepts loopback SearXNG URLs only.
 - Managed container setup uses the approved `personal-agent-searxng` container
   and binds only to `127.0.0.1`.
+- On Linux, rootless Podman is the preferred managed-service engine. Docker is
+  shown only as an explicit fallback when rootless Podman is unavailable or not
+  confirmed.
+- If Podman is missing, the default setup plan is a Podman prerequisite plan,
+  not a Docker plan. It previews the package action, requires confirmation,
+  uses the system package manager for the `podman` package only, does not store
+  sudo passwords, verifies Podman/rootless usability, and then asks the operator
+  to preview SearXNG setup again.
+- Docker fallback plans include `preferred_engine=podman`,
+  `selected_engine=docker`, a `fallback_reason`, `rootless_expected=false` or
+  unknown, and a Docker fallback warning before confirmation.
 - Setup updates the running Personal Agent search configuration after a
   successful SearXNG JSON probe.
 - Persistent managed-action journals record planned/running/verified,
@@ -40,10 +51,11 @@ managed local service:
   paths.
 
 The current managed setup does not silently install Podman, Docker, SearXNG, or
-system packages. If no supported runtime or trusted endpoint is available,
-setup is blocked and reports the next operator action. To keep search enabled
-after restarting Personal Agent, set the environment variables above in the
-service environment.
+system packages. Podman prerequisite setup is explicit, confirmation-gated, and
+narrowly allowlisted for SearXNG. If no supported runtime or trusted endpoint is
+available and prerequisite setup cannot be prepared, setup is blocked and
+reports the next operator action. To keep search enabled after restarting
+Personal Agent, set the environment variables above in the service environment.
 
 ## Safety Boundaries
 

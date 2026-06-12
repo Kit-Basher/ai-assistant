@@ -196,13 +196,20 @@ If search is missing, preview setup with:
 
 - `POST /search/setup/plan`
 - `POST /search/setup/apply` with the returned confirmation token
+- `POST /search/setup/prerequisite/plan` for the narrow Podman prerequisite
+  plan when Podman is missing
+- `POST /search/setup/prerequisite/apply` with the returned confirmation token
 
 The managed setup path accepts only loopback SearXNG URLs or the approved local
 `personal-agent-searxng` container plan. It must not install Podman, Docker,
-SearXNG, or system packages silently. It updates the running Personal Agent
-search configuration only after the SearXNG JSON endpoint verifies. To keep
-search enabled after restart, set `SEARCH_ENABLED=1`, `SEARCH_PROVIDER=searxng`,
-and `SEARXNG_BASE_URL` in the service environment.
+SearXNG, or system packages silently. On Linux, rootless Podman is preferred;
+when Podman is missing, the default setup path previews a Podman prerequisite
+install for the `podman` package only and requires confirmation before running
+the package manager. Docker appears only as an explicit fallback plan with a
+warning, fallback reason, and Docker fallback confirmation flag. It updates the
+running Personal Agent search configuration only after the SearXNG JSON endpoint
+verifies. To keep search enabled after restart, set `SEARCH_ENABLED=1`,
+`SEARCH_PROVIDER=searxng`, and `SEARXNG_BASE_URL` in the service environment.
 
 ## Core Workflow Proof
 

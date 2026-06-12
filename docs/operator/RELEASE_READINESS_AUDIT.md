@@ -128,10 +128,13 @@ surface:
    rerun the proof.
 15. SearXNG setup now follows the managed local service boundary for the
    running runtime: no base Docker/Podman dependency, user-provided loopback URL
-   remains supported, the managed container path is confirmation-gated and
-   localhost-bound, setup is journaled, and rollback restores prior runtime
-   search settings plus only owned setup resources. Restart-persistent service
-   env writing remains an operator step/follow-up.
+   remains supported, rootless Podman is preferred on Linux, missing Podman
+   produces a confirmation-gated Podman prerequisite plan for the `podman`
+   package only, Docker is labeled as an explicit fallback only with
+   warning/confirmation metadata, the managed container path is
+   confirmation-gated and localhost-bound, setup is journaled, and rollback
+   restores prior runtime search settings plus only owned setup resources.
+   Restart-persistent service env writing remains an operator step/follow-up.
 16. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.

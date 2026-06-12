@@ -14,6 +14,7 @@ import mimetypes
 import os
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -609,6 +610,9 @@ class AgentRuntime:
         self._managed_local_services: ManagedLocalServiceDetector | None = None
         self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
         self._search_setup_confirmations: dict[str, dict[str, Any]] = {}
+        self._podman_prerequisite_confirmations: dict[str, dict[str, Any]] = {}
+        self._prerequisite_command_finder: Callable[[str], str | None] = shutil.which
+        self._prerequisite_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -12094,14 +12098,21 @@ class AgentRuntime:
         services = self.managed_services_status()
         services_rows = services.get("services") if isinstance(services.get("services"), list) else []
         searxng = next((row for row in services_rows if isinstance(row, dict) and row.get("service_id") == "searxng"), {})
-        engine = "podman" if bool(services.get("podman_available") or searxng.get("podman_available")) else "docker" if bool(services.get("docker_available") or searxng.get("docker_available")) else ""
+        engine_choice = self._select_searxng_setup_engine(
+            services,
+            searxng,
+            allow_docker_fallback=bool(payload.get("allow_docker_fallback", False)),
+        )
+        engine = str(engine_choice.get("selected_engine") or "")
+        if str(engine_choice.get("setup_mode") or "") == "podman_prerequisite":
+            return self._store_podman_prerequisite_confirmation(self._build_podman_prerequisite_plan(engine_choice))
         if not engine:
             return {
                 "ok": False,
                 "blocked": True,
                 "blocked_reason": "managed_service_runtime_unavailable",
-                "reason": "Neither rootless Podman nor Docker is available to this runtime.",
-                "next_action": "Install/run SearXNG yourself and provide SEARXNG_BASE_URL, or install Podman/Docker manually and retry the setup plan.",
+                "reason": str(engine_choice.get("reason") or "Neither rootless Podman nor Docker is available to this runtime."),
+                "next_action": str(engine_choice.get("next_action") or "Install/run SearXNG yourself and provide SEARXNG_BASE_URL, or install rootless Podman manually and retry the setup plan."),
                 "mutated": False,
             }
         preview = self.preview_managed_service_setup({"service_id": "searxng", "selected_engine": engine})
@@ -12120,6 +12131,11 @@ class AgentRuntime:
             "setup_mode": "managed_container",
             "provider": "searxng",
             "selected_engine": engine,
+            "preferred_engine": "podman",
+            "fallback_reason": engine_choice.get("fallback_reason"),
+            "rootless_expected": engine_choice.get("rootless_expected"),
+            "requires_docker_fallback_confirmation": bool(engine_choice.get("requires_docker_fallback_confirmation", False)),
+            "engine_warning": engine_choice.get("engine_warning"),
             "image": plan.get("image"),
             "container_name": plan.get("container_name"),
             "loopback_bind": plan.get("loopback_bind"),
@@ -12147,7 +12163,219 @@ class AgentRuntime:
                 "health_url": plan.get("health_url"),
             },
         }
+        if setup_plan["engine_warning"]:
+            setup_plan["safety_notes"].append(str(setup_plan["engine_warning"]))
         return self._store_search_setup_confirmation(setup_plan)
+
+    def podman_prerequisite_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        _ = payload
+        return self._store_podman_prerequisite_confirmation(
+            self._build_podman_prerequisite_plan({"reason": "Podman is required before managed SearXNG setup."})
+        )
+
+    def apply_podman_prerequisite(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        token = str(payload.get("confirmation_token") or "").strip()
+        plan_id = str(payload.get("plan_id") or "").strip()
+        stored = self._podman_prerequisite_confirmations.get(plan_id or token)
+        if not stored or str(stored.get("confirmation_token") or "") != token:
+            return {"ok": False, "error": "invalid_confirmation", "mutated": False}
+        if bool(stored.get("consumed")):
+            return {"ok": False, "error": "confirmation_consumed", "mutated": False}
+        if float(stored.get("expires_at") or 0) <= time.time():
+            return {"ok": False, "error": "confirmation_expired", "mutated": False}
+        stored["consumed"] = True
+        plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
+        return self._execute_podman_prerequisite_plan(plan)
+
+    def _build_podman_prerequisite_plan(self, engine_choice: dict[str, Any]) -> dict[str, Any]:
+        apt_get = self._prerequisite_command_finder("apt-get")
+        sudo = self._prerequisite_command_finder("sudo")
+        running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+        command = ["apt-get", "install", "-y", "podman"] if running_as_root else ["sudo", "apt-get", "install", "-y", "podman"]
+        return {
+            "service_id": "searxng",
+            "setup_mode": "podman_prerequisite",
+            "prerequisite": "podman",
+            "preferred_engine": "podman",
+            "selected_engine": None,
+            "package_manager": "apt-get" if apt_get else None,
+            "package_name": "podman",
+            "commands": [command],
+            "privilege_required": not running_as_root,
+            "privilege_path": "sudo apt-get" if not running_as_root else "root apt-get",
+            "sudo_password_storage": False,
+            "podman_required": True,
+            "docker_fallback_available": bool(engine_choice.get("docker_fallback_available", False)),
+            "reason": str(engine_choice.get("reason") or "Podman is required before managed SearXNG setup."),
+            "next_after_verified": "Preview SearXNG setup again; it should select rootless Podman.",
+            "safety_notes": [
+                "This is only a Podman prerequisite plan for SearXNG.",
+                "It must not install Docker, SearXNG, or arbitrary packages.",
+                "It must not store sudo passwords.",
+                "Search remains disabled until SearXNG itself is verified.",
+            ],
+        }
+
+    def _store_podman_prerequisite_confirmation(self, plan: dict[str, Any]) -> dict[str, Any]:
+        plan_id = f"podman-prereq-{uuid.uuid4().hex[:10]}"
+        token = f"confirm-{uuid.uuid4().hex[:16]}"
+        expires_at = time.time() + 600
+        public_plan = dict(plan)
+        public_plan.update({"plan_id": plan_id, "confirmation_token": token, "expires_at": int(expires_at)})
+        stored_plan = dict(plan)
+        stored_plan.update({"plan_id": plan_id, "confirmation_token": token})
+        self._podman_prerequisite_confirmations[plan_id] = {
+            "plan": stored_plan,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "consumed": False,
+        }
+        return {"ok": True, "requires_confirmation": True, "plan": public_plan}
+
+    def _execute_podman_prerequisite_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        journal = ManagedActionJournal(action_type="podman_prerequisite_setup", target="searxng:podman")
+        for step in ("preflight_podman_install", "install_podman_package", "verify_podman_present", "verify_rootless_podman"):
+            journal.plan_step(step, resource="podman")
+        if str(plan.get("setup_mode") or "") != "podman_prerequisite" or str(plan.get("package_name") or "") != "podman":
+            journal.record_step("preflight_podman_install", ok=False, resource="podman", reason="invalid_plan")
+            journal.mark_verification(ok=False, reason="invalid_plan")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "invalid_podman_prerequisite_plan", "mutated": False, "managed_action_journal": journal.to_dict()}
+        if sys.platform != "linux":
+            journal.record_step("preflight_podman_install", ok=False, resource="podman", reason="unsupported_platform")
+            journal.mark_verification(ok=False, reason="unsupported_platform")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "podman_prerequisite_unsupported_platform", "mutated": False, "managed_action_journal": journal.to_dict()}
+        apt_get = self._prerequisite_command_finder("apt-get")
+        sudo = self._prerequisite_command_finder("sudo")
+        running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+        if not apt_get:
+            journal.record_step("preflight_podman_install", ok=False, resource="apt-get", reason="apt_get_missing")
+            journal.mark_verification(ok=False, reason="apt_get_missing")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "apt_get_missing", "next_action": "Install Podman with your system package manager, then retry SearXNG setup.", "mutated": False, "managed_action_journal": journal.to_dict()}
+        if not running_as_root and not sudo:
+            journal.record_step("preflight_podman_install", ok=False, resource="sudo", reason="sudo_missing")
+            journal.mark_verification(ok=False, reason="sudo_missing")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "sudo_missing", "next_action": "Install Podman manually or provide sudo/polkit access, then retry.", "mutated": False, "managed_action_journal": journal.to_dict()}
+        argv = [apt_get, "install", "-y", "podman"] if running_as_root else [sudo, apt_get, "install", "-y", "podman"]
+        journal.record_step("preflight_podman_install", ok=True, resource="podman", command=" ".join(Path(part).name if index < 2 else str(part) for index, part in enumerate(argv)))
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
+        try:
+            result = self._prerequisite_runner(argv, capture_output=True, text=True, timeout=600, shell=False)
+        except Exception as exc:  # noqa: BLE001 - safe failure copy uses class only.
+            journal.record_step("install_podman_package", ok=False, resource="podman", error=exc.__class__.__name__)
+            journal.mark_verification(ok=False, reason="podman_install_execution_failed")
+            journal.mark_rollback(ok=True, attempted=False, summary="No automatic rollback for system package install.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "podman_install_execution_failed", "next_action": "Install Podman manually, then retry SearXNG setup.", "mutated": False, "managed_action_journal": journal.to_dict()}
+        install_ok = int(getattr(result, "returncode", 1) or 0) == 0
+        journal.record_step("install_podman_package", ok=install_ok, resource="podman", returncode=int(getattr(result, "returncode", 1) or 0))
+        if not install_ok:
+            journal.mark_verification(ok=False, reason="podman_install_failed")
+            journal.mark_rollback(ok=True, attempted=False, summary="No automatic rollback for system package install.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "podman_install_failed", "returncode": int(getattr(result, "returncode", 1) or 0), "next_action": "Read the package-manager error, install Podman manually if needed, then retry.", "mutated": False, "managed_action_journal": journal.to_dict()}
+        podman_path = self._prerequisite_command_finder("podman")
+        present = bool(podman_path)
+        journal.record_step("verify_podman_present", ok=present, resource="podman")
+        rootless = self._verify_rootless_podman(podman_path)
+        journal.record_step("verify_rootless_podman", ok=rootless is True, resource="podman", rootless=rootless)
+        verified = present and rootless is True
+        journal.mark_verification(ok=verified, podman_present=present, rootless_podman=rootless)
+        journal.mark_rollback(ok=True, attempted=False, summary="No automatic rollback for system package install.")
+        self._persist_managed_action_journal(journal, status="verified" if verified else "recovery_needed")
+        if not verified:
+            return {"ok": False, "error": "rootless_podman_not_usable" if present else "podman_not_found_after_install", "next_action": "Verify rootless Podman for this user, then retry SearXNG setup.", "mutated": True, "managed_action_journal": journal.to_dict()}
+        self._managed_local_services = None
+        return {"ok": True, "mutated": True, "podman_present": True, "rootless_podman": True, "next_action": "Preview SearXNG setup again; it should select Podman.", "managed_action_journal": journal.to_dict()}
+
+    def _verify_rootless_podman(self, podman_path: str | None) -> bool | None:
+        if not podman_path:
+            return False
+        try:
+            result = self._prerequisite_runner(
+                [podman_path, "info", "--format", "{{.Host.Security.Rootless}}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                shell=False,
+            )
+        except Exception:
+            return None
+        if int(getattr(result, "returncode", 1) or 0) != 0:
+            return None
+        output = str(getattr(result, "stdout", "") or "").strip().lower()
+        if output in {"true", "1", "yes"}:
+            return True
+        if output in {"false", "0", "no"}:
+            return False
+        return None
+
+    @staticmethod
+    def _select_searxng_setup_engine(
+        services: dict[str, Any],
+        searxng: dict[str, Any],
+        *,
+        allow_docker_fallback: bool = False,
+    ) -> dict[str, Any]:
+        podman_available = bool(services.get("podman_available") or searxng.get("podman_available"))
+        docker_available = bool(services.get("docker_available") or searxng.get("docker_available"))
+        podman_rootless = services.get("podman_rootless", searxng.get("podman_rootless"))
+        docker_rootless = services.get("docker_rootless", searxng.get("docker_rootless"))
+        if podman_available and podman_rootless is True:
+            return {
+                "selected_engine": "podman",
+                "preferred_engine": "podman",
+                "rootless_expected": True,
+                "requires_docker_fallback_confirmation": False,
+            }
+        if docker_available:
+            if not allow_docker_fallback:
+                return {
+                    "selected_engine": "",
+                    "preferred_engine": "podman",
+                    "setup_mode": "podman_prerequisite",
+                    "reason": "Podman is missing or rootless Podman was not confirmed.",
+                    "next_action": "Preview and confirm Podman prerequisite setup, or explicitly request the Docker fallback plan.",
+                    "docker_available": True,
+                    "docker_fallback_available": True,
+                }
+            if not podman_available:
+                fallback_reason = "rootless_podman_not_found"
+                warning = "Podman was not found. Docker is available, but it may use a root-level daemon."
+            else:
+                fallback_reason = "rootless_podman_not_confirmed"
+                warning = "Rootless Podman was not confirmed. Docker is available, but it may use a root-level daemon."
+            return {
+                "selected_engine": "docker",
+                "preferred_engine": "podman",
+                "fallback_reason": fallback_reason,
+                "rootless_expected": bool(docker_rootless) if docker_rootless is not None else None,
+                "requires_docker_fallback_confirmation": True,
+                "engine_warning": warning,
+            }
+        if podman_available:
+            return {
+                "selected_engine": "",
+                "preferred_engine": "podman",
+                "reason": "Podman is installed, but rootless Podman was not confirmed.",
+                "next_action": "Enable rootless Podman for this user, or provide a trusted loopback SEARXNG_BASE_URL.",
+            }
+        return {
+            "selected_engine": "",
+            "preferred_engine": "podman",
+            "setup_mode": "podman_prerequisite",
+            "reason": "Rootless Podman was not found and Docker is not available.",
+            "next_action": "Preview and confirm Podman prerequisite setup, or run SearXNG yourself and provide a trusted loopback SEARXNG_BASE_URL.",
+        }
 
     def apply_search_setup(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -23507,6 +23735,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 return
             if path == "/search/setup/apply":
                 body = self.runtime.apply_search_setup(payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/search/setup/prerequisite/plan":
+                body = self.runtime.podman_prerequisite_plan(payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/search/setup/prerequisite/apply":
+                body = self.runtime.apply_podman_prerequisite(payload)
                 self._send_json(200 if body.get("ok") else 400, body)
                 return
             if path in {"/chat", "/ask"}:

@@ -2188,18 +2188,59 @@ class Orchestrator:
     def _selected_managed_service_engine(self, services_payload: dict[str, Any], searxng: dict[str, Any]) -> str | None:
         docker_available = bool(services_payload.get("docker_available") or searxng.get("docker_available"))
         podman_available = bool(services_payload.get("podman_available") or searxng.get("podman_available"))
-        if podman_available:
+        podman_rootless = services_payload.get("podman_rootless", searxng.get("podman_rootless"))
+        if podman_available and podman_rootless is True:
             return "podman"
-        if docker_available:
-            return "docker"
         return None
 
-    def _managed_service_missing_engine_response(self, services_payload: dict[str, Any]) -> OrchestratorResponse:
+    def _managed_service_missing_engine_response(self, user_id: str, services_payload: dict[str, Any]) -> OrchestratorResponse:
         searxng = self._searxng_service_from_status(services_payload)
+        adapter = self._chat_runtime_adapter
+        prereq_payload: dict[str, Any] = {}
+        if callable(getattr(adapter, "podman_prerequisite_plan", None)):
+            try:
+                prereq_payload = dict(adapter.podman_prerequisite_plan({"service_id": "searxng"}))
+            except Exception:
+                prereq_payload = {}
+        plan = prereq_payload.get("plan") if isinstance(prereq_payload.get("plan"), dict) else {}
+        if bool(prereq_payload.get("ok")) and plan:
+            question = "\n".join(
+                [
+                    "Search is not configured.",
+                    "I can set up local SearXNG, but this machine is missing Podman, the preferred rootless container runtime.",
+                    "I can install Podman first using the system package manager, then run SearXNG on 127.0.0.1 only.",
+                    "I will not install anything until you confirm the Podman prerequisite setup.",
+                    "Reply yes to preview and confirm the Podman setup, or no to cancel.",
+                ]
+            )
+            return self._confirmation_preview_response(
+                user_id,
+                route="action_tool",
+                question=question,
+                used_tools=["managed_local_service_prerequisite_preview", "safe_web_search"],
+                action={
+                    "operation": "podman_prerequisite_setup_preview",
+                    "params": {
+                        "plan_id": str(plan.get("plan_id") or ""),
+                        "confirmation_token": str(plan.get("confirmation_token") or ""),
+                    },
+                },
+                title="Podman prerequisite setup",
+                preview_payload={
+                    "type": "managed_local_service_prerequisite_preview",
+                    "service_id": "searxng",
+                    "prerequisite": "podman",
+                    "plan": plan,
+                    "services_status": services_payload,
+                    "mutated": False,
+                },
+                mutating=False,
+            )
         text = "\n".join(
             [
-                "Web search needs one extra system tool first.",
-                "I can show you the install command, but I won’t install system software automatically.",
+                "Search is not configured.",
+                "Podman, the preferred rootless container runtime for managed SearXNG, is not usable.",
+                "I could not prepare the Podman prerequisite setup plan.",
                 "No command has run yet.",
             ]
         )
@@ -2240,7 +2281,7 @@ class Orchestrator:
             )
         engine = self._selected_managed_service_engine(services_payload, searxng)
         if not engine:
-            return self._managed_service_missing_engine_response(services_payload)
+            return self._managed_service_missing_engine_response(user_id, services_payload)
         approved = searxng.get("approved_container") if isinstance(searxng.get("approved_container"), dict) else {}
         preview_payload_from_runtime: dict[str, Any] = {}
         adapter = self._chat_runtime_adapter
@@ -2292,6 +2333,8 @@ class Orchestrator:
         volume = str(approved.get("volume_path") or "memory/local_services/searxng")
         health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
         fallback_selected = bool(preview_payload_from_runtime.get("fallback_selected"))
+        docker_fallback = engine == "docker" and not bool(services_payload.get("podman_rootless") or searxng.get("podman_rootless"))
+        docker_warning = "Podman was not found. Docker is available, but it may use a root-level daemon."
         if fallback_selected:
             lines = [
                 "Web search is not set up yet.",
@@ -2310,6 +2353,9 @@ class Orchestrator:
                 "",
                 "Say yes to continue, or no to cancel.",
             ]
+        if docker_fallback:
+            lines.insert(3, docker_warning)
+            lines.insert(4, "Rootless Podman remains the preferred managed-service engine on Linux; this is a Docker fallback plan.")
         return self._confirmation_preview_response(
             user_id,
             route="action_tool",
@@ -2327,6 +2373,10 @@ class Orchestrator:
                     "approved_volume_path": volume,
                     "health_url": health_url,
                     "fallback_selected": fallback_selected,
+                    "preferred_engine": "podman",
+                    "fallback_reason": "rootless_podman_not_found" if docker_fallback else None,
+                    "rootless_expected": False if docker_fallback else True,
+                    "requires_docker_fallback_confirmation": docker_fallback,
                 },
             },
             title="SearXNG setup preview",
@@ -2341,6 +2391,11 @@ class Orchestrator:
                 "approved_volume_path": volume,
                 "health_url": health_url,
                 "fallback_selected": fallback_selected,
+                "preferred_engine": "podman",
+                "fallback_reason": "rootless_podman_not_found" if docker_fallback else None,
+                "rootless_expected": False if docker_fallback else True,
+                "requires_docker_fallback_confirmation": docker_fallback,
+                "engine_warning": docker_warning if docker_fallback else None,
                 "setup_preview": preview_payload_from_runtime,
                 "services_status": services_payload,
                 "search_status": status_payload,
@@ -2363,8 +2418,10 @@ class Orchestrator:
         services_payload = self._managed_service_status_payload()
         searxng = self._searxng_service_from_status(services_payload)
         engine = self._selected_managed_service_engine(services_payload, searxng)
+        if not engine and bool(services_payload.get("docker_available") or searxng.get("docker_available")):
+            engine = "docker"
         if not engine:
-            return self._managed_service_missing_engine_response(services_payload)
+            return self._managed_service_missing_engine_response(user_id, services_payload)
         adapter = self._chat_runtime_adapter
         preview_payload_from_runtime: dict[str, Any] = {}
         if callable(getattr(adapter, "preview_managed_service_stop", None)):
@@ -2846,6 +2903,49 @@ class Orchestrator:
                 used_tools=["managed_local_service_setup", "safe_web_search"],
                 ok=ok,
                 error_kind=None if ok else (blocked_reason or "managed_service_setup_failed"),
+                payload=payload,
+            )
+        if operation == "podman_prerequisite_setup_preview":
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            adapter = self._chat_runtime_adapter
+            if not callable(getattr(adapter, "apply_podman_prerequisite", None)):
+                return self._runtime_truth_response(
+                    text="Podman prerequisite setup could not run because the managed prerequisite executor is unavailable. I did not install anything.",
+                    route="action_tool",
+                    used_tools=["managed_local_service_prerequisite_setup"],
+                    ok=False,
+                    error_kind="managed_prerequisite_executor_unavailable",
+                    payload={"type": "managed_local_service_prerequisite_result", "prerequisite": "podman", "mutated": False},
+                )
+            try:
+                result = adapter.apply_podman_prerequisite(params)
+            except Exception as exc:  # noqa: BLE001 - safe user-facing failure.
+                result = {"ok": False, "error": "podman_prerequisite_execution_error", "detail": exc.__class__.__name__, "mutated": False}
+            ok = bool(result.get("ok"))
+            if ok:
+                lines = [
+                    "Podman prerequisite setup finished.",
+                    "Rootless Podman verified: yes.",
+                    "Search is still disabled.",
+                    "Next step: ask me to set up web search again so I can preview the SearXNG setup plan with Podman.",
+                ]
+            else:
+                error = str(result.get("error") or "podman_prerequisite_failed")
+                next_action = str(result.get("next_action") or "Fix the Podman prerequisite issue, then retry SearXNG setup.")
+                lines = [
+                    "Podman prerequisite setup did not finish.",
+                    f"Reason: {error}.",
+                    "Search was not enabled and SearXNG was not started.",
+                    f"Next step: {next_action}",
+                ]
+            payload = dict(result) if isinstance(result, dict) else {}
+            payload.update({"type": "managed_local_service_prerequisite_result", "prerequisite": "podman"})
+            return self._runtime_truth_response(
+                text="\n".join(lines),
+                route="action_tool",
+                used_tools=["managed_local_service_prerequisite_setup", "safe_web_search"],
+                ok=ok,
+                error_kind=None if ok else str(result.get("error") or "podman_prerequisite_failed"),
                 payload=payload,
             )
         if operation == "managed_local_service_stop_preview":

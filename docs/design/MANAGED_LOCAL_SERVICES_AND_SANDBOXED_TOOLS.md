@@ -1,12 +1,13 @@
 # Managed Local Services And Sandboxed Tools
 
-Status: design boundary for the next implementation track. This document does
-not implement SearXNG setup, Podman/Docker setup, MCP execution, or app control.
+Status: design boundary plus the first SearXNG managed-service implementation
+notes. This document does not implement Podman/Docker setup, MCP execution, or
+app control.
 
 ## Purpose
 
 Personal Agent needs a clear boundary for capabilities that go beyond safe text
-skill packs. The next target is search/SearXNG, but SearXNG must set the pattern
+skill packs. SearXNG is the first managed local service and must set the pattern
 for future Ollama, llama.cpp server, MCP servers, Blender, Godot, PDF tools,
 image tools, browser helpers, and other executable integrations.
 
@@ -279,8 +280,22 @@ Current state:
 - `/search/setup/plan` and `/search/setup/apply` provide a confirmation-gated
   setup path for either a user-provided loopback URL or the approved local
   SearXNG container plan
+- when rootless Podman is missing, `/search/setup/plan` returns a
+  confirmation-gated Podman prerequisite plan instead of silently selecting
+  Docker
+- the Podman prerequisite path is narrow: it previews the package action, runs
+  only the allowlisted Podman package install command after confirmation,
+  stores no sudo password, verifies Podman, verifies rootless Podman usability,
+  and does not start SearXNG or enable search
 - managed setup uses only the approved SearXNG image, container name, bind, and
   owned state directory; it binds to `127.0.0.1` only
+- on Linux, rootless Podman is the preferred managed-service engine; Docker is
+  an explicit fallback only when rootless Podman is unavailable or unconfirmed
+- Docker fallback plans must say that Podman was not found or rootless Podman
+  was not confirmed, set `preferred_engine=podman`, set
+  `selected_engine=docker`, include `fallback_reason`, include
+  `rootless_expected=false` or unknown, and require explicit Docker fallback
+  confirmation
 - setup writes persistent managed-action journal status rows and restores the
   previous runtime search settings if verification fails
 - the core workflow proof keeps internet/search `BLOCKED` when no trusted
@@ -289,7 +304,6 @@ Current state:
 
 Later implementation may add:
 
-- stronger rootless Podman detection and operator diagnostics
 - optional Docker policy controls if operators want to disable Docker fallback
 - owned container/volume markers
 - stop/remove path

@@ -65,6 +65,26 @@ class _FakeSearchOpener:
         return _FakeSearchResponse(self.payload)
 
 
+class _FakePrerequisiteRunner:
+    def __init__(self, *, install_ok: bool = True, rootless: bool = True) -> None:
+        self.install_ok = install_ok
+        self.rootless = rootless
+        self.installed = False
+        self.calls: list[dict[str, object]] = []
+
+    def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        self.calls.append({"argv": list(argv), **kwargs})
+        if kwargs.get("shell") is not False:
+            return subprocess.CompletedProcess(argv, 99, stdout="", stderr="shell must be false")
+        joined = " ".join(argv)
+        if "apt-get" in joined and argv[-3:] == ["install", "-y", "podman"]:
+            self.installed = bool(self.install_ok)
+            return subprocess.CompletedProcess(argv, 0 if self.install_ok else 2, stdout="", stderr="mock install failed")
+        if Path(str(argv[0])).name == "podman" and argv[1:3] == ["info", "--format"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="true" if self.rootless else "false", stderr="")
+        return subprocess.CompletedProcess(argv, 3, stdout="", stderr="unexpected command")
+
+
 class TestManagedLocalServices(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -93,14 +113,30 @@ class TestManagedLocalServices(unittest.TestCase):
         detector = ManagedLocalServiceDetector(
             search_status_provider=lambda: {"enabled": False, "available": False, "endpoint_configured": False},
             command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout="name=seccomp", stderr=""),
             health_checker=lambda _url: False,
         )
         payload = detector.status()
 
         self.assertTrue(payload["docker_available"])
         self.assertFalse(payload["podman_available"])
+        self.assertFalse(payload["docker_rootless"])
         self.assertEqual("setup_preview_available", payload["services"][0]["next_step"])
         self.assertEqual("127.0.0.1:8080:8080", payload["services"][0]["approved_container"]["bind"])
+
+    def test_status_with_mocked_rootless_podman_presence(self) -> None:
+        detector = ManagedLocalServiceDetector(
+            search_status_provider=lambda: {"enabled": False, "available": False, "endpoint_configured": False},
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            command_runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout="true", stderr=""),
+            health_checker=lambda _url: False,
+        )
+        payload = detector.status()
+
+        self.assertFalse(payload["docker_available"])
+        self.assertTrue(payload["podman_available"])
+        self.assertTrue(payload["podman_rootless"])
+        self.assertEqual("podman", payload["services"][0]["preferred_engine"])
 
     def test_url_redaction_removes_credentials_and_token_query(self) -> None:
         redacted = redact_service_url("http://user:pass@127.0.0.1:8080/search?token=secret&q=test")
@@ -524,6 +560,145 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual("searxng_endpoint_not_loopback", payload["blocked_reason"])
 
+    def test_search_setup_plan_selects_rootless_podman_when_available(self) -> None:
+        runtime = self._runtime_with_engine("podman", podman_rootless=True)
+        handler = _HandlerForTest(runtime, "/search/setup/plan", {})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+        plan = payload["plan"]
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("podman", plan["selected_engine"])
+        self.assertEqual("podman", plan["preferred_engine"])
+        self.assertTrue(plan["rootless_expected"])
+        self.assertFalse(plan["requires_docker_fallback_confirmation"])
+        self.assertIsNone(plan["fallback_reason"])
+
+    def test_search_setup_plan_marks_docker_as_explicit_fallback(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        handler = _HandlerForTest(runtime, "/search/setup/plan", {"allow_docker_fallback": True})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+        plan = payload["plan"]
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("docker", plan["selected_engine"])
+        self.assertEqual("podman", plan["preferred_engine"])
+        self.assertEqual("rootless_podman_not_found", plan["fallback_reason"])
+        self.assertFalse(plan["rootless_expected"])
+        self.assertTrue(plan["requires_docker_fallback_confirmation"])
+        self.assertIn("Podman was not found", plan["engine_warning"])
+        self.assertIn("root-level daemon", plan["engine_warning"])
+
+    def test_search_setup_plan_blocks_when_no_runtime_available(self) -> None:
+        runtime = self._runtime_with_engine(None)
+        handler = _HandlerForTest(runtime, "/search/setup/plan", {})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual("podman_prerequisite", payload["plan"]["setup_mode"])
+        self.assertEqual("podman", payload["plan"]["prerequisite"])
+        self.assertTrue(payload["requires_confirmation"])
+
+    def test_podman_prerequisite_setup_requires_confirmation(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite()
+        handler = _HandlerForTest(runtime, "/search/setup/prerequisite/plan", {})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["requires_confirmation"])
+        self.assertEqual("podman_prerequisite", payload["plan"]["setup_mode"])
+        self.assertEqual([["sudo", "apt-get", "install", "-y", "podman"]], payload["plan"]["commands"])
+        self.assertEqual([], runner.calls)
+
+    def test_podman_prerequisite_apply_rejects_invalid_and_expired_confirmation(self) -> None:
+        runtime, _runner = self._runtime_with_podman_prerequisite()
+        invalid = runtime.apply_podman_prerequisite({"plan_id": "missing", "confirmation_token": "bad"})
+        plan_payload = runtime.podman_prerequisite_plan({})
+        plan = plan_payload["plan"]
+        runtime._podman_prerequisite_confirmations[plan["plan_id"]]["expires_at"] = time.time() - 1  # noqa: SLF001
+        expired = runtime.apply_podman_prerequisite({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+
+        self.assertFalse(invalid["ok"])
+        self.assertEqual("invalid_confirmation", invalid["error"])
+        self.assertFalse(expired["ok"])
+        self.assertEqual("confirmation_expired", expired["error"])
+        self.assertFalse(runtime.config.search_enabled)
+
+    def test_podman_prerequisite_apply_uses_allowlisted_command_and_verifies_rootless(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite()
+
+        result = self._install_podman_prerequisite(runtime)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["podman_present"])
+        self.assertTrue(result["rootless_podman"])
+        self.assertFalse(runtime.config.search_enabled)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertEqual(["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "podman"], argv_rows[0])
+        self.assertEqual(["/usr/bin/podman", "info", "--format", "{{.Host.Security.Rootless}}"], argv_rows[1])
+        self.assertTrue(all(call.get("shell") is False for call in runner.calls))
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("verified", row["status"])
+        self.assertEqual("podman_prerequisite_setup", row["action_type"])
+
+    def test_failed_podman_install_does_not_enable_search(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite(install_ok=False)
+
+        result = self._install_podman_prerequisite(runtime)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("podman_install_failed", result["error"])
+        self.assertFalse(runtime.config.search_enabled)
+        self.assertEqual(1, len(runner.calls))
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("failed", row["status"])
+
+    def test_podman_installed_but_not_rootless_does_not_enable_search(self) -> None:
+        runtime, _runner = self._runtime_with_podman_prerequisite(rootless=False)
+
+        result = self._install_podman_prerequisite(runtime)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("rootless_podman_not_usable", result["error"])
+        self.assertFalse(runtime.config.search_enabled)
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("recovery_needed", row["status"])
+
+    def test_verified_podman_allows_searxng_plan_to_select_podman(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite()
+        result = self._install_podman_prerequisite(runtime)
+        self.assertTrue(result["ok"])
+        runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
+            search_status_provider=runtime.search_status,
+            command_finder=lambda name: "/usr/bin/podman" if name == "podman" and runner.installed else None,
+            command_runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout="true", stderr=""),
+            health_checker=lambda _url: False,
+        )
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: "/usr/bin/podman" if name == "podman" and runner.installed else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        plan_payload = runtime.search_setup_plan({})
+        plan = plan_payload["plan"]
+
+        self.assertTrue(plan_payload["ok"])
+        self.assertEqual("managed_container", plan["setup_mode"])
+        self.assertEqual("podman", plan["selected_engine"])
+
     def test_search_setup_apply_rejects_invalid_confirmation(self) -> None:
         runtime = self._runtime(search_enabled=False, endpoint=None)
         handler = _HandlerForTest(runtime, "/search/setup/apply", {"plan_id": "missing", "confirmation_token": "bad"})
@@ -603,11 +778,32 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         body = json.loads(handler.body.decode("utf-8"))
         return body, _assistant_text(body)
 
-    def _runtime_with_engine(self, engine: str | None, *, ports: dict[int, bool] | None = None, existing: bool = False) -> AgentRuntime:
+    def _runtime_with_engine(
+        self,
+        engine: str | None,
+        *,
+        ports: dict[int, bool] | None = None,
+        existing: bool = False,
+        podman_rootless: bool | None = True,
+        docker_rootless: bool | None = False,
+    ) -> AgentRuntime:
+        def _info_runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            binary = Path(str(argv[0])).name
+            if binary == "podman":
+                if podman_rootless is None:
+                    return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unknown")
+                return subprocess.CompletedProcess(argv, 0, stdout="true" if podman_rootless else "false", stderr="")
+            if binary == "docker":
+                if docker_rootless is None:
+                    return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unknown")
+                return subprocess.CompletedProcess(argv, 0, stdout="name=rootless" if docker_rootless else "name=seccomp", stderr="")
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unknown")
+
         runtime = self._runtime(search_enabled=False, endpoint=None)
         runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
             search_status_provider=runtime.search_status,
             command_finder=lambda name: f"/usr/bin/{name}" if name == engine else None,
+            command_runner=_info_runner,
             health_checker=lambda _url: False,
         )
         port_map = ports if ports is not None else {8080: True, 8888: True}
@@ -620,31 +816,48 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         )
         return runtime
 
-    def test_setup_prompt_with_docker_available_shows_preview(self) -> None:
+    def _runtime_with_podman_prerequisite(self, *, install_ok: bool = True, rootless: bool = True) -> tuple[AgentRuntime, _FakePrerequisiteRunner]:
+        runtime = self._runtime_with_engine(None)
+        runner = _FakePrerequisiteRunner(install_ok=install_ok, rootless=rootless)
+
+        def _finder(name: str) -> str | None:
+            if name == "apt-get":
+                return "/usr/bin/apt-get"
+            if name == "sudo":
+                return "/usr/bin/sudo"
+            if name == "podman" and runner.installed:
+                return "/usr/bin/podman"
+            return None
+
+        runtime._prerequisite_command_finder = _finder  # noqa: SLF001
+        runtime._prerequisite_runner = runner  # noqa: SLF001
+        return runtime, runner
+
+    def _install_podman_prerequisite(self, runtime: AgentRuntime) -> dict[str, object]:
+        plan_payload = runtime.podman_prerequisite_plan({})
+        plan = plan_payload["plan"]
+        return runtime.apply_podman_prerequisite(
+            {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]}
+        )
+
+    def test_setup_prompt_with_docker_available_offers_podman_prerequisite(self) -> None:
         runtime = self._runtime_with_engine("docker")
         body, text = self._chat(runtime, "set up web search")
 
         first_line = text.splitlines()[0]
-        self.assertEqual("Web search is not set up yet.", first_line)
-        self.assertNotIn("searxng/searxng", first_line)
-        self.assertNotIn("127.0.0.1", first_line)
-        self.assertNotIn("SearXNG", text)
+        self.assertEqual("Search is not configured.", first_line)
+        self.assertIn("missing Podman", text)
+        self.assertIn("preferred rootless container runtime", text)
+        self.assertIn("I will not install anything until you confirm", text)
         self.assertNotIn("Approved image: searxng/searxng:latest", text)
         self.assertNotIn("Approved container: personal-agent-searxng", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
-        self.assertIn("in the background", text)
-        self.assertIn("ask me to stop it later", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
-        self.assertEqual("searxng/searxng:latest", setup.get("approved_image"))
-        self.assertEqual("personal-agent-searxng", setup.get("approved_container_name"))
-        self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
-        preview_plan = (setup.get("setup_preview") or {}).get("plan", {}) if isinstance(setup.get("setup_preview"), dict) else {}
-        self.assertEqual("searxng/searxng:latest", preview_plan.get("image"))
-        self.assertEqual("127.0.0.1:8080:8080", preview_plan.get("loopback_bind"))
-        blocked_actions = setup.get("services_status", {}).get("services", [{}])[0].get("blocked_actions", {})
-        self.assertIn("external_pack_triggered_container_action", blocked_actions)
+        plan = setup.get("plan", {}) if isinstance(setup.get("plan"), dict) else {}
+        self.assertEqual("podman_prerequisite", plan.get("setup_mode"))
+        self.assertEqual("podman", plan.get("prerequisite"))
         meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
-        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("managed_local_service_prerequisite_preview", meta.get("used_tools", []))
 
     def test_setup_prompt_with_podman_available_shows_preview(self) -> None:
         runtime = self._runtime_with_engine("podman")
@@ -655,13 +868,16 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
+        self.assertEqual("podman", setup.get("selected_engine"))
+        self.assertEqual("podman", setup.get("preferred_engine"))
+        self.assertFalse(setup.get("requires_docker_fallback_confirmation"))
 
     def test_yes_after_preview_runs_bounded_setup_configures_runtime_search_after_verify(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
             port_checker=lambda _port: True,
@@ -689,11 +905,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(setup_payload.get("did_configure"))
 
     def test_setup_verification_failure_restores_config_and_removes_owned_container(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
             port_checker=lambda _port: True,
@@ -706,17 +922,17 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIn("Previous search settings restored: yes", second_text)
         self.assertFalse(runtime.config.search_enabled)
         argv_rows = [call["argv"] for call in runner.calls]
-        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
-        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["podman", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["podman", "rm", "personal-agent-searxng"], argv_rows)
         row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
         self.assertEqual("rolled_back", row["status"])
 
     def test_setup_verification_cleanup_failure_persists_recovery_needed(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner(fail_on=" rm ")
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
             port_checker=lambda _port: True,
@@ -730,11 +946,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(row["recovery_needed"])
 
     def test_expired_yes_returns_explicit_expiry_and_does_not_execute_setup(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
             port_checker=lambda _port: True,
@@ -756,11 +972,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual([], runner.calls)
 
     def test_telegram_style_delay_within_ttl_still_executes(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
             port_checker=lambda _port: True,
@@ -779,11 +995,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(runner.calls)
 
     def test_failed_setup_health_check_reports_owned_cleanup(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
-            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
             health_checker=lambda _url: False,
             port_checker=lambda _port: True,
@@ -796,11 +1012,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIn("cleaned up the failed setup", second_text)
         self.assertIn("Nothing was left running", second_text)
         argv_rows = [call["argv"] for call in runner.calls]
-        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
-        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["podman", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["podman", "rm", "personal-agent-searxng"], argv_rows)
 
     def test_setup_prompt_with_port_conflict_offers_fallback(self) -> None:
-        runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: True})
+        runtime = self._runtime_with_engine("podman", ports={8080: False, 8888: True})
         body, text = self._chat(runtime, "set up web search")
 
         self.assertIn("Port 8080 is already being used", text)
@@ -811,7 +1027,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("127.0.0.1:8888:8080", setup.get("loopback_bind"))
 
     def test_setup_prompt_with_both_ports_busy_does_not_queue_run(self) -> None:
-        runtime = self._runtime_with_engine("docker", ports={8080: False, 8888: False})
+        runtime = self._runtime_with_engine("podman", ports={8080: False, 8888: False})
         body, text = self._chat(runtime, "set up web search")
 
         self.assertIn("Both approved SearXNG ports, 8080 and 8888, are already in use", text)
@@ -820,7 +1036,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(meta.get("requires_confirmation", False))
 
     def test_existing_created_container_does_not_get_silently_removed(self) -> None:
-        runtime = self._runtime_with_engine("docker", existing=True)
+        runtime = self._runtime_with_engine("podman", existing=True)
         _body, first_text = self._chat(runtime, "set up web search")
         self.assertIn("Web search is not set up yet", first_text)
 
@@ -834,13 +1050,13 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine(None)
         _body, text = self._chat(runtime, "set up web search")
 
-        self.assertIn("Web search needs one extra system tool first", text)
-        self.assertIn("install command", text)
-        self.assertIn("won’t install system software automatically", text)
-        self.assertNotIn("SearXNG setup preview", text)
+        self.assertIn("missing Podman", text)
+        self.assertIn("preferred rootless container runtime", text)
+        self.assertIn("I will not install anything until you confirm", text)
+        self.assertNotIn("SearXNG setup finished", text)
 
     def test_search_query_when_unavailable_shows_setup_preview(self) -> None:
-        runtime = self._runtime_with_engine("docker")
+        runtime = self._runtime_with_engine("podman")
         _body, text = self._chat(runtime, "search the web for local searxng setup")
 
         self.assertIn("Web search is not set up yet", text)
