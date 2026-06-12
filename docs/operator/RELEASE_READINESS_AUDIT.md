@@ -14,9 +14,8 @@ Yellow.
 
 The core local assistant path, first-run path, external-pack safety gates,
 assistant/agent boundary, and supported install stories are coherent enough for
-a controlled public trial. This is not Green because public chat proof for
-missing-capability/model guidance still needs a ready provider/model, real
-internet/search still needs a trusted SearXNG endpoint, semantic memory remains
+a controlled public trial. This is not Green because real internet/search still
+needs a trusted SearXNG endpoint, semantic memory remains
 release-gated/off-by-default, and the live barrage is a smoke check rather than
 a full behavioral certification.
 
@@ -58,12 +57,15 @@ below are resolved or explicitly scoped out of the public build.
     source through preview, quarantine/import, review, approval, enablement,
     metadata-only permission grant, harmless managed-adapter dry-run invocation,
     disable/remove, tombstone, and source cleanup
-  - missing capability flow: BLOCKED at the public chat surface until a ready
-    provider/model is configured
+  - missing capability flow: PASS through approved-source search, candidate
+    naming, preview/install/review proposal, confirmation gate, and no fake
+    install/use claim
   - internet/search status: BLOCKED until a trusted SearXNG endpoint is
     configured
-  - model scout/provider behavior: BLOCKED at the public chat surface until a
-    ready provider/model is configured
+  - model scout/provider behavior: PASS for Debian/RTX 2060 guidance, including
+    Ollama, OpenAI-compatible local endpoints, llama.cpp server/LM Studio/vLLM
+    through user-run endpoints, direct llama.cpp management absent, and no
+    huge-model easy/default claim
   - behavior/release pytest group: run directly after the proof and treat direct
     failures as release-blocking
 
@@ -120,16 +122,13 @@ surface:
 13. Support bundle creation now has persistent redacted status rows, verification,
    and owned incomplete-bundle cleanup, but read-only restart/status surfacing is
    not yet implemented.
-14. Public chat missing-capability and model/provider guidance are not yet
-   proven by the core workflow proof because the isolated proof runtime has no
-   ready provider/model. Configure a ready provider/model and rerun the proof.
-15. Real internet/search is not yet proven by the core workflow proof because no
+14. Real internet/search is not yet proven by the core workflow proof because no
    trusted SearXNG endpoint is configured. Configure `SEARXNG_BASE_URL` and
    rerun the proof.
-16. Live behavior barrage is good smoke coverage only. It catches boundary,
+15. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
-17. Public install/update/rollback needs one clean end-to-end pass on a clean
+16. Public install/update/rollback needs one clean end-to-end pass on a clean
     user-local environment or VM before any unassisted public trial.
 
 ## Non-Blocking Polish Items
@@ -188,9 +187,8 @@ ownership is proven. Remaining gaps are clearly tracked in
 `MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
 Remaining risk: the next reliability target is read-only recovery/status
-surfacing. Do not claim public chat missing-capability handling, real search, or
-model/provider guidance are proven until the core workflow proof runs with a
-ready provider/model and trusted SearXNG endpoint.
+surfacing. Do not claim real search is proven until the core workflow proof runs
+with a trusted SearXNG endpoint.
 
 ### Safety / Security
 
@@ -273,9 +271,8 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Configure a ready provider/model and a trusted SearXNG endpoint, then rerun
-`python scripts/prove_core_workflows.py`. The target is to move missing
-capability public chat, model/provider public chat guidance, and real
+Configure a trusted SearXNG endpoint, then rerun
+`python scripts/prove_core_workflows.py`. The target is to move real
 internet/search from `BLOCKED` to observed PASS or FAIL. Do not continue broad
 persistent-journal rollout before that proof.
 

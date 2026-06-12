@@ -26,9 +26,9 @@ Status at this checkpoint:
 | Workflow | Result | Meaning |
 | --- | --- | --- |
 | External skill pack lifecycle | PASS | A deterministic approved local source was created, searched, previewed, imported through quarantine/normalization, reviewed without exposing hostile fixture text, approved, enabled, granted one metadata-only adapter permission, invoked through a harmless core-owned adapter dry-run, disabled, removed, tombstoned, and cleaned up. |
-| Missing capability flow | BLOCKED | Approved-source search and preview were proven, but the isolated proof runtime had no ready chat model/provider, so the public chat response could not be proven. |
+| Missing capability flow | PASS | Approved-source search, preview availability, and the public chat response were proven. The assistant names the candidate, proposes the preview/install/review path, asks for confirmation before mutation, and does not claim installation or use. |
 | Internet/search status | BLOCKED | No trusted SearXNG/search backend was configured in the proof environment. The script reports search disabled instead of claiming search works. |
-| Model scout/provider behavior | BLOCKED | The provider boundary documentation was checked, but public chat guidance could not be proven without a ready chat model/provider. |
+| Model scout/provider behavior | PASS | The provider boundary documentation and public chat guidance were checked. The assistant distinguishes Ollama, OpenAI-compatible local endpoints, llama.cpp server/LM Studio/vLLM through user-run OpenAI-compatible endpoints, and direct llama.cpp management as absent. |
 | Release gates still pass | NOT_PROVEN inside script | `external_pack_safety_smoke`, docs tests, `git diff --check`, and `git status --short` run from the script. The behavior/release pytest group must be run directly after the proof and treated as authoritative. |
 
 ## What Was Proven
@@ -44,15 +44,18 @@ Status at this checkpoint:
   adapter dry-run after the metadata-only permission grant.
 - Disable/remove leaves a tombstone/removal record and removes the active pack
   record without exposing hostile fixture text.
+- Missing-capability public chat checks approved pack sources and offers the
+  confirmation-gated preview/install/review path without claiming install or
+  use.
+- Model/provider public chat guidance is grounded in the current provider
+  boundary: Ollama optional, OpenAI-compatible local servers supported, direct
+  llama.cpp binary/library management absent, and llama.cpp server/LM Studio/vLLM
+  usable only through user-run OpenAI-compatible endpoints.
 
 ## What Remains Blocked Or Unproven
 
-- Public chat missing-capability behavior is not proven until a ready provider
-  and chat model are configured in the proof runtime.
 - Real internet/search is not proven until `SEARXNG_BASE_URL` points at a
   trusted reachable SearXNG instance.
-- Public chat model/provider guidance is not proven until a ready provider and
-  chat model are configured in the proof runtime.
 - The behavior/release pytest group is intentionally run directly outside the
   proof harness:
 
@@ -62,12 +65,9 @@ python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barra
 
 ## Smallest Next Fixes
 
-1. Configure or finish a ready provider/model setup for the proof runtime, then
-   rerun `python scripts/prove_core_workflows.py` to prove the public chat
-   missing-capability and model-provider guidance surfaces.
-2. Configure `SEARXNG_BASE_URL` for a trusted SearXNG instance, then rerun the
+1. Configure `SEARXNG_BASE_URL` for a trusted SearXNG instance, then rerun the
    proof to turn internet/search from `BLOCKED` into an observed real query.
-3. Keep running the behavior/release pytest group directly after the proof until
+2. Keep running the behavior/release pytest group directly after the proof until
    the proof harness can run it without introducing test-environment drift.
 
 ## Guardrails

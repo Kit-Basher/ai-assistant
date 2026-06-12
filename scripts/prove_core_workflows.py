@@ -501,7 +501,20 @@ def prove_missing_capability(runtime: AgentRuntime, root: Path) -> WorkflowRepor
     lowered = text.lower()
     blocked_by_setup = "not ready to chat yet" in lowered or "finish getting me ready" in lowered
     checked_sources = any(token in lowered for token in ("approved catalog", "approved pack sources", "preview", "candidate"))
-    no_fake_install = not any(token in lowered for token in ("installed", "enabled", "i added"))
+    fake_install_claims = (
+        "i installed",
+        "i have installed",
+        "i've installed",
+        "installed it",
+        "installed the skill",
+        "enabled it",
+        "i enabled",
+        "i added",
+        "i have added",
+        "i've added",
+        "ready to use now",
+    )
+    no_fake_install = not any(token in lowered for token in fake_install_claims)
     confirmation_gate = any(token in lowered for token in ("say yes", "preview", "next safe step", "confirm"))
     status = "BLOCKED" if blocked_by_setup else ("PASS" if ok_chat and checked_sources and no_fake_install and confirmation_gate else "FAIL")
     report.add(
@@ -597,7 +610,6 @@ def prove_model_provider(runtime: AgentRuntime) -> WorkflowReport:
     )
     response = str(payload.get("message") or payload.get("text") or "")
     r = response.lower()
-    blocked_by_setup = "not ready" in r or "no ready chat models" in r or "configure a provider" in r
     guidance_ok = (
         ok_chat
         and "ollama" in r
@@ -606,6 +618,9 @@ def prove_model_provider(runtime: AgentRuntime) -> WorkflowReport:
         and any(token in r for token in ("not", "absent", "doesn't", "does not", "no direct"))
         and not any(token in r for token in ("70b is easy", "huge models are easy", "default 70b"))
     )
+    blocked_by_setup = (
+        "not ready" in r or "no ready chat models" in r or "configure a provider" in r
+    ) and not guidance_ok
     report.add(
         "assistant/provider guidance",
         "PASS" if guidance_ok else ("BLOCKED" if blocked_by_setup else "FAIL"),

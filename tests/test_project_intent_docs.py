@@ -247,9 +247,9 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "pack lifecycle/source cleanup now has persistent redacted status rows" in lowered_flat
     assert "scripts/prove_core_workflows.py" in text
     assert "external skill pack lifecycle: pass" in lowered
-    assert "missing capability flow: blocked" in lowered
+    assert "missing capability flow: pass" in lowered
     assert "internet/search status: blocked" in lowered
-    assert "model scout/provider behavior: blocked" in lowered
+    assert "model scout/provider behavior: pass" in lowered
     assert "trusted searxng endpoint" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
@@ -264,9 +264,9 @@ def test_core_workflow_proof_doc_exists_and_refuses_fake_passes() -> None:
     lowered = text.lower()
     assert "python scripts/prove_core_workflows.py" in text
     assert "external skill pack lifecycle | pass" in lowered
-    assert "missing capability flow | blocked" in lowered
+    assert "missing capability flow | pass" in lowered
     assert "internet/search status | blocked" in lowered
-    assert "model scout/provider behavior | blocked" in lowered
+    assert "model scout/provider behavior | pass" in lowered
     assert "behavior/release pytest group" in lowered
     assert "must not execute foreign code" in lowered
     assert "must not claim direct llama.cpp support" in lowered

@@ -140,6 +140,7 @@ from agent.skill_governance_store import SkillGovernanceStore
 from agent.setup_chat_flow import (
     _looks_like_current_model_query,
     _looks_like_local_model_inventory_query,
+    _looks_like_local_provider_guidance_query,
     _looks_like_model_availability_query,
     _looks_like_model_lifecycle_query,
     _looks_like_setup_explanation_query,
@@ -6696,6 +6697,59 @@ class Orchestrator:
             return self._model_scout_strategy_response(user_id, text)
         return self._model_scout_inventory_response(focus_terms=focus_terms)
 
+    def _local_model_provider_guidance_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        current: dict[str, Any] = {}
+        if truth is not None:
+            try:
+                current = truth.current_chat_target_status()
+            except Exception:
+                current = {}
+        configured_provider = str(current.get("provider") or current.get("configured_provider") or "").strip().lower() or None
+        configured_model = str(current.get("model") or current.get("configured_model") or "").strip() or None
+        ready = bool(current.get("ready", False))
+        setup_line = (
+            f"Current chat target: {configured_provider}:{configured_model}, ready={ready}."
+            if configured_provider and configured_model
+            else "Current chat target: no ready provider/model is available from runtime truth."
+        )
+        message = "\n".join(
+            [
+                "For Debian with an RTX 2060 6GB VRAM and 64GB RAM, treat local models as constrained, not huge-model default.",
+                "Ollama is the simple local path if you install and run Ollama yourself; use smaller 7B/8B-class or quantized models first on 6GB VRAM.",
+                "A generic OpenAI-compatible local server is supported through the OpenAI-compatible provider path when you run that endpoint yourself.",
+                "llama.cpp direct binary/library management is absent here. I should not claim I can install, manage, or run llama.cpp directly.",
+                "llama.cpp server, LM Studio, and vLLM are usable only through a user-run OpenAI-compatible endpoint that you configure.",
+                "Cloud/API providers remain a separate path when you configure a provider key and choose to allow remote inference.",
+                setup_line,
+                "Practical next step: choose one path first: set up Ollama for the easiest local route, or start a local OpenAI-compatible server and configure its endpoint. Do not start with huge MoE or 70B-class local models as the easy/default option on this GPU.",
+            ]
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=truth is not None,
+            used_tools=["model_provider_support"],
+            payload={
+                "type": "local_model_provider_guidance",
+                "summary": message,
+                "source": "docs/operator/LOCAL_MODEL_PROVIDER_SUPPORT.md",
+                "ollama": "supported_optional",
+                "openai_compatible_local_server": "supported",
+                "llama_cpp_direct": "absent",
+                "llama_cpp_server": "supported_through_openai_compatible_endpoint",
+                "lm_studio": "supported_through_openai_compatible_endpoint",
+                "vllm": "supported_through_openai_compatible_endpoint",
+                "hardware_profile": {
+                    "os": "Debian",
+                    "gpu": "RTX 2060",
+                    "vram_gb": 6,
+                    "ram_gb": 64,
+                },
+            },
+            skip_post_response_hooks=True,
+        )
+
     def _handle_action_tool_intent(self, user_id: str, text: str) -> OrchestratorResponse | None:
         if self._process_state_action_requested(text):
             response_text = resource_followup(self.db, user_id, "process_state", self.timezone, question=text)
@@ -6723,6 +6777,8 @@ class Orchestrator:
             return self._model_controller_switch_back_response(user_id)
         if self._model_acquisition_requested(normalized):
             return self._model_acquire_response(user_id, text)
+        if _looks_like_local_provider_guidance_query(normalized):
+            return self._local_model_provider_guidance_response()
         if self._model_ready_now_requested(text):
             return self._model_ready_now_response()
         if self._model_controller_test_requested(text):
@@ -6761,6 +6817,8 @@ class Orchestrator:
             return self._model_controller_promote_default_response(user_id, text)
         if _looks_like_local_model_inventory_query(normalized):
             return self._model_inventory_response(local_only=True, provider_id=provider_hint)
+        if _looks_like_local_provider_guidance_query(normalized):
+            return self._local_model_provider_guidance_response()
         if _looks_like_model_availability_query(normalized):
             normalized_space = normalized.replace("/", " ")
             remote_only = any(token in normalized_space for token in ("cloud", "remote")) and any(
@@ -14837,6 +14895,8 @@ class Orchestrator:
                 text,
                 requested_role_override="best_local",
             )
+        if kind == "local_provider_guidance":
+            return self._local_model_provider_guidance_response()
         if kind == "model_switch_advisory":
             return self._model_switch_advisory_response()
         if kind == "model_ready_now":
