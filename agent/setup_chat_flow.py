@@ -97,6 +97,16 @@ _LOCAL_MODEL_RECOMMENDATION_PHRASES = (
     "what local model do you recommend",
     "which local model do you recommend",
 )
+_LOCAL_PROVIDER_GUIDANCE_PHRASES = (
+    "what local model/provider setup should i use",
+    "what local model provider setup should i use",
+    "which local model/provider setup should i use",
+    "which local model provider setup should i use",
+    "what provider setup should i use",
+    "which provider setup should i use",
+    "local provider setup",
+    "local model provider setup",
+)
 _FILESYSTEM_LIST_PHRASES = (
     "list files in",
     "list files under",
@@ -851,6 +861,25 @@ def _looks_like_local_model_recommendation_query(normalized: str) -> bool:
     ):
         return True
     return False
+
+
+def _looks_like_local_provider_guidance_query(normalized: str) -> bool:
+    normalized_space = str(normalized or "").replace("/", " ")
+    if any(phrase in normalized_space for phrase in _LOCAL_PROVIDER_GUIDANCE_PHRASES):
+        return True
+    hardware_hint = any(
+        token in normalized_space
+        for token in ("rtx", "vram", "gb ram", "debian", "linux", "2060", "64gb", "64 gb")
+    )
+    provider_hint = any(
+        token in normalized_space
+        for token in ("provider", "ollama", "llama.cpp", "llama cpp", "lm studio", "vllm", "openai-compatible", "openai compatible")
+    )
+    model_setup_hint = any(
+        phrase in normalized_space
+        for phrase in ("should i use", "setup should i use", "do i have direct", "direct support", "local endpoint")
+    )
+    return bool(hardware_hint and provider_hint and model_setup_hint)
 
 
 def _looks_like_setup_explanation_query(normalized: str) -> bool:
@@ -1705,6 +1734,8 @@ def classify_setup_intent(
             "kind": "local_model_inventory",
             "provider_id": "ollama" if "ollama" in normalized else None,
         }
+    if _looks_like_local_provider_guidance_query(normalized):
+        return {"kind": "local_provider_guidance"}
     if _looks_like_explicit_model_acquisition_request(normalized):
         return {"kind": "model_acquisition_request"}
     if _looks_like_model_lifecycle_query(normalized):
@@ -1848,7 +1879,7 @@ def classify_runtime_chat_route(
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }
-    if setup_kind in {"recommend_local_model"}:
+    if setup_kind in {"recommend_local_model", "local_provider_guidance"}:
         return {
             **setup_intent,
             "route": "action_tool",

@@ -538,9 +538,15 @@ def looks_like_generic_external_capability_request(text: str | None) -> bool:
     if not cleaned:
         return False
     prefixes = (
+        "can you add a ",
+        "could you add a ",
+        "please add a ",
         "add a capability for ",
         "add capability for ",
         "add a skill for ",
+        "add a skill that ",
+        "add an external skill for ",
+        "add an external skill that ",
         "install a skill for ",
         "install a skill that ",
         "create a skill for ",
