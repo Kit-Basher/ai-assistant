@@ -293,7 +293,10 @@ Current state:
   verification/retry steps instead of running hidden sudo from the background
   API service
 - managed setup uses only the approved SearXNG image, container name, bind, and
-  owned state directory; it binds to `127.0.0.1` only
+  no config volume by default; it binds to `127.0.0.1` only
+- the first managed SearXNG container uses the image default config and does
+  not bind-mount an empty host directory over `/etc/searxng`; future persistent
+  config must be seeded and validated before mounting
 - on Linux, rootless Podman is the preferred managed-service engine; Docker is
   an explicit fallback only when rootless Podman is unavailable or unconfirmed
 - Docker fallback plans must say that Podman was not found or rootless Podman

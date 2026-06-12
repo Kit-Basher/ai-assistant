@@ -2330,7 +2330,6 @@ class Orchestrator:
         image = str(plan.get("image") or approved.get("image") or "docker.io/searxng/searxng:latest")
         name = str(plan.get("container_name") or approved.get("name") or "personal-agent-searxng")
         bind = str(plan.get("loopback_bind") or approved.get("bind") or "127.0.0.1:8080:8080")
-        volume = str(approved.get("volume_path") or "memory/local_services/searxng")
         health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
         fallback_selected = bool(preview_payload_from_runtime.get("fallback_selected"))
         docker_fallback = engine == "docker" and not bool(services_payload.get("podman_rootless") or searxng.get("podman_rootless"))
@@ -2370,7 +2369,7 @@ class Orchestrator:
                     "approved_image": image,
                     "approved_container_name": name,
                     "loopback_bind": bind,
-                    "approved_volume_path": volume,
+                    "volume_mount": False,
                     "health_url": health_url,
                     "fallback_selected": fallback_selected,
                     "preferred_engine": "podman",
@@ -2388,7 +2387,7 @@ class Orchestrator:
                 "approved_image": image,
                 "approved_container_name": name,
                 "loopback_bind": bind,
-                "approved_volume_path": volume,
+                "volume_mount": False,
                 "health_url": health_url,
                 "fallback_selected": fallback_selected,
                 "preferred_engine": "podman",
