@@ -100,7 +100,10 @@ The first mutating service action is confirm-gated SearXNG setup. It may only:
 - if both 8080 and 8888 are busy, do not pull or run
 - use no config bind mount by default
 - run detached
-- health check `http://127.0.0.1:8080`
+- health check the selected loopback URL for up to 30 seconds, using HTTP 200
+  as healthy and retrying `GET` if `HEAD` does not prove readiness
+- capture redacted `ps -a` and `logs --tail 120` diagnostics for the owned
+  container before rollback on health failure
 
 Future persistent SearXNG config support must seed and validate a known-good config before mounting it; an empty host directory must not be mounted over `/etc/searxng`.
 

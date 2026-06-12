@@ -1101,6 +1101,8 @@ def main() -> int:
                     runner=runner,
                     health_checker=lambda _url: False,
                     port_checker=lambda _port: True,
+                    health_timeout_seconds=0.01,
+                    health_poll_interval_seconds=0.01,
                 )
                 result = executor.execute_from_pending(
                     {
@@ -1141,6 +1143,8 @@ def main() -> int:
                     runner=runner,
                     health_checker=lambda _url: False,
                     port_checker=lambda _port: True,
+                    health_timeout_seconds=0.01,
+                    health_poll_interval_seconds=0.01,
                 )
                 result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
                 argv_rows = [call["argv"] for call in calls]

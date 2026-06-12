@@ -211,10 +211,14 @@ service must not run hidden sudo or store sudo passwords. Docker appears only as
 an explicit fallback plan with a warning, fallback reason, and Docker fallback
 confirmation flag. The first managed SearXNG container uses the image default
 config and no `/etc/searxng` bind mount; future persistent config must be seeded
-and validated before mounting. It updates the running Personal Agent search
-configuration only after the SearXNG JSON endpoint verifies. To keep search
-enabled after restart, set `SEARCH_ENABLED=1`, `SEARCH_PROVIDER=searxng`, and
-`SEARXNG_BASE_URL` in the service environment.
+and validated before mounting. It waits up to 30 seconds for first boot,
+accepts HTTP 200 as healthy, and retries with `GET` when `HEAD` does not prove
+readiness. If health fails, it captures redacted `ps -a` and `logs --tail 120`
+diagnostics for `personal-agent-searxng` before rolling back that owned
+container. It updates the running Personal Agent search configuration only
+after the SearXNG JSON endpoint verifies. To keep search enabled after restart,
+set `SEARCH_ENABLED=1`, `SEARCH_PROVIDER=searxng`, and `SEARXNG_BASE_URL` in
+the service environment.
 
 ## Core Workflow Proof
 

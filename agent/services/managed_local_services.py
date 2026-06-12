@@ -194,6 +194,7 @@ class ManagedLocalServiceExecutionResult:
     rollback_ok: bool = False
     cleanup_performed: bool = False
     cleanup_incomplete: bool = False
+    diagnostics: dict[str, Any] = field(default_factory=dict)
     journal: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -214,6 +215,7 @@ class ManagedLocalServiceExecutionResult:
             "rollback_ok": self.rollback_ok,
             "cleanup_performed": self.cleanup_performed,
             "cleanup_incomplete": self.cleanup_incomplete,
+            "diagnostics": dict(self.diagnostics),
             "journal": dict(self.journal),
             "shell": False,
             "external_pack_triggered": False,
@@ -260,6 +262,8 @@ class ManagedLocalServiceExecutor:
         health_checker: Callable[[str], bool] | None = None,
         port_checker: Callable[[int], bool] | None = None,
         timeout_seconds: float = 60.0,
+        health_timeout_seconds: float = 30.0,
+        health_poll_interval_seconds: float = 1.0,
     ) -> None:
         self._managed_root = Path(managed_root).expanduser().resolve()
         self._command_finder = command_finder or shutil.which
@@ -267,6 +271,10 @@ class ManagedLocalServiceExecutor:
         self._health_checker = health_checker
         self._port_checker = port_checker or self._port_available
         self._timeout_seconds = max(1.0, float(timeout_seconds or 60.0))
+        self._health_timeout_seconds = max(30.0, float(health_timeout_seconds or 30.0))
+        if health_timeout_seconds < 30.0:
+            self._health_timeout_seconds = max(0.0, float(health_timeout_seconds))
+        self._health_poll_interval_seconds = max(0.01, float(health_poll_interval_seconds or 1.0))
 
     def build_searxng_setup_plan(self, *, selected_engine: str, host_port: int = APPROVED_SEARXNG_PORT) -> ManagedLocalServiceSetupPlan:
         engine = str(selected_engine or "").strip().lower()
@@ -398,6 +406,7 @@ class ManagedLocalServiceExecutor:
         journal.plan_step("pull_image", resource=plan.image)
         journal.plan_step("run_container", resource=plan.container_name)
         journal.plan_step("health_check", resource=plan.health_url)
+        journal.plan_step("capture_failure_diagnostics", resource=plan.container_name)
         reason = self.validate_plan(plan)
         if reason:
             journal.record_step("validate_plan", ok=False, resource=plan.service_id, reason=reason)
@@ -465,10 +474,12 @@ class ManagedLocalServiceExecutor:
             )
         journal.record_step("run_container", ok=True, resource=plan.container_name)
         journal.record_created_resource("container", plan.container_name, engine=plan.engine, image=plan.image)
-        reachable = self._check_health(plan.health_url)
-        journal.record_step("health_check", ok=reachable, resource=plan.health_url)
-        journal.mark_verification(ok=reachable, health_url=plan.health_url)
+        reachable, health_diagnostics = self._wait_for_health(plan.health_url)
+        journal.record_step("health_check", ok=reachable, resource=plan.health_url, **health_diagnostics)
+        journal.mark_verification(ok=reachable, health_url=plan.health_url, **health_diagnostics)
         if not reachable:
+            diagnostics = self._capture_failure_diagnostics(plan, health_diagnostics)
+            journal.record_step("capture_failure_diagnostics", ok=True, resource=plan.container_name, diagnostics=diagnostics)
             rollback_ok, rollback_error = self._rollback_owned_setup(plan, journal)
             message = (
                 "Health check failed after the approved container started. I cleaned up the failed setup. Nothing was left running."
@@ -489,6 +500,7 @@ class ManagedLocalServiceExecutor:
                 rollback_ok=rollback_ok,
                 cleanup_performed=rollback_ok,
                 cleanup_incomplete=not rollback_ok,
+                diagnostics=diagnostics,
                 journal=journal.to_dict(),
             )
         return ManagedLocalServiceExecutionResult(
@@ -499,6 +511,7 @@ class ManagedLocalServiceExecutor:
             did_run=True,
             reachable=True,
             plan=plan,
+            diagnostics=health_diagnostics,
             journal=journal.to_dict(),
         )
 
@@ -687,18 +700,86 @@ class ManagedLocalServiceExecutor:
         except OSError:
             return False
 
-    def _check_health(self, url: str) -> bool:
+    def _wait_for_health(self, url: str) -> tuple[bool, dict[str, Any]]:
+        started = time.monotonic()
+        deadline = started + self._health_timeout_seconds
+        attempts = 0
+        last: dict[str, Any] = {"ok": False, "error": "not_checked"}
+        while True:
+            attempts += 1
+            ok, last = self._check_health_once(url)
+            if ok:
+                return True, {
+                    "attempts": attempts,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "last_health_status": last.get("status"),
+                    "last_health_method": last.get("method"),
+                }
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(self._health_poll_interval_seconds, max(0.0, deadline - time.monotonic())))
+        return False, {
+            "attempts": attempts,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "last_health_status": last.get("status"),
+            "last_health_error": last.get("error"),
+            "last_health_method": last.get("method"),
+        }
+
+    def _check_health_once(self, url: str) -> tuple[bool, dict[str, Any]]:
         if callable(self._health_checker):
             try:
-                return bool(self._health_checker(url))
-            except Exception:
-                return False
-        request = urllib.request.Request(url, method="GET", headers={"User-Agent": "personal-agent-managed-service/1"})
+                ok = bool(self._health_checker(url))
+                return ok, {"ok": ok, "method": "custom", "status": 200 if ok else None, "error": None if ok else "custom_health_checker_false"}
+            except Exception as exc:
+                return False, {"ok": False, "method": "custom", "error": exc.__class__.__name__}
+        head_ok, head_info = self._http_health_probe(url, method="HEAD")
+        if head_ok:
+            return True, head_info
+        get_ok, get_info = self._http_health_probe(url, method="GET")
+        if get_ok:
+            return True, get_info
+        return False, get_info if get_info.get("error") else head_info
+
+    @staticmethod
+    def _http_health_probe(url: str, *, method: str) -> tuple[bool, dict[str, Any]]:
+        request = urllib.request.Request(url, method=method, headers={"User-Agent": "personal-agent-managed-service/1"})
         try:
             with urllib.request.urlopen(request, timeout=5) as response:  # nosec B310 - fixed loopback URL after validation.
-                return 200 <= int(getattr(response, "status", 0) or 0) < 500
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            return False
+                status = int(getattr(response, "status", 0) or 0)
+                return status == 200, {"ok": status == 200, "method": method, "status": status}
+        except urllib.error.HTTPError as exc:
+            return False, {"ok": False, "method": method, "status": int(getattr(exc, "code", 0) or 0), "error": "http_error"}
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            return False, {"ok": False, "method": method, "error": exc.__class__.__name__}
+
+    def _capture_failure_diagnostics(self, plan: ManagedLocalServiceSetupPlan, health: dict[str, Any]) -> dict[str, Any]:
+        ps_result = self._run_fixed([plan.engine, "ps", "-a", "--filter", f"name=^/{plan.container_name}$", "--no-trunc"])
+        logs_result = self._run_fixed([plan.engine, "logs", "--tail", "120", plan.container_name])
+        return {
+            "container_name": plan.container_name,
+            "selected_engine": plan.engine,
+            "health": dict(health),
+            "ps_returncode": int(ps_result.returncode),
+            "ps_output": self._redact_diagnostic_text(str(ps_result.stdout or ps_result.stderr or "")),
+            "logs_returncode": int(logs_result.returncode),
+            "logs_tail": self._redact_diagnostic_text(str(logs_result.stdout or logs_result.stderr or "")),
+        }
+
+    @staticmethod
+    def _redact_diagnostic_text(text: str) -> str:
+        redacted = str(text or "")
+        for marker in ("token=", "api_key=", "apikey=", "password=", "passwd=", "secret="):
+            lowered = redacted.lower()
+            start = lowered.find(marker)
+            while start >= 0:
+                end = start + len(marker)
+                while end < len(redacted) and not redacted[end].isspace():
+                    end += 1
+                redacted = f"{redacted[:start]}{marker}<redacted>{redacted[end:]}"
+                lowered = redacted.lower()
+                start = lowered.find(marker, start + len(marker) + len("<redacted>"))
+        return redacted[:4000]
 
     @staticmethod
     def _short_process_error(result: subprocess.CompletedProcess[str]) -> str:

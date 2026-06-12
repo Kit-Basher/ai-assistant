@@ -51,7 +51,12 @@ managed local service:
   `selected_engine=docker`, a `fallback_reason`, `rootless_expected=false` or
   unknown, and a Docker fallback warning before confirmation.
 - Setup updates the running Personal Agent search configuration after a
-  successful SearXNG JSON probe.
+  successful SearXNG JSON probe. Managed setup waits up to 30 seconds for
+  first boot, treats HTTP 200 as healthy, and retries with `GET` if `HEAD`
+  does not prove readiness.
+- If health still fails, setup captures redacted diagnostics for the owned
+  `personal-agent-searxng` container, including `ps -a` state and the last
+  container logs, before rolling back only that container.
 - Persistent managed-action journals record planned/running/verified,
   rolled_back, recovery_needed, or failed status without secrets or private
   paths.

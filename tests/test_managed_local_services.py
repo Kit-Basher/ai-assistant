@@ -31,6 +31,8 @@ class _FakeManagedServiceRunner:
         if argv[1:3] == ["ps", "-a"]:
             stdout = "personal-agent-searxng\n" if self.existing else ""
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        if len(argv) > 1 and argv[1] == "logs":
+            return subprocess.CompletedProcess(argv, 0, stdout="mock searxng first-boot log token=secret-value", stderr="")
         if self.fail_on and self.fail_on in joined:
             return subprocess.CompletedProcess(argv, 2, stdout="", stderr="mock failure")
         if len(argv) > 1 and argv[1] == "run":
@@ -48,6 +50,17 @@ class _FakeSearchResponse:
         return self._body.read(size)
 
     def __enter__(self) -> "_FakeSearchResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeHTTPHealthResponse:
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def __enter__(self) -> "_FakeHTTPHealthResponse":
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
@@ -420,6 +433,8 @@ class TestManagedLocalServices(unittest.TestCase):
             runner=runner,
             health_checker=lambda _url: False,
             port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
         )
 
         result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
@@ -438,6 +453,64 @@ class TestManagedLocalServices(unittest.TestCase):
         journal = result.journal
         self.assertTrue(journal.get("created_resources"))
         self.assertTrue(journal.get("rollback_steps"))
+        self.assertIn("mock searxng first-boot log", result.diagnostics["logs_tail"])
+        self.assertNotIn("secret-value", result.diagnostics["logs_tail"])
+        self.assertEqual("custom_health_checker_false", result.diagnostics["health"]["last_health_error"])
+        self.assertIn("capture_failure_diagnostics", [step["name"] for step in journal.get("executed_steps", [])])
+
+    def test_health_check_retries_until_first_boot_succeeds(self) -> None:
+        runner = _FakeManagedServiceRunner()
+        health_calls: list[str] = []
+
+        def _health(url: str) -> bool:
+            health_calls.append(url)
+            return len(health_calls) >= 3
+
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=_health,
+            port_checker=lambda _port: True,
+            health_timeout_seconds=1.0,
+            health_poll_interval_seconds=0.01,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.reachable)
+        self.assertEqual(3, len(health_calls))
+        self.assertEqual(3, result.diagnostics["attempts"])
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertNotIn(["podman", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertNotIn(["podman", "rm", "personal-agent-searxng"], argv_rows)
+
+    def test_http_health_probe_retries_get_after_head_failure(self) -> None:
+        methods: list[str] = []
+
+        def _urlopen(request, timeout: float = 5.0):  # noqa: ANN001
+            _ = timeout
+            method = str(getattr(request, "get_method")())
+            methods.append(method)
+            return _FakeHTTPHealthResponse(405 if method == "HEAD" else 200)
+
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=_FakeManagedServiceRunner(),
+            port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
+        )
+
+        with mock.patch("agent.services.managed_local_services.urllib.request.urlopen", side_effect=_urlopen):
+            ok, diagnostics = executor._wait_for_health("http://127.0.0.1:8888")  # noqa: SLF001
+
+        self.assertTrue(ok)
+        self.assertEqual(["HEAD", "GET"], methods)
+        self.assertEqual("GET", diagnostics["last_health_method"])
+        self.assertEqual(200, diagnostics["last_health_status"])
 
     def test_rollback_does_not_delete_preexisting_container(self) -> None:
         runner = _FakeManagedServiceRunner(existing=True)
@@ -447,6 +520,8 @@ class TestManagedLocalServices(unittest.TestCase):
             runner=runner,
             health_checker=lambda _url: False,
             port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
         )
 
         result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
@@ -465,6 +540,8 @@ class TestManagedLocalServices(unittest.TestCase):
             runner=runner,
             health_checker=lambda _url: False,
             port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
         )
 
         result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
@@ -991,12 +1068,20 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
     def test_yes_after_preview_runs_bounded_setup_configures_runtime_search_after_verify(self) -> None:
         runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
+        health_calls: list[str] = []
+
+        def _health(url: str) -> bool:
+            health_calls.append(url)
+            return len(health_calls) >= 3 and url == "http://127.0.0.1:8080"
+
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
             managed_root=self.tmpdir.name,
             command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
             runner=runner,
-            health_checker=lambda url: url == "http://127.0.0.1:8080",
+            health_checker=_health,
             port_checker=lambda _port: True,
+            health_timeout_seconds=1.0,
+            health_poll_interval_seconds=0.01,
         )
         _body, first_text = self._chat(runtime, "enable web search")
         self.assertIn("Web search is not set up yet", first_text)
@@ -1017,6 +1102,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("podman install", rendered)
         self.assertTrue(runtime.config.search_enabled)
         self.assertEqual("http://127.0.0.1:8080", runtime.config.searxng_base_url)
+        self.assertEqual(3, len(health_calls))
         setup_payload = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertTrue(setup_payload.get("did_configure"))
 
@@ -1119,6 +1205,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             runner=runner,
             health_checker=lambda _url: False,
             port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
         )
         _body, first_text = self._chat(runtime, "enable web search")
 
