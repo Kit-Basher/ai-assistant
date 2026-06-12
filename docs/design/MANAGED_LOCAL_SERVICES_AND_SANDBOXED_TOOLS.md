@@ -284,9 +284,14 @@ Current state:
   confirmation-gated Podman prerequisite plan instead of silently selecting
   Docker
 - the Podman prerequisite path is narrow: it previews the package action, runs
-  only the allowlisted Podman package install command after confirmation,
-  stores no sudo password, verifies Podman, verifies rootless Podman usability,
-  and does not start SearXNG or enable search
+  only the allowlisted Podman package install command when it can do so without
+  hidden interactive privilege, stores no sudo password, verifies Podman,
+  verifies rootless Podman usability, and does not start SearXNG or enable
+  search
+- when Podman install needs interactive privilege, apply returns a bounded
+  elevated terminal handoff for `sudo apt-get install -y podman` plus
+  verification/retry steps instead of running hidden sudo from the background
+  API service
 - managed setup uses only the approved SearXNG image, container name, bind, and
   owned state directory; it binds to `127.0.0.1` only
 - on Linux, rootless Podman is the preferred managed-service engine; Docker is

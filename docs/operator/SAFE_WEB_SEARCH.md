@@ -38,8 +38,11 @@ managed local service:
   confirmed.
 - If Podman is missing, the default setup plan is a Podman prerequisite plan,
   not a Docker plan. It previews the package action, requires confirmation,
-  uses the system package manager for the `podman` package only, does not store
-  sudo passwords, verifies Podman/rootless usability, and then asks the operator
+  and is allowlisted for the `podman` package only. When privilege is required,
+  the background API service does not run hidden `sudo`; apply returns a
+  visible elevated terminal handoff for `sudo apt-get install -y podman`, with
+  no sudo password storage. After the handoff runs, the operator retries setup;
+  Personal Agent verifies Podman/rootless usability and then asks the operator
   to preview SearXNG setup again.
 - Docker fallback plans include `preferred_engine=podman`,
   `selected_engine=docker`, a `fallback_reason`, `rootless_expected=false` or
@@ -52,10 +55,12 @@ managed local service:
 
 The current managed setup does not silently install Podman, Docker, SearXNG, or
 system packages. Podman prerequisite setup is explicit, confirmation-gated, and
-narrowly allowlisted for SearXNG. If no supported runtime or trusted endpoint is
-available and prerequisite setup cannot be prepared, setup is blocked and
-reports the next operator action. To keep search enabled after restarting
-Personal Agent, set the environment variables above in the service environment.
+narrowly allowlisted for SearXNG; when it needs OS privilege, it prepares an
+operator-visible handoff instead of pretending the background service installed
+Podman. If no supported runtime or trusted endpoint is available and
+prerequisite setup cannot be prepared, setup is blocked and reports the next
+operator action. To keep search enabled after restarting Personal Agent, set
+the environment variables above in the service environment.
 
 ## Safety Boundaries
 

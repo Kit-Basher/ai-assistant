@@ -634,7 +634,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("confirmation_expired", expired["error"])
         self.assertFalse(runtime.config.search_enabled)
 
-    def test_search_setup_apply_accepts_podman_prerequisite_plan_token_from_search_plan(self) -> None:
+    def test_search_setup_apply_returns_elevated_handoff_for_podman_prerequisite_plan_token(self) -> None:
         runtime, runner = self._runtime_with_podman_prerequisite(install_ok=False)
         plan_handler = _HandlerForTest(runtime, "/search/setup/plan", {})
         plan_handler.do_POST()
@@ -653,9 +653,16 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual(400, apply_handler.status_code)
         self.assertFalse(payload["ok"])
         self.assertNotEqual("invalid_confirmation", payload.get("error"))
-        self.assertEqual("podman_install_failed", payload["error"])
+        self.assertEqual("elevated_handoff_required", payload["error"])
+        self.assertTrue(payload["elevated_handoff_required"])
+        handoff = payload["handoff"]
+        self.assertEqual(["sudo", "apt-get", "install", "-y", "podman"], handoff["command"])
+        self.assertEqual([["sudo", "apt-get", "install", "-y", "podman"]], handoff["allowed_commands"])
+        self.assertIn("command -v podman", handoff["after_command_verification"])
+        self.assertIn("podman --version", handoff["after_command_verification"])
+        self.assertIn("podman info", handoff["after_command_verification"][2])
         self.assertFalse(runtime.config.search_enabled)
-        self.assertEqual(1, len(runner.calls))
+        self.assertEqual([], runner.calls)
 
     def test_search_setup_apply_podman_prerequisite_safe_mode_blocks_clearly(self) -> None:
         runtime, runner = self._runtime_with_podman_prerequisite()
@@ -672,7 +679,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(runtime.config.search_enabled)
 
     def test_podman_prerequisite_apply_uses_allowlisted_command_and_verifies_rootless(self) -> None:
-        runtime, runner = self._runtime_with_podman_prerequisite()
+        runtime, runner = self._runtime_with_podman_prerequisite(running_as_root=True)
 
         result = self._install_podman_prerequisite(runtime)
 
@@ -681,15 +688,30 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(result["rootless_podman"])
         self.assertFalse(runtime.config.search_enabled)
         argv_rows = [call["argv"] for call in runner.calls]
-        self.assertEqual(["/usr/bin/sudo", "/usr/bin/apt-get", "install", "-y", "podman"], argv_rows[0])
+        self.assertEqual(["/usr/bin/apt-get", "install", "-y", "podman"], argv_rows[0])
         self.assertEqual(["/usr/bin/podman", "info", "--format", "{{.Host.Security.Rootless}}"], argv_rows[1])
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
         row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
         self.assertEqual("verified", row["status"])
         self.assertEqual("podman_prerequisite_setup", row["action_type"])
 
+    def test_podman_prerequisite_apply_ignores_arbitrary_stored_command_strings(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite(running_as_root=True)
+        plan_payload = runtime.podman_prerequisite_plan({})
+        plan = plan_payload["plan"]
+        stored = runtime._podman_prerequisite_confirmations[plan["plan_id"]]["plan"]  # noqa: SLF001
+        stored["commands"] = [["sudo", "apt-get", "install", "-y", "curl"]]
+
+        result = runtime.apply_podman_prerequisite(
+            {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(["/usr/bin/apt-get", "install", "-y", "podman"], runner.calls[0]["argv"])
+        self.assertFalse(runtime.config.search_enabled)
+
     def test_failed_podman_install_does_not_enable_search(self) -> None:
-        runtime, runner = self._runtime_with_podman_prerequisite(install_ok=False)
+        runtime, runner = self._runtime_with_podman_prerequisite(install_ok=False, running_as_root=True)
 
         result = self._install_podman_prerequisite(runtime)
 
@@ -701,7 +723,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("failed", row["status"])
 
     def test_podman_installed_but_not_rootless_does_not_enable_search(self) -> None:
-        runtime, _runner = self._runtime_with_podman_prerequisite(rootless=False)
+        runtime, _runner = self._runtime_with_podman_prerequisite(rootless=False, running_as_root=True)
 
         result = self._install_podman_prerequisite(runtime)
 
@@ -712,7 +734,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("recovery_needed", row["status"])
 
     def test_verified_podman_allows_searxng_plan_to_select_podman(self) -> None:
-        runtime, runner = self._runtime_with_podman_prerequisite()
+        runtime, runner = self._runtime_with_podman_prerequisite(running_as_root=True)
         result = self._install_podman_prerequisite(runtime)
         self.assertTrue(result["ok"])
         runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
@@ -853,7 +875,13 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         )
         return runtime
 
-    def _runtime_with_podman_prerequisite(self, *, install_ok: bool = True, rootless: bool = True) -> tuple[AgentRuntime, _FakePrerequisiteRunner]:
+    def _runtime_with_podman_prerequisite(
+        self,
+        *,
+        install_ok: bool = True,
+        rootless: bool = True,
+        running_as_root: bool = False,
+    ) -> tuple[AgentRuntime, _FakePrerequisiteRunner]:
         runtime = self._runtime_with_engine(None)
         runner = _FakePrerequisiteRunner(install_ok=install_ok, rootless=rootless)
 
@@ -868,6 +896,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
         runtime._prerequisite_command_finder = _finder  # noqa: SLF001
         runtime._prerequisite_runner = runner  # noqa: SLF001
+        runtime._prerequisite_running_as_root = lambda: running_as_root  # noqa: SLF001
         return runtime, runner
 
     def _install_podman_prerequisite(self, runtime: AgentRuntime) -> dict[str, object]:

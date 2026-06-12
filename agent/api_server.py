@@ -12199,7 +12199,7 @@ class AgentRuntime:
     def _build_podman_prerequisite_plan(self, engine_choice: dict[str, Any]) -> dict[str, Any]:
         apt_get = self._prerequisite_command_finder("apt-get")
         sudo = self._prerequisite_command_finder("sudo")
-        running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+        running_as_root = self._prerequisite_running_as_root()
         command = ["apt-get", "install", "-y", "podman"] if running_as_root else ["sudo", "apt-get", "install", "-y", "podman"]
         return {
             "service_id": "searxng",
@@ -12259,7 +12259,7 @@ class AgentRuntime:
             return {"ok": False, "error": "podman_prerequisite_unsupported_platform", "mutated": False, "managed_action_journal": journal.to_dict()}
         apt_get = self._prerequisite_command_finder("apt-get")
         sudo = self._prerequisite_command_finder("sudo")
-        running_as_root = hasattr(os, "geteuid") and os.geteuid() == 0
+        running_as_root = self._prerequisite_running_as_root()
         if not apt_get:
             journal.record_step("preflight_podman_install", ok=False, resource="apt-get", reason="apt_get_missing")
             journal.mark_verification(ok=False, reason="apt_get_missing")
@@ -12272,6 +12272,23 @@ class AgentRuntime:
             journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
             self._persist_managed_action_journal(journal, status="failed")
             return {"ok": False, "error": "sudo_missing", "next_action": "Install Podman manually or provide sudo/polkit access, then retry.", "mutated": False, "managed_action_journal": journal.to_dict()}
+        if not running_as_root:
+            journal.record_step("preflight_podman_install", ok=False, resource="sudo", reason="elevated_handoff_required")
+            journal.mark_verification(ok=False, reason="elevated_handoff_required")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started; elevated terminal handoff required.")
+            self._persist_managed_action_journal(journal, status="planned")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {
+                "ok": False,
+                "error": "elevated_handoff_required",
+                "error_kind": "elevated_handoff_required",
+                "reason": "Podman installation requires interactive privilege, and the background API service cannot safely handle sudo prompts.",
+                "mutated": False,
+                "elevated_handoff_required": True,
+                "handoff": self._podman_prerequisite_elevated_handoff(),
+                "next_action": "Run the handoff command in a visible terminal, then retry /search/setup/plan.",
+                "managed_action_journal": journal.to_dict(),
+            }
         argv = [apt_get, "install", "-y", "podman"] if running_as_root else [sudo, apt_get, "install", "-y", "podman"]
         journal.record_step("preflight_podman_install", ok=True, resource="podman", command=" ".join(Path(part).name if index < 2 else str(part) for index, part in enumerate(argv)))
         self._persist_managed_action_journal(journal, status="planned")
@@ -12304,6 +12321,36 @@ class AgentRuntime:
             return {"ok": False, "error": "rootless_podman_not_usable" if present else "podman_not_found_after_install", "next_action": "Verify rootless Podman for this user, then retry SearXNG setup.", "mutated": True, "managed_action_journal": journal.to_dict()}
         self._managed_local_services = None
         return {"ok": True, "mutated": True, "podman_present": True, "rootless_podman": True, "next_action": "Preview SearXNG setup again; it should select Podman.", "managed_action_journal": journal.to_dict()}
+
+    @staticmethod
+    def _prerequisite_running_as_root() -> bool:
+        return hasattr(os, "geteuid") and os.geteuid() == 0
+
+    @staticmethod
+    def _podman_prerequisite_elevated_handoff() -> dict[str, Any]:
+        command = ["sudo", "apt-get", "install", "-y", "podman"]
+        return {
+            "kind": "visible_terminal",
+            "bounded_action": "install_podman_prerequisite_for_searxng",
+            "command": command,
+            "command_string": "sudo apt-get install -y podman",
+            "allowed_commands": [command],
+            "why_privilege_is_required": "Installing the Podman system package requires operating-system package-manager privileges.",
+            "sudo_password_storage": False,
+            "will_install_searxng": False,
+            "will_enable_search": False,
+            "after_command_verification": [
+                "command -v podman",
+                "podman --version",
+                "podman info --format '{{.Host.Security.Rootless}}'",
+            ],
+            "verification_commands": [
+                ["podman", "--version"],
+                ["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+            ],
+            "retry_endpoint": "POST /search/setup/plan",
+            "retry_expectation": "After rootless Podman is available, the SearXNG setup plan should use setup_mode=managed_container and selected_engine=podman.",
+        }
 
     def _verify_rootless_podman(self, podman_path: str | None) -> bool | None:
         if not podman_path:

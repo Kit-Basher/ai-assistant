@@ -130,7 +130,9 @@ surface:
    running runtime: no base Docker/Podman dependency, user-provided loopback URL
    remains supported, rootless Podman is preferred on Linux, missing Podman
    produces a confirmation-gated Podman prerequisite plan for the `podman`
-   package only, Docker is labeled as an explicit fallback only with
+   package only, and interactive privilege is handled by a bounded elevated
+   terminal handoff rather than hidden sudo from the background API service.
+   Docker is labeled as an explicit fallback only with
    warning/confirmation metadata, the managed container path is
    confirmation-gated and localhost-bound, setup is journaled, and rollback
    restores prior runtime search settings plus only owned setup resources.
