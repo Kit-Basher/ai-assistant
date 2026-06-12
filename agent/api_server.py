@@ -12177,13 +12177,21 @@ class AgentRuntime:
         payload = dict(payload or {})
         token = str(payload.get("confirmation_token") or "").strip()
         plan_id = str(payload.get("plan_id") or "").strip()
-        stored = self._podman_prerequisite_confirmations.get(plan_id or token)
+        stored = self._confirmation_by_plan_or_token(self._podman_prerequisite_confirmations, plan_id=plan_id, token=token)
         if not stored or str(stored.get("confirmation_token") or "") != token:
             return {"ok": False, "error": "invalid_confirmation", "mutated": False}
         if bool(stored.get("consumed")):
             return {"ok": False, "error": "confirmation_consumed", "mutated": False}
         if float(stored.get("expires_at") or 0) <= time.time():
             return {"ok": False, "error": "confirmation_expired", "mutated": False}
+        if self._safe_mode_enabled():
+            return {
+                "ok": False,
+                "error": "safe_mode_blocked",
+                "error_kind": "safe_mode_blocked",
+                "message": "Podman prerequisite setup is blocked while safe mode is active.",
+                "mutated": False,
+            }
         stored["consumed"] = True
         plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
         return self._execute_podman_prerequisite_plan(plan)
@@ -12381,13 +12389,15 @@ class AgentRuntime:
         payload = dict(payload or {})
         token = str(payload.get("confirmation_token") or "").strip()
         plan_id = str(payload.get("plan_id") or "").strip()
+        if self._confirmation_by_plan_or_token(self._podman_prerequisite_confirmations, plan_id=plan_id, token=token):
+            return self.apply_podman_prerequisite(payload)
         embedded_plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
         if embedded_plan is not None and not token:
             plan = dict(embedded_plan)
             token = str(plan.get("confirmation_token") or "").strip()
             stored = {"plan": plan, "confirmation_token": token, "expires_at": time.time() + 1, "consumed": False}
         else:
-            stored = self._search_setup_confirmations.get(plan_id or token)
+            stored = self._confirmation_by_plan_or_token(self._search_setup_confirmations, plan_id=plan_id, token=token)
         if not stored or str(stored.get("confirmation_token") or "") != token:
             return {"ok": False, "error": "invalid_confirmation", "mutated": False}
         if bool(stored.get("consumed")):
@@ -12397,6 +12407,21 @@ class AgentRuntime:
         stored["consumed"] = True
         plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
         return self._execute_search_setup_plan(plan)
+
+    @staticmethod
+    def _confirmation_by_plan_or_token(
+        store: dict[str, dict[str, Any]],
+        *,
+        plan_id: str,
+        token: str,
+    ) -> dict[str, Any] | None:
+        if plan_id and plan_id in store:
+            return store.get(plan_id)
+        if token:
+            for row in store.values():
+                if str(row.get("confirmation_token") or "") == token:
+                    return row
+        return None
 
     def _store_search_setup_confirmation(self, plan: dict[str, Any]) -> dict[str, Any]:
         plan_id = f"search-setup-{uuid.uuid4().hex[:10]}"

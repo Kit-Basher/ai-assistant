@@ -634,6 +634,43 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("confirmation_expired", expired["error"])
         self.assertFalse(runtime.config.search_enabled)
 
+    def test_search_setup_apply_accepts_podman_prerequisite_plan_token_from_search_plan(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite(install_ok=False)
+        plan_handler = _HandlerForTest(runtime, "/search/setup/plan", {})
+        plan_handler.do_POST()
+        plan_payload = json.loads(plan_handler.body.decode("utf-8"))
+        plan = plan_payload["plan"]
+        self.assertEqual("podman_prerequisite", plan["setup_mode"])
+
+        apply_handler = _HandlerForTest(
+            runtime,
+            "/search/setup/apply",
+            {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]},
+        )
+        apply_handler.do_POST()
+        payload = json.loads(apply_handler.body.decode("utf-8"))
+
+        self.assertEqual(400, apply_handler.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertNotEqual("invalid_confirmation", payload.get("error"))
+        self.assertEqual("podman_install_failed", payload["error"])
+        self.assertFalse(runtime.config.search_enabled)
+        self.assertEqual(1, len(runner.calls))
+
+    def test_search_setup_apply_podman_prerequisite_safe_mode_blocks_clearly(self) -> None:
+        runtime, runner = self._runtime_with_podman_prerequisite()
+        runtime.config = replace(runtime.config, safe_mode_enabled=True)
+        plan_payload = runtime.search_setup_plan({})
+        plan = plan_payload["plan"]
+
+        result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("safe_mode_blocked", result["error"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual([], runner.calls)
+        self.assertFalse(runtime.config.search_enabled)
+
     def test_podman_prerequisite_apply_uses_allowlisted_command_and_verifies_rootless(self) -> None:
         runtime, runner = self._runtime_with_podman_prerequisite()
 
