@@ -14,7 +14,7 @@ import urllib.request
 from agent.actions.managed_action_recovery import ManagedActionJournal
 
 
-APPROVED_SEARXNG_IMAGE = "searxng/searxng:latest"
+APPROVED_SEARXNG_IMAGE = "docker.io/searxng/searxng:latest"
 APPROVED_SEARXNG_CONTAINER = "personal-agent-searxng"
 APPROVED_SEARXNG_PORT = 8080
 APPROVED_SEARXNG_FALLBACK_PORT = 8888

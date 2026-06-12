@@ -2327,7 +2327,7 @@ class Orchestrator:
                 },
             )
         plan = preview_payload_from_runtime.get("plan") if isinstance(preview_payload_from_runtime.get("plan"), dict) else {}
-        image = str(plan.get("image") or approved.get("image") or "searxng/searxng:latest")
+        image = str(plan.get("image") or approved.get("image") or "docker.io/searxng/searxng:latest")
         name = str(plan.get("container_name") or approved.get("name") or "personal-agent-searxng")
         bind = str(plan.get("loopback_bind") or approved.get("bind") or "127.0.0.1:8080:8080")
         volume = str(approved.get("volume_path") or "memory/local_services/searxng")

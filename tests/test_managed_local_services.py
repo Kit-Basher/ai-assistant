@@ -164,7 +164,7 @@ class TestManagedLocalServices(unittest.TestCase):
             "service_id": "searxng",
             "selected_engine": "docker",
             "action": "preview_only",
-            "approved_image": "searxng/searxng:latest",
+            "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8080:8080",
             "approved_volume_path": "memory/local_services/searxng",
@@ -175,7 +175,7 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertTrue(result.did_pull)
         self.assertTrue(result.did_run)
-        self.assertEqual(["docker", "pull", "searxng/searxng:latest"], runner.calls[1]["argv"])
+        self.assertEqual(["docker", "pull", "docker.io/searxng/searxng:latest"], runner.calls[1]["argv"])
         run_argv = runner.calls[2]["argv"]
         self.assertEqual("docker", run_argv[0])
         self.assertIn("run", run_argv)
@@ -183,7 +183,7 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertIn("--name", run_argv)
         self.assertIn("personal-agent-searxng", run_argv)
         self.assertIn("127.0.0.1:8080:8080", run_argv)
-        self.assertIn("searxng/searxng:latest", run_argv)
+        self.assertIn("docker.io/searxng/searxng:latest", run_argv)
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
 
     def test_executor_preview_uses_primary_or_fallback_port(self) -> None:
@@ -217,6 +217,21 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertFalse(preview["ok"])
         self.assertEqual("managed_service_approved_ports_occupied", preview["blocked_reason"])
 
+    def test_podman_plan_argv_uses_fully_qualified_searxng_image(self) -> None:
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        plan = executor.build_searxng_setup_plan(selected_engine="podman")
+
+        self.assertEqual("docker.io/searxng/searxng:latest", plan.image)
+        self.assertEqual(["podman", "pull", "docker.io/searxng/searxng:latest"], plan.pull_argv())
+        self.assertIn("docker.io/searxng/searxng:latest", plan.run_argv())
+
     def test_executor_fallback_run_uses_loopback_only(self) -> None:
         runner = _FakeManagedServiceRunner()
         executor = ManagedLocalServiceExecutor(
@@ -230,7 +245,7 @@ class TestManagedLocalServices(unittest.TestCase):
             "service_id": "searxng",
             "selected_engine": "docker",
             "action": "preview_only",
-            "approved_image": "searxng/searxng:latest",
+            "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8888:8080",
             "approved_volume_path": "memory/local_services/searxng",
@@ -257,7 +272,7 @@ class TestManagedLocalServices(unittest.TestCase):
                 "service_id": "searxng",
                 "selected_engine": "docker",
                 "action": "preview_only",
-                "approved_image": "searxng/searxng:latest",
+                "approved_image": "docker.io/searxng/searxng:latest",
                 "approved_container_name": "personal-agent-searxng",
                 "loopback_bind": "0.0.0.0:8888:8080",
                 "approved_volume_path": "memory/local_services/searxng",
@@ -296,7 +311,7 @@ class TestManagedLocalServices(unittest.TestCase):
             "service_id": "searxng",
             "selected_engine": "docker",
             "action": "preview_only",
-            "approved_image": "searxng/searxng:latest",
+            "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8080:8080",
             "approved_volume_path": "memory/local_services/searxng",
@@ -316,6 +331,30 @@ class TestManagedLocalServices(unittest.TestCase):
                 or result.blocked_reason == "managed_service_bind_not_approved",
                 result.blocked_reason,
             )
+
+    def test_executor_rejects_old_short_name_searxng_image(self) -> None:
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_from_pending(
+            {
+                "service_id": "searxng",
+                "selected_engine": "podman",
+                "action": "preview_only",
+                "approved_image": "searxng/searxng:latest",
+                "approved_container_name": "personal-agent-searxng",
+                "loopback_bind": "127.0.0.1:8080:8080",
+                "approved_volume_path": "memory/local_services/searxng",
+            }
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_plan_tampered_approved_image", result.blocked_reason)
 
     def test_executor_rejects_unknown_service_and_non_loopback_plan(self) -> None:
         executor = ManagedLocalServiceExecutor(
@@ -575,6 +614,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(plan["rootless_expected"])
         self.assertFalse(plan["requires_docker_fallback_confirmation"])
         self.assertIsNone(plan["fallback_reason"])
+        self.assertEqual("docker.io/searxng/searxng:latest", plan["image"])
+        self.assertEqual("docker.io/searxng/searxng:latest", plan["executor_pending"]["approved_image"])
 
     def test_search_setup_plan_marks_docker_as_explicit_fallback(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -915,7 +956,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIn("missing Podman", text)
         self.assertIn("preferred rootless container runtime", text)
         self.assertIn("I will not install anything until you confirm", text)
-        self.assertNotIn("Approved image: searxng/searxng:latest", text)
+        self.assertNotIn("Approved image: docker.io/searxng/searxng:latest", text)
         self.assertNotIn("Approved container: personal-agent-searxng", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}

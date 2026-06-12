@@ -92,7 +92,7 @@ Managed local services complement managed adapters. Both are core-owned safety b
 The first mutating service action is confirm-gated SearXNG setup. It may only:
 
 - use detected `docker` or `podman`
-- pull `searxng/searxng:latest`
+- pull `docker.io/searxng/searxng:latest`
 - run container `personal-agent-searxng`
 - prefer `127.0.0.1:8080:8080`
 - preflight port 8080 before pull/run
