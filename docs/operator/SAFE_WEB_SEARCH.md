@@ -23,6 +23,28 @@ SEARCH_MAX_RESULTS=5
 
 `SEARXNG_BASE_URL` should point to a SearXNG instance you operate or have explicitly chosen to trust as a search endpoint. A local self-hosted instance is preferred. Public SearXNG instances may be rate-limited, unavailable, or operated by parties you do not control.
 
+## Managed Setup
+
+Personal Agent can preview and apply a bounded SearXNG setup as the first
+managed local service:
+
+- `POST /search/setup/plan` returns a confirmation-gated plan.
+- `POST /search/setup/apply` requires the confirmation token before mutation.
+- User-provided setup accepts loopback SearXNG URLs only.
+- Managed container setup uses the approved `personal-agent-searxng` container
+  and binds only to `127.0.0.1`.
+- Setup updates the running Personal Agent search configuration after a
+  successful SearXNG JSON probe.
+- Persistent managed-action journals record planned/running/verified,
+  rolled_back, recovery_needed, or failed status without secrets or private
+  paths.
+
+The current managed setup does not silently install Podman, Docker, SearXNG, or
+system packages. If no supported runtime or trusted endpoint is available,
+setup is blocked and reports the next operator action. To keep search enabled
+after restarting Personal Agent, set the environment variables above in the
+service environment.
+
 ## Safety Boundaries
 
 The native search adapter:
@@ -49,4 +71,4 @@ A lead can only point to a later source approval review. Source approval is stil
 
 ## Status
 
-Use `/search/status` or ask the assistant “what is your search status?” to check configuration. If search is disabled or missing `SEARXNG_BASE_URL`, the assistant should explain the missing requirement and show the next safe setup step without claiming search works.
+Use `/search/status` or ask the assistant “what is your search status?” to check configuration. The status reports whether search is enabled, whether the SearXNG endpoint is configured, whether the JSON endpoint is reachable, a redacted base URL, setup source, blocked reason, and one next action. If search is disabled or missing `SEARXNG_BASE_URL`, the assistant should explain the missing requirement and offer the confirmation-gated local setup path without claiming search works.
