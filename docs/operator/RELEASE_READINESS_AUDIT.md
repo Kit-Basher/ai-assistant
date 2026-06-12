@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
 Date: 2026-06-11
-Checkpoint: `019ac0c` Persist journals for pack lifecycle
-Updated after the first real core workflow proof pass.
+Checkpoint: `e4b4252` Complete core workflow proof fixes
+Updated after defining the managed local service and sandboxed tool boundary.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -42,6 +42,7 @@ below are resolved or explicitly scoped out of the public build.
   - `docs/operator/RELEASE.md`
   - `docs/operator/SAFE_WEB_SEARCH.md`
   - `docs/operator/KNOWN_LIMITS.md`
+  - `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`
 - Release and safety tests:
   - first-run/install hardening
   - release bundle packaging
@@ -125,10 +126,15 @@ surface:
 14. Real internet/search is not yet proven by the core workflow proof because no
    trusted SearXNG endpoint is configured. Configure `SEARXNG_BASE_URL` and
    rerun the proof.
-15. Live behavior barrage is good smoke coverage only. It catches boundary,
+15. SearXNG setup must follow the managed local service boundary before it is
+   implemented: no base Docker/Podman dependency, user-provided URL remains
+   supported, optional rootless Podman path is confirmation-gated and
+   localhost-bound, setup is journaled, and rollback touches only owned
+   resources.
+16. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
-16. Public install/update/rollback needs one clean end-to-end pass on a clean
+17. Public install/update/rollback needs one clean end-to-end pass on a clean
     user-local environment or VM before any unassisted public trial.
 
 ## Non-Blocking Polish Items
@@ -204,6 +210,11 @@ Remaining risk: keep package install, directory creation, Docker/container
 control, and future filesystem writes outside normal assistant actions unless
 they use a managed transaction path.
 
+Before SearXNG setup implementation, use
+`docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` as the boundary for
+Tier 1 text packs, Tier 2 managed local services, Tier 3 sandboxed tool/MCP
+runtimes, and app/plugin bridges. Do not make Docker/Podman a base dependency.
+
 ### Docs
 
 Status: mostly ready.
@@ -271,10 +282,11 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Configure a trusted SearXNG endpoint, then rerun
-`python scripts/prove_core_workflows.py`. The target is to move real
-internet/search from `BLOCKED` to observed PASS or FAIL. Do not continue broad
-persistent-journal rollout before that proof.
+Implement SearXNG detection/setup guidance against
+`docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`. Keep search
+disabled until explicitly configured/enabled, support user-provided
+`SEARXNG_BASE_URL`, and do not add managed rootless Podman setup until the
+preview/confirm/journal/health/rollback path is ready.
 
 ## Required Verification
 

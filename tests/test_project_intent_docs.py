@@ -88,6 +88,27 @@ def test_managed_local_services_and_docker_helper_docs_state_safety_boundaries()
     assert "dockerfile builds from untrusted" in combined
 
 
+def test_managed_local_services_and_sandboxed_tools_doc_defines_runtime_boundary() -> None:
+    path = REPO_ROOT / "docs" / "design" / "MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8").lower()
+    text_flat = " ".join(text.split())
+    assert "safe text skill packs" in text
+    assert "managed local services" in text
+    assert "sandboxed tool/mcp runtimes" in text
+    assert "app bridges and plugins" in text
+    assert "podman/docker is not a base personal agent dependency" in text_flat
+    assert "rootless podman is preferred" in text
+    assert "confirmation-gated" in text
+    assert "localhost-bound by default" in text
+    assert "127.0.0.1" in text
+    assert "persistent managed-action journal" in text
+    assert "rollback only resources created by the failed action" in text
+    assert "searxng is the first planned managed local service" in text
+    assert "search is disabled unless explicitly configured/enabled" in text
+    assert "must not claim search works until a real configured runtime path works" in text
+
+
 def test_capability_setup_ux_doc_exists_and_keeps_backends_optional() -> None:
     path = REPO_ROOT / "docs" / "design" / "CAPABILITY_SETUP_UX.md"
     assert path.is_file()
@@ -230,7 +251,7 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     lowered = text.lower()
     lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "019ac0c" in text
+    assert "e4b4252" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
     assert (
@@ -251,6 +272,8 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "internet/search status: blocked" in lowered
     assert "model scout/provider behavior: pass" in lowered
     assert "trusted searxng endpoint" in lowered
+    assert "managed_local_services_and_sandboxed_tools.md" in lowered
+    assert "no base docker/podman dependency" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered

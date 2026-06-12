@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-11
-Checkpoint: `019ac0c` Persist journals for pack lifecycle
-Latest clean checkpoint before this pass: `019ac0c` Persist journals for pack lifecycle
+Checkpoint: `e4b4252` Complete core workflow proof fixes
+Latest clean checkpoint before this pass: `e4b4252` Complete core workflow proof fixes
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -17,6 +17,7 @@ This checkpoint captures the current operator/project baseline so future chats a
 
 ## Latest Known Commits
 
+- `e4b4252` Complete core workflow proof fixes
 - `019ac0c` Persist journals for pack lifecycle
 - `6d7fd86` Persist journals for model acquisition
 - `cd913e1` Persist journals for model selection changes
@@ -65,7 +66,8 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Semantic memory remains disabled by default and release-gated, but optional semantic ingest/rebuild/repair paths now attach redacted managed-action journals, verify source/chunk/vector/index-state readback, keep duplicate observe writes idempotent through deterministic source hashes, remove only owned failed new ingest rows, preserve prior usable index state on failed repair, and expose a read-only semantic doctor plus confirmed repair path.
 - Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows. Stop broad journaling for now; the next work is proof and targeted fixes, not more infrastructure. Package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
 - Core workflow proof now exists in `scripts/prove_core_workflows.py` and is documented in `docs/operator/CORE_WORKFLOW_PROOF.md`. Latest observed result: external skill pack lifecycle PASS for a deterministic approved local source through preview, quarantine/import, review, approval, enablement, metadata-only permission grant, harmless managed-adapter dry-run invocation, disable/remove, tombstone, and source cleanup. Missing-capability public chat PASS: it checks approved pack sources, names a candidate, proposes the preview/install/review path, and does not claim install/use. Model/provider public chat guidance PASS: it distinguishes Ollama, OpenAI-compatible local endpoints, llama.cpp server/LM Studio/vLLM through user-run endpoints, and direct llama.cpp management as absent. Internet/search is BLOCKED until a trusted SearXNG endpoint is configured. Release gates still require direct verification outside the proof harness.
-- Release readiness is Yellow at `019ac0c`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` defines the next implementation boundary before SearXNG setup: Tier 1 safe text packs, Tier 2 managed local services, Tier 3 sandboxed tool/MCP runtimes, and app/plugin bridges. Personal Agent remains Python plus a user systemd service; Podman/Docker is not a base dependency; rootless Podman is preferred only for optional confirmed sandboxed services; services are localhost-bound by default.
+- Release readiness is Yellow at `e4b4252`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -130,7 +132,7 @@ Run this after external-pack, search, acquisition, or routing changes:
 
 ## Next Likely Work
 
-- Configure a trusted SearXNG endpoint, then rerun the core workflow proof to move internet/search from `BLOCKED` to proven or failed.
+- Use `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` as the implementation boundary for SearXNG setup. First add detection/setup guidance for a trusted SearXNG endpoint; keep managed rootless Podman setup optional, confirmation-gated, localhost-bound, journaled, and owned-resource rollback only.
 - Add read-only persistent-journal status surfacing before making broader crash/restart recovery claims.
 - Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.
