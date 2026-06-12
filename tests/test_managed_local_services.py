@@ -167,7 +167,7 @@ class TestManagedLocalServices(unittest.TestCase):
             "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8080:8080",
-            "approved_volume_path": "memory/local_services/searxng",
+            "volume_mount": False,
         }
 
         result = executor.execute_from_pending(params)
@@ -183,6 +183,8 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertIn("--name", run_argv)
         self.assertIn("personal-agent-searxng", run_argv)
         self.assertIn("127.0.0.1:8080:8080", run_argv)
+        self.assertNotIn("-v", run_argv)
+        self.assertFalse(any("/etc/searxng" in str(part) for part in run_argv))
         self.assertIn("docker.io/searxng/searxng:latest", run_argv)
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
 
@@ -230,6 +232,9 @@ class TestManagedLocalServices(unittest.TestCase):
 
         self.assertEqual("docker.io/searxng/searxng:latest", plan.image)
         self.assertEqual(["podman", "pull", "docker.io/searxng/searxng:latest"], plan.pull_argv())
+        self.assertFalse(plan.volume_mount)
+        self.assertNotIn("-v", plan.run_argv())
+        self.assertFalse(any("/etc/searxng" in str(part) for part in plan.run_argv()))
         self.assertIn("docker.io/searxng/searxng:latest", plan.run_argv())
 
     def test_executor_fallback_run_uses_loopback_only(self) -> None:
@@ -248,7 +253,7 @@ class TestManagedLocalServices(unittest.TestCase):
             "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8888:8080",
-            "approved_volume_path": "memory/local_services/searxng",
+            "volume_mount": False,
         }
 
         result = executor.execute_from_pending(params)
@@ -275,7 +280,7 @@ class TestManagedLocalServices(unittest.TestCase):
                 "approved_image": "docker.io/searxng/searxng:latest",
                 "approved_container_name": "personal-agent-searxng",
                 "loopback_bind": "0.0.0.0:8888:8080",
-                "approved_volume_path": "memory/local_services/searxng",
+                "volume_mount": False,
             }
         )
 
@@ -314,13 +319,14 @@ class TestManagedLocalServices(unittest.TestCase):
             "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8080:8080",
-            "approved_volume_path": "memory/local_services/searxng",
+            "volume_mount": False,
         }
         for key, value in {
             "approved_image": "evil/image:latest",
             "approved_container_name": "evil-name",
             "loopback_bind": "0.0.0.0:8080:8080",
             "approved_volume_path": "/tmp/random",
+            "volume_mount": True,
         }.items():
             params = dict(base)
             params[key] = value
@@ -349,7 +355,7 @@ class TestManagedLocalServices(unittest.TestCase):
                 "approved_image": "searxng/searxng:latest",
                 "approved_container_name": "personal-agent-searxng",
                 "loopback_bind": "127.0.0.1:8080:8080",
-                "approved_volume_path": "memory/local_services/searxng",
+                "volume_mount": False,
             }
         )
 
@@ -616,6 +622,9 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIsNone(plan["fallback_reason"])
         self.assertEqual("docker.io/searxng/searxng:latest", plan["image"])
         self.assertEqual("docker.io/searxng/searxng:latest", plan["executor_pending"]["approved_image"])
+        self.assertFalse(plan["volume_mount"])
+        self.assertEqual([], plan["state_files_touched"])
+        self.assertFalse(plan["executor_pending"]["volume_mount"])
 
     def test_search_setup_plan_marks_docker_as_explicit_fallback(self) -> None:
         runtime = self._runtime_with_engine("docker")

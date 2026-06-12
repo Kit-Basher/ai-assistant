@@ -33,6 +33,9 @@ managed local service:
 - User-provided setup accepts loopback SearXNG URLs only.
 - Managed container setup uses the approved `personal-agent-searxng` container
   and binds only to `127.0.0.1`.
+- The first managed SearXNG install uses the image default config and does not
+  bind-mount an empty host directory over `/etc/searxng`. Future persistent
+  config support must seed and validate a known-good config before mounting it.
 - On Linux, rootless Podman is the preferred managed-service engine. Docker is
   shown only as an explicit fallback when rootless Podman is unavailable or not
   confirmed.

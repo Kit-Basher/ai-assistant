@@ -12144,11 +12144,13 @@ class AgentRuntime:
             "health_url": plan.get("health_url"),
             "state_config_scope": "runtime_config",
             "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
-            "state_files_touched": [str(plan.get("volume_path") or "memory/local_services/searxng")],
+            "state_files_touched": [],
+            "volume_mount": False,
             "service_name": "personal-agent-searxng",
             "rollback_scope": "remove only the owned personal-agent-searxng container created by this action and restore previous runtime search config",
             "safety_notes": [
                 "The service binds to 127.0.0.1 only.",
+                "The first managed setup uses the image default SearXNG config and does not bind-mount an empty /etc/searxng directory.",
                 "No system packages are installed automatically.",
                 "Search remains metadata-only.",
             ],
@@ -12159,7 +12161,7 @@ class AgentRuntime:
                 "approved_image": plan.get("image"),
                 "approved_container_name": plan.get("container_name"),
                 "loopback_bind": plan.get("loopback_bind"),
-                "approved_volume_path": "memory/local_services/searxng",
+                "volume_mount": False,
                 "health_url": plan.get("health_url"),
             },
         }
@@ -12513,7 +12515,7 @@ class AgentRuntime:
                 "approved_image": str(params.get("approved_image") or "docker.io/searxng/searxng:latest"),
                 "approved_container_name": str(params.get("approved_container_name") or "personal-agent-searxng"),
                 "loopback_bind": bind,
-                "approved_volume_path": str(params.get("approved_volume_path") or "memory/local_services/searxng"),
+                "volume_mount": False,
                 "health_url": health_url,
             },
         }

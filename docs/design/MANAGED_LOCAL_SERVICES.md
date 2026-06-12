@@ -21,12 +21,12 @@ Allowed native service actions are limited to:
 - run an approved image only
 - bind service ports to `127.0.0.1` only
 - use approved fallback ports only after preflight detects a conflict
-- use fixed container names, fixed ports, and fixed volume paths
+- use fixed container names, fixed ports, and explicitly approved mounts only
 - health check a local endpoint
 - stop, restart, or remove Personal-Agent-managed service containers
 - update Personal Agent config or env only after confirmation, if an existing config flow safely supports it
 
-For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, approved image reference, and bounded persistent volume location. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
+For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, and approved image reference. The first managed install does not bind-mount a host config directory over `/etc/searxng`; it uses the image defaults so SearXNG can bootstrap its own config. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
 
 Mutating service actions follow the managed-action recovery pattern in [MANAGED_ACTION_RECOVERY.md](MANAGED_ACTION_RECOVERY.md): journal the attempt, verify success, roll back only owned changes on failure, and never silently mutate pre-existing user resources.
 
@@ -98,11 +98,13 @@ The first mutating service action is confirm-gated SearXNG setup. It may only:
 - preflight port 8080 before pull/run
 - if 8080 is busy, offer only approved fallback `127.0.0.1:8888:8080`
 - if both 8080 and 8888 are busy, do not pull or run
-- mount only the Personal-Agent-managed SearXNG volume
+- use no config bind mount by default
 - run detached
 - health check `http://127.0.0.1:8080`
 
-It must not update search config automatically. If SearXNG starts successfully but search is not configured, the assistant should tell the user to set `SEARCH_ENABLED=1` and `SEARXNG_BASE_URL` to the selected approved local URL, either `http://127.0.0.1:8080` or `http://127.0.0.1:8888`, or use a future separately confirmed config path.
+Future persistent SearXNG config support must seed and validate a known-good config before mounting it; an empty host directory must not be mounted over `/etc/searxng`.
+
+Search config is updated only after the SearXNG JSON endpoint verifies. To keep search enabled after restart, the service environment still needs the selected approved local URL, either `http://127.0.0.1:8080` or `http://127.0.0.1:8888`.
 
 If the approved container name already exists, including a failed `Created` container from an earlier attempt, the conservative default is to stop and require manual inspection or a separate confirmed cleanup action. The runtime must not silently delete or recreate containers.
 
@@ -124,4 +126,4 @@ Service action tests must prove:
 - Dockerfile or Compose content from packs is rejected
 - confirmation is one step only
 - missing Docker/Podman produces setup guidance, not auto-install
-- SearXNG setup uses only the approved image/name/port/volume contract
+- SearXNG setup uses only the approved image/name/port/no-volume default contract

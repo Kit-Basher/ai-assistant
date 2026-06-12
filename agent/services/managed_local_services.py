@@ -18,7 +18,6 @@ APPROVED_SEARXNG_IMAGE = "docker.io/searxng/searxng:latest"
 APPROVED_SEARXNG_CONTAINER = "personal-agent-searxng"
 APPROVED_SEARXNG_PORT = 8080
 APPROVED_SEARXNG_FALLBACK_PORT = 8888
-APPROVED_SEARXNG_VOLUME = "memory/local_services/searxng"
 APPROVED_SEARXNG_PRIMARY_BIND = "127.0.0.1:8080:8080"
 APPROVED_SEARXNG_FALLBACK_BIND = "127.0.0.1:8888:8080"
 APPROVED_SEARXNG_BINDS = (APPROVED_SEARXNG_PRIMARY_BIND, APPROVED_SEARXNG_FALLBACK_BIND)
@@ -34,7 +33,7 @@ class ManagedServiceSpec:
     approved_image: str
     approved_port: int
     approved_loopback_bind: str
-    approved_volume_path: str
+    approved_volume_path: str | None = None
     blocked_actions: tuple[str, ...] = field(default_factory=tuple)
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -50,6 +49,7 @@ class ManagedServiceSpec:
                 "bind": self.approved_loopback_bind,
                 "fallback_bind": APPROVED_SEARXNG_FALLBACK_BIND if self.service_id == "searxng" else None,
                 "volume_path": self.approved_volume_path,
+                "volume_mount": False,
                 "metadata_only": True,
             },
             "blocked_actions": list(self.blocked_actions),
@@ -65,7 +65,7 @@ SEARXNG_SERVICE = ManagedServiceSpec(
     approved_image=APPROVED_SEARXNG_IMAGE,
     approved_port=APPROVED_SEARXNG_PORT,
     approved_loopback_bind=APPROVED_SEARXNG_PRIMARY_BIND,
-    approved_volume_path=APPROVED_SEARXNG_VOLUME,
+    approved_volume_path=None,
     blocked_actions=(
         "docker_pull",
         "docker_run",
@@ -89,10 +89,11 @@ class ManagedLocalServiceSetupPlan:
     image: str
     container_name: str
     loopback_bind: str
-    host_volume_path: str
-    container_volume_path: str
     health_url: str
     host_port: int
+    volume_mount: bool = False
+    host_volume_path: str | None = None
+    container_volume_path: str | None = None
 
     def pull_argv(self) -> list[str]:
         return [self.engine, "pull", self.image]
@@ -109,7 +110,7 @@ class ManagedLocalServiceSetupPlan:
         ]
 
     def run_argv(self) -> list[str]:
-        return [
+        argv = [
             self.engine,
             "run",
             "-d",
@@ -117,10 +118,11 @@ class ManagedLocalServiceSetupPlan:
             self.container_name,
             "-p",
             self.loopback_bind,
-            "-v",
-            f"{self.host_volume_path}:{self.container_volume_path}",
-            self.image,
         ]
+        if self.volume_mount:
+            argv.extend(["-v", f"{self.host_volume_path}:{self.container_volume_path}"])
+        argv.append(self.image)
+        return argv
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -129,6 +131,7 @@ class ManagedLocalServiceSetupPlan:
             "image": self.image,
             "container_name": self.container_name,
             "loopback_bind": self.loopback_bind,
+            "volume_mount": self.volume_mount,
             "host_volume_path": self.host_volume_path,
             "container_volume_path": self.container_volume_path,
             "health_url": self.health_url,
@@ -270,17 +273,17 @@ class ManagedLocalServiceExecutor:
         spec = SERVICE_REGISTRY["searxng"]
         port = int(host_port)
         bind = APPROVED_SEARXNG_FALLBACK_BIND if port == APPROVED_SEARXNG_FALLBACK_PORT else APPROVED_SEARXNG_PRIMARY_BIND
-        volume = (self._managed_root / spec.approved_volume_path).resolve()
         return ManagedLocalServiceSetupPlan(
             service_id=spec.service_id,
             engine=engine,
             image=spec.approved_image,
             container_name=spec.approved_container_name,
             loopback_bind=bind,
-            host_volume_path=str(volume),
-            container_volume_path="/etc/searxng",
             health_url=f"http://127.0.0.1:{port}",
             host_port=port,
+            volume_mount=False,
+            host_volume_path=None,
+            container_volume_path=None,
         )
 
     def preview_setup_from_status(self, *, service_id: str, selected_engine: str) -> dict[str, Any]:
@@ -346,11 +349,14 @@ class ManagedLocalServiceExecutor:
             "approved_image": spec.approved_image,
             "approved_container_name": spec.approved_container_name,
             "loopback_bind": plan.loopback_bind,
-            "approved_volume_path": spec.approved_volume_path,
+            "volume_mount": False,
         }
         for key, expected in checks.items():
-            if str(params.get(key) or "").strip() != expected:
+            actual = bool(params.get(key)) if isinstance(expected, bool) else str(params.get(key) or "").strip()
+            if actual != expected:
                 return None, f"managed_service_plan_tampered_{key}"
+        if str(params.get("approved_volume_path") or "").strip():
+            return None, "managed_service_plan_tampered_approved_volume_path"
         reason = self.validate_plan(plan)
         if reason:
             return None, reason
@@ -378,19 +384,16 @@ class ManagedLocalServiceExecutor:
             return "managed_service_bind_not_loopback"
         if int(host_port) != plan.host_port:
             return "managed_service_bind_port_mismatch"
-        host_volume = Path(plan.host_volume_path).expanduser().resolve()
-        approved_root = (self._managed_root / spec.approved_volume_path).resolve()
-        if host_volume != approved_root:
+        if plan.volume_mount:
             return "managed_service_volume_not_approved"
-        if plan.container_volume_path != "/etc/searxng":
-            return "managed_service_container_volume_not_approved"
+        if plan.host_volume_path or plan.container_volume_path:
+            return "managed_service_volume_not_approved"
         return None
 
     def execute_plan(self, plan: ManagedLocalServiceSetupPlan) -> ManagedLocalServiceExecutionResult:
         journal = ManagedActionJournal(action_type="managed_local_service_setup", target=plan.service_id)
         journal.plan_step("validate_plan", resource=plan.service_id)
         journal.plan_step("preflight_port", resource=f"127.0.0.1:{plan.host_port}")
-        journal.plan_step("ensure_volume", resource=plan.host_volume_path)
         journal.plan_step("check_existing_container", resource=plan.container_name)
         journal.plan_step("pull_image", resource=plan.image)
         journal.plan_step("run_container", resource=plan.container_name)
@@ -420,21 +423,6 @@ class ManagedLocalServiceExecutor:
                 journal=journal.to_dict(),
             )
         journal.record_step("preflight_port", ok=True, resource=f"127.0.0.1:{plan.host_port}")
-        try:
-            Path(plan.host_volume_path).mkdir(parents=True, exist_ok=True)
-            journal.record_step("ensure_volume", ok=True, resource=plan.host_volume_path)
-            journal.record_changed_resource("directory", plan.host_volume_path, owned_by="personal-agent")
-        except OSError as exc:
-            journal.record_step("ensure_volume", ok=False, resource=plan.host_volume_path, error=str(exc))
-            return ManagedLocalServiceExecutionResult(
-                ok=False,
-                service_id=plan.service_id,
-                selected_engine=plan.engine,
-                blocked_reason="managed_service_volume_create_failed",
-                error=str(exc),
-                plan=plan,
-                journal=journal.to_dict(),
-            )
         existing = self._run_fixed(plan.existing_container_argv())
         if existing.returncode == 0 and plan.container_name in str(existing.stdout or "").splitlines():
             journal.record_step("check_existing_container", ok=False, resource=plan.container_name, reason="preexisting_container")
