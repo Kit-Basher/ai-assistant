@@ -186,6 +186,24 @@ Promotion criteria:
 
 Until then, they stay separate from the mandatory gate.
 
+## Safe Web Search / SearXNG
+
+Check search with:
+
+- `GET /search/status`
+
+If search is missing, preview setup with:
+
+- `POST /search/setup/plan`
+- `POST /search/setup/apply` with the returned confirmation token
+
+The managed setup path accepts only loopback SearXNG URLs or the approved local
+`personal-agent-searxng` container plan. It must not install Podman, Docker,
+SearXNG, or system packages silently. It updates the running Personal Agent
+search configuration only after the SearXNG JSON endpoint verifies. To keep
+search enabled after restart, set `SEARCH_ENABLED=1`, `SEARCH_PROVIDER=searxng`,
+and `SEARXNG_BASE_URL` in the service environment.
+
 ## Core Workflow Proof
 
 Run this before any real acceptance claim:

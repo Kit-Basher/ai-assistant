@@ -54,8 +54,10 @@ Status at this checkpoint:
 
 ## What Remains Blocked Or Unproven
 
-- Real internet/search is not proven until `SEARXNG_BASE_URL` points at a
-  trusted reachable SearXNG instance.
+- Real internet/search is not proven until `/search/status` reports a trusted
+  reachable SearXNG instance. This must be a trusted SearXNG instance.
+  Operators can use the confirmation-gated
+  SearXNG managed setup path or provide a loopback `SEARXNG_BASE_URL`.
 - The behavior/release pytest group is intentionally run directly outside the
   proof harness:
 
@@ -65,7 +67,8 @@ python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barra
 
 ## Smallest Next Fixes
 
-1. Configure `SEARXNG_BASE_URL` for a trusted SearXNG instance, then rerun the
+1. Use `/search/setup/plan` and `/search/setup/apply`, or configure
+   `SEARXNG_BASE_URL` for a trusted reachable SearXNG instance, then rerun the
    proof to turn internet/search from `BLOCKED` into an observed real query.
 2. Keep running the behavior/release pytest group directly after the proof until
    the proof harness can run it without introducing test-environment drift.

@@ -35,6 +35,38 @@ def redact_search_query(query: str | None) -> str:
     return text
 
 
+def _redact_base_url(url: str) -> str:
+    parsed = urlparse(str(url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return "<configured>"
+    host = parsed.hostname or ""
+    port = f":{parsed.port}" if parsed.port else ""
+    path = parsed.path.rstrip("/")
+    return f"{parsed.scheme}://{host}{port}{path}"
+
+
+def _setup_source_for_base_url(url: str) -> str:
+    parsed = urlparse(str(url or "").strip())
+    host = (parsed.hostname or "").strip().lower()
+    if host in {"127.0.0.1", "localhost", "::1"} and parsed.port in {8080, 8888}:
+        return "managed_or_user_loopback"
+    return "user_provided"
+
+
+def _next_action_for_status(reason: str | None, *, endpoint_configured: bool) -> str:
+    if reason is None:
+        return "Use an explicit prompt such as: search the web for <topic>."
+    if reason == "search_disabled":
+        return "Preview and confirm local SearXNG setup, or set SEARCH_ENABLED=1 with a trusted SEARXNG_BASE_URL."
+    if reason == "unsupported_provider":
+        return "Set SEARCH_PROVIDER=searxng; no other search provider is supported by this runtime yet."
+    if reason == "endpoint_missing" or not endpoint_configured:
+        return "Set SEARXNG_BASE_URL to a trusted SearXNG endpoint, or preview local SearXNG setup."
+    if reason == "endpoint_unreachable":
+        return "Start or repair the configured SearXNG endpoint, then check /search/status again."
+    return "Check /search/status and configure a trusted SearXNG endpoint."
+
+
 @dataclass(frozen=True)
 class SafeWebSearchConfig:
     enabled: bool = False
@@ -108,8 +140,9 @@ class SafeWebSearchClient:
     def status(self) -> dict[str, Any]:
         enabled = bool(self.config.enabled)
         provider = str(self.config.provider or "").strip().lower() or SUPPORTED_PROVIDER
-        endpoint_configured = bool(str(self.config.searxng_base_url or "").strip())
-        available = enabled and provider == SUPPORTED_PROVIDER and endpoint_configured
+        base_url = str(self.config.searxng_base_url or "").strip()
+        endpoint_configured = bool(base_url)
+        available = False
         reason = None
         if not enabled:
             reason = "search_disabled"
@@ -117,15 +150,22 @@ class SafeWebSearchClient:
             reason = "unsupported_provider"
         elif not endpoint_configured:
             reason = "endpoint_missing"
+        else:
+            available = self._probe_available(base_url)
+            if not available:
+                reason = "endpoint_unreachable"
         return {
             "ok": True,
             "enabled": enabled,
             "provider": provider,
             "available": available,
             "endpoint_configured": endpoint_configured,
+            "base_url": _redact_base_url(base_url) if base_url else None,
+            "setup_source": _setup_source_for_base_url(base_url) if base_url else "unconfigured",
             "max_results": min(HARD_MAX_RESULTS, max(1, int(self.config.max_results or DEFAULT_MAX_RESULTS))),
             "timeout_seconds": max(0.1, float(self.config.timeout_seconds or DEFAULT_TIMEOUT_SECONDS)),
             "reason": reason,
+            "next_action": _next_action_for_status(reason, endpoint_configured=endpoint_configured),
             "safety": {
                 "metadata_only": True,
                 "results_are_untrusted": True,
@@ -135,6 +175,17 @@ class SafeWebSearchClient:
                 "pack_install_import": False,
             },
         }
+
+    def _probe_available(self, base_url: str) -> bool:
+        url = self._search_url(base_url, "personal agent search status")
+        request = Request(url, headers={"Accept": "application/json", "User-Agent": "personal-agent-safe-web-search/1"})
+        try:
+            with self._opener.open(request, timeout=min(self._timeout(), 2.0)) as response:
+                raw = response.read(512 * 1024)
+            payload = json.loads(raw.decode("utf-8"))
+        except (TimeoutError, HTTPError, URLError, OSError, socket.timeout, UnicodeError, json.JSONDecodeError):
+            return False
+        return isinstance(payload, dict) and isinstance(payload.get("results", []), list)
 
     def search(self, query: str, *, max_results: int | None = None) -> SafeWebSearchResponse:
         query_clean = " ".join(str(query or "").split())

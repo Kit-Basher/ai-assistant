@@ -2188,10 +2188,10 @@ class Orchestrator:
     def _selected_managed_service_engine(self, services_payload: dict[str, Any], searxng: dict[str, Any]) -> str | None:
         docker_available = bool(services_payload.get("docker_available") or searxng.get("docker_available"))
         podman_available = bool(services_payload.get("podman_available") or searxng.get("podman_available"))
-        if docker_available:
-            return "docker"
         if podman_available:
             return "podman"
+        if docker_available:
+            return "docker"
         return None
 
     def _managed_service_missing_engine_response(self, services_payload: dict[str, Any]) -> OrchestratorResponse:
@@ -2793,6 +2793,7 @@ class Orchestrator:
             ok = bool(result.get("ok"))
             did_pull = bool(result.get("did_pull"))
             did_run = bool(result.get("did_run"))
+            did_configure = bool(result.get("did_configure"))
             reachable = bool(result.get("reachable"))
             blocked_reason = str(result.get("blocked_reason") or "").strip()
             plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
@@ -2803,9 +2804,10 @@ class Orchestrator:
                 f"Pulled approved image: {'yes' if did_pull else 'no'}.",
                 f"Started approved container: {'yes' if did_run else 'no'}.",
                 f"Reachable at {health_url}: {'yes' if reachable else 'no'}.",
+                f"Enabled Personal Agent metadata-only search for this running service: {'yes' if did_configure else 'no'}.",
                 "I used only the approved SearXNG Docker/Podman plan; no arbitrary Docker commands ran.",
                 "No external pack code ran.",
-                "No host networking, privileged mode, random mounts, system package install, or config change was used.",
+                "No host networking, privileged mode, random mounts, or system package install was used.",
             ]
             if blocked_reason == "managed_service_port_occupied":
                 lines.append(str(result.get("error") or "The approved port is already being used by another local app."))
@@ -2818,18 +2820,24 @@ class Orchestrator:
             if ok:
                 lines.append("A background service is running, and it is only reachable from this computer.")
                 lines.append("You can ask me to stop web search if you want to remove the managed container.")
-                lines.append(f"Next step: if web search is not already configured, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL={health_url}, then check search again.")
+                lines.append("Next step: ask me to search for a topic. To keep this after restart, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL to the local URL in your service environment.")
             else:
-                lines.append("Next step: fix the reported port/container issue, then ask me to set up web search again.")
+                journal_payload = result.get("managed_action_journal") if isinstance(result.get("managed_action_journal"), dict) else {}
+                rollback_payload = journal_payload.get("rollback_result") if isinstance(journal_payload.get("rollback_result"), dict) else {}
+                rollback_known = "rollback_ok" in result or "ok" in rollback_payload
+                rollback_ok = bool(result.get("rollback_ok", rollback_payload.get("ok", False)))
+                restored = "yes" if rollback_ok else "no" if rollback_known else "unknown"
+                lines.append(f"Previous search settings restored: {restored}.")
+                lines.append("Next step: fix the reported port/container/search status issue, then ask me to set up web search again.")
             payload = dict(result) if isinstance(result, dict) else {}
             payload.update(
                 {
                     "type": "managed_local_service_setup_result",
                     "service_id": service_id,
                     "selected_engine": engine,
-                    "mutated": bool(did_pull or did_run),
+                    "mutated": bool(did_pull or did_run or did_configure),
                     "did_install": False,
-                    "did_configure": False,
+                    "did_configure": did_configure,
                 }
             )
             return self._runtime_truth_response(

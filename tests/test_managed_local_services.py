@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import replace
+import io
 import json
 import os
 import subprocess
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from agent.api_server import AgentRuntime
@@ -31,7 +33,36 @@ class _FakeManagedServiceRunner:
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
         if self.fail_on and self.fail_on in joined:
             return subprocess.CompletedProcess(argv, 2, stdout="", stderr="mock failure")
+        if len(argv) > 1 and argv[1] == "run":
+            self.existing = True
+        if len(argv) > 1 and argv[1] == "rm":
+            self.existing = False
         return subprocess.CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+
+class _FakeSearchResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self._body = io.BytesIO(json.dumps(payload).encode("utf-8"))
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def __enter__(self) -> "_FakeSearchResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeSearchOpener:
+    def __init__(self, payload: dict[str, object] | None = None) -> None:
+        self.payload = payload or {"results": []}
+        self.opened_urls: list[str] = []
+
+    def open(self, request, timeout: float = 5.0):  # noqa: ANN001
+        _ = timeout
+        self.opened_urls.append(getattr(request, "full_url", str(request)))
+        return _FakeSearchResponse(self.payload)
 
 
 class TestManagedLocalServices(unittest.TestCase):
@@ -459,6 +490,101 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(payload["docker_available"])
         self.assertEqual("searxng", payload["services"][0]["service_id"])
 
+    def test_search_status_disabled_has_blocked_next_action(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        handler = _HandlerForTest(runtime, "/search/status")
+
+        handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertFalse(payload["available"])
+        self.assertEqual("search_disabled", payload["reason"])
+        self.assertIn("Preview and confirm", payload["next_action"])
+        self.assertEqual("unconfigured", payload["setup_source"])
+
+    def test_user_provided_loopback_status_probes_availability(self) -> None:
+        runtime = self._runtime(search_enabled=True, endpoint="http://127.0.0.1:8888")
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            handler = _HandlerForTest(runtime, "/search/status")
+            handler.do_GET()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertTrue(payload["available"])
+        self.assertEqual("http://127.0.0.1:8888", payload["base_url"])
+        self.assertEqual("managed_or_user_loopback", payload["setup_source"])
+
+    def test_search_setup_plan_rejects_non_loopback_user_url(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        handler = _HandlerForTest(runtime, "/search/setup/plan", {"base_url": "https://search.example.test"})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(400, handler.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("searxng_endpoint_not_loopback", payload["blocked_reason"])
+
+    def test_search_setup_apply_rejects_invalid_confirmation(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        handler = _HandlerForTest(runtime, "/search/setup/apply", {"plan_id": "missing", "confirmation_token": "bad"})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(400, handler.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("invalid_confirmation", payload["error"])
+        self.assertFalse(runtime.config.search_enabled)
+
+    def test_search_setup_apply_user_url_verifies_and_persists_journal(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        plan_handler = _HandlerForTest(runtime, "/search/setup/plan", {"base_url": "http://127.0.0.1:8888"})
+        plan_handler.do_POST()
+        plan_payload = json.loads(plan_handler.body.decode("utf-8"))
+        plan = plan_payload["plan"]
+
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            apply_handler = _HandlerForTest(
+                runtime,
+                "/search/setup/apply",
+                {"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]},
+            )
+            apply_handler.do_POST()
+        payload = json.loads(apply_handler.body.decode("utf-8"))
+
+        self.assertEqual(200, apply_handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["did_configure"])
+        self.assertTrue(runtime.config.search_enabled)
+        self.assertEqual("http://127.0.0.1:8888", runtime.config.searxng_base_url)
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("verified", row["status"])
+        self.assertEqual("searxng_managed_service_setup", row["action_type"])
+
+    def test_search_setup_apply_consumes_confirmation(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
+        plan = plan_payload["plan"]
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            first = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+        second = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+
+        self.assertTrue(first["ok"])
+        self.assertFalse(second["ok"])
+        self.assertEqual("confirmation_consumed", second["error"])
+
+    def test_search_setup_apply_refuses_expired_confirmation(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
+        plan = plan_payload["plan"]
+        runtime._search_setup_confirmations[plan["plan_id"]]["expires_at"] = time.time() - 1  # noqa: SLF001
+
+        result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("confirmation_expired", result["error"])
+        self.assertFalse(runtime.config.search_enabled)
+
     def _chat(self, runtime: AgentRuntime, prompt: str, *, history: list[dict[str, str]] | None = None) -> tuple[dict[str, object], str]:
         messages = list(history or []) + [{"role": "user", "content": prompt}]
         handler = _MemoryHandlerForTest(
@@ -530,7 +656,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
 
-    def test_yes_after_preview_runs_bounded_setup_without_configure_or_install(self) -> None:
+    def test_yes_after_preview_runs_bounded_setup_configures_runtime_search_after_verify(self) -> None:
         runtime = self._runtime_with_engine("docker")
         runner = _FakeManagedServiceRunner()
         runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
@@ -543,20 +669,65 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         _body, first_text = self._chat(runtime, "enable web search")
         self.assertIn("Web search is not set up yet", first_text)
 
-        body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
         self.assertIn("SearXNG setup finished", second_text)
         self.assertIn("Pulled approved image: yes", second_text)
         self.assertIn("Started approved container: yes", second_text)
+        self.assertIn("Enabled Personal Agent metadata-only search for this running service: yes", second_text)
         self.assertIn("No external pack code ran", second_text)
         self.assertIn("No host networking", second_text)
-        self.assertIn("set SEARCH_ENABLED=1", second_text)
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
         self.assertIn("system package install", second_text)
-        self.assertIn("config change", second_text)
         rendered = second_text.lower()
         self.assertNotIn("docker install", rendered)
         self.assertNotIn("podman install", rendered)
+        self.assertTrue(runtime.config.search_enabled)
+        self.assertEqual("http://127.0.0.1:8080", runtime.config.searxng_base_url)
+        setup_payload = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
+        self.assertTrue(setup_payload.get("did_configure"))
+
+    def test_setup_verification_failure_restores_config_and_removes_owned_container(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner()
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "enable web search")
+
+        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+
+        self.assertIn("SearXNG setup did not complete", second_text)
+        self.assertIn("Previous search settings restored: yes", second_text)
+        self.assertFalse(runtime.config.search_enabled)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("rolled_back", row["status"])
+
+    def test_setup_verification_cleanup_failure_persists_recovery_needed(self) -> None:
+        runtime = self._runtime_with_engine("docker")
+        runner = _FakeManagedServiceRunner(fail_on=" rm ")
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "enable web search")
+
+        self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("recovery_needed", row["status"])
+        self.assertTrue(row["recovery_needed"])
 
     def test_expired_yes_returns_explicit_expiry_and_does_not_execute_setup(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -576,7 +747,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             pending.action["expires_at"] = pending.expires_at
         orchestrator._memory_runtime.clear_expired_pending_items(pending.user_id, now_ts=int(time.time()) + 601)  # noqa: SLF001
 
-        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
         self.assertIn("confirmation expired", second_text)
         self.assertIn("didn’t make any changes", second_text)
@@ -600,7 +772,8 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         if isinstance(pending.action, dict):
             pending.action["expires_at"] = pending.expires_at
 
-        _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
 
         self.assertIn("SearXNG setup finished", second_text)
         self.assertTrue(runner.calls)

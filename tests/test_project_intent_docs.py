@@ -104,8 +104,10 @@ def test_managed_local_services_and_sandboxed_tools_doc_defines_runtime_boundary
     assert "127.0.0.1" in text
     assert "persistent managed-action journal" in text
     assert "rollback only resources created by the failed action" in text
-    assert "searxng is the first planned managed local service" in text
+    assert "searxng is the first implemented managed local service" in text
     assert "search is disabled unless explicitly configured/enabled" in text
+    assert "/search/setup/plan" in text
+    assert "/search/setup/apply" in text
     assert "must not claim search works until a real configured runtime path works" in text
 
 

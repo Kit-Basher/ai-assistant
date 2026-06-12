@@ -267,30 +267,35 @@ offer a future approved managed setup plan. It must not install silently.
 
 ## SearXNG First
 
-SearXNG is the first planned managed local service under this boundary.
+SearXNG is the first implemented managed local service under this boundary.
 
 Current state:
 
 - search is disabled unless explicitly configured/enabled
-- a user-provided `SEARXNG_BASE_URL` works when configured
+- a user-provided loopback `SEARXNG_BASE_URL` works when configured and
+  reachable
+- `/search/status` distinguishes disabled, configured, reachable, and not
+  reachable; it redacts the base URL and gives one next action
+- `/search/setup/plan` and `/search/setup/apply` provide a confirmation-gated
+  setup path for either a user-provided loopback URL or the approved local
+  SearXNG container plan
+- managed setup uses only the approved SearXNG image, container name, bind, and
+  owned state directory; it binds to `127.0.0.1` only
+- setup writes persistent managed-action journal status rows and restores the
+  previous runtime search settings if verification fails
 - the core workflow proof keeps internet/search `BLOCKED` when no trusted
   backend is configured
 - mocked search must not be called proof of real internet/search
 
-Next implementation should add:
-
-- detection of configured `SEARXNG_BASE_URL`
-- detection of local SearXNG availability
-- setup guidance when search is missing
-- status that distinguishes disabled, configured, reachable, and not reachable
-
 Later implementation may add:
 
-- managed rootless Podman setup for SearXNG
-- optional Docker fallback if explicitly supported
+- stronger rootless Podman detection and operator diagnostics
+- optional Docker policy controls if operators want to disable Docker fallback
 - owned container/volume markers
-- health check and rollback
 - stop/remove path
+- persistent restart-safe search environment configuration; the current managed
+  setup updates the running Personal Agent process and tells operators how to
+  keep the setting after restart
 
 Search must stay disabled unless explicitly configured/enabled. The assistant
 must not claim search works until a real configured runtime path works.

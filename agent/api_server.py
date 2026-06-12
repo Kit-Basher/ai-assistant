@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, deque
 import copy
+from dataclasses import replace
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import argparse
@@ -607,6 +608,7 @@ class AgentRuntime:
         self._safe_web_search_client: SafeWebSearchClient | None = None
         self._managed_local_services: ManagedLocalServiceDetector | None = None
         self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
+        self._search_setup_confirmations: dict[str, dict[str, Any]] = {}
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -12054,7 +12056,302 @@ class AgentRuntime:
         )
 
     def execute_managed_service_setup(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._managed_service_executor().execute_from_pending(params).to_dict()
+        params = dict(params or {})
+        plan = self._search_setup_plan_from_pending(params)
+        return self._execute_search_setup_plan(plan)
+
+    def search_setup_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        base_url = str(payload.get("searxng_base_url") or payload.get("base_url") or "").strip()
+        if base_url:
+            if not self._is_loopback_http_url(base_url):
+                return {
+                    "ok": False,
+                    "blocked": True,
+                    "blocked_reason": "searxng_endpoint_not_loopback",
+                    "reason": "Managed search setup only accepts http://127.0.0.1, http://localhost, or http://[::1] endpoints.",
+                    "next_action": "Run your trusted SearXNG locally and provide its loopback URL, or use the managed container plan.",
+                    "mutated": False,
+                }
+            plan = {
+                "service_id": "searxng",
+                "setup_mode": "user_provided_url",
+                "provider": "searxng",
+                "base_url": self._redact_url(base_url),
+                "raw_base_url": base_url,
+                "bind_address": urllib.parse.urlparse(base_url).hostname or "127.0.0.1",
+                "port": urllib.parse.urlparse(base_url).port,
+                "state_config_scope": "runtime_config",
+                "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
+                "rollback_scope": "restore previous runtime search config only",
+                "safety_notes": [
+                    "Search remains metadata-only.",
+                    "No page fetching, browser automation, downloads, or pack install runs from search.",
+                ],
+            }
+            return self._store_search_setup_confirmation(plan)
+
+        services = self.managed_services_status()
+        services_rows = services.get("services") if isinstance(services.get("services"), list) else []
+        searxng = next((row for row in services_rows if isinstance(row, dict) and row.get("service_id") == "searxng"), {})
+        engine = "podman" if bool(services.get("podman_available") or searxng.get("podman_available")) else "docker" if bool(services.get("docker_available") or searxng.get("docker_available")) else ""
+        if not engine:
+            return {
+                "ok": False,
+                "blocked": True,
+                "blocked_reason": "managed_service_runtime_unavailable",
+                "reason": "Neither rootless Podman nor Docker is available to this runtime.",
+                "next_action": "Install/run SearXNG yourself and provide SEARXNG_BASE_URL, or install Podman/Docker manually and retry the setup plan.",
+                "mutated": False,
+            }
+        preview = self.preview_managed_service_setup({"service_id": "searxng", "selected_engine": engine})
+        if not bool(preview.get("ok")):
+            return {
+                "ok": False,
+                "blocked": True,
+                "blocked_reason": str(preview.get("blocked_reason") or "managed_service_setup_unavailable"),
+                "reason": str(preview.get("error") or preview.get("blocked_reason") or "SearXNG setup plan could not be prepared."),
+                "setup_preview": preview,
+                "mutated": False,
+            }
+        plan = dict(preview.get("plan") if isinstance(preview.get("plan"), dict) else {})
+        setup_plan = {
+            "service_id": "searxng",
+            "setup_mode": "managed_container",
+            "provider": "searxng",
+            "selected_engine": engine,
+            "image": plan.get("image"),
+            "container_name": plan.get("container_name"),
+            "loopback_bind": plan.get("loopback_bind"),
+            "bind_address": "127.0.0.1",
+            "port": int(plan.get("host_port") or 8080),
+            "health_url": plan.get("health_url"),
+            "state_config_scope": "runtime_config",
+            "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
+            "state_files_touched": [str(plan.get("volume_path") or "memory/local_services/searxng")],
+            "service_name": "personal-agent-searxng",
+            "rollback_scope": "remove only the owned personal-agent-searxng container created by this action and restore previous runtime search config",
+            "safety_notes": [
+                "The service binds to 127.0.0.1 only.",
+                "No system packages are installed automatically.",
+                "Search remains metadata-only.",
+            ],
+            "executor_pending": {
+                "service_id": "searxng",
+                "selected_engine": engine,
+                "action": "preview_only",
+                "approved_image": plan.get("image"),
+                "approved_container_name": plan.get("container_name"),
+                "loopback_bind": plan.get("loopback_bind"),
+                "approved_volume_path": "memory/local_services/searxng",
+                "health_url": plan.get("health_url"),
+            },
+        }
+        return self._store_search_setup_confirmation(setup_plan)
+
+    def apply_search_setup(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        token = str(payload.get("confirmation_token") or "").strip()
+        plan_id = str(payload.get("plan_id") or "").strip()
+        embedded_plan = payload.get("plan") if isinstance(payload.get("plan"), dict) else None
+        if embedded_plan is not None and not token:
+            plan = dict(embedded_plan)
+            token = str(plan.get("confirmation_token") or "").strip()
+            stored = {"plan": plan, "confirmation_token": token, "expires_at": time.time() + 1, "consumed": False}
+        else:
+            stored = self._search_setup_confirmations.get(plan_id or token)
+        if not stored or str(stored.get("confirmation_token") or "") != token:
+            return {"ok": False, "error": "invalid_confirmation", "mutated": False}
+        if bool(stored.get("consumed")):
+            return {"ok": False, "error": "confirmation_consumed", "mutated": False}
+        if float(stored.get("expires_at") or 0) <= time.time():
+            return {"ok": False, "error": "confirmation_expired", "mutated": False}
+        stored["consumed"] = True
+        plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
+        return self._execute_search_setup_plan(plan)
+
+    def _store_search_setup_confirmation(self, plan: dict[str, Any]) -> dict[str, Any]:
+        plan_id = f"search-setup-{uuid.uuid4().hex[:10]}"
+        token = f"confirm-{uuid.uuid4().hex[:16]}"
+        expires_at = time.time() + 600
+        public_plan = {key: value for key, value in plan.items() if key != "raw_base_url"}
+        public_plan.update({"plan_id": plan_id, "confirmation_token": token, "expires_at": int(expires_at)})
+        stored_plan = dict(plan)
+        stored_plan.update({"plan_id": plan_id, "confirmation_token": token})
+        self._search_setup_confirmations[plan_id] = {
+            "plan": stored_plan,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "consumed": False,
+        }
+        return {"ok": True, "requires_confirmation": True, "plan": public_plan}
+
+    @staticmethod
+    def _search_setup_plan_from_pending(params: dict[str, Any]) -> dict[str, Any]:
+        health_url = str(params.get("health_url") or "http://127.0.0.1:8080")
+        bind = str(params.get("loopback_bind") or "127.0.0.1:8080:8080")
+        try:
+            host_port = int(bind.split(":", 2)[1])
+        except (IndexError, ValueError):
+            host_port = 8080
+        return {
+            "service_id": "searxng",
+            "setup_mode": "managed_container",
+            "provider": "searxng",
+            "selected_engine": str(params.get("selected_engine") or "docker"),
+            "image": str(params.get("approved_image") or "searxng/searxng:latest"),
+            "container_name": str(params.get("approved_container_name") or "personal-agent-searxng"),
+            "loopback_bind": bind,
+            "bind_address": "127.0.0.1",
+            "port": host_port,
+            "health_url": health_url,
+            "settings_changed": ["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"],
+            "executor_pending": {
+                "service_id": "searxng",
+                "selected_engine": str(params.get("selected_engine") or "docker"),
+                "action": "preview_only",
+                "approved_image": str(params.get("approved_image") or "searxng/searxng:latest"),
+                "approved_container_name": str(params.get("approved_container_name") or "personal-agent-searxng"),
+                "loopback_bind": bind,
+                "approved_volume_path": str(params.get("approved_volume_path") or "memory/local_services/searxng"),
+                "health_url": health_url,
+            },
+        }
+
+    def _execute_search_setup_plan(self, plan: dict[str, Any]) -> dict[str, Any]:
+        journal = ManagedActionJournal(action_type="searxng_managed_service_setup", target="searxng")
+        for step in ("preflight_setup_plan", "apply_service_setup", "configure_runtime_search", "verify_search_status"):
+            journal.plan_step(step, resource="searxng")
+        previous = {
+            "search_enabled": bool(self.config.search_enabled),
+            "search_provider": str(self.config.search_provider or "searxng"),
+            "searxng_base_url": str(self.config.searxng_base_url or "") or None,
+        }
+        journal.record_step("preflight_setup_plan", ok=True, resource="searxng", setup_mode=str(plan.get("setup_mode") or ""))
+        self._persist_managed_action_journal(journal, status="planned")
+        self._persist_managed_action_journal(journal, status="running")
+        setup_mode = str(plan.get("setup_mode") or "").strip()
+        base_url = str(plan.get("raw_base_url") or plan.get("health_url") or "").strip()
+        service_result: dict[str, Any] = {"ok": True, "mutated": False}
+        if setup_mode == "managed_container":
+            pending = dict(plan.get("executor_pending") if isinstance(plan.get("executor_pending"), dict) else {})
+            service_result = self._managed_service_executor().execute_from_pending(pending).to_dict()
+            journal.record_step("apply_service_setup", ok=bool(service_result.get("ok")), resource="personal-agent-searxng", engine=str(plan.get("selected_engine") or ""))
+            if bool(service_result.get("did_run")):
+                journal.record_created_resource("container", "personal-agent-searxng", engine=str(plan.get("selected_engine") or ""))
+            if not bool(service_result.get("ok")):
+                rollback_ok = bool(service_result.get("rollback_ok", not service_result.get("rollback_attempted")))
+                journal.mark_verification(ok=False, reason=str(service_result.get("blocked_reason") or "service_setup_failed"))
+                journal.mark_rollback(ok=rollback_ok, attempted=bool(service_result.get("rollback_attempted")), summary=str(service_result.get("error") or "Service setup failed."))
+                self._persist_managed_action_journal(
+                    journal,
+                    status="rolled_back" if rollback_ok else "recovery_needed",
+                    recovery_hint="Inspect only the personal-agent-searxng container if cleanup was incomplete.",
+                )
+                response = dict(service_result)
+                response.update({"ok": False, "did_configure": False, "managed_action_journal": journal.to_dict()})
+                return response
+        else:
+            journal.record_step("apply_service_setup", ok=True, resource="user_provided_searxng_url", setup_mode=setup_mode)
+        if not self._is_loopback_http_url(base_url):
+            journal.record_step("configure_runtime_search", ok=False, resource="runtime_search_config", reason="non_loopback_url")
+            journal.mark_verification(ok=False, reason="non_loopback_url")
+            journal.mark_rollback(ok=True, attempted=False, summary="No mutation started.")
+            self._persist_managed_action_journal(journal, status="failed")
+            return {"ok": False, "error": "searxng_endpoint_not_loopback", "mutated": False, "managed_action_journal": journal.to_dict()}
+        self._set_runtime_search_config(enabled=True, provider="searxng", base_url=base_url)
+        journal.record_changed_resource("runtime_search_config", "search", rollback_supported=True)
+        journal.record_step("configure_runtime_search", ok=True, resource="runtime_search_config", settings_changed=["SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"])
+        status = self.search_status()
+        verified = bool(status.get("available")) and bool(status.get("enabled")) and bool(status.get("endpoint_configured"))
+        journal.record_step("verify_search_status", ok=verified, resource="/search/status", reason=str(status.get("reason") or "ok"))
+        journal.mark_verification(ok=verified, available=bool(status.get("available")), provider=str(status.get("provider") or ""))
+        if verified:
+            journal.mark_rollback(ok=True, attempted=False, summary="No rollback needed.")
+            self._persist_managed_action_journal(journal, status="verified")
+            response = dict(service_result)
+            response.update({"ok": True, "did_configure": True, "search_status": status, "managed_action_journal": journal.to_dict()})
+            return response
+        self._set_runtime_search_config(
+            enabled=bool(previous["search_enabled"]),
+            provider=str(previous["search_provider"]),
+            base_url=previous["searxng_base_url"],
+        )
+        rollback_ok = True
+        cleanup_result: dict[str, Any] = {}
+        journal.record_rollback_step("restore_runtime_search_config", ok=True, resource="runtime_search_config")
+        rollback_summary = "Restored previous runtime search configuration."
+        if setup_mode == "managed_container" and bool(service_result.get("did_run")):
+            try:
+                cleanup_result = self._managed_service_executor().stop_from_pending(
+                    {
+                        "service_id": "searxng",
+                        "selected_engine": str(plan.get("selected_engine") or "docker"),
+                        "action": "stop_preview_only",
+                        "approved_container_name": "personal-agent-searxng",
+                    }
+                ).to_dict()
+                cleanup_ok = bool(cleanup_result.get("ok"))
+            except Exception as exc:  # noqa: BLE001 - rollback records recovery-needed safely.
+                cleanup_result = {"ok": False, "error": exc.__class__.__name__}
+                cleanup_ok = False
+            rollback_ok = rollback_ok and cleanup_ok
+            journal.record_rollback_step(
+                "remove_owned_searxng_container_after_verification_failure",
+                ok=cleanup_ok,
+                resource="personal-agent-searxng",
+            )
+            rollback_summary += (
+                " Removed the owned SearXNG container created by this setup."
+                if cleanup_ok
+                else " Could not fully remove the owned SearXNG container created by this setup."
+            )
+        journal.mark_rollback(ok=rollback_ok, attempted=True, summary=rollback_summary)
+        self._persist_managed_action_journal(
+            journal,
+            status="rolled_back" if rollback_ok else "recovery_needed",
+            recovery_hint=None if rollback_ok else "Inspect only the personal-agent-searxng container; do not remove unrelated containers.",
+        )
+        response = dict(service_result)
+        response.update(
+            {
+                "ok": False,
+                "did_configure": False,
+                "blocked_reason": "search_status_verification_failed",
+                "search_status": status,
+                "cleanup_result": cleanup_result,
+                "rollback_ok": rollback_ok,
+                "managed_action_journal": journal.to_dict(),
+            }
+        )
+        return response
+
+    def _set_runtime_search_config(self, *, enabled: bool, provider: str, base_url: str | None) -> None:
+        self.config = replace(self.config, search_enabled=bool(enabled), search_provider=str(provider or "searxng"), searxng_base_url=base_url)
+        self._safe_web_search_client = None
+        self._managed_local_services = None
+
+    @staticmethod
+    def _is_loopback_http_url(url: str | None) -> bool:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+        host = parsed.hostname.strip().lower()
+        if host == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+
+    @staticmethod
+    def _redact_url(url: str) -> str:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+        if not parsed.scheme or not parsed.netloc:
+            return "<configured>"
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}{parsed.path.rstrip('/')}"
 
     def preview_managed_service_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         return self._managed_service_executor().preview_stop_from_status(
@@ -23203,6 +23500,14 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/search/query":
                 ok, body = self.runtime.search_query(payload)
                 self._send_json(200 if ok else 400, body)
+                return
+            if path == "/search/setup/plan":
+                body = self.runtime.search_setup_plan(payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/search/setup/apply":
+                body = self.runtime.apply_search_setup(payload)
+                self._send_json(200 if body.get("ok") else 400, body)
                 return
             if path in {"/chat", "/ask"}:
                 trace_id = self._request_trace_id(payload)
