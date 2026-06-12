@@ -171,6 +171,7 @@ Template: `docs/operator/RELEASE_NOTES_TEMPLATE.md`
 Keep these as post-release operator checks until they are boring enough to
 promote:
 
+- `python scripts/prove_core_workflows.py`
 - `python scripts/webui_smoke.py`
 - `python scripts/reference_pack_workflow_smoke.py`
 - `bash scripts/promote_local_stable.sh`
@@ -184,6 +185,21 @@ Promotion criteria:
 - stable on the actual release machine, not just in tests
 
 Until then, they stay separate from the mandatory gate.
+
+## Core Workflow Proof
+
+Run this before any real acceptance claim:
+
+- `python scripts/prove_core_workflows.py`
+
+Read the report literally. `PASS` means the script observed the runtime path and
+state change. `BLOCKED` means the current machine is missing required runtime
+configuration, such as a ready provider/model or trusted SearXNG endpoint.
+`NOT_PROVEN` means a claim still needs a separate direct command.
+
+The behavior/release gate remains authoritative when run directly:
+
+- `python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py`
 
 ## Runbook Maintenance Rule
 

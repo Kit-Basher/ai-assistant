@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-11
-Checkpoint: `6d7fd86` Persist journals for model acquisition
-Latest clean checkpoint before this pass: `6d7fd86` Persist journals for model acquisition
+Checkpoint: `019ac0c` Persist journals for pack lifecycle
+Latest clean checkpoint before this pass: `019ac0c` Persist journals for pack lifecycle
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -15,10 +15,9 @@ This checkpoint captures the current operator/project baseline so future chats a
 - External pack acquisition remains preview-first and confirmation-gated. Source trust is not content trust, and imported content remains untrusted until it passes quarantine, review, enablement, configuration, and permission gates.
 - Managed-action reliability now covers the high/medium normal-user write paths listed below; remaining follow-ups are tracked in `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
-## Operator History Baseline
-
 ## Latest Known Commits
 
+- `019ac0c` Persist journals for pack lifecycle
 - `6d7fd86` Persist journals for model acquisition
 - `cd913e1` Persist journals for model selection changes
 - `82f9f30` Persist journals for Telegram setup
@@ -64,8 +63,9 @@ This checkpoint captures the current operator/project baseline so future chats a
 - Support bundle artifacts now write a redacted managed-action journal inside the owned temp bundle, persist redacted managed-action journal status transitions, verify expected files by readback, remove only the newly created `agent-support-*` directory on failed verification, and record recovery_needed if owned cleanup cannot complete. Notification test/send/prune now journal policy/target metadata, verify local notification history writes and prune count/window results, restore prior notification history on failed local verification where a snapshot exists, and verify action-ledger appends by readback.
 - Pack removal/source deletion cleanup now attaches managed-action journals, verifies removed/tombstoned/source-policy state by readback, restores prior owned metadata on verification failure, and keeps hostile imported text redacted from tombstones/support output.
 - Semantic memory remains disabled by default and release-gated, but optional semantic ingest/rebuild/repair paths now attach redacted managed-action journals, verify source/chunk/vector/index-state readback, keep duplicate observe writes idempotent through deterministic source hashes, remove only owned failed new ingest rows, preserve prior usable index state on failed repair, and expose a read-only semantic doctor plus confirmed repair path.
-- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows. Highest priority next target is the real acceptance proof plus read-only restart/status surfacing; package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
-- Release readiness is Yellow at `6d7fd86`: suitable for a controlled public trial only after clean install verification and acceptance proof, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows. Stop broad journaling for now; the next work is proof and targeted fixes, not more infrastructure. Package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
+- Core workflow proof now exists in `scripts/prove_core_workflows.py` and is documented in `docs/operator/CORE_WORKFLOW_PROOF.md`. Latest observed result: external skill pack lifecycle PASS for a deterministic approved local source through preview, quarantine/import, review, approval, enablement, metadata-only permission grant, harmless managed-adapter dry-run invocation, disable/remove, tombstone, and source cleanup. Missing-capability public chat and model/provider public chat guidance are BLOCKED in the isolated proof runtime until a ready provider/model is configured. Internet/search is BLOCKED until a trusted SearXNG endpoint is configured. Release gates still require direct verification outside the proof harness.
+- Release readiness is Yellow at `019ac0c`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -121,14 +121,17 @@ Run this after external-pack, search, acquisition, or routing changes:
 
 1. `bash scripts/promote_local_stable.sh`
 2. `python scripts/external_pack_safety_smoke.py`
-3. `python -u scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90 --strict-quality`
-4. `git status`
+3. `python scripts/prove_core_workflows.py`
+4. `python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py`
+5. `python -u scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90 --strict-quality`
+6. `git status`
 
-`external_pack_safety_smoke` currently covers 39 hostile-intake, lifecycle, managed-service, and recovery gates. It proves hostile intake gates. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
+`external_pack_safety_smoke` currently covers 39 hostile-intake, lifecycle, managed-service, and recovery gates. It proves hostile intake gates. `prove_core_workflows.py` proves what actually works and reports `BLOCKED` or `NOT_PROVEN` where runtime configuration or direct verification is still missing. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
 
 ## Next Likely Work
 
-- Run the real acceptance proof, then add read-only persistent-journal status surfacing before making broader crash/restart recovery claims.
+- Configure a ready provider/model and trusted SearXNG endpoint, then rerun the core workflow proof to move public chat missing-capability/model guidance and internet/search from `BLOCKED` to proven or failed.
+- Add read-only persistent-journal status surfacing before making broader crash/restart recovery claims.
 - Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.
 - Add future core-owned content operations only after separate preview/confirmation and safety tests.

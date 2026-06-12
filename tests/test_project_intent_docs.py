@@ -230,7 +230,7 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     lowered = text.lower()
     lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "6d7fd86" in text
+    assert "019ac0c" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
     assert (
@@ -245,11 +245,32 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     assert "default model changes and temporary chat overrides now have persistent redacted status rows" in lowered_flat
     assert "model acquisition/import now has persistent redacted status rows" in lowered_flat
     assert "pack lifecycle/source cleanup now has persistent redacted status rows" in lowered_flat
-    assert "run the real acceptance proof" in lowered_flat
+    assert "scripts/prove_core_workflows.py" in text
+    assert "external skill pack lifecycle: pass" in lowered
+    assert "missing capability flow: blocked" in lowered
+    assert "internet/search status: blocked" in lowered
+    assert "model scout/provider behavior: blocked" in lowered
+    assert "trusted searxng endpoint" in lowered
     assert "semantic memory must remain off by default" in lowered
     assert "package install and directory creation shell flows" in lowered
     assert "future filesystem writes" in lowered
     assert "python scripts/external_pack_safety_smoke.py" in text
+
+
+def test_core_workflow_proof_doc_exists_and_refuses_fake_passes() -> None:
+    path = REPO_ROOT / "docs" / "operator" / "CORE_WORKFLOW_PROOF.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "python scripts/prove_core_workflows.py" in text
+    assert "external skill pack lifecycle | pass" in lowered
+    assert "missing capability flow | blocked" in lowered
+    assert "internet/search status | blocked" in lowered
+    assert "model scout/provider behavior | blocked" in lowered
+    assert "behavior/release pytest group" in lowered
+    assert "must not execute foreign code" in lowered
+    assert "must not claim direct llama.cpp support" in lowered
+    assert "trusted searxng instance" in lowered
 
 
 def test_local_model_provider_support_doc_states_current_boundaries() -> None:

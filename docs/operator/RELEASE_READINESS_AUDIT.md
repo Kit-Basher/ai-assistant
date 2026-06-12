@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
 Date: 2026-06-11
-Checkpoint: `6d7fd86` Persist journals for model acquisition
-Updated after pack lifecycle/source cleanup persistent managed-action journal conversion.
+Checkpoint: `019ac0c` Persist journals for pack lifecycle
+Updated after the first real core workflow proof pass.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -14,8 +14,9 @@ Yellow.
 
 The core local assistant path, first-run path, external-pack safety gates,
 assistant/agent boundary, and supported install stories are coherent enough for
-a controlled public trial. This is not Green because several reliability
-controls are still in-memory or operator-grade, semantic memory remains
+a controlled public trial. This is not Green because public chat proof for
+missing-capability/model guidance still needs a ready provider/model, real
+internet/search still needs a trusted SearXNG endpoint, semantic memory remains
 release-gated/off-by-default, and the live barrage is a smoke check rather than
 a full behavioral certification.
 
@@ -50,6 +51,21 @@ below are resolved or explicitly scoped out of the public build.
   - chat behavior audit
   - live barrage classifier
   - external-pack safety smoke
+- Core workflow proof:
+  - `scripts/prove_core_workflows.py`
+  - `docs/operator/CORE_WORKFLOW_PROOF.md`
+  - external skill pack lifecycle: PASS for the deterministic approved local
+    source through preview, quarantine/import, review, approval, enablement,
+    metadata-only permission grant, harmless managed-adapter dry-run invocation,
+    disable/remove, tombstone, and source cleanup
+  - missing capability flow: BLOCKED at the public chat surface until a ready
+    provider/model is configured
+  - internet/search status: BLOCKED until a trusted SearXNG endpoint is
+    configured
+  - model scout/provider behavior: BLOCKED at the public chat surface until a
+    ready provider/model is configured
+  - behavior/release pytest group: run directly after the proof and treat direct
+    failures as release-blocking
 
 ## Top Release Blockers
 
@@ -91,8 +107,10 @@ surface:
 10. Pack lifecycle/source cleanup now has persistent redacted status rows for
    source approval, import records, review approval, enable/disable, removal
    tombstones, source catalog create/update/delete, source policy update, and
-   source deletion policy-override cleanup, but the external pack workflow still
-   needs the real acceptance proof before end-to-end public claims.
+   source deletion policy-override cleanup. The core workflow proof now proves a
+   safe local external pack lifecycle end to end through harmless managed-adapter
+   dry-run invocation, but it does not prove arbitrary remote packs or foreign
+   code execution.
 11. Model acquisition/import now has persistent redacted status rows,
    verification, and owned generated-file cleanup coverage, but read-only
    restart/status surfacing is not yet implemented.
@@ -102,10 +120,16 @@ surface:
 13. Support bundle creation now has persistent redacted status rows, verification,
    and owned incomplete-bundle cleanup, but read-only restart/status surfacing is
    not yet implemented.
-14. Live behavior barrage is good smoke coverage only. It catches boundary,
+14. Public chat missing-capability and model/provider guidance are not yet
+   proven by the core workflow proof because the isolated proof runtime has no
+   ready provider/model. Configure a ready provider/model and rerun the proof.
+15. Real internet/search is not yet proven by the core workflow proof because no
+   trusted SearXNG endpoint is configured. Configure `SEARXNG_BASE_URL` and
+   rerun the proof.
+16. Live behavior barrage is good smoke coverage only. It catches boundary,
    quality, and stale-context regressions, but it is not enough by itself for a
    release gate.
-15. Public install/update/rollback needs one clean end-to-end pass on a clean
+17. Public install/update/rollback needs one clean end-to-end pass on a clean
     user-local environment or VM before any unassisted public trial.
 
 ## Non-Blocking Polish Items
@@ -163,9 +187,10 @@ other write paths now have journals, verification, and scoped rollback where
 ownership is proven. Remaining gaps are clearly tracked in
 `MANAGED_ACTION_RELIABILITY_AUDIT.md`.
 
-Remaining risk: the next reliability target is the real acceptance proof,
-followed by read-only recovery/status surfacing. Do not claim external skill
-packs are proven end-to-end until that proof pass runs.
+Remaining risk: the next reliability target is read-only recovery/status
+surfacing. Do not claim public chat missing-capability handling, real search, or
+model/provider guidance are proven until the core workflow proof runs with a
+ready provider/model and trusted SearXNG endpoint.
 
 ### Safety / Security
 
@@ -229,7 +254,11 @@ migration story exists.
 8. Confirm semantic memory is disabled by default.
 9. Confirm no assistant surface exposes arbitrary shell, package install,
    filesystem write, Docker, or systemctl actions as normal chat behavior.
-10. Record the release gate output, smoke output, git commit, and known limits
+10. Run `python scripts/prove_core_workflows.py` and record every `BLOCKED` or
+    `NOT_PROVEN` item honestly.
+11. Run the behavior/release pytest group directly and treat any direct failure
+    as release-blocking.
+12. Record the release gate output, smoke output, git commit, and known limits
     in release notes.
 
 ## What Can Wait
@@ -244,17 +273,11 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Run the real acceptance proof for external pack workflow and release gates.
-Scoped preference reset/clear now has in-memory journal, persistent redacted
-status rows, verification, redaction, and rollback coverage. Support bundle
-creation now has persistent redacted status rows, verification, and owned
-incomplete-bundle cleanup coverage. Provider/API key config now has persistent
-redacted status rows for secret save, save-and-test, provider config update, and
-provider config/secret portions of OpenRouter setup. Default model changes and
-temporary chat overrides now have persistent redacted status rows, verification,
-and scoped rollback coverage. Model acquisition/import and pack lifecycle/source
-cleanup now have persistent redacted status rows, verification, and scoped
-rollback coverage.
+Configure a ready provider/model and a trusted SearXNG endpoint, then rerun
+`python scripts/prove_core_workflows.py`. The target is to move missing
+capability public chat, model/provider public chat guidance, and real
+internet/search from `BLOCKED` to observed PASS or FAIL. Do not continue broad
+persistent-journal rollout before that proof.
 
 ## Required Verification
 
@@ -262,6 +285,8 @@ Run:
 
 ```bash
 python -m pytest -q tests/test_project_intent_docs.py
+python -m py_compile scripts/prove_core_workflows.py
+python scripts/prove_core_workflows.py
 python scripts/external_pack_safety_smoke.py
 python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py
 git diff --check
