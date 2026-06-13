@@ -955,7 +955,10 @@ def main() -> int:
                         "approved_image": "evil/image:latest",
                         "approved_container_name": "personal-agent-searxng",
                         "loopback_bind": "127.0.0.1:8080:8080",
-                        "volume_mount": False,
+                        "volume_mount": True,
+                        "config_seeded": True,
+                        "approved_volume_path": "memory/local_services/searxng",
+                        "config_purpose": "enable_json_output_for_safe_metadata_search",
                     }
                 )
                 _assert(not result.ok, "tampered SearXNG plan was accepted")
@@ -990,7 +993,10 @@ def main() -> int:
                         "approved_image": "docker.io/searxng/searxng:latest",
                         "approved_container_name": "personal-agent-searxng",
                         "loopback_bind": "127.0.0.1:8080:8080",
-                        "volume_mount": False,
+                        "volume_mount": True,
+                        "config_seeded": True,
+                        "approved_volume_path": "memory/local_services/searxng",
+                        "config_purpose": "enable_json_output_for_safe_metadata_search",
                     }
                 )
                 _assert(result.ok and result.did_pull and result.did_run, f"approved setup did not complete in fake runner: {result}")
@@ -998,8 +1004,8 @@ def main() -> int:
                 _assert(len(run_calls) == 1, f"expected one run call: {calls}")
                 argv = run_calls[0]["argv"]
                 _assert("127.0.0.1:8080:8080" in argv, f"loopback bind missing: {argv}")
-                _assert("-v" not in argv, f"unexpected config volume mount: {argv}")
-                _assert(not any("/etc/searxng" in str(part) for part in argv), f"unexpected SearXNG config mount: {argv}")
+                _assert("-v" in argv, f"missing config volume mount: {argv}")
+                _assert(any(str(part).endswith("memory/local_services/searxng:/etc/searxng") for part in argv), f"approved SearXNG config mount missing: {argv}")
                 _assert("--privileged" not in argv and "--network" not in argv, f"unsafe docker flags present: {argv}")
                 _assert(run_calls[0].get("shell") is False, "managed service runner did not use shell=False")
 
@@ -1031,7 +1037,10 @@ def main() -> int:
                         "approved_image": "docker.io/searxng/searxng:latest",
                         "approved_container_name": "personal-agent-searxng",
                         "loopback_bind": "127.0.0.1:8080:8080",
-                        "volume_mount": False,
+                        "volume_mount": True,
+                        "config_seeded": True,
+                        "approved_volume_path": "memory/local_services/searxng",
+                        "config_purpose": "enable_json_output_for_safe_metadata_search",
                     }
                 )
                 _assert(not result.ok, "external-pack style action was accepted")
@@ -1069,7 +1078,10 @@ def main() -> int:
                         "approved_image": "docker.io/searxng/searxng:latest",
                         "approved_container_name": "personal-agent-searxng",
                         "loopback_bind": "127.0.0.1:8888:8080",
-                        "volume_mount": False,
+                        "volume_mount": True,
+                        "config_seeded": True,
+                        "approved_volume_path": "memory/local_services/searxng",
+                        "config_purpose": "enable_json_output_for_safe_metadata_search",
                     }
                 )
                 _assert(result.ok and result.did_run, f"fallback setup did not run with fake runner: {result}")
@@ -1112,7 +1124,10 @@ def main() -> int:
                         "approved_image": "docker.io/searxng/searxng:latest",
                         "approved_container_name": "personal-agent-searxng",
                         "loopback_bind": "127.0.0.1:8080:8080",
-                        "volume_mount": False,
+                        "volume_mount": True,
+                        "config_seeded": True,
+                        "approved_volume_path": "memory/local_services/searxng",
+                        "config_purpose": "enable_json_output_for_safe_metadata_search",
                     }
                 )
                 argv_rows = [call["argv"] for call in calls]

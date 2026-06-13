@@ -12,7 +12,12 @@ from unittest import mock
 from pathlib import Path
 
 from agent.api_server import AgentRuntime
-from agent.services.managed_local_services import ManagedLocalServiceDetector, ManagedLocalServiceExecutor, redact_service_url
+from agent.services.managed_local_services import (
+    APPROVED_SEARXNG_SETTINGS,
+    ManagedLocalServiceDetector,
+    ManagedLocalServiceExecutor,
+    redact_service_url,
+)
 from tests.test_api_packs_endpoints import _HandlerForTest, _config
 from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _assistant_text
 
@@ -54,6 +59,29 @@ class _FakeSearchResponse:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         return None
+
+
+class _FakeRawResponse:
+    def __init__(self, body: bytes) -> None:
+        self._body = io.BytesIO(body)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def __enter__(self) -> "_FakeRawResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeRawOpener:
+    def __init__(self, body: bytes) -> None:
+        self.body = body
+
+    def open(self, request, timeout: float = 5.0):  # noqa: ANN001
+        _ = request, timeout
+        return _FakeRawResponse(self.body)
 
 
 class _FakeHTTPHealthResponse:
@@ -180,7 +208,10 @@ class TestManagedLocalServices(unittest.TestCase):
             "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8080:8080",
-            "volume_mount": False,
+            "volume_mount": True,
+            "config_seeded": True,
+            "approved_volume_path": "memory/local_services/searxng",
+            "config_purpose": "enable_json_output_for_safe_metadata_search",
         }
 
         result = executor.execute_from_pending(params)
@@ -196,9 +227,11 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertIn("--name", run_argv)
         self.assertIn("personal-agent-searxng", run_argv)
         self.assertIn("127.0.0.1:8080:8080", run_argv)
-        self.assertNotIn("-v", run_argv)
-        self.assertFalse(any("/etc/searxng" in str(part) for part in run_argv))
+        self.assertIn("-v", run_argv)
+        self.assertTrue(any(str(part).endswith("memory/local_services/searxng:/etc/searxng") for part in run_argv))
         self.assertIn("docker.io/searxng/searxng:latest", run_argv)
+        settings = Path(self.tmpdir.name) / "memory/local_services/searxng/settings.yml"
+        self.assertEqual(APPROVED_SEARXNG_SETTINGS, settings.read_text(encoding="utf-8"))
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
 
     def test_executor_preview_uses_primary_or_fallback_port(self) -> None:
@@ -245,9 +278,11 @@ class TestManagedLocalServices(unittest.TestCase):
 
         self.assertEqual("docker.io/searxng/searxng:latest", plan.image)
         self.assertEqual(["podman", "pull", "docker.io/searxng/searxng:latest"], plan.pull_argv())
-        self.assertFalse(plan.volume_mount)
-        self.assertNotIn("-v", plan.run_argv())
-        self.assertFalse(any("/etc/searxng" in str(part) for part in plan.run_argv()))
+        self.assertTrue(plan.volume_mount)
+        self.assertTrue(plan.config_seeded)
+        self.assertEqual("enable_json_output_for_safe_metadata_search", plan.config_purpose)
+        self.assertIn("-v", plan.run_argv())
+        self.assertTrue(any(str(part).endswith("memory/local_services/searxng:/etc/searxng") for part in plan.run_argv()))
         self.assertIn("docker.io/searxng/searxng:latest", plan.run_argv())
 
     def test_executor_fallback_run_uses_loopback_only(self) -> None:
@@ -266,7 +301,10 @@ class TestManagedLocalServices(unittest.TestCase):
             "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8888:8080",
-            "volume_mount": False,
+            "volume_mount": True,
+            "config_seeded": True,
+            "approved_volume_path": "memory/local_services/searxng",
+            "config_purpose": "enable_json_output_for_safe_metadata_search",
         }
 
         result = executor.execute_from_pending(params)
@@ -293,7 +331,10 @@ class TestManagedLocalServices(unittest.TestCase):
                 "approved_image": "docker.io/searxng/searxng:latest",
                 "approved_container_name": "personal-agent-searxng",
                 "loopback_bind": "0.0.0.0:8888:8080",
-                "volume_mount": False,
+                "volume_mount": True,
+                "config_seeded": True,
+                "approved_volume_path": "memory/local_services/searxng",
+                "config_purpose": "enable_json_output_for_safe_metadata_search",
             }
         )
 
@@ -332,14 +373,19 @@ class TestManagedLocalServices(unittest.TestCase):
             "approved_image": "docker.io/searxng/searxng:latest",
             "approved_container_name": "personal-agent-searxng",
             "loopback_bind": "127.0.0.1:8080:8080",
-            "volume_mount": False,
+            "volume_mount": True,
+            "config_seeded": True,
+            "approved_volume_path": "memory/local_services/searxng",
+            "config_purpose": "enable_json_output_for_safe_metadata_search",
         }
         for key, value in {
             "approved_image": "evil/image:latest",
             "approved_container_name": "evil-name",
             "loopback_bind": "0.0.0.0:8080:8080",
             "approved_volume_path": "/tmp/random",
-            "volume_mount": True,
+            "volume_mount": False,
+            "config_seeded": False,
+            "settings_yml": "search:\n  formats: [html, json]\n",
         }.items():
             params = dict(base)
             params[key] = value
@@ -368,7 +414,10 @@ class TestManagedLocalServices(unittest.TestCase):
                 "approved_image": "searxng/searxng:latest",
                 "approved_container_name": "personal-agent-searxng",
                 "loopback_bind": "127.0.0.1:8080:8080",
-                "volume_mount": False,
+                "volume_mount": True,
+                "config_seeded": True,
+                "approved_volume_path": "memory/local_services/searxng",
+                "config_purpose": "enable_json_output_for_safe_metadata_search",
             }
         )
 
@@ -699,9 +748,13 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIsNone(plan["fallback_reason"])
         self.assertEqual("docker.io/searxng/searxng:latest", plan["image"])
         self.assertEqual("docker.io/searxng/searxng:latest", plan["executor_pending"]["approved_image"])
-        self.assertFalse(plan["volume_mount"])
-        self.assertEqual([], plan["state_files_touched"])
-        self.assertFalse(plan["executor_pending"]["volume_mount"])
+        self.assertTrue(plan["volume_mount"])
+        self.assertTrue(plan["config_seeded"])
+        self.assertEqual("memory/local_services/searxng", plan["approved_volume_path"])
+        self.assertEqual("enable_json_output_for_safe_metadata_search", plan["config_purpose"])
+        self.assertEqual(["memory/local_services/searxng/settings.yml"], plan["state_files_touched"])
+        self.assertTrue(plan["executor_pending"]["volume_mount"])
+        self.assertTrue(plan["executor_pending"]["config_seeded"])
 
     def test_search_setup_plan_marks_docker_as_explicit_fallback(self) -> None:
         runtime = self._runtime_with_engine("docker")
@@ -1122,6 +1175,33 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
         self.assertIn("SearXNG setup did not complete", second_text)
         self.assertIn("Previous search settings restored: yes", second_text)
+        self.assertFalse(runtime.config.search_enabled)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["podman", "stop", "personal-agent-searxng"], argv_rows)
+        self.assertIn(["podman", "rm", "personal-agent-searxng"], argv_rows)
+        row = runtime._managed_action_journal_store.recent(limit=1)[0]  # noqa: SLF001
+        self.assertEqual("rolled_back", row["status"])
+
+    def test_html_only_searxng_health_is_not_enough_to_enable_search(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runner = _FakeManagedServiceRunner()
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8080",
+            port_checker=lambda _port: True,
+        )
+        _body, first_text = self._chat(runtime, "enable web search")
+
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeRawOpener(b"<html>ok</html>")):
+            _body, second_text = self._chat(
+                runtime,
+                "yes",
+                history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}],
+            )
+
+        self.assertIn("SearXNG setup did not complete", second_text)
         self.assertFalse(runtime.config.search_enabled)
         argv_rows = [call["argv"] for call in runner.calls]
         self.assertIn(["podman", "stop", "personal-agent-searxng"], argv_rows)

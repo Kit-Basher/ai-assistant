@@ -209,9 +209,10 @@ the prerequisite path. If privilege is required, apply returns an elevated
 terminal handoff for `sudo apt-get install -y podman`; the background API
 service must not run hidden sudo or store sudo passwords. Docker appears only as
 an explicit fallback plan with a warning, fallback reason, and Docker fallback
-confirmation flag. The first managed SearXNG container uses the image default
-config and no `/etc/searxng` bind mount; future persistent config must be seeded
-and validated before mounting. It waits up to 30 seconds for first boot,
+confirmation flag. The first managed SearXNG container seeds and validates the
+approved owned `settings.yml` before mounting `/etc/searxng`; empty config
+mounts and arbitrary settings content are rejected. The seeded config enables
+JSON output for metadata-only safe search. It waits up to 30 seconds for first boot,
 accepts HTTP 200 as healthy, and retries with `GET` when `HEAD` does not prove
 readiness. If health fails, it captures redacted `ps -a` and `logs --tail 120`
 diagnostics for `personal-agent-searxng` before rolling back that owned

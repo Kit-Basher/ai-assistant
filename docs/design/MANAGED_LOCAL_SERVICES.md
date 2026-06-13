@@ -26,7 +26,7 @@ Allowed native service actions are limited to:
 - stop, restart, or remove Personal-Agent-managed service containers
 - update Personal Agent config or env only after confirmation, if an existing config flow safely supports it
 
-For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, and approved image reference. The first managed install does not bind-mount a host config directory over `/etc/searxng`; it uses the image defaults so SearXNG can bootstrap its own config. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
+For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, approved image reference, and an owned seeded config directory. The first managed install must not bind-mount an empty host directory over `/etc/searxng`; it writes and validates the approved minimal `settings.yml` first so JSON metadata search is available. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
 
 Mutating service actions follow the managed-action recovery pattern in [MANAGED_ACTION_RECOVERY.md](MANAGED_ACTION_RECOVERY.md): journal the attempt, verify success, roll back only owned changes on failure, and never silently mutate pre-existing user resources.
 
@@ -98,14 +98,15 @@ The first mutating service action is confirm-gated SearXNG setup. It may only:
 - preflight port 8080 before pull/run
 - if 8080 is busy, offer only approved fallback `127.0.0.1:8888:8080`
 - if both 8080 and 8888 are busy, do not pull or run
-- use no config bind mount by default
+- seed the approved `settings.yml` before mounting `/etc/searxng`
+- mount only the approved Personal-Agent-owned SearXNG config directory
 - run detached
 - health check the selected loopback URL for up to 30 seconds, using HTTP 200
   as healthy and retrying `GET` if `HEAD` does not prove readiness
 - capture redacted `ps -a` and `logs --tail 120` diagnostics for the owned
   container before rollback on health failure
 
-Future persistent SearXNG config support must seed and validate a known-good config before mounting it; an empty host directory must not be mounted over `/etc/searxng`.
+The seeded config keeps default SearXNG settings and enables `json` output for Personal Agent's metadata-only safe search. Empty config mounts and arbitrary settings content are rejected.
 
 Search config is updated only after the SearXNG JSON endpoint verifies. To keep search enabled after restart, the service environment still needs the selected approved local URL, either `http://127.0.0.1:8080` or `http://127.0.0.1:8888`.
 
@@ -129,4 +130,4 @@ Service action tests must prove:
 - Dockerfile or Compose content from packs is rejected
 - confirmation is one step only
 - missing Docker/Podman produces setup guidance, not auto-install
-- SearXNG setup uses only the approved image/name/port/no-volume default contract
+- SearXNG setup uses only the approved image/name/port/seeded-config contract

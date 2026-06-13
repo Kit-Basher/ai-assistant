@@ -18,6 +18,16 @@ APPROVED_SEARXNG_IMAGE = "docker.io/searxng/searxng:latest"
 APPROVED_SEARXNG_CONTAINER = "personal-agent-searxng"
 APPROVED_SEARXNG_PORT = 8080
 APPROVED_SEARXNG_FALLBACK_PORT = 8888
+APPROVED_SEARXNG_VOLUME = "memory/local_services/searxng"
+APPROVED_SEARXNG_CONFIG_PURPOSE = "enable_json_output_for_safe_metadata_search"
+APPROVED_SEARXNG_SETTINGS = """\
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json
+"""
 APPROVED_SEARXNG_PRIMARY_BIND = "127.0.0.1:8080:8080"
 APPROVED_SEARXNG_FALLBACK_BIND = "127.0.0.1:8888:8080"
 APPROVED_SEARXNG_BINDS = (APPROVED_SEARXNG_PRIMARY_BIND, APPROVED_SEARXNG_FALLBACK_BIND)
@@ -49,7 +59,9 @@ class ManagedServiceSpec:
                 "bind": self.approved_loopback_bind,
                 "fallback_bind": APPROVED_SEARXNG_FALLBACK_BIND if self.service_id == "searxng" else None,
                 "volume_path": self.approved_volume_path,
-                "volume_mount": False,
+                "volume_mount": True,
+                "config_seeded": True,
+                "config_purpose": APPROVED_SEARXNG_CONFIG_PURPOSE,
                 "metadata_only": True,
             },
             "blocked_actions": list(self.blocked_actions),
@@ -65,7 +77,7 @@ SEARXNG_SERVICE = ManagedServiceSpec(
     approved_image=APPROVED_SEARXNG_IMAGE,
     approved_port=APPROVED_SEARXNG_PORT,
     approved_loopback_bind=APPROVED_SEARXNG_PRIMARY_BIND,
-    approved_volume_path=None,
+    approved_volume_path=APPROVED_SEARXNG_VOLUME,
     blocked_actions=(
         "docker_pull",
         "docker_run",
@@ -91,7 +103,9 @@ class ManagedLocalServiceSetupPlan:
     loopback_bind: str
     health_url: str
     host_port: int
-    volume_mount: bool = False
+    volume_mount: bool = True
+    config_seeded: bool = True
+    config_purpose: str = APPROVED_SEARXNG_CONFIG_PURPOSE
     host_volume_path: str | None = None
     container_volume_path: str | None = None
 
@@ -132,6 +146,8 @@ class ManagedLocalServiceSetupPlan:
             "container_name": self.container_name,
             "loopback_bind": self.loopback_bind,
             "volume_mount": self.volume_mount,
+            "config_seeded": self.config_seeded,
+            "config_purpose": self.config_purpose,
             "host_volume_path": self.host_volume_path,
             "container_volume_path": self.container_volume_path,
             "health_url": self.health_url,
@@ -281,6 +297,7 @@ class ManagedLocalServiceExecutor:
         spec = SERVICE_REGISTRY["searxng"]
         port = int(host_port)
         bind = APPROVED_SEARXNG_FALLBACK_BIND if port == APPROVED_SEARXNG_FALLBACK_PORT else APPROVED_SEARXNG_PRIMARY_BIND
+        volume = (self._managed_root / str(spec.approved_volume_path)).resolve()
         return ManagedLocalServiceSetupPlan(
             service_id=spec.service_id,
             engine=engine,
@@ -289,9 +306,11 @@ class ManagedLocalServiceExecutor:
             loopback_bind=bind,
             health_url=f"http://127.0.0.1:{port}",
             host_port=port,
-            volume_mount=False,
-            host_volume_path=None,
-            container_volume_path=None,
+            volume_mount=True,
+            config_seeded=True,
+            config_purpose=APPROVED_SEARXNG_CONFIG_PURPOSE,
+            host_volume_path=str(volume),
+            container_volume_path="/etc/searxng",
         )
 
     def preview_setup_from_status(self, *, service_id: str, selected_engine: str) -> dict[str, Any]:
@@ -357,14 +376,17 @@ class ManagedLocalServiceExecutor:
             "approved_image": spec.approved_image,
             "approved_container_name": spec.approved_container_name,
             "loopback_bind": plan.loopback_bind,
-            "volume_mount": False,
+            "volume_mount": True,
+            "config_seeded": True,
+            "approved_volume_path": spec.approved_volume_path,
+            "config_purpose": APPROVED_SEARXNG_CONFIG_PURPOSE,
         }
         for key, expected in checks.items():
             actual = bool(params.get(key)) if isinstance(expected, bool) else str(params.get(key) or "").strip()
             if actual != expected:
                 return None, f"managed_service_plan_tampered_{key}"
-        if str(params.get("approved_volume_path") or "").strip():
-            return None, "managed_service_plan_tampered_approved_volume_path"
+        if any(str(params.get(key) or "").strip() for key in ("settings_yml", "settings_yaml", "config_text", "config_content")):
+            return None, "managed_service_plan_tampered_config_content"
         reason = self.validate_plan(plan)
         if reason:
             return None, reason
@@ -392,9 +414,17 @@ class ManagedLocalServiceExecutor:
             return "managed_service_bind_not_loopback"
         if int(host_port) != plan.host_port:
             return "managed_service_bind_port_mismatch"
-        if plan.volume_mount:
+        if not plan.volume_mount:
+            return "managed_service_volume_required"
+        if not plan.config_seeded:
+            return "managed_service_config_not_seeded"
+        if plan.config_purpose != APPROVED_SEARXNG_CONFIG_PURPOSE:
+            return "managed_service_config_purpose_not_approved"
+        host_volume = Path(str(plan.host_volume_path or "")).expanduser().resolve()
+        approved_root = (self._managed_root / str(spec.approved_volume_path)).resolve()
+        if host_volume != approved_root:
             return "managed_service_volume_not_approved"
-        if plan.host_volume_path or plan.container_volume_path:
+        if plan.container_volume_path != "/etc/searxng":
             return "managed_service_volume_not_approved"
         return None
 
@@ -403,6 +433,7 @@ class ManagedLocalServiceExecutor:
         journal.plan_step("validate_plan", resource=plan.service_id)
         journal.plan_step("preflight_port", resource=f"127.0.0.1:{plan.host_port}")
         journal.plan_step("check_existing_container", resource=plan.container_name)
+        journal.plan_step("seed_config", resource=plan.host_volume_path)
         journal.plan_step("pull_image", resource=plan.image)
         journal.plan_step("run_container", resource=plan.container_name)
         journal.plan_step("health_check", resource=plan.health_url)
@@ -445,6 +476,20 @@ class ManagedLocalServiceExecutor:
                 journal=journal.to_dict(),
             )
         journal.record_step("check_existing_container", ok=True, resource=plan.container_name)
+        seeded, seed_error = self._seed_searxng_config(plan)
+        if not seeded:
+            journal.record_step("seed_config", ok=False, resource=plan.host_volume_path, error=seed_error)
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason="managed_service_config_seed_failed",
+                error=seed_error,
+                plan=plan,
+                journal=journal.to_dict(),
+            )
+        journal.record_step("seed_config", ok=True, resource=plan.host_volume_path, config_purpose=plan.config_purpose)
+        journal.record_changed_resource("directory", str(plan.host_volume_path), owned_by="personal-agent", config_seeded=True)
         pulled = self._run_fixed(plan.pull_argv())
         if pulled.returncode != 0:
             journal.record_step("pull_image", ok=False, resource=plan.image, error=self._short_process_error(pulled))
@@ -666,6 +711,26 @@ class ManagedLocalServiceExecutor:
         )
         journal.mark_rollback(ok=rollback_ok, stopped_container=stop_ok, removed_container=remove_ok, error=error)
         return rollback_ok, error
+
+    def _seed_searxng_config(self, plan: ManagedLocalServiceSetupPlan) -> tuple[bool, str | None]:
+        if not plan.volume_mount or not plan.config_seeded:
+            return False, "config_seeded_required"
+        if plan.config_purpose != APPROVED_SEARXNG_CONFIG_PURPOSE:
+            return False, "config_purpose_not_approved"
+        try:
+            root = Path(str(plan.host_volume_path or "")).expanduser().resolve()
+            approved = (self._managed_root / APPROVED_SEARXNG_VOLUME).resolve()
+            if root != approved:
+                return False, "config_volume_not_approved"
+            root.mkdir(parents=True, exist_ok=True)
+            settings = root / "settings.yml"
+            settings.write_text(APPROVED_SEARXNG_SETTINGS, encoding="utf-8")
+            actual = settings.read_text(encoding="utf-8")
+        except OSError as exc:
+            return False, exc.__class__.__name__
+        if actual != APPROVED_SEARXNG_SETTINGS:
+            return False, "settings_validation_failed"
+        return True, None
 
     def _run_fixed(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         return self._runner(
