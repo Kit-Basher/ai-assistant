@@ -12563,6 +12563,9 @@ class AgentRuntime:
                 response = dict(service_result)
                 response.update({"ok": False, "did_configure": False, "managed_action_journal": journal.to_dict()})
                 return response
+            service_plan = service_result.get("plan") if isinstance(service_result.get("plan"), dict) else {}
+            if str(service_plan.get("health_url") or "").strip():
+                base_url = str(service_plan.get("health_url") or "").strip()
         else:
             journal.record_step("apply_service_setup", ok=True, resource="user_provided_searxng_url", setup_mode=setup_mode)
         if not self._is_loopback_http_url(base_url):
