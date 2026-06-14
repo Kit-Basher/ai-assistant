@@ -215,9 +215,14 @@ mounts and arbitrary settings content are rejected. The seeded config enables
 JSON output for metadata-only safe search and creates or preserves a
 non-default `server.secret_key`; the inherited `ultrasecretkey` value is
 rejected and the key is redacted from journals, diagnostics, and support
-output. It waits up to 30 seconds for first boot, accepts HTTP 200 as healthy,
-and retries with `GET` when `HEAD` does not prove readiness. If health fails,
-it captures redacted `ps -a` and `logs --tail 120`
+output. If the approved config directory is not writable by the service user,
+setup stops before pull/run and returns a bounded ownership handoff instead of
+running hidden sudo. If the approved container already exists, setup reuses or
+restarts it only after inspect confirms the approved image, loopback bind, and
+config mount; mismatches are blocked and not removed automatically. It waits up
+to 30 seconds for first boot, accepts HTTP 200 as healthy, and retries with
+`GET` when `HEAD` does not prove readiness. If health fails, it captures
+redacted `ps -a` and `logs --tail 120`
 diagnostics for `personal-agent-searxng` before rolling back that owned
 container. It updates the running Personal Agent search configuration only
 after the SearXNG JSON endpoint verifies. To keep search enabled after restart,

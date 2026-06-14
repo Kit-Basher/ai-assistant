@@ -301,6 +301,13 @@ Current state:
   or arbitrary config mounts are rejected
 - the managed SearXNG `server.secret_key` is redacted from journals,
   diagnostics, support bundles, and user-facing setup results
+- setup preflights ownership/writability of the approved config directory and
+  returns a bounded visible-terminal ownership handoff instead of running
+  hidden sudo when rootless container UID/GID mapping leaves it unwritable
+- an existing `personal-agent-searxng` container may be reused or restarted
+  only when inspect confirms the approved image, loopback bind, and config
+  mount; mismatched containers are blocked for manual inspection and are not
+  removed automatically
 - on Linux, rootless Podman is the preferred managed-service engine; Docker is
   an explicit fallback only when rootless Podman is unavailable or unconfirmed
 - Docker fallback plans must say that Podman was not found or rootless Podman

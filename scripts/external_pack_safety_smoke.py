@@ -1163,7 +1163,7 @@ def main() -> int:
                 )
                 result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
                 argv_rows = [call["argv"] for call in calls]
-                _assert(not result.ok and result.blocked_reason == "managed_service_container_already_exists", f"unexpected result: {result}")
+                _assert(not result.ok and result.blocked_reason == "managed_service_existing_container_inspect_failed", f"unexpected result: {result}")
                 _assert(["docker", "stop", "personal-agent-searxng"] not in argv_rows, f"preexisting stop attempted: {argv_rows}")
                 _assert(["docker", "rm", "personal-agent-searxng"] not in argv_rows, f"preexisting rm attempted: {argv_rows}")
 

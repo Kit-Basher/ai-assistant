@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import json
+import os
 from pathlib import Path
 import re
 import secrets as secrets_lib
@@ -38,6 +40,10 @@ APPROVED_SEARXNG_SETTINGS = APPROVED_SEARXNG_SETTINGS_TEMPLATE.format(secret_key
 APPROVED_SEARXNG_PRIMARY_BIND = "127.0.0.1:8080:8080"
 APPROVED_SEARXNG_FALLBACK_BIND = "127.0.0.1:8888:8080"
 APPROVED_SEARXNG_BINDS = (APPROVED_SEARXNG_PRIMARY_BIND, APPROVED_SEARXNG_FALLBACK_BIND)
+SEARXNG_CONFIG_OWNERSHIP_HANDOFF_COMMANDS = (
+    'sudo chown -R "$USER:$USER" ~/.local/share/personal-agent/memory/local_services/searxng',
+    "chmod -R u+rwX ~/.local/share/personal-agent/memory/local_services/searxng",
+)
 
 
 @dataclass(frozen=True)
@@ -129,6 +135,12 @@ class ManagedLocalServiceSetupPlan:
             "--format",
             "{{.Names}}",
         ]
+
+    def inspect_container_argv(self) -> list[str]:
+        return [self.engine, "inspect", self.container_name, "--format", "{{json .}}"]
+
+    def start_container_argv(self) -> list[str]:
+        return [self.engine, "start", self.container_name]
 
     def run_argv(self) -> list[str]:
         argv = [
@@ -440,8 +452,9 @@ class ManagedLocalServiceExecutor:
     def execute_plan(self, plan: ManagedLocalServiceSetupPlan) -> ManagedLocalServiceExecutionResult:
         journal = ManagedActionJournal(action_type="managed_local_service_setup", target=plan.service_id)
         journal.plan_step("validate_plan", resource=plan.service_id)
-        journal.plan_step("preflight_port", resource=f"127.0.0.1:{plan.host_port}")
         journal.plan_step("check_existing_container", resource=plan.container_name)
+        journal.plan_step("preflight_port", resource=f"127.0.0.1:{plan.host_port}")
+        journal.plan_step("preflight_config_writable", resource=plan.host_volume_path)
         journal.plan_step("seed_config", resource=plan.host_volume_path)
         journal.plan_step("pull_image", resource=plan.image)
         journal.plan_step("run_container", resource=plan.container_name)
@@ -459,6 +472,10 @@ class ManagedLocalServiceExecutor:
                 journal=journal.to_dict(),
             )
         journal.record_step("validate_plan", ok=True, resource=plan.service_id)
+        existing = self._run_fixed(plan.existing_container_argv())
+        if existing.returncode == 0 and plan.container_name in str(existing.stdout or "").splitlines():
+            return self._handle_existing_searxng_container(plan, journal)
+        journal.record_step("check_existing_container", ok=True, resource=plan.container_name)
         if not self._is_port_available(plan.host_port):
             journal.record_step("preflight_port", ok=False, resource=f"127.0.0.1:{plan.host_port}")
             return ManagedLocalServiceExecutionResult(
@@ -472,19 +489,20 @@ class ManagedLocalServiceExecutor:
                 journal=journal.to_dict(),
             )
         journal.record_step("preflight_port", ok=True, resource=f"127.0.0.1:{plan.host_port}")
-        existing = self._run_fixed(plan.existing_container_argv())
-        if existing.returncode == 0 and plan.container_name in str(existing.stdout or "").splitlines():
-            journal.record_step("check_existing_container", ok=False, resource=plan.container_name, reason="preexisting_container")
+        writable, writable_error = self._check_searxng_config_writable(plan)
+        if not writable:
+            journal.record_step("preflight_config_writable", ok=False, resource=plan.host_volume_path, reason=writable_error)
             return ManagedLocalServiceExecutionResult(
                 ok=False,
                 service_id=plan.service_id,
                 selected_engine=plan.engine,
-                blocked_reason="managed_service_container_already_exists",
-                error="A container with the approved name already exists; manual inspection is required before reuse.",
+                blocked_reason="managed_service_config_dir_not_writable",
+                error=writable_error or "approved_config_dir_not_writable",
                 plan=plan,
+                diagnostics={"operator_handoff": self._config_ownership_handoff(plan)},
                 journal=journal.to_dict(),
             )
-        journal.record_step("check_existing_container", ok=True, resource=plan.container_name)
+        journal.record_step("preflight_config_writable", ok=True, resource=plan.host_volume_path)
         seeded, seed_error = self._seed_searxng_config(plan)
         if not seeded:
             journal.record_step("seed_config", ok=False, resource=plan.host_volume_path, error=seed_error)
@@ -492,9 +510,10 @@ class ManagedLocalServiceExecutor:
                 ok=False,
                 service_id=plan.service_id,
                 selected_engine=plan.engine,
-                blocked_reason="managed_service_config_seed_failed",
+                blocked_reason="managed_service_config_dir_not_writable" if seed_error == "PermissionError" else "managed_service_config_seed_failed",
                 error=seed_error,
                 plan=plan,
+                diagnostics={"operator_handoff": self._config_ownership_handoff(plan)} if seed_error == "PermissionError" else {},
                 journal=journal.to_dict(),
             )
         journal.record_step("seed_config", ok=True, resource=plan.host_volume_path, config_purpose=plan.config_purpose)
@@ -720,6 +739,214 @@ class ManagedLocalServiceExecutor:
         )
         journal.mark_rollback(ok=rollback_ok, stopped_container=stop_ok, removed_container=remove_ok, error=error)
         return rollback_ok, error
+
+    def _handle_existing_searxng_container(
+        self,
+        plan: ManagedLocalServiceSetupPlan,
+        journal: ManagedActionJournal,
+    ) -> ManagedLocalServiceExecutionResult:
+        info, reason = self._inspect_existing_container(plan)
+        if reason or not info:
+            journal.record_step("check_existing_container", ok=False, resource=plan.container_name, reason=reason or "inspect_failed")
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=plan.service_id,
+                selected_engine=plan.engine,
+                blocked_reason=reason or "managed_service_existing_container_inspect_failed",
+                error="A container with the approved name exists, but it could not be verified as an approved Personal Agent SearXNG container.",
+                plan=plan,
+                journal=journal.to_dict(),
+            )
+        effective_plan = plan
+        inspected_bind = str(info.get("loopback_bind") or "").strip()
+        inspected_port = self._host_port_for_bind(inspected_bind)
+        if inspected_port is not None and inspected_bind != plan.loopback_bind:
+            effective_plan = replace(
+                plan,
+                loopback_bind=inspected_bind,
+                host_port=inspected_port,
+                health_url=f"http://127.0.0.1:{inspected_port}",
+            )
+        journal.record_step(
+            "check_existing_container",
+            ok=True,
+            resource=effective_plan.container_name,
+            reused_existing=True,
+            running=bool(info.get("running")),
+            loopback_bind=effective_plan.loopback_bind,
+        )
+        if bool(info.get("running")):
+            reachable, health_diagnostics = self._wait_for_health(effective_plan.health_url)
+            journal.record_step("health_check", ok=reachable, resource=effective_plan.health_url, reused_existing=True, **health_diagnostics)
+            journal.mark_verification(ok=reachable, reused_existing=True, health_url=effective_plan.health_url, **health_diagnostics)
+            if reachable:
+                return ManagedLocalServiceExecutionResult(
+                    ok=True,
+                    service_id=effective_plan.service_id,
+                    selected_engine=effective_plan.engine,
+                    reachable=True,
+                    plan=effective_plan,
+                    diagnostics={"reused_existing_container": True, **health_diagnostics},
+                    journal=journal.to_dict(),
+                )
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=effective_plan.service_id,
+                selected_engine=effective_plan.engine,
+                reachable=False,
+                blocked_reason="managed_service_existing_container_unhealthy",
+                error="The existing approved SearXNG container matched the managed-service contract, but its health check failed. I did not remove it.",
+                plan=effective_plan,
+                diagnostics={"reused_existing_container": True, **health_diagnostics},
+                journal=journal.to_dict(),
+            )
+        started = self._run_fixed(effective_plan.start_container_argv())
+        start_ok = int(started.returncode) == 0
+        journal.record_step("run_container", ok=start_ok, resource=effective_plan.container_name, repair_action="start_existing_container")
+        if not start_ok:
+            return ManagedLocalServiceExecutionResult(
+                ok=False,
+                service_id=effective_plan.service_id,
+                selected_engine=effective_plan.engine,
+                blocked_reason="managed_service_existing_container_start_failed",
+                error=self._short_process_error(started),
+                plan=effective_plan,
+                diagnostics={"repair_action": "start_existing_container"},
+                journal=journal.to_dict(),
+            )
+        reachable, health_diagnostics = self._wait_for_health(effective_plan.health_url)
+        journal.record_step("health_check", ok=reachable, resource=effective_plan.health_url, repaired_existing=True, **health_diagnostics)
+        journal.mark_verification(ok=reachable, repaired_existing=True, health_url=effective_plan.health_url, **health_diagnostics)
+        if reachable:
+            return ManagedLocalServiceExecutionResult(
+                ok=True,
+                service_id=effective_plan.service_id,
+                selected_engine=effective_plan.engine,
+                reachable=True,
+                plan=effective_plan,
+                diagnostics={"repaired_existing_container": True, "repair_action": "start_existing_container", **health_diagnostics},
+                journal=journal.to_dict(),
+            )
+        return ManagedLocalServiceExecutionResult(
+            ok=False,
+            service_id=effective_plan.service_id,
+            selected_engine=effective_plan.engine,
+            reachable=False,
+            blocked_reason="managed_service_existing_container_unhealthy",
+            error="The existing approved SearXNG container was restarted, but health verification failed. I did not remove it.",
+            plan=effective_plan,
+            diagnostics={"repaired_existing_container": True, "repair_action": "start_existing_container", **health_diagnostics},
+            journal=journal.to_dict(),
+        )
+
+    def _inspect_existing_container(self, plan: ManagedLocalServiceSetupPlan) -> tuple[dict[str, Any] | None, str | None]:
+        inspected = self._run_fixed(plan.inspect_container_argv())
+        if inspected.returncode != 0:
+            return None, "managed_service_existing_container_inspect_failed"
+        try:
+            payload = json.loads(str(inspected.stdout or "{}"))
+        except json.JSONDecodeError:
+            return None, "managed_service_existing_container_inspect_failed"
+        if isinstance(payload, list):
+            payload = payload[0] if payload and isinstance(payload[0], dict) else {}
+        if not isinstance(payload, dict):
+            return None, "managed_service_existing_container_inspect_failed"
+        image = str(
+            payload.get("ImageName")
+            or (payload.get("Config") if isinstance(payload.get("Config"), dict) else {}).get("Image")
+            or ""
+        ).strip()
+        if image != plan.image:
+            return None, "managed_service_existing_container_image_mismatch"
+        bind = self._inspect_approved_bind(payload)
+        if not bind:
+            return None, "managed_service_existing_container_bind_mismatch"
+        if not self._inspect_has_approved_mount(payload, plan):
+            return None, "managed_service_existing_container_mount_mismatch"
+        state = payload.get("State") if isinstance(payload.get("State"), dict) else {}
+        running = bool(state.get("Running")) or str(state.get("Status") or "").strip().lower() == "running"
+        return {"running": running, "image": image, "loopback_bind": bind}, None
+
+    @staticmethod
+    def _inspect_approved_bind(payload: dict[str, Any]) -> str | None:
+        network = payload.get("NetworkSettings") if isinstance(payload.get("NetworkSettings"), dict) else {}
+        ports = network.get("Ports") if isinstance(network.get("Ports"), dict) else {}
+        bind = ManagedLocalServiceExecutor._approved_bind_from_rows(ports)
+        if bind:
+            return bind
+        host_config = payload.get("HostConfig") if isinstance(payload.get("HostConfig"), dict) else {}
+        bindings = host_config.get("PortBindings") if isinstance(host_config.get("PortBindings"), dict) else {}
+        return ManagedLocalServiceExecutor._approved_bind_from_rows(bindings)
+
+    @staticmethod
+    def _approved_bind_from_rows(port_rows: dict[str, Any]) -> str | None:
+        rows = port_rows.get("8080/tcp")
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            bind = f"{str(row.get('HostIp') or '')}:{str(row.get('HostPort') or '')}:8080"
+            if bind in APPROVED_SEARXNG_BINDS:
+                return bind
+        return None
+
+    @staticmethod
+    def _inspect_has_approved_mount(payload: dict[str, Any], plan: ManagedLocalServiceSetupPlan) -> bool:
+        expected_source = str(Path(str(plan.host_volume_path or "")).expanduser().resolve())
+        expected_destination = str(plan.container_volume_path or "")
+        mounts = payload.get("Mounts")
+        if not isinstance(mounts, list):
+            return False
+        for row in mounts:
+            if not isinstance(row, dict):
+                continue
+            source = str(row.get("Source") or row.get("Name") or "").strip()
+            destination = str(row.get("Destination") or "").strip()
+            if source and str(Path(source).expanduser().resolve()) == expected_source and destination == expected_destination:
+                return True
+        return False
+
+    def _check_searxng_config_writable(self, plan: ManagedLocalServiceSetupPlan) -> tuple[bool, str | None]:
+        try:
+            root = Path(str(plan.host_volume_path or "")).expanduser().resolve()
+            approved = (self._managed_root / APPROVED_SEARXNG_VOLUME).resolve()
+            if root != approved:
+                return False, "config_volume_not_approved"
+            if root.exists() and not root.is_dir():
+                return False, "approved_config_path_not_directory"
+            settings = root / "settings.yml"
+            if root.exists() and not self._path_writable(root):
+                return False, "approved_config_dir_not_writable"
+            if settings.exists() and not self._path_writable(settings):
+                return False, "approved_settings_not_writable"
+            parent = root.parent
+            if not root.exists() and parent.exists() and not self._path_writable(parent):
+                return False, "approved_config_parent_not_writable"
+        except OSError as exc:
+            return False, exc.__class__.__name__
+        return True, None
+
+    @staticmethod
+    def _path_writable(path: Path) -> bool:
+        return bool(path.exists() and os.access(path, os.W_OK))
+
+    def _config_ownership_handoff(self, plan: ManagedLocalServiceSetupPlan) -> dict[str, Any]:
+        return {
+            "kind": "visible_terminal",
+            "bounded_action": "repair_searxng_config_ownership",
+            "target": "memory/local_services/searxng",
+            "reason": "The approved SearXNG config directory is not writable by the Personal Agent service user.",
+            "commands": list(SEARXNG_CONFIG_OWNERSHIP_HANDOFF_COMMANDS),
+            "command_string": " && ".join(SEARXNG_CONFIG_OWNERSHIP_HANDOFF_COMMANDS),
+            "sudo_password_storage": False,
+            "will_pull_image": False,
+            "will_run_container": False,
+            "will_enable_search": False,
+            "retry_endpoint": "POST /search/setup/apply with a fresh confirmed setup plan",
+            "approved_path": "memory/local_services/searxng",
+            "path": str(plan.host_volume_path or ""),
+        }
 
     def _seed_searxng_config(self, plan: ManagedLocalServiceSetupPlan) -> tuple[bool, str | None]:
         if not plan.volume_mount or not plan.config_seeded:

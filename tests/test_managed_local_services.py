@@ -13,6 +13,8 @@ from pathlib import Path
 
 from agent.api_server import AgentRuntime
 from agent.services.managed_local_services import (
+    APPROVED_SEARXNG_IMAGE,
+    APPROVED_SEARXNG_VOLUME,
     DEFAULT_SEARXNG_SECRET_KEY,
     ManagedLocalServiceDetector,
     ManagedLocalServiceExecutor,
@@ -23,9 +25,16 @@ from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _a
 
 
 class _FakeManagedServiceRunner:
-    def __init__(self, *, fail_on: str | None = None, existing: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_on: str | None = None,
+        existing: bool = False,
+        inspect_payload: dict[str, object] | None = None,
+    ) -> None:
         self.fail_on = fail_on
         self.existing = existing
+        self.inspect_payload = inspect_payload
         self.calls: list[dict[str, object]] = []
 
     def __call__(self, argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -36,6 +45,18 @@ class _FakeManagedServiceRunner:
         if argv[1:3] == ["ps", "-a"]:
             stdout = "personal-agent-searxng\n" if self.existing else ""
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+        if len(argv) > 1 and argv[1] == "inspect":
+            if self.inspect_payload is None:
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="inspect failed")
+            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(self.inspect_payload), stderr="")
+        if len(argv) > 1 and argv[1] == "start":
+            self.existing = True
+            if isinstance(self.inspect_payload, dict):
+                state = self.inspect_payload.setdefault("State", {})
+                if isinstance(state, dict):
+                    state["Running"] = True
+                    state["Status"] = "running"
+            return subprocess.CompletedProcess(argv, 0, stdout="personal-agent-searxng\n", stderr="")
         if len(argv) > 1 and argv[1] == "logs":
             return subprocess.CompletedProcess(
                 argv,
@@ -129,6 +150,22 @@ class _FakePrerequisiteRunner:
         if Path(str(argv[0])).name == "podman" and argv[1:3] == ["info", "--format"]:
             return subprocess.CompletedProcess(argv, 0, stdout="true" if self.rootless else "false", stderr="")
         return subprocess.CompletedProcess(argv, 3, stdout="", stderr="unexpected command")
+
+
+def _approved_searxng_inspect(root: str, *, running: bool = True, image: str = APPROVED_SEARXNG_IMAGE, bind: str = "127.0.0.1:8080:8080") -> dict[str, object]:
+    host, host_port, container_port = bind.split(":", 2)
+    return {
+        "ImageName": image,
+        "Config": {"Image": image},
+        "State": {"Running": running, "Status": "running" if running else "exited"},
+        "NetworkSettings": {"Ports": {f"{container_port}/tcp": [{"HostIp": host, "HostPort": host_port}]}},
+        "Mounts": [
+            {
+                "Source": str((Path(root) / APPROVED_SEARXNG_VOLUME).resolve()),
+                "Destination": "/etc/searxng",
+            }
+        ],
+    }
 
 
 class TestManagedLocalServices(unittest.TestCase):
@@ -435,7 +472,164 @@ search:
         self.assertFalse(result.ok)
         self.assertEqual("managed_service_port_occupied", result.blocked_reason)
         self.assertTrue(result.port_conflict)
-        self.assertEqual([], runner.calls)
+        self.assertEqual([["docker", "ps", "-a", "--filter", "name=^/personal-agent-searxng$", "--format", "{{.Names}}"]], [call["argv"] for call in runner.calls])
+
+    def test_unwritable_config_dir_blocks_before_pull_or_run_with_handoff(self) -> None:
+        runner = _FakeManagedServiceRunner()
+        config_dir = Path(self.tmpdir.name) / APPROVED_SEARXNG_VOLUME
+        config_dir.mkdir(parents=True)
+        config_dir.chmod(0o500)
+        try:
+            executor = ManagedLocalServiceExecutor(
+                managed_root=self.tmpdir.name,
+                command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+                runner=runner,
+                health_checker=lambda _url: True,
+                port_checker=lambda _port: True,
+            )
+
+            result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+        finally:
+            config_dir.chmod(0o700)
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_config_dir_not_writable", result.blocked_reason)
+        self.assertFalse(result.did_pull)
+        self.assertFalse(result.did_run)
+        self.assertFalse(result.did_configure)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertNotIn(["podman", "pull", "docker.io/searxng/searxng:latest"], argv_rows)
+        self.assertFalse(any(len(argv) > 1 and argv[1] == "run" for argv in argv_rows))
+        handoff = result.diagnostics.get("operator_handoff", {})
+        self.assertEqual("repair_searxng_config_ownership", handoff.get("bounded_action"))
+        self.assertIn('sudo chown -R "$USER:$USER"', handoff.get("command_string", ""))
+        self.assertIn("chmod -R u+rwX", handoff.get("command_string", ""))
+
+    def test_existing_matching_running_container_is_reused(self) -> None:
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, running=True),
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: False,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.reachable)
+        self.assertFalse(result.did_pull)
+        self.assertFalse(result.did_run)
+        self.assertTrue(result.diagnostics.get("reused_existing_container"))
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["podman", "inspect", "personal-agent-searxng", "--format", "{{json .}}"], argv_rows)
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"pull", "run", "rm"} for argv in argv_rows))
+
+    def test_existing_matching_running_fallback_container_restores_actual_port(self) -> None:
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, running=True, bind="127.0.0.1:8888:8080"),
+        )
+        health_urls: list[str] = []
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda url: health_urls.append(url) or url == "http://127.0.0.1:8888",
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertTrue(result.ok)
+        self.assertEqual("127.0.0.1:8888:8080", result.plan.loopback_bind)
+        self.assertEqual("http://127.0.0.1:8888", result.plan.health_url)
+        self.assertEqual(["http://127.0.0.1:8888"], health_urls)
+
+    def test_existing_matching_stopped_container_is_restarted_for_repair(self) -> None:
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, running=False),
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.reachable)
+        self.assertTrue(result.diagnostics.get("repaired_existing_container"))
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["podman", "start", "personal-agent-searxng"], argv_rows)
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"pull", "run", "rm"} for argv in argv_rows))
+
+    def test_existing_container_mismatched_image_blocks_without_cleanup(self) -> None:
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, image="docker.io/other/image:latest"),
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_existing_container_image_mismatch", result.blocked_reason)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"rm", "stop", "run", "pull"} for argv in argv_rows))
+
+    def test_existing_container_public_bind_blocks_without_cleanup(self) -> None:
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, bind="0.0.0.0:8080:8080"),
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_existing_container_bind_mismatch", result.blocked_reason)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"rm", "stop", "run", "pull"} for argv in argv_rows))
+
+    def test_existing_container_wrong_mount_blocks_without_cleanup(self) -> None:
+        inspect_payload = _approved_searxng_inspect(self.tmpdir.name)
+        inspect_payload["Mounts"] = [{"Source": "/tmp/other", "Destination": "/etc/searxng"}]
+        runner = _FakeManagedServiceRunner(existing=True, inspect_payload=inspect_payload)
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_existing_container_mount_mismatch", result.blocked_reason)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"rm", "stop", "run", "pull"} for argv in argv_rows))
 
     def test_executor_rejects_tampered_pending_fields(self) -> None:
         executor = ManagedLocalServiceExecutor(
@@ -538,7 +732,7 @@ search:
         self.assertFalse(result.did_configure)
         self.assertEqual("managed_service_run_failed", result.blocked_reason)
 
-    def test_executor_existing_container_is_conservative(self) -> None:
+    def test_existing_container_without_approved_inspect_is_conservative(self) -> None:
         runner = _FakeManagedServiceRunner(existing=True)
         executor = ManagedLocalServiceExecutor(
             managed_root=self.tmpdir.name,
@@ -550,8 +744,8 @@ search:
         result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
 
         self.assertFalse(result.ok)
-        self.assertEqual("managed_service_container_already_exists", result.blocked_reason)
-        self.assertEqual(1, len(runner.calls))
+        self.assertEqual("managed_service_existing_container_inspect_failed", result.blocked_reason)
+        self.assertEqual(2, len(runner.calls))
 
     def test_failed_health_check_rolls_back_created_container(self) -> None:
         runner = _FakeManagedServiceRunner()
@@ -657,7 +851,7 @@ search:
         result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
 
         self.assertFalse(result.ok)
-        self.assertEqual("managed_service_container_already_exists", result.blocked_reason)
+        self.assertEqual("managed_service_existing_container_inspect_failed", result.blocked_reason)
         argv_rows = [call["argv"] for call in runner.calls]
         self.assertNotIn(["docker", "stop", "personal-agent-searxng"], argv_rows)
         self.assertNotIn(["docker", "rm", "personal-agent-searxng"], argv_rows)
@@ -1243,6 +1437,29 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         setup_payload = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertTrue(setup_payload.get("did_configure"))
 
+    def test_existing_fallback_container_reuse_configures_runtime_to_actual_port(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, running=True, bind="127.0.0.1:8888:8080"),
+        )
+        runtime._managed_local_service_executor = ManagedLocalServiceExecutor(  # noqa: SLF001
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda url: url == "http://127.0.0.1:8888",
+            port_checker=lambda _port: True,
+        )
+        plan = runtime.search_setup_plan({"allow_docker_fallback": False})["plan"]
+
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["did_configure"])
+        self.assertEqual("http://127.0.0.1:8888", runtime.config.searxng_base_url)
+        self.assertEqual("http://127.0.0.1:8888", result["search_status"]["base_url"])
+
     def test_setup_verification_failure_restores_config_and_removes_owned_container(self) -> None:
         runtime = self._runtime_with_engine("podman")
         runner = _FakeManagedServiceRunner()
@@ -1410,9 +1627,10 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
         _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "set up web search"}, {"role": "assistant", "content": first_text}])
 
-        self.assertIn("container already exists", second_text)
-        self.assertIn("I did not remove it", second_text)
-        self.assertNotIn("removed", second_text.lower())
+        self.assertIn("managed_service_existing_container_inspect_failed", second_text)
+        runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"stop", "rm"} for argv in argv_rows))
 
     def test_missing_docker_or_podman_gives_terminal_guidance_no_auto_install(self) -> None:
         runtime = self._runtime_with_engine(None)

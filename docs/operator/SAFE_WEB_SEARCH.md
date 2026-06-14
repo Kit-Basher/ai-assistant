@@ -41,6 +41,18 @@ managed local service:
   creates or preserves a non-default `server.secret_key`; the inherited
   `ultrasecretkey` value is rejected and replaced, and the key is redacted from
   journals, diagnostics, and support output.
+- If rootless Podman/SearXNG changes ownership on the owned config directory,
+  setup stops before pull/run with `managed_service_config_dir_not_writable`
+  and returns a bounded visible-terminal handoff:
+  `sudo chown -R "$USER:$USER" ~/.local/share/personal-agent/memory/local_services/searxng`
+  followed by
+  `chmod -R u+rwX ~/.local/share/personal-agent/memory/local_services/searxng`.
+  The API service must not run hidden sudo.
+- If `personal-agent-searxng` already exists, setup inspects it. It reuses a
+  running container only when image, loopback bind, and config mount exactly
+  match the approved plan and JSON search verifies. It may restart a stopped
+  matching container as the approved repair path. Mismatched containers remain
+  blocked for manual inspection and are not removed automatically.
 - On Linux, rootless Podman is the preferred managed-service engine. Docker is
   shown only as an explicit fallback when rootless Podman is unavailable or not
   confirmed.
