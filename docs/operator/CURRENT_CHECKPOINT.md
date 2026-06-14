@@ -6,6 +6,8 @@ Latest clean checkpoint before this pass: `e4b4252` Complete core workflow proof
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
+For the compact release history and roadmap routing layer, use `docs/operator/RELEASE_LEDGER.md` and `docs/operator/ROADMAP_INDEX.md`.
+
 ## Current Truth
 
 - The user talks to the assistant layer.

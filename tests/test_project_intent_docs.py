@@ -310,6 +310,35 @@ def test_core_workflow_proof_doc_exists_and_refuses_fake_passes() -> None:
     assert "trusted searxng instance" in lowered
 
 
+def test_release_ledger_and_roadmap_index_exist_and_route_future_work() -> None:
+    ledger = REPO_ROOT / "docs" / "operator" / "RELEASE_LEDGER.md"
+    roadmap = REPO_ROOT / "docs" / "operator" / "ROADMAP_INDEX.md"
+    assert ledger.is_file()
+    assert roadmap.is_file()
+
+    ledger_text = ledger.read_text(encoding="utf-8")
+    ledger_lower = ledger_text.lower()
+    assert "v0.2.0-managed-searxng" in ledger_text
+    assert "v0.2.0-plan-mode-policy" in ledger_text
+    assert "v0.2.0-plan-mode-pack-lifecycle" in ledger_text
+    assert "fresh debian vm install test is intentionally deferred" in ledger_lower
+    assert "prove_core_workflows.py" in ledger_text
+    assert "isolated proof environment" in ledger_lower
+    assert "live workstation" in ledger_lower
+    assert "/search/status" in ledger_text
+
+    roadmap_text = roadmap.read_text(encoding="utf-8")
+    roadmap_lower = roadmap_text.lower()
+    assert "current authority" in roadmap_lower
+    assert "docs/operator/release_ledger.md" in roadmap_lower
+    assert "docs/operator/current_checkpoint.md" in roadmap_lower
+    assert "historical or supporting" in roadmap_lower
+    assert "current next work" in roadmap_lower
+    assert "do not start until later" in roadmap_lower
+    assert "fresh debian vm install proof" in roadmap_lower
+    assert "docs/design/plan_mode_policy.md" in roadmap_lower
+
+
 def test_local_model_provider_support_doc_states_current_boundaries() -> None:
     path = REPO_ROOT / "docs" / "operator" / "LOCAL_MODEL_PROVIDER_SUPPORT.md"
     assert path.is_file()
