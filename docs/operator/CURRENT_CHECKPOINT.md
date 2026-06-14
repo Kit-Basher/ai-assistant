@@ -139,3 +139,21 @@ Run this after external-pack, search, acquisition, or routing changes:
 - Add future core-owned content operations only after separate preview/confirmation and safety tests.
 - Add more managed adapters only through core-owned safety boundaries.
 - Do not expand arbitrary plugin execution.
+
+## v0.2.0-managed-searxng checkpoint
+
+Managed local SearXNG safe web search is working on the primary Debian workstation.
+
+Verified:
+- rootless Podman SearXNG container runs on 127.0.0.1:8888
+- /search/status reports enabled=true and available=true
+- /search/query returns metadata-only untrusted results
+- managed setup repairs/reuses approved stopped containers
+- config ownership failures produce bounded operator handoff
+- seeded config enables JSON output and uses non-default secret key
+- page fetching, browser automation, downloads, and pack install/import remain disabled
+- prove_core_workflows.py has no FAIL workflows
+- external_pack_safety_smoke.py passes 39 gates
+- behavior/release tests pass
+- project intent docs pass
+- git status clean at tag v0.2.0-managed-searxng
