@@ -156,6 +156,7 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         status_handler.do_GET()
         status = json.loads(status_handler.body.decode("utf-8"))
         self.assertTrue(status["available"])
+        self.assertIsNone(status["reason"])
         self.assertTrue(status["safety"]["metadata_only"])
 
         query_handler = _HandlerForTest(runtime, "/search/query", {"query": "example", "max_results": 1})
@@ -164,6 +165,28 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertEqual(200, query_handler.status_code)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["results"][0]["untrusted"])
+        client = runtime._safe_web_search_client  # noqa: SLF001
+        self.assertIsInstance(client, SafeWebSearchClient)
+        opener = client._opener  # noqa: SLF001
+        self.assertEqual(2, len(opener.opened_urls))
+        self.assertTrue(all(url.startswith("http://127.0.0.1:8888/search?") for url in opener.opened_urls))
+
+    def test_search_status_uses_same_json_search_path_as_query(self) -> None:
+        opener = _FakeOpener({"results": [{"title": "One", "url": "https://example.com", "content": "Snippet"}]})
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888", timeout_seconds=4.0),
+            opener=opener,
+        )
+
+        status = client.status()
+        query = client.search("personal agent test", max_results=1)
+
+        self.assertTrue(status["available"])
+        self.assertIsNone(status["reason"])
+        self.assertTrue(query.ok)
+        self.assertEqual(2, len(opener.opened_urls))
+        self.assertTrue(all(url.startswith("http://127.0.0.1:8888/search?") for url in opener.opened_urls))
+        self.assertEqual([4.0, 4.0], opener.timeouts)
 
     def test_chat_route_uses_native_search_without_pack_acquisition(self) -> None:
         runtime = self._runtime()
@@ -200,4 +223,3 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("did not open pages", text.lower())
         self.assertNotIn("pack", " ".join(str(item) for item in meta.get("used_tools", [])))
         self.assertEqual(1, len(opener.opened_urls))
-

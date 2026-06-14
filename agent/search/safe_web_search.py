@@ -151,9 +151,9 @@ class SafeWebSearchClient:
         elif not endpoint_configured:
             reason = "endpoint_missing"
         else:
-            available = self._probe_available(base_url)
+            available, probe_reason = self._probe_available()
             if not available:
-                reason = "endpoint_unreachable"
+                reason = probe_reason or "endpoint_unreachable"
         return {
             "ok": True,
             "enabled": enabled,
@@ -176,16 +176,13 @@ class SafeWebSearchClient:
             },
         }
 
-    def _probe_available(self, base_url: str) -> bool:
-        url = self._search_url(base_url, "personal agent search status")
-        request = Request(url, headers={"Accept": "application/json", "User-Agent": "personal-agent-safe-web-search/1"})
-        try:
-            with self._opener.open(request, timeout=min(self._timeout(), 2.0)) as response:
-                raw = response.read(512 * 1024)
-            payload = json.loads(raw.decode("utf-8"))
-        except (TimeoutError, HTTPError, URLError, OSError, socket.timeout, UnicodeError, json.JSONDecodeError):
-            return False
-        return isinstance(payload, dict) and isinstance(payload.get("results", []), list)
+    def _probe_available(self) -> tuple[bool, str | None]:
+        result = self.search("personal agent test", max_results=1)
+        if result.ok:
+            return True, None
+        if result.error_kind in {"bad_response", "search_error", "search_timeout"}:
+            return False, "endpoint_unreachable"
+        return False, result.error_kind or "endpoint_unreachable"
 
     def search(self, query: str, *, max_results: int | None = None) -> SafeWebSearchResponse:
         query_clean = " ".join(str(query or "").split())

@@ -293,10 +293,14 @@ Current state:
   verification/retry steps instead of running hidden sudo from the background
   API service
 - managed setup uses only the approved SearXNG image, container name, bind, and
-  no config volume by default; it binds to `127.0.0.1` only
-- the first managed SearXNG container uses the image default config and does
-  not bind-mount an empty host directory over `/etc/searxng`; future persistent
-  config must be seeded and validated before mounting
+  seeded owned config directory; it binds to `127.0.0.1` only
+- the first managed SearXNG container writes and validates the approved
+  `settings.yml` before mounting `/etc/searxng`; the config enables JSON output
+  for metadata-only safe search, creates or preserves a non-default
+  `server.secret_key`, rejects the inherited `ultrasecretkey` value, and empty
+  or arbitrary config mounts are rejected
+- the managed SearXNG `server.secret_key` is redacted from journals,
+  diagnostics, support bundles, and user-facing setup results
 - on Linux, rootless Podman is the preferred managed-service engine; Docker is
   an explicit fallback only when rootless Podman is unavailable or unconfirmed
 - Docker fallback plans must say that Podman was not found or rootless Podman

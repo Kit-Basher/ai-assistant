@@ -1236,6 +1236,9 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("podman install", rendered)
         self.assertTrue(runtime.config.search_enabled)
         self.assertEqual("http://127.0.0.1:8080", runtime.config.searxng_base_url)
+        status = runtime.search_status()
+        self.assertTrue(status["available"])
+        self.assertIsNone(status["reason"])
         self.assertEqual(3, len(health_calls))
         setup_payload = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertTrue(setup_payload.get("did_configure"))
