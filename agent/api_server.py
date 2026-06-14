@@ -93,7 +93,7 @@ from agent.runtime_contract import (
     normalize_user_facing_status,
 )
 from agent.persona import normalize_persona_text
-from agent.policy import build_mutator_plan, classify_operation, validate_mutator_apply
+from agent.policy import build_mutator_plan, classify_operation, mutator_confirmation_required_payload, validate_mutator_apply
 from agent.public_chat import (
     build_no_llm_public_message,
     build_trivial_social_turn_message,
@@ -235,6 +235,13 @@ from agent.memory_runtime import MemoryRuntime
 from agent.semantic_memory import build_semantic_memory_service
 from agent.packs.external_ingestion import ExternalPackIngestor
 from agent.packs.manifest import compute_permissions_hash, normalize_permissions
+from agent.packs.managed_adapters import (
+    build_permission_request,
+    create_metadata_only_grant,
+    list_adapter_grants,
+    record_adapter_grant,
+    validate_local_file_path_metadata,
+)
 from agent.packs.policy import is_iface_allowed
 from agent.packs.state_truth import build_pack_state_snapshot, normalize_available_pack_truth, normalize_installed_pack_truth
 from agent.packs.registry_discovery import PackRegistryDiscoveryService, RegistrySourcePolicyError
@@ -612,6 +619,7 @@ class AgentRuntime:
         self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
         self._search_setup_confirmations: dict[str, dict[str, Any]] = {}
         self._podman_prerequisite_confirmations: dict[str, dict[str, Any]] = {}
+        self._pack_lifecycle_confirmations: dict[str, dict[str, Any]] = {}
         self._prerequisite_command_finder: Callable[[str], str | None] = shutil.which
         self._prerequisite_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
 
@@ -2015,6 +2023,269 @@ class AgentRuntime:
             "compare": diff_payload,
         }
 
+    @staticmethod
+    def _pack_plan_payload_hash(payload: dict[str, Any]) -> str:
+        safe = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(safe.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _pack_plan_public_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        public: dict[str, Any] = {}
+        for key in ("pack_id", "enabled", "approve", "source_id", "source_kind", "ref", "adapter_kind"):
+            if key in payload:
+                public[key] = payload.get(key)
+        source = payload.get("source")
+        path_value = payload.get("path") or payload.get("pack_path")
+        if isinstance(source, dict):
+            public["source"] = {
+                key: source.get(key)
+                for key in ("source_id", "kind", "ref")
+                if source.get(key) is not None
+            }
+            url = str(source.get("url") or "").strip()
+            if url:
+                public["source"]["url_host"] = urllib.parse.urlparse(url).netloc
+        elif isinstance(source, str) and "://" in source:
+            public["source_url_host"] = urllib.parse.urlparse(source).netloc
+        elif isinstance(source, str) and source:
+            public["source_basename"] = Path(source).name
+        elif path_value:
+            public["source_basename"] = Path(str(path_value)).name
+        if "url" in payload:
+            public["url_host"] = urllib.parse.urlparse(str(payload.get("url") or "")).netloc
+        if "requested_path" in payload:
+            public["requested_path_basename"] = Path(str(payload.get("requested_path") or "")).name
+        return public
+
+    def _pack_mutator_resources(self, action_type: str, payload: dict[str, Any]) -> dict[str, list[str]]:
+        pack_id = str(payload.get("pack_id") or "").strip()
+        if action_type == "external_pack.install":
+            return {
+                "created": ["external_pack_review_record", "quarantine_artifact", "normalized_pack_artifact"],
+                "changed": ["external_pack_store"],
+                "deleted": [],
+            }
+        if action_type == "external_pack.approve":
+            return {"created": [], "changed": [f"pack:{pack_id}:approval"], "deleted": []}
+        if action_type == "external_pack.enable":
+            return {"created": [], "changed": [f"pack:{pack_id}:enabled"], "deleted": []}
+        if action_type == "external_pack.grant":
+            return {
+                "created": [f"pack:{pack_id}:managed_adapter_grant"],
+                "changed": ["managed_adapter_grants"],
+                "deleted": [],
+            }
+        if action_type == "external_pack.remove":
+            return {
+                "created": [f"pack:{pack_id}:tombstone"],
+                "changed": ["external_pack_store"],
+                "deleted": [f"pack:{pack_id}:installed_artifacts"],
+            }
+        return {"created": [], "changed": ["external_pack_lifecycle"], "deleted": []}
+
+    @staticmethod
+    def _pack_rollback_scope(action_type: str) -> str:
+        scopes = {
+            "external_pack.install": "remove only the owned failed import record and owned quarantine/normalized artifacts when verification fails",
+            "external_pack.approve": "restore previous pack approval metadata",
+            "external_pack.enable": "restore previous pack enabled metadata",
+            "external_pack.grant": "restore previous managed adapter grant metadata",
+            "external_pack.remove": "restore previous pack metadata if removal verification fails; preserve audit tombstones where required",
+        }
+        return scopes.get(action_type, "restore only scoped external pack lifecycle metadata")
+
+    @staticmethod
+    def _pack_rollback_supported(action_type: str) -> bool:
+        return action_type in {
+            "external_pack.install",
+            "external_pack.approve",
+            "external_pack.enable",
+            "external_pack.grant",
+            "external_pack.remove",
+        }
+
+    def _store_pack_lifecycle_confirmation(self, *, action_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+        plan_id = f"pack-{action_type.rsplit('.', 1)[-1]}-{uuid.uuid4().hex[:10]}"
+        token = f"confirm-{uuid.uuid4().hex[:16]}"
+        expires_at = time.time() + 600
+        mutation_plan = build_mutator_plan(
+            action_type=action_type,
+            resources=self._pack_mutator_resources(action_type, payload),
+            rollback_scope=self._pack_rollback_scope(action_type),
+            rollback_supported=self._pack_rollback_supported(action_type),
+            confirmation_token=token,
+            expires_at=expires_at,
+            plan_id=plan_id,
+        )
+        plan = {
+            "plan_id": plan_id,
+            "confirmation_token": token,
+            "expires_at": int(expires_at),
+            "requires_confirmation": True,
+            "action_type": action_type,
+            "operation_payload": self._pack_plan_public_payload(payload),
+            "operation_payload_hash": self._pack_plan_payload_hash(payload),
+            "mutation_plan": mutation_plan,
+            "safety_notes": [
+                "This plan covers one external pack lifecycle transition only.",
+                "Approval does not enable, grant, invoke, or use the pack.",
+                "Enablement does not grant permissions, invoke, or use the pack.",
+                "Permission grants record metadata only and do not read or parse private file contents.",
+                "Search results cannot install or import packs directly.",
+            ],
+        }
+        self._pack_lifecycle_confirmations[plan_id] = {
+            "plan": dict(plan),
+            "payload": dict(payload),
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "consumed": False,
+        }
+        return {"ok": True, "requires_confirmation": True, "plan": plan}
+
+    def plan_pack_lifecycle(self, action_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        decision = classify_operation(action_type)
+        if decision.classification != "mutating":
+            return {"ok": False, "error": "read_only_operation_does_not_need_plan", "mutated": False}
+        return self._store_pack_lifecycle_confirmation(action_type=action_type, payload=payload)
+
+    def _validate_pack_lifecycle_apply(
+        self,
+        action_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        payload = dict(payload or {})
+        token = str(payload.get("confirmation_token") or "").strip()
+        plan_id = str(payload.get("plan_id") or "").strip()
+        submitted_plan = payload.get("mutation_plan") if isinstance(payload.get("mutation_plan"), dict) else None
+        if submitted_plan is None:
+            return None, {"ok": False, "error": "plan_required", "mutated": False}
+        stored = self._confirmation_by_plan_or_token(self._pack_lifecycle_confirmations, plan_id=plan_id, token=token)
+        if not stored or str(stored.get("confirmation_token") or "") != token:
+            return None, {"ok": False, "error": "invalid_confirmation", "mutated": False}
+        if bool(stored.get("consumed")):
+            return None, {"ok": False, "error": "confirmation_consumed", "mutated": False}
+        if float(stored.get("expires_at") or 0) <= time.time():
+            return None, {"ok": False, "error": "confirmation_expired", "mutated": False}
+        plan = stored.get("plan") if isinstance(stored.get("plan"), dict) else {}
+        stored_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None
+        ok, error = validate_mutator_apply(
+            submitted_plan,
+            expected_action_type=action_type,
+            confirmation_token=token,
+        )
+        if not ok:
+            return None, {"ok": False, "error": error or "policy_plan_invalid", "mutated": False}
+        if str(submitted_plan.get("plan_id") or "") != str(stored_plan.get("plan_id") if isinstance(stored_plan, dict) else ""):
+            return None, {"ok": False, "error": "plan_id_mismatch", "mutated": False}
+        if submitted_plan != stored_plan:
+            return None, {"ok": False, "error": "plan_apply_mismatch", "mutated": False}
+        stored["consumed"] = True
+        return stored, None
+
+    def apply_pack_lifecycle(self, action_type: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        stored, error = self._validate_pack_lifecycle_apply(action_type, payload)
+        if error is not None:
+            return error
+        assert stored is not None
+        plan_payload = dict(stored.get("payload") if isinstance(stored.get("payload"), dict) else {})
+        if action_type == "external_pack.install":
+            ok, body = self.packs_install(plan_payload)
+        elif action_type == "external_pack.approve":
+            plan_payload["approve"] = True
+            ok, body = self.packs_approve(plan_payload)
+        elif action_type == "external_pack.enable":
+            ok, body = self.packs_enable(plan_payload)
+        elif action_type == "external_pack.grant":
+            ok, body = self.packs_grant(plan_payload)
+        elif action_type == "external_pack.remove":
+            ok, body = self.delete_external_pack(
+                str(plan_payload.get("pack_id") or "").strip(),
+                changed_by=str(plan_payload.get("changed_by") or "loopback_operator"),
+            )
+        else:
+            return {"ok": False, "error": "unknown_pack_lifecycle_action", "mutated": False}
+        body = dict(body if isinstance(body, dict) else {})
+        body.setdefault("mutated", bool(ok))
+        body["plan_mode"] = {"policy_layer": "plan_mode", "action_type": action_type, "plan_id": stored["plan"]["plan_id"]}
+        return body
+
+    def packs_grant(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+        pack_id = str(payload.get("pack_id") or "").strip()
+        if not pack_id:
+            return self._pack_error(
+                error="bad_request",
+                error_kind="bad_request",
+                message="pack_id is required",
+                next_question="Which pack_id should receive managed-adapter grant metadata?",
+            )
+        current = self.pack_store.get_external_pack(pack_id) or self.pack_store.get_pack(pack_id)
+        if current is None:
+            return self._pack_error(
+                error="pack_not_found",
+                error_kind="bad_request",
+                message=f"pack not found: {pack_id}",
+                next_question="Install, review, approve, and enable the pack before recording grant metadata.",
+            )
+        canonical = current.get("canonical_pack") if isinstance(current.get("canonical_pack"), dict) else current
+        pack_name = str(canonical.get("name") or current.get("name") or pack_id).strip()
+        adapter_payload = payload.get("adapter") if isinstance(payload.get("adapter"), dict) else {}
+        if not adapter_payload:
+            permissions = canonical.get("permissions") if isinstance(canonical.get("permissions"), dict) else {}
+            adapters = permissions.get("managed_adapters") if isinstance(permissions.get("managed_adapters"), list) else []
+            adapter_payload = dict(adapters[0]) if adapters and isinstance(adapters[0], dict) else {}
+        if not adapter_payload:
+            return self._pack_error(
+                error="managed_adapter_missing",
+                error_kind="bad_request",
+                message="managed adapter declaration is required for grant metadata",
+                next_question="Preview the pack permission requirement first, then submit its managed adapter declaration.",
+            )
+        requested_path = str(payload.get("requested_path") or "").strip() or None
+        request = build_permission_request(
+            pack_id=pack_id,
+            pack_name=pack_name,
+            adapter=adapter_payload,
+            requested_path=requested_path,
+        )
+        ok_path = True
+        path_errors: list[str] = []
+        path_metadata: dict[str, Any] = {}
+        if requested_path:
+            ok_path, path_errors, path_metadata = validate_local_file_path_metadata(requested_path, request.adapter)
+        if not ok_path:
+            return self._pack_error(
+                error="managed_adapter_grant_path_invalid",
+                error_kind="bad_request",
+                message="selected file did not match the managed adapter grant policy",
+                why=", ".join(path_errors),
+                next_question="Choose one existing user-selected file with an allowed extension.",
+            )
+        grant = create_metadata_only_grant(request=request, path_metadata=path_metadata)
+        grant_payload = record_adapter_grant(self.pack_store.external_storage_root(), grant)
+        if grant_payload.get("metadata_update_ok") is False:
+            return False, {
+                "ok": False,
+                "error": str(grant_payload.get("error_kind") or "managed_adapter_grant_verification_failed"),
+                "error_kind": str(grant_payload.get("error_kind") or "managed_adapter_grant_verification_failed"),
+                "grant": grant_payload,
+                "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
+                "next_action": "Inspect managed adapter grant metadata before retrying.",
+            }
+        grants = list_adapter_grants(self.pack_store.external_storage_root())
+        return True, {
+            "ok": True,
+            "grant": grant_payload,
+            "grants": grants,
+            "message": f"Recorded managed-adapter grant metadata for pack {pack_id}.",
+            "did_invoke_adapter": False,
+            "did_use_pack": False,
+            "reads_file": False,
+            "executes_code": False,
+            "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
+        }
+
     def packs_install(self, payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
         source_value = payload.get("source")
         source_text = str(source_value or "").strip() if not isinstance(source_value, dict) else ""
@@ -2195,7 +2466,8 @@ class AgentRuntime:
                 next_question="Which pack_id should be approved?",
             )
         current = self.pack_store.get_pack(pack_id)
-        if current is None:
+        external_current = self.pack_store.get_external_pack(pack_id)
+        if current is None and external_current is None:
             return self._pack_error(
                 error="pack_not_found",
                 error_kind="bad_request",
@@ -2207,6 +2479,33 @@ class AgentRuntime:
                 intent="packs.approve",
                 message=f"Approve pack {pack_id} for its declared permissions?",
             )
+        if isinstance(external_current, dict):
+            approved = self.pack_store.set_external_pack_review_status(
+                pack_id,
+                local_review_status="approved",
+                approve_current_hash=True,
+            )
+            if approved is None:
+                return self._pack_error(
+                    error="pack_not_found",
+                    error_kind="bad_request",
+                    message=f"pack not found: {pack_id}",
+                    next_question="Install the pack first, then approve it.",
+                )
+            log_event(
+                self.config.log_path,
+                "external_pack_approved",
+                {"pack_id": pack_id},
+            )
+            return True, {
+                "ok": True,
+                "pack": approved,
+                "message": f"Approved external pack {pack_id} for the next lifecycle step.",
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+                "managed_action_journal": approved.get("managed_action_journal") if isinstance(approved.get("managed_action_journal"), dict) else {},
+            }
         approved = self.pack_store.set_approval_hash(pack_id, str(current.get("permissions_hash") or ""))
         if approved is None:
             return self._pack_error(
@@ -2255,7 +2554,11 @@ class AgentRuntime:
                 message="enabled must be a boolean",
                 next_question='Include {"enabled": true} or {"enabled": false}.',
             )
-        updated = self.pack_store.set_enabled(pack_id, bool(enabled_value))
+        external_current = self.pack_store.get_external_pack(pack_id)
+        if isinstance(external_current, dict):
+            updated = self.pack_store.set_external_pack_enabled(pack_id, enabled=bool(enabled_value))
+        else:
+            updated = self.pack_store.set_enabled(pack_id, bool(enabled_value))
         if updated is None:
             return self._pack_error(
                 error="pack_not_found",
@@ -2263,18 +2566,21 @@ class AgentRuntime:
                 message=f"pack not found: {pack_id}",
                 next_question="Install the pack first, then enable it.",
             )
+        response_pack = dict(updated)
+        if isinstance(external_current, dict):
+            response_pack["enabled"] = bool(enabled_value)
         log_event(
             self.config.log_path,
             "pack_enabled_updated",
             {
                 "pack_id": pack_id,
-                "enabled": bool(updated.get("enabled")),
+                "enabled": bool(response_pack.get("enabled")),
             },
         )
         return True, {
             "ok": True,
-            "pack": updated,
-            "message": f"Pack {pack_id} {'enabled' if bool(updated.get('enabled')) else 'disabled'}.",
+            "pack": response_pack,
+            "message": f"Pack {pack_id} {'enabled' if bool(response_pack.get('enabled')) else 'disabled'}.",
         }
 
     def _reload_router(self) -> None:
@@ -24652,20 +24958,101 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/packs/install":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.packs_install(payload)
-                self._send_json(200 if ok else 400, body)
+                self._send_json(400, mutator_confirmation_required_payload("external_pack.install"))
+                return
+            if path == "/packs/install/plan":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.plan_pack_lifecycle("external_pack.install", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/install/apply":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.apply_pack_lifecycle("external_pack.install", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
                 return
             if path == "/packs/approve":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.packs_approve(payload)
-                self._send_json(200 if ok else 400, body)
+                self._send_json(400, mutator_confirmation_required_payload("external_pack.approve"))
+                return
+            if path == "/packs/approve/plan":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.plan_pack_lifecycle("external_pack.approve", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/approve/apply":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.apply_pack_lifecycle("external_pack.approve", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
                 return
             if path == "/packs/enable":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.packs_enable(payload)
-                self._send_json(200 if ok else 400, body)
+                self._send_json(400, mutator_confirmation_required_payload("external_pack.enable"))
+                return
+            if path == "/packs/enable/plan":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.plan_pack_lifecycle("external_pack.enable", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/enable/apply":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.apply_pack_lifecycle("external_pack.enable", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/grant":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                self._send_json(400, mutator_confirmation_required_payload("external_pack.grant"))
+                return
+            if path == "/packs/grant/plan":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.plan_pack_lifecycle("external_pack.grant", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/grant/apply":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.apply_pack_lifecycle("external_pack.grant", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/remove":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                self._send_json(400, mutator_confirmation_required_payload("external_pack.remove"))
+                return
+            if path == "/packs/remove/plan":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.plan_pack_lifecycle("external_pack.remove", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if path == "/packs/remove/apply":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.apply_pack_lifecycle("external_pack.remove", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if len(parts) == 4 and parts[0] == "packs" and parts[2] == "remove" and parts[3] == "plan":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                planned_payload = dict(payload)
+                planned_payload["pack_id"] = parts[1]
+                body = self.runtime.plan_pack_lifecycle("external_pack.remove", planned_payload)
+                self._send_json(200 if body.get("ok") else 400, body)
+                return
+            if len(parts) == 4 and parts[0] == "packs" and parts[2] == "remove" and parts[3] == "apply":
+                if self._reject_non_loopback_operator_surface(path=path):
+                    return
+                body = self.runtime.apply_pack_lifecycle("external_pack.remove", payload)
+                self._send_json(200 if body.get("ok") else 400, body)
                 return
             if path == "/bootstrap/run":
                 trace_id = self._request_trace_id(payload)
@@ -25114,11 +25501,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[0] == "packs":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
-                ok, body = self.runtime.delete_external_pack(
-                    parts[1],
-                    changed_by=self._request_client_host() or "loopback_operator",
-                )
-                self._send_json(200 if ok else 400, body)
+                self._send_json(400, mutator_confirmation_required_payload("external_pack.remove"))
                 return
             if len(parts) == 2 and parts[0] == "providers":
                 if self.runtime._safe_mode_enabled():

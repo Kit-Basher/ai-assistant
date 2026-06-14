@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 import os
 from pathlib import Path
+import time
 import tempfile
 import unittest
 
@@ -41,6 +42,52 @@ class TestPlanModePolicy(unittest.TestCase):
             searxng_base_url=None,
         )
         return AgentRuntime(config)
+
+    def _make_pack_dir(self, name: str = "plan-pack", *, adapter: bool = False) -> str:
+        pack_dir = os.path.join(self.tmpdir.name, name)
+        os.makedirs(pack_dir, exist_ok=True)
+        if adapter:
+            body = (
+                "---\n"
+                f"id: {name}\n"
+                f"name: {name}\n"
+                "version: 0.1.0\n"
+                "description: plan mode pack\n"
+                "managed_adapters:\n"
+                "  - kind: local_file_import\n"
+                "    purpose: selected fixture metadata grant\n"
+                "    path_policy: user_selected_file_only\n"
+                "    allowed_extensions: [.txt]\n"
+                "    max_file_size_mb: 1\n"
+                "    stores_local_index: false\n"
+                "    network_allowed: false\n"
+                "---\n"
+                "# Plan Pack\n\n"
+                "Safe text only.\n"
+            )
+        else:
+            body = (
+                "---\n"
+                f"id: {name}\n"
+                f"name: {name}\n"
+                "version: 0.1.0\n"
+                "description: plan mode pack\n"
+                "---\n"
+                "# Plan Pack\n\n"
+                "Safe text only.\n"
+            )
+        with open(os.path.join(pack_dir, "SKILL.md"), "w", encoding="utf-8") as handle:
+            handle.write(body)
+        return pack_dir
+
+    def _plan_apply_payload(self, plan_payload: dict[str, object]) -> dict[str, object]:
+        plan = plan_payload["plan"]
+        self.assertIsInstance(plan, dict)
+        return {
+            "plan_id": plan["plan_id"],
+            "confirmation_token": plan["confirmation_token"],
+            "mutation_plan": plan["mutation_plan"],
+        }
 
     def test_unknown_operations_default_to_mutating(self) -> None:
         decision = classify_operation("do_magic")
@@ -142,11 +189,161 @@ class TestPlanModePolicy(unittest.TestCase):
     def test_pack_lifecycle_mutators_are_centrally_classified(self) -> None:
         runtime = self._runtime()
 
-        for action_type in ("external_pack.install", "external_pack.enable", "external_pack.grant"):
+        for action_type in (
+            "external_pack.install",
+            "external_pack.approve",
+            "external_pack.enable",
+            "external_pack.grant",
+            "external_pack.remove",
+        ):
             payload = runtime.plan_mode_policy(action_type)
             self.assertEqual("mutating", payload["classification"], action_type)
             self.assertTrue(payload["requires_plan"], action_type)
             self.assertTrue(payload["requires_confirmation"], action_type)
+
+    def test_external_pack_install_plan_apply_persists_pack(self) -> None:
+        runtime = self._runtime()
+        pack_dir = self._make_pack_dir("plan-install-pack")
+
+        plan_payload = runtime.plan_pack_lifecycle("external_pack.install", {"source": pack_dir})
+        self.assertTrue(plan_payload["ok"])
+        plan = plan_payload["plan"]
+        mutation_plan = plan["mutation_plan"]
+        self.assertEqual("plan_mode", mutation_plan["policy_layer"])
+        self.assertEqual("external_pack.install", mutation_plan["action_type"])
+        self.assertEqual("mutating", mutation_plan["classification"])
+        self.assertTrue(mutation_plan["requires_confirmation"])
+        self.assertIn("external_pack_store", mutation_plan["resources"]["changed"])
+        self.assertEqual(plan["confirmation_token"], mutation_plan["confirmation_token"])
+
+        result = runtime.apply_pack_lifecycle("external_pack.install", self._plan_apply_payload(plan_payload))
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("plan-install-pack", result["pack"]["canonical_pack"]["audit"]["declared_id"])
+
+    def test_external_pack_direct_mutator_endpoint_requires_plan(self) -> None:
+        runtime = self._runtime()
+        handler = _HandlerForPlanTest(runtime, "/packs/install", {"source": self._make_pack_dir("direct-blocked")})
+        handler.do_POST()
+        payload = handler.json_payload()
+
+        self.assertEqual(400, handler.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("confirmation_required", payload["error"])
+        self.assertTrue(payload["requires_plan"])
+        self.assertTrue(payload["requires_confirmation"])
+
+    def test_external_pack_plan_apply_rejects_tampering(self) -> None:
+        runtime = self._runtime()
+        plan_payload = runtime.plan_pack_lifecycle("external_pack.install", {"source": self._make_pack_dir("tamper-pack")})
+        apply_payload = self._plan_apply_payload(plan_payload)
+
+        missing_plan = dict(apply_payload)
+        missing_plan.pop("mutation_plan")
+        self.assertEqual("plan_required", runtime.apply_pack_lifecycle("external_pack.install", missing_plan)["error"])
+
+        bad_token = dict(apply_payload)
+        bad_token["confirmation_token"] = "confirm-wrong"
+        self.assertEqual("invalid_confirmation", runtime.apply_pack_lifecycle("external_pack.install", bad_token)["error"])
+
+        bad_action = dict(apply_payload)
+        bad_action["mutation_plan"] = dict(apply_payload["mutation_plan"])
+        bad_action["mutation_plan"]["action_type"] = "external_pack.enable"
+        self.assertEqual("plan_action_type_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_action)["error"])
+
+        bad_resources = dict(apply_payload)
+        bad_resources["mutation_plan"] = dict(apply_payload["mutation_plan"])
+        bad_resources["mutation_plan"]["resources"] = {"created": ["other"], "changed": [], "deleted": []}
+        self.assertEqual("plan_apply_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_resources)["error"])
+
+        bad_plan_id = dict(apply_payload)
+        bad_plan_id["mutation_plan"] = dict(apply_payload["mutation_plan"])
+        bad_plan_id["mutation_plan"]["plan_id"] = "other-plan"
+        self.assertEqual("plan_id_mismatch", runtime.apply_pack_lifecycle("external_pack.install", bad_plan_id)["error"])
+
+    def test_external_pack_plan_apply_rejects_expired_plan(self) -> None:
+        runtime = self._runtime()
+        plan_payload = runtime.plan_pack_lifecycle("external_pack.install", {"source": self._make_pack_dir("expired-pack")})
+        plan = plan_payload["plan"]
+        runtime._pack_lifecycle_confirmations[plan["plan_id"]]["expires_at"] = time.time() - 1  # noqa: SLF001
+
+        result = runtime.apply_pack_lifecycle("external_pack.install", self._plan_apply_payload(plan_payload))
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("confirmation_expired", result["error"])
+
+    def test_external_pack_approve_enable_grant_remove_use_plan_apply(self) -> None:
+        runtime = self._runtime()
+        pack_dir = self._make_pack_dir("plan-adapter-pack", adapter=True)
+        install_ok, install_body = runtime.packs_install({"source": pack_dir})
+        self.assertTrue(install_ok)
+        pack_id = install_body["pack"]["pack_id"]
+
+        approve_plan = runtime.plan_pack_lifecycle("external_pack.approve", {"pack_id": pack_id})
+        approve = runtime.apply_pack_lifecycle("external_pack.approve", self._plan_apply_payload(approve_plan))
+        self.assertTrue(approve["ok"])
+        self.assertEqual(pack_id, approve["pack"]["pack_id"])
+
+        enable_plan = runtime.plan_pack_lifecycle("external_pack.enable", {"pack_id": pack_id, "enabled": True})
+        enabled = runtime.apply_pack_lifecycle("external_pack.enable", self._plan_apply_payload(enable_plan))
+        self.assertTrue(enabled["ok"])
+        self.assertTrue(enabled["pack"]["enabled"])
+
+        selected = Path(self.tmpdir.name) / "selected.txt"
+        selected.write_text("fixture", encoding="utf-8")
+        grant_plan = runtime.plan_pack_lifecycle(
+            "external_pack.grant",
+            {
+                "pack_id": pack_id,
+                "requested_path": str(selected),
+                "adapter": {
+                    "kind": "local_file_import",
+                    "purpose": "selected fixture metadata grant",
+                    "path_policy": "user_selected_file_only",
+                    "allowed_extensions": [".txt"],
+                    "max_file_size_mb": 1,
+                    "stores_local_index": False,
+                    "network_allowed": False,
+                },
+            },
+        )
+        granted = runtime.apply_pack_lifecycle("external_pack.grant", self._plan_apply_payload(grant_plan))
+        self.assertTrue(granted["ok"])
+        self.assertFalse(granted["did_invoke_adapter"])
+        self.assertFalse(granted["reads_file"])
+        self.assertIn("managed_action_journal", granted)
+
+        remove_plan = runtime.plan_pack_lifecycle("external_pack.remove", {"pack_id": pack_id})
+        removed = runtime.apply_pack_lifecycle("external_pack.remove", self._plan_apply_payload(remove_plan))
+        self.assertTrue(removed["ok"])
+        self.assertIn("tombstone", str(removed.get("managed_action_journal", {})).lower())
+
+    def test_external_pack_preview_list_search_are_read_only(self) -> None:
+        runtime = self._runtime()
+        for action_type in ("external_pack.list", "external_pack.preview", "external_pack.search", "external_pack.status"):
+            payload = runtime.plan_mode_policy(action_type)
+            self.assertEqual("read_only", payload["classification"], action_type)
+            self.assertFalse(payload["requires_confirmation"], action_type)
+
+
+class _HandlerForPlanTest:
+    def __init__(self, runtime: AgentRuntime, path: str, payload: dict[str, object] | None = None) -> None:
+        from tests.test_api_packs_endpoints import _HandlerForTest
+
+        self._handler = _HandlerForTest(runtime, path, payload or {})
+
+    @property
+    def status_code(self) -> int:
+        return self._handler.status_code
+
+    def do_POST(self) -> None:
+        self._handler.do_POST()
+
+    def json_payload(self) -> dict[str, object]:
+        import json
+
+        return json.loads(self._handler.body.decode("utf-8"))
 
 
 if __name__ == "__main__":

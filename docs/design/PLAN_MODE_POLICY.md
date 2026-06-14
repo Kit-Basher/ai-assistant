@@ -35,10 +35,24 @@ or tampered plans before the runtime executor runs.
 
 ## Reference Implementation
 
-Managed SearXNG setup is the reference implementation. `/search/setup/plan`
-embeds a Plan Mode `mutation_plan`; `/search/setup/apply` validates that plan
-before managed local service execution, then journals executed steps and changed
-resources through the existing managed-action journal.
+Managed SearXNG setup is the reference implementation. As the managed-service
+reference, `/search/setup/plan` embeds a Plan Mode `mutation_plan`;
+`/search/setup/apply` validates that plan before managed local service
+execution, then journals executed steps and changed resources through the
+existing managed-action journal.
+
+External pack lifecycle writes use the same public shape:
+
+- `POST /packs/install/plan` then `POST /packs/install/apply`
+- `POST /packs/approve/plan` then `POST /packs/approve/apply`
+- `POST /packs/enable/plan` then `POST /packs/enable/apply`
+- `POST /packs/grant/plan` then `POST /packs/grant/apply`
+- `POST /packs/remove/plan` then `POST /packs/remove/apply`
+
+The direct lifecycle write endpoints return confirmation-required Plan Mode
+responses instead of mutating. Apply rejects missing plans, expired plans,
+wrong tokens, action-type changes, resource changes, plan-id mismatches, and
+plan/apply mismatches before the underlying pack lifecycle method runs.
 
 The policy layer does not permit hidden sudo, arbitrary shell execution, public
 SearXNG binds, or external pack install/import from search results.
