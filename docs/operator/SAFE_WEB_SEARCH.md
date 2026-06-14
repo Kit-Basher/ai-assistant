@@ -37,7 +37,10 @@ managed local service:
   `settings.yml` before bind-mounting `/etc/searxng`. Empty config mounts and
   arbitrary settings content are rejected.
 - The seeded config preserves default SearXNG behavior and enables JSON output
-  for Personal Agent's metadata-only safe search provider check.
+  for Personal Agent's metadata-only safe search provider check. It also
+  creates or preserves a non-default `server.secret_key`; the inherited
+  `ultrasecretkey` value is rejected and replaced, and the key is redacted from
+  journals, diagnostics, and support output.
 - On Linux, rootless Podman is the preferred managed-service engine. Docker is
   shown only as an explicit fallback when rootless Podman is unavailable or not
   confirmed.

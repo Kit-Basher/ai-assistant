@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
+import secrets as secrets_lib
 import shutil
 import socket
 import subprocess
@@ -20,14 +22,19 @@ APPROVED_SEARXNG_PORT = 8080
 APPROVED_SEARXNG_FALLBACK_PORT = 8888
 APPROVED_SEARXNG_VOLUME = "memory/local_services/searxng"
 APPROVED_SEARXNG_CONFIG_PURPOSE = "enable_json_output_for_safe_metadata_search"
-APPROVED_SEARXNG_SETTINGS = """\
+DEFAULT_SEARXNG_SECRET_KEY = "ultrasecretkey"
+APPROVED_SEARXNG_SETTINGS_TEMPLATE = """\
 use_default_settings: true
+
+server:
+  secret_key: "{secret_key}"
 
 search:
   formats:
     - html
     - json
 """
+APPROVED_SEARXNG_SETTINGS = APPROVED_SEARXNG_SETTINGS_TEMPLATE.format(secret_key="<generated>")
 APPROVED_SEARXNG_PRIMARY_BIND = "127.0.0.1:8080:8080"
 APPROVED_SEARXNG_FALLBACK_BIND = "127.0.0.1:8888:8080"
 APPROVED_SEARXNG_BINDS = (APPROVED_SEARXNG_PRIMARY_BIND, APPROVED_SEARXNG_FALLBACK_BIND)
@@ -277,6 +284,7 @@ class ManagedLocalServiceExecutor:
         runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         health_checker: Callable[[str], bool] | None = None,
         port_checker: Callable[[int], bool] | None = None,
+        secret_generator: Callable[[], str] | None = None,
         timeout_seconds: float = 60.0,
         health_timeout_seconds: float = 30.0,
         health_poll_interval_seconds: float = 1.0,
@@ -286,6 +294,7 @@ class ManagedLocalServiceExecutor:
         self._runner = runner or subprocess.run
         self._health_checker = health_checker
         self._port_checker = port_checker or self._port_available
+        self._secret_generator = secret_generator or (lambda: secrets_lib.token_urlsafe(32))
         self._timeout_seconds = max(1.0, float(timeout_seconds or 60.0))
         self._health_timeout_seconds = max(30.0, float(health_timeout_seconds or 30.0))
         if health_timeout_seconds < 30.0:
@@ -724,13 +733,52 @@ class ManagedLocalServiceExecutor:
                 return False, "config_volume_not_approved"
             root.mkdir(parents=True, exist_ok=True)
             settings = root / "settings.yml"
-            settings.write_text(APPROVED_SEARXNG_SETTINGS, encoding="utf-8")
+            existing = settings.read_text(encoding="utf-8") if settings.exists() else ""
+            secret_key = self._extract_approved_searxng_secret(existing)
+            if not secret_key:
+                secret_key = self._generate_searxng_secret()
+            settings.write_text(self._approved_searxng_settings(secret_key), encoding="utf-8")
             actual = settings.read_text(encoding="utf-8")
         except OSError as exc:
             return False, exc.__class__.__name__
-        if actual != APPROVED_SEARXNG_SETTINGS:
+        if not self._validate_approved_searxng_settings(actual):
             return False, "settings_validation_failed"
         return True, None
+
+    def _generate_searxng_secret(self) -> str:
+        for _attempt in range(3):
+            value = str(self._secret_generator() or "").strip()
+            if self._is_approved_searxng_secret(value):
+                return value
+        return secrets_lib.token_urlsafe(32)
+
+    @staticmethod
+    def _approved_searxng_settings(secret_key: str) -> str:
+        escaped = str(secret_key).replace("\\", "\\\\").replace('"', '\\"')
+        return APPROVED_SEARXNG_SETTINGS_TEMPLATE.format(secret_key=escaped)
+
+    @classmethod
+    def _validate_approved_searxng_settings(cls, text: str) -> bool:
+        raw = str(text or "")
+        return (
+            "use_default_settings: true" in raw
+            and cls._extract_approved_searxng_secret(raw) is not None
+            and re.search(r"(?im)^\s*-\s*html\s*$", raw) is not None
+            and re.search(r"(?im)^\s*-\s*json\s*$", raw) is not None
+        )
+
+    @classmethod
+    def _extract_approved_searxng_secret(cls, text: str) -> str | None:
+        match = re.search(r"(?im)^\s*secret_key\s*:\s*(.+?)\s*$", str(text or ""))
+        if not match:
+            return None
+        value = match.group(1).strip().strip("\"'")
+        return value if cls._is_approved_searxng_secret(value) else None
+
+    @staticmethod
+    def _is_approved_searxng_secret(value: str) -> bool:
+        cleaned = str(value or "").strip()
+        return bool(cleaned) and cleaned != DEFAULT_SEARXNG_SECRET_KEY
 
     def _run_fixed(self, argv: list[str]) -> subprocess.CompletedProcess[str]:
         return self._runner(
@@ -834,6 +882,8 @@ class ManagedLocalServiceExecutor:
     @staticmethod
     def _redact_diagnostic_text(text: str) -> str:
         redacted = str(text or "")
+        redacted = re.sub(r"(?im)^(\s*secret_key\s*:\s*)(.+)$", r"\1<redacted>", redacted)
+        redacted = re.sub(r"(?i)(server\.secret_key\s*[=:]\s*)(\S+)", r"\1<redacted>", redacted)
         for marker in ("token=", "api_key=", "apikey=", "password=", "passwd=", "secret="):
             lowered = redacted.lower()
             start = lowered.find(marker)

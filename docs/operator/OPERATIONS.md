@@ -212,9 +212,12 @@ an explicit fallback plan with a warning, fallback reason, and Docker fallback
 confirmation flag. The first managed SearXNG container seeds and validates the
 approved owned `settings.yml` before mounting `/etc/searxng`; empty config
 mounts and arbitrary settings content are rejected. The seeded config enables
-JSON output for metadata-only safe search. It waits up to 30 seconds for first boot,
-accepts HTTP 200 as healthy, and retries with `GET` when `HEAD` does not prove
-readiness. If health fails, it captures redacted `ps -a` and `logs --tail 120`
+JSON output for metadata-only safe search and creates or preserves a
+non-default `server.secret_key`; the inherited `ultrasecretkey` value is
+rejected and the key is redacted from journals, diagnostics, and support
+output. It waits up to 30 seconds for first boot, accepts HTTP 200 as healthy,
+and retries with `GET` when `HEAD` does not prove readiness. If health fails,
+it captures redacted `ps -a` and `logs --tail 120`
 diagnostics for `personal-agent-searxng` before rolling back that owned
 container. It updates the running Personal Agent search configuration only
 after the SearXNG JSON endpoint verifies. To keep search enabled after restart,

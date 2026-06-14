@@ -13,7 +13,7 @@ from pathlib import Path
 
 from agent.api_server import AgentRuntime
 from agent.services.managed_local_services import (
-    APPROVED_SEARXNG_SETTINGS,
+    DEFAULT_SEARXNG_SECRET_KEY,
     ManagedLocalServiceDetector,
     ManagedLocalServiceExecutor,
     redact_service_url,
@@ -37,7 +37,12 @@ class _FakeManagedServiceRunner:
             stdout = "personal-agent-searxng\n" if self.existing else ""
             return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
         if len(argv) > 1 and argv[1] == "logs":
-            return subprocess.CompletedProcess(argv, 0, stdout="mock searxng first-boot log token=secret-value", stderr="")
+            return subprocess.CompletedProcess(
+                argv,
+                0,
+                stdout="mock searxng first-boot log token=secret-value\nserver:\n  secret_key: leaked-settings-secret\n",
+                stderr="",
+            )
         if self.fail_on and self.fail_on in joined:
             return subprocess.CompletedProcess(argv, 2, stdout="", stderr="mock failure")
         if len(argv) > 1 and argv[1] == "run":
@@ -200,6 +205,7 @@ class TestManagedLocalServices(unittest.TestCase):
             runner=runner,
             health_checker=lambda url: url == "http://127.0.0.1:8080",
             port_checker=lambda _port: True,
+            secret_generator=lambda: "deterministic-managed-secret",
         )
         params = {
             "service_id": "searxng",
@@ -231,8 +237,81 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertTrue(any(str(part).endswith("memory/local_services/searxng:/etc/searxng") for part in run_argv))
         self.assertIn("docker.io/searxng/searxng:latest", run_argv)
         settings = Path(self.tmpdir.name) / "memory/local_services/searxng/settings.yml"
-        self.assertEqual(APPROVED_SEARXNG_SETTINGS, settings.read_text(encoding="utf-8"))
+        settings_text = settings.read_text(encoding="utf-8")
+        self.assertIn("use_default_settings: true", settings_text)
+        self.assertIn("server:", settings_text)
+        self.assertIn('secret_key: "deterministic-managed-secret"', settings_text)
+        self.assertIn("- json", settings_text)
+        self.assertNotIn(DEFAULT_SEARXNG_SECRET_KEY, settings_text)
+        result_payload = json.dumps(result.to_dict(), sort_keys=True)
+        self.assertNotIn("deterministic-managed-secret", result_payload)
         self.assertTrue(all(call.get("shell") is False for call in runner.calls))
+
+    def test_seeded_searxng_config_preserves_existing_acceptable_secret(self) -> None:
+        settings = Path(self.tmpdir.name) / "memory/local_services/searxng/settings.yml"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            """\
+use_default_settings: true
+
+server:
+  secret_key: "existing-good-secret"
+
+search:
+  formats:
+    - html
+    - json
+""",
+            encoding="utf-8",
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "docker" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+            secret_generator=lambda: "new-generated-secret",
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="docker"))
+
+        self.assertTrue(result.ok)
+        settings_text = settings.read_text(encoding="utf-8")
+        self.assertIn('secret_key: "existing-good-secret"', settings_text)
+        self.assertNotIn("new-generated-secret", settings_text)
+
+    def test_seeded_searxng_config_replaces_missing_or_default_secret(self) -> None:
+        settings = Path(self.tmpdir.name) / "memory/local_services/searxng/settings.yml"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(
+            """\
+use_default_settings: true
+
+server:
+  secret_key: "ultrasecretkey"
+
+search:
+  formats:
+    - html
+    - json
+""",
+            encoding="utf-8",
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=_FakeManagedServiceRunner(),
+            health_checker=lambda _url: True,
+            port_checker=lambda _port: True,
+            secret_generator=lambda: "replacement-managed-secret",
+        )
+
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+
+        self.assertTrue(result.ok)
+        settings_text = settings.read_text(encoding="utf-8")
+        self.assertIn('secret_key: "replacement-managed-secret"', settings_text)
+        self.assertNotIn(DEFAULT_SEARXNG_SECRET_KEY, settings_text)
 
     def test_executor_preview_uses_primary_or_fallback_port(self) -> None:
         executor = ManagedLocalServiceExecutor(
@@ -504,6 +583,8 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertTrue(journal.get("rollback_steps"))
         self.assertIn("mock searxng first-boot log", result.diagnostics["logs_tail"])
         self.assertNotIn("secret-value", result.diagnostics["logs_tail"])
+        self.assertNotIn("leaked-settings-secret", result.diagnostics["logs_tail"])
+        self.assertIn("secret_key: <redacted>", result.diagnostics["logs_tail"])
         self.assertEqual("custom_health_checker_false", result.diagnostics["health"]["last_health_error"])
         self.assertIn("capture_failure_diagnostics", [step["name"] for step in journal.get("executed_steps", [])])
 

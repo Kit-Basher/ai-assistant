@@ -28,6 +28,11 @@ Allowed native service actions are limited to:
 
 For SearXNG, the runtime uses a fixed Personal-Agent-managed container name, loopback-only bind, approved image reference, and an owned seeded config directory. The first managed install must not bind-mount an empty host directory over `/etc/searxng`; it writes and validates the approved minimal `settings.yml` first so JSON metadata search is available. Execution is confirm-gated and validates the approved plan again before any Docker or Podman command runs.
 
+The approved SearXNG settings include a generated or preserved non-default
+`server.secret_key`; the image default `ultrasecretkey` is invalid for managed
+setup. The value is local config state and must be redacted from journals,
+diagnostics, support bundles, and user-facing setup results.
+
 Mutating service actions follow the managed-action recovery pattern in [MANAGED_ACTION_RECOVERY.md](MANAGED_ACTION_RECOVERY.md): journal the attempt, verify success, roll back only owned changes on failure, and never silently mutate pre-existing user resources.
 
 ## Blocked Actions
@@ -106,7 +111,10 @@ The first mutating service action is confirm-gated SearXNG setup. It may only:
 - capture redacted `ps -a` and `logs --tail 120` diagnostics for the owned
   container before rollback on health failure
 
-The seeded config keeps default SearXNG settings and enables `json` output for Personal Agent's metadata-only safe search. Empty config mounts and arbitrary settings content are rejected.
+The seeded config keeps default SearXNG settings, sets a non-default
+`server.secret_key`, and enables `json` output for Personal Agent's
+metadata-only safe search. Empty config mounts and arbitrary settings content
+are rejected.
 
 Search config is updated only after the SearXNG JSON endpoint verifies. To keep search enabled after restart, the service environment still needs the selected approved local URL, either `http://127.0.0.1:8080` or `http://127.0.0.1:8888`.
 
