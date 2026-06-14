@@ -93,6 +93,7 @@ from agent.runtime_contract import (
     normalize_user_facing_status,
 )
 from agent.persona import normalize_persona_text
+from agent.policy import build_mutator_plan, classify_operation, validate_mutator_apply
 from agent.public_chat import (
     build_no_llm_public_message,
     build_trivial_social_turn_message,
@@ -12032,6 +12033,18 @@ class AgentRuntime:
             "search": self.search_status(),
         }
 
+    def plan_mode_policy(self, action_type: str) -> dict[str, Any]:
+        decision = classify_operation(action_type)
+        return {
+            "ok": True,
+            "action_type": decision.action_type,
+            "classification": decision.classification,
+            "allowed_without_confirmation": decision.allowed_without_confirmation,
+            "requires_plan": decision.requires_plan,
+            "requires_confirmation": decision.requires_confirmation,
+            "reason": decision.reason,
+        }
+
     def _safe_web_search(self) -> SafeWebSearchClient:
         if self._safe_web_search_client is None:
             self._safe_web_search_client = SafeWebSearchClient(SafeWebSearchConfig.from_runtime_config(self.config))
@@ -12460,8 +12473,15 @@ class AgentRuntime:
             return {"ok": False, "error": "confirmation_consumed", "mutated": False}
         if float(stored.get("expires_at") or 0) <= time.time():
             return {"ok": False, "error": "confirmation_expired", "mutated": False}
-        stored["consumed"] = True
         plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
+        policy_ok, policy_error = validate_mutator_apply(
+            plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None,
+            expected_action_type="managed_local_service.setup_apply",
+            confirmation_token=token,
+        )
+        if not policy_ok:
+            return {"ok": False, "error": policy_error or "policy_plan_invalid", "mutated": False}
+        stored["consumed"] = True
         return self._execute_search_setup_plan(plan)
 
     @staticmethod
@@ -12483,6 +12503,19 @@ class AgentRuntime:
         plan_id = f"search-setup-{uuid.uuid4().hex[:10]}"
         token = f"confirm-{uuid.uuid4().hex[:16]}"
         expires_at = time.time() + 600
+        plan["mutation_plan"] = build_mutator_plan(
+            action_type="managed_local_service.setup_apply",
+            resources={
+                "created": ["container:personal-agent-searxng"],
+                "changed": ["runtime_search_config", "memory/local_services/searxng/settings.yml"],
+                "deleted": [],
+            },
+            rollback_scope=str(plan.get("rollback_scope") or "restore previous runtime search config and remove only owned managed-service resources"),
+            rollback_supported=True,
+            confirmation_token=token,
+            expires_at=expires_at,
+            plan_id=plan_id,
+        )
         public_plan = {key: value for key, value in plan.items() if key != "raw_base_url"}
         public_plan.update({"plan_id": plan_id, "confirmation_token": token, "expires_at": int(expires_at)})
         stored_plan = dict(plan)

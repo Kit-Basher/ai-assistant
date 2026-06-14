@@ -161,6 +161,18 @@ def test_managed_action_recovery_doc_exists_and_states_rollback_boundary() -> No
     assert "persistent_managed_action_journal.md" in text
 
 
+def test_plan_mode_policy_doc_exists_and_defines_mutator_boundary() -> None:
+    path = REPO_ROOT / "docs" / "design" / "PLAN_MODE_POLICY.md"
+    assert path.is_file()
+    text = path.read_text(encoding="utf-8").lower()
+    assert "unknown operations default to mutating" in text
+    assert "read-only operations may run without confirmation" in text
+    assert "mutating operations require a plan, preview, and explicit confirmation" in text
+    assert "managed searxng setup is the reference implementation" in text
+    assert "hidden sudo" in text
+    assert "arbitrary shell execution" in text
+
+
 def test_persistent_managed_action_journal_doc_exists_and_limits_recovery_claims() -> None:
     path = REPO_ROOT / "docs" / "design" / "PERSISTENT_MANAGED_ACTION_JOURNAL.md"
     assert path.is_file()
