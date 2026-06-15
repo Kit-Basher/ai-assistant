@@ -1,15 +1,15 @@
 # Release Ledger
 
-Date: 2026-06-14
+Date: 2026-06-15
 
 This ledger is the compact release-history index for the current Personal Agent
 line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.0-plan-mode-pack-lifecycle`
+Current stable checkpoint target: `v0.2.0-plan-mode-user-confirmation-ux`
 
-Commit: `7096852` Enforce Plan Mode for external pack lifecycle writes
+Commit: pending tag/commit after this docs update.
 
 Summary:
 
@@ -19,6 +19,10 @@ Summary:
   operations.
 - External pack lifecycle writes now use Plan Mode plan/apply flows for install,
   approve, enable, grant, and remove/tombstone.
+- Managed SearXNG and external pack lifecycle user-facing chat/API/Telegram
+  confirmations now preserve `plan_id`, `confirmation_token`, and
+  `mutation_plan` through preview and apply. Telegram output stays concise and
+  does not dump raw JSON or confirmation tokens.
 
 ## Recent Release Tags
 
@@ -27,6 +31,7 @@ Summary:
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |
+| `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 | pending | User-facing Plan Mode confirmation UX for managed SearXNG and external pack lifecycle. |
 
 ## Full Tag List
 
@@ -72,6 +77,7 @@ Dates are from `git for-each-ref --sort=creatordate`.
 | `v0.2.0-managed-searxng` | 2026-06-14 |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 |
+| `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 pending tag |
 
 ## What Was Proven
 
@@ -118,6 +124,25 @@ Proven:
 - Preview/list/search/status pack surfaces remain read-only.
 - Existing external pack safety gates still pass.
 
+### `v0.2.0-plan-mode-user-confirmation-ux`
+
+Proven:
+
+- Managed SearXNG setup chat UX presents the existing Plan Mode setup plan
+  naturally: resources that may be created/changed/deleted, rollback scope,
+  rollback support, expiry, and explicit yes/no confirmation.
+- External pack lifecycle user-facing paths use the existing Plan Mode
+  plan/apply payloads for install/import-for-review, approve, enable, grant
+  metadata, and remove/tombstone where routed through chat/API.
+- The assistant preserves `plan_id`, `confirmation_token`, and `mutation_plan`
+  through confirmation and applies only the matching pending plan.
+- Declined, expired, consumed, missing, mismatched, or tampered confirmations
+  block cleanly without pack use, service start, image pull, permission grant,
+  or search enablement.
+- Telegram rendering remains concise and does not dump raw JSON,
+  confirmation tokens, raw hostile pack text, raw `SKILL.md`, or raw `AGENTS.md`
+  content.
+
 ## Deferred
 
 - Fresh Debian VM install test is intentionally deferred until the very end
@@ -160,6 +185,30 @@ Behavior/release gates:
 
 ```bash
 python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py
+```
+
+Recent checkpoint verification:
+
+```bash
+python -m py_compile agent/api_server.py agent/policy.py agent/bot.py
+# PASS
+
+python -m pytest -q tests/test_plan_policy.py tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py
+# 58 passed
+
+python -m pytest -q tests/test_managed_local_services.py tests/test_safe_web_search.py tests/test_api_packs_endpoints.py
+# 95 passed
+
+python scripts/external_pack_safety_smoke.py
+# PASS external_pack_safety_smoke (39 gates)
+
+python scripts/prove_core_workflows.py
+# PASS: external skill pack lifecycle, missing capability flow, model scout/provider behavior
+# BLOCKED: internet/search in isolated proof environment when no trusted SearXNG backend is configured
+# FAIL: none
+
+git diff --check
+# PASS
 ```
 
 Repository hygiene:

@@ -1,7 +1,7 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-11
-Checkpoint: `e4b4252` Complete core workflow proof fixes
+Checkpoint: `v0.2.0-plan-mode-user-confirmation-ux`
 Latest clean checkpoint before this pass: `e4b4252` Complete core workflow proof fixes
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
@@ -52,6 +52,7 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 - Managed-adapter invocation is previewed and explicitly confirmed before running a core-owned adapter operation.
 - Confirm-gated SearXNG managed local service setup can run only the approved Docker/Podman image, name, loopback bind, approved primary/fallback ports, and seeded owned config directory. The first managed install writes and validates the approved minimal `settings.yml` before mounting `/etc/searxng`; it enables JSON output, creates or preserves a non-default `server.secret_key`, rejects `ultrasecretkey`, and rejects empty config mounts or arbitrary settings content. If the approved config directory is not writable, setup blocks before pull/run with a bounded ownership handoff. If the approved container already exists, setup reuses or restarts it only after inspect confirms the approved image, loopback bind, and config mount.
 - Plan Mode policy is now a central classification layer in `agent/policy.py` and documented in `docs/design/PLAN_MODE_POLICY.md`: read/list/search/status/preview operations are read-only, known mutators require a plan plus explicit confirmation, and unknown operations default to mutating. Managed SearXNG setup embeds and validates the reference `mutation_plan` before executor work. External pack install, approve, enable, grant, and remove now expose plan/apply API flows with the same `mutation_plan` shape; direct lifecycle write endpoints return confirmation-required responses instead of mutating, and apply rejects missing, expired, mismatched, or tampered plans before pack lifecycle writes run.
+- User-facing Plan Mode confirmation UX now covers managed SearXNG setup and external pack lifecycle paths. Chat/API/Telegram responses explain the planned mutation, resources that may be created/changed/deleted, rollback scope/support, expiry, and explicit yes/no confirmation. The assistant preserves `plan_id`, `confirmation_token`, and `mutation_plan` through confirmation and applies only the matching pending plan. Telegram stays concise and does not dump raw JSON, confirmation tokens, raw hostile pack text, raw `SKILL.md`, or raw `AGENTS.md` content.
 - Managed local service setup now journals owned changes and rolls back the SearXNG container it created if health checks fail.
 - Web search cleanup is a separate confirmed action that only targets `personal-agent-searxng`.
 - Managed action reliability now has a product-wide standard and audit. Only SearXNG setup/cleanup currently meets the full journal/owned-rollback pattern; other mutating flows are tracked as follow-up work.
@@ -132,6 +133,15 @@ Run this after external-pack, search, acquisition, or routing changes:
 6. `git status`
 
 `external_pack_safety_smoke` currently covers 39 hostile-intake, lifecycle, managed-service, and recovery gates. It proves hostile intake gates. `prove_core_workflows.py` proves what actually works and reports `BLOCKED` or `NOT_PROVEN` where runtime configuration or direct verification is still missing. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
+
+Recent `v0.2.0-plan-mode-user-confirmation-ux` verification:
+
+- `python -m py_compile agent/api_server.py agent/policy.py agent/bot.py`: PASS
+- `python -m pytest -q tests/test_plan_policy.py tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py`: 58 passed
+- `python -m pytest -q tests/test_managed_local_services.py tests/test_safe_web_search.py tests/test_api_packs_endpoints.py`: 95 passed
+- `python scripts/external_pack_safety_smoke.py`: PASS, 39 gates
+- `python scripts/prove_core_workflows.py`: no FAIL workflows; isolated internet/search remains BLOCKED when no trusted SearXNG backend is configured
+- `git diff --check`: PASS
 
 ## Next Likely Work
 
