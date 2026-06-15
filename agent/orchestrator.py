@@ -68,10 +68,8 @@ from agent.packs.managed_adapters import (
     ADAPTER_LOCAL_FILE_IMPORT,
     GRANT_GRANTED,
     build_permission_request,
-    create_metadata_only_grant,
     extract_local_path,
     list_adapter_grants,
-    record_adapter_grant,
     render_permission_preview,
     validate_local_file_path_metadata,
     validate_managed_adapter_declarations,
@@ -2220,7 +2218,14 @@ class Orchestrator:
         resources = plan.get("resources") if isinstance(plan.get("resources"), dict) else {}
         rollback_scope = str(plan.get("rollback_scope") or "Only the resources listed in this plan.").strip()
         rollback_supported = "yes" if bool(plan.get("rollback_supported")) else "no"
-        return [
+        expires_at = plan.get("expires_at")
+        expiry_line = ""
+        if expires_at is not None:
+            try:
+                expiry_line = f"Expires: {datetime.fromtimestamp(int(expires_at), tz=timezone.utc).isoformat()}."
+            except (TypeError, ValueError, OSError):
+                expiry_line = "Expires: soon."
+        lines = [
             "Plan Mode confirmation:",
             self._format_plan_resource_line("Will create", resources, "created"),
             self._format_plan_resource_line("Will change", resources, "changed"),
@@ -2228,6 +2233,107 @@ class Orchestrator:
             f"Rollback scope: {rollback_scope}",
             f"Rollback supported: {rollback_supported}.",
         ]
+        if expiry_line:
+            lines.append(expiry_line)
+        return lines
+
+    def _external_pack_plan_confirmation_response(
+        self,
+        user_id: str,
+        *,
+        action_type: str,
+        operation_payload: dict[str, Any],
+        title: str,
+        intro_lines: list[str],
+        used_tools: list[str],
+        preview_payload: dict[str, Any] | None = None,
+        permission_summary: str | None = None,
+    ) -> OrchestratorResponse:
+        adapter = self._chat_runtime_adapter
+        if not callable(getattr(adapter, "plan_pack_lifecycle", None)):
+            message = (
+                "I cannot prepare the external pack Plan Mode confirmation right now. "
+                "No pack was installed, approved, enabled, granted permissions, removed, or used."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=used_tools,
+                ok=False,
+                error_kind="external_pack_plan_unavailable",
+                payload={
+                    "type": "external_pack_lifecycle_plan_unavailable",
+                    "action_type": action_type,
+                    "mutated": False,
+                },
+            )
+        plan_payload = dict(adapter.plan_pack_lifecycle(action_type, operation_payload))
+        if not bool(plan_payload.get("ok")):
+            message = (
+                "I could not prepare that external pack Plan Mode confirmation. "
+                f"Reason: {plan_payload.get('error') or plan_payload.get('blocked_reason') or 'plan_unavailable'}. "
+                "No mutation ran."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=used_tools,
+                ok=False,
+                error_kind=str(plan_payload.get("error") or plan_payload.get("blocked_reason") or "external_pack_plan_failed"),
+                payload={
+                    "type": "external_pack_lifecycle_plan_unavailable",
+                    "action_type": action_type,
+                    "plan_result": plan_payload,
+                    "mutated": False,
+                },
+            )
+        plan = plan_payload.get("plan") if isinstance(plan_payload.get("plan"), dict) else {}
+        mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else {}
+        apply_payload = {
+            "plan_id": str(plan.get("plan_id") or ""),
+            "confirmation_token": str(plan.get("confirmation_token") or ""),
+            "mutation_plan": mutation_plan,
+        }
+        lines = [line for line in intro_lines if str(line or "").strip()]
+        if permission_summary:
+            lines.append(str(permission_summary).strip())
+        lines.extend(self._render_plan_mode_confirmation_lines(mutation_plan))
+        lines.append("Reply yes to apply this exact plan, or no to cancel.")
+        payload = dict(preview_payload) if isinstance(preview_payload, dict) else {}
+        payload.update(
+            {
+                "type": "external_pack_lifecycle_plan",
+                "action_type": action_type,
+                "title": title,
+                "plan": plan,
+                "mutation_plan": mutation_plan,
+                "plan_mode": self._plan_mode_public_payload(mutation_plan),
+                "apply_payload": apply_payload,
+                "mutated": False,
+            }
+        )
+        return self._confirmation_preview_response(
+            user_id,
+            route="action_tool",
+            question="\n".join(lines),
+            used_tools=used_tools,
+            action={
+                "operation": "external_pack_lifecycle_plan",
+                "params": {
+                    **apply_payload,
+                    "action_type": action_type,
+                },
+            },
+            title=title,
+            preview_payload=payload,
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            mutating=True,
+        )
 
     def _managed_service_missing_engine_response(self, user_id: str, services_payload: dict[str, Any]) -> OrchestratorResponse:
         searxng = self._searxng_service_from_status(services_payload)
@@ -3067,6 +3173,156 @@ class Orchestrator:
                 used_tools=["managed_local_service_prerequisite_setup", "safe_web_search"],
                 ok=ok,
                 error_kind=None if ok else str(result.get("error") or "podman_prerequisite_failed"),
+                payload=payload,
+            )
+        if operation == "external_pack_lifecycle_plan":
+            params = action.get("params") if isinstance(action.get("params"), dict) else {}
+            action_type = str(params.get("action_type") or "").strip().lower()
+            adapter = self._chat_runtime_adapter
+            if not callable(getattr(adapter, "apply_pack_lifecycle", None)):
+                return self._runtime_truth_response(
+                    text=(
+                        "External pack lifecycle confirmation could not run because the Plan Mode apply path is unavailable. "
+                        "No pack was installed, approved, enabled, granted permissions, removed, or used."
+                    ),
+                    route="action_tool",
+                    used_tools=["pack_lifecycle_action"],
+                    ok=False,
+                    error_kind="external_pack_apply_unavailable",
+                    payload={
+                        "type": "external_pack_lifecycle_result",
+                        "action_type": action_type,
+                        "mutated": False,
+                    },
+                )
+            apply_payload = {
+                "plan_id": str(params.get("plan_id") or ""),
+                "confirmation_token": str(params.get("confirmation_token") or ""),
+                "mutation_plan": params.get("mutation_plan") if isinstance(params.get("mutation_plan"), dict) else None,
+            }
+            try:
+                result = dict(adapter.apply_pack_lifecycle(action_type, apply_payload))
+            except Exception as exc:  # noqa: BLE001 - user-facing safe failure.
+                result = {
+                    "ok": False,
+                    "error": "external_pack_apply_error",
+                    "detail": exc.__class__.__name__,
+                    "mutated": False,
+                }
+            ok = bool(result.get("ok"))
+            error_code = str(result.get("error") or "").strip()
+            if error_code in {
+                "plan_required",
+                "invalid_confirmation",
+                "confirmation_consumed",
+                "confirmation_expired",
+                "plan_action_type_mismatch",
+                "plan_id_mismatch",
+                "plan_apply_mismatch",
+                "plan_policy_missing",
+                "plan_not_mutating",
+                "plan_resources_missing",
+                "plan_resources_invalid",
+            }:
+                if error_code == "confirmation_expired":
+                    first = "That external pack confirmation expired, so I didn’t make any changes."
+                elif error_code == "confirmation_consumed":
+                    first = "That external pack confirmation was already used, so I didn’t replay it."
+                elif error_code in {"plan_apply_mismatch", "plan_id_mismatch", "plan_action_type_mismatch"}:
+                    first = "That external pack plan no longer matches the saved Plan Mode confirmation, so I blocked it."
+                else:
+                    first = "That external pack confirmation was invalid, so I blocked it."
+                return self._runtime_truth_response(
+                    text="\n".join(
+                        [
+                            first,
+                            "No pack was installed, approved, enabled, granted permissions, removed, invoked, or used.",
+                            "Next step: ask me to show the pack lifecycle plan again.",
+                        ]
+                    ),
+                    route="action_tool",
+                    used_tools=["pack_lifecycle_action"],
+                    ok=False,
+                    error_kind=error_code,
+                    payload={
+                        "type": "external_pack_lifecycle_result",
+                        "action_type": action_type,
+                        "ok": False,
+                        "mutated": False,
+                        "plan_mode_blocked": True,
+                        "error": error_code,
+                    },
+                )
+            pack = result.get("pack") if isinstance(result.get("pack"), dict) else {}
+            pack_name = str(pack.get("name") or pack.get("display_name") or "External pack").strip()
+            if ok and pack:
+                try:
+                    grants = list_adapter_grants(self._pack_store.external_storage_root())
+                except Exception:
+                    grants = []
+                lifecycle = PackLifecycleService().evaluate(imported_pack=pack, permission_grants=grants).to_dict()
+                if action_type == "external_pack.install" and lifecycle.get("state") in {"generated_quarantined", "imported_for_review"}:
+                    self._queue_pack_review_approve_followup(user_id, pack=pack, lifecycle=lifecycle)
+                elif action_type == "external_pack.approve" and (lifecycle.get("next_step") or {}).get("action") == "enable":
+                    self._queue_pack_enable_followup(user_id, pack=pack, lifecycle=lifecycle)
+                elif action_type == "external_pack.enable":
+                    managed_adapters = self._external_pack_managed_adapters(pack)
+                    if lifecycle.get("state") == "needs_permission" and managed_adapters:
+                        self._pending_managed_adapter_requests[user_id] = {
+                            "pack_id": str(pack.get("pack_id") or pack.get("canonical_id") or "").strip(),
+                            "pack_name": pack_name,
+                            "managed_adapters": managed_adapters,
+                        }
+                        self._queue_managed_adapter_permission_request_followup(
+                            user_id,
+                            pack=pack,
+                            lifecycle=lifecycle,
+                            managed_adapters=managed_adapters,
+                        )
+                elif action_type == "external_pack.grant":
+                    self._pending_managed_adapter_requests.pop(user_id, None)
+            action_label = {
+                "external_pack.install": "imported for review",
+                "external_pack.approve": "approved for the next setup step",
+                "external_pack.enable": "turned on",
+                "external_pack.grant": "permission metadata recorded",
+                "external_pack.remove": "removed and tombstoned",
+            }.get(action_type, "updated")
+            lines = [
+                f"External pack lifecycle step {'finished' if ok else 'did not finish'}.",
+                f"Action: {action_type or 'unknown'}.",
+            ]
+            if pack_name and pack_name != "External pack":
+                lines.append(f"Pack: {pack_name}.")
+            if ok:
+                lines.append(f"Result: {action_label}.")
+                if action_type == "external_pack.install":
+                    lines.append("It is not approved, not enabled, has no granted permissions, and was not used.")
+                elif action_type == "external_pack.approve":
+                    lines.append("It is still not enabled, no permissions were granted, and I did not use it.")
+                elif action_type == "external_pack.enable":
+                    lines.append("No permissions were granted, no adapter ran, and I did not use it.")
+                elif action_type == "external_pack.grant":
+                    lines.append("The grant is metadata-only. I did not read the file, invoke an adapter, or use the pack.")
+                elif action_type == "external_pack.remove":
+                    lines.append("The removal keeps a redacted tombstone for audit and does not expose raw skill text.")
+            else:
+                lines.append(f"Reason: {error_code or result.get('error_kind') or 'external_pack_lifecycle_failed'}.")
+                lines.append("No pack was invoked or used.")
+            payload = dict(result)
+            payload.update(
+                {
+                    "type": "external_pack_lifecycle_result",
+                    "action_type": action_type,
+                    "mutated": bool(result.get("mutated", ok)),
+                }
+            )
+            return self._runtime_truth_response(
+                text="\n".join(lines),
+                route="action_tool",
+                used_tools=["pack_lifecycle_action"],
+                ok=ok,
+                error_kind=None if ok else (error_code or str(result.get("error_kind") or "external_pack_lifecycle_failed")),
                 payload=payload,
             )
         if operation == "managed_local_service_stop_preview":
@@ -8143,83 +8399,38 @@ class Orchestrator:
             adapter=adapter,
             requested_path=requested_path,
         )
-        grant = create_metadata_only_grant(request=request, state=GRANT_GRANTED, path_metadata=path_metadata)
-        grant_payload = record_adapter_grant(self._pack_store.external_storage_root(), grant)
-        if grant_payload.get("metadata_update_ok") is False:
-            message = (
-                f"Permission setup did not finish for {pack_name}: I could not verify the grant metadata. "
-                "I restored the previous grant metadata where possible. I did not read the file, invoke an adapter, use the pack, or run code."
-            )
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=False,
-                used_memory=bool(self._current_runtime_setup_state(user_id)),
-                used_tools=["managed_adapter_permission_grant"],
-                ok=False,
-                error_kind=str(grant_payload.get("error_kind") or "managed_adapter_grant_verification_failed"),
-                payload={
-                    "type": "managed_adapter_permission_grant",
-                    "ok": False,
-                    "summary": message,
-                    "grant": grant_payload,
-                    "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
-                    "did_grant_permissions": False,
-                    "did_invoke_adapter": False,
-                    "did_use_pack": False,
-                    "executes_code": False,
-                    "reads_file": False,
-                },
-            )
-        self._pending_managed_adapter_requests.pop(user_id, None)
-        pack = self._pack_store.get_external_pack(request.pack_id)
-        lifecycle = PackLifecycleService().evaluate(
-            imported_pack=pack if isinstance(pack, dict) else {
-                "pack_id": request.pack_id,
-                "name": request.pack_name,
-                "approved": True,
-                "enabled": True,
-                "canonical_pack": {
-                    "display_name": request.pack_name,
-                    "pack_identity": {"canonical_id": request.pack_id},
-                    "managed_adapters": [request.adapter.to_dict()],
-                    "runtime": {"enabled": True},
-                    "trust_anchor": {"local_review_status": "approved"},
-                },
-            },
-            permission_grants=list_adapter_grants(self._pack_store.external_storage_root()),
-        ).to_dict()
-        if lifecycle.get("usable"):
-            next_text = "It is ready for a safe adapter check, but I did not run or use it. Tell me the specific check or action you want next."
-        else:
-            next_text = f"Next review step: {(lifecycle.get('next_step') or {}).get('label') or 'continue setup'}."
         message = (
-            f"Selected-file permission recorded for {pack_name}. "
-            "I did not read or parse the file, run code, run an adapter, or use the skill. "
-            f"{next_text}"
+            f"Selected-file permission plan for {pack_name}. "
+            "This will record metadata for the selected file only. It will not read or parse the file, run code, run an adapter, or use the skill."
         )
-        return self._runtime_truth_response(
-            text=message,
-            route="action_tool",
-            used_runtime_state=False,
-            used_memory=bool(self._current_runtime_setup_state(user_id)),
+        operation_payload = {
+            "pack_id": request.pack_id,
+            "requested_path": requested_path,
+            "adapter": adapter.to_dict(),
+        }
+        return self._external_pack_plan_confirmation_response(
+            user_id,
+            action_type="external_pack.grant",
+            operation_payload=operation_payload,
+            title=f"Grant external pack permission: {pack_name}",
+            intro_lines=[message],
             used_tools=["managed_adapter_permission_grant"],
-            payload={
+            permission_summary=(
+                f"Permission impacted: {adapter.kind}; path policy {adapter.path_policy}; "
+                f"selected file basename {Path(requested_path).name}."
+            ),
+            preview_payload={
                 "type": "managed_adapter_permission_grant",
                 "ok": True,
                 "summary": message,
-                "grant": grant_payload,
-                "lifecycle": lifecycle,
-                "approved": True,
-                "enabled": True,
+                "permission_request": request.to_dict(),
+                "path_metadata": path_metadata,
                 "permissions_granted": [],
-                "did_grant_permissions": True,
+                "did_grant_permissions": False,
                 "did_invoke_adapter": False,
                 "did_use_pack": False,
                 "executes_code": False,
                 "reads_file": False,
-                "usable": bool(lifecycle.get("usable")),
-                "managed_action_journal": grant_payload.get("managed_action_journal") if isinstance(grant_payload.get("managed_action_journal"), dict) else {},
             },
         )
 
@@ -9518,16 +9729,19 @@ class Orchestrator:
             f"Review preview for {name}.\n\n"
             f"{review_state_text}\n\n"
             "Approving this draft only lets it move to the next setup step. It does not turn the skill on, grant file permission, run code, or use the skill. "
-            f"After approval, the next review step is: {next_label}. Say yes to approve the draft, or no to cancel."
+            f"After approval, the next review step is: {next_label}."
         )
-        self._queue_pack_review_approve_confirm_followup(user_id, pack=pack, lifecycle=lifecycle)
-        return self._runtime_truth_response(
-            text=message,
-            route="action_tool",
-            used_runtime_state=False,
-            used_memory=bool(self._current_runtime_setup_state(user_id)),
+        return self._external_pack_plan_confirmation_response(
+            user_id,
+            action_type="external_pack.approve",
+            operation_payload={"pack_id": pack_id},
+            title=f"Approve external pack: {name}",
+            intro_lines=[
+                message,
+                "This approval will not enable the pack, grant permissions, invoke adapters, or use the skill.",
+            ],
             used_tools=["pack_lifecycle_action"],
-            payload={
+            preview_payload={
                 "type": "pack_lifecycle_action",
                 "ok": True,
                 "action": "review_approve_preview",
@@ -9550,6 +9764,30 @@ class Orchestrator:
             return refusal
         context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
         pack_id = str(context.get("pack_id") or "").strip()
+        existing_pack = self._pack_store.get_external_pack(pack_id)
+        if isinstance(existing_pack, dict):
+            pack_name = str(existing_pack.get("name") or context.get("pack_name") or "the pack").strip()
+            return self._external_pack_plan_confirmation_response(
+                user_id,
+                action_type="external_pack.approve",
+                operation_payload={"pack_id": pack_id},
+                title=f"Approve external pack: {pack_name}",
+                intro_lines=[
+                    f"Approve {pack_name} for the next setup step.",
+                    "This approval will not enable the pack, grant permissions, invoke adapters, or use the skill.",
+                ],
+                used_tools=["pack_lifecycle_action"],
+                preview_payload={
+                    "type": "pack_lifecycle_action",
+                    "ok": True,
+                    "action": "review_approve_confirm",
+                    "pack": existing_pack,
+                    "did_approve": False,
+                    "did_enable": False,
+                    "did_grant_permissions": False,
+                    "did_use_pack": False,
+                },
+            )
         pack = self._pack_store.set_external_pack_review_status(
             pack_id,
             local_review_status="approved",
@@ -9669,16 +9907,19 @@ class Orchestrator:
         message = (
             f"Turn-on preview for {name}. Review status: {review_status}. Currently turned on: false. "
             f"Requested safe adapters: {adapters}. Turning it on will not grant file permission, run code, or use the skill. "
-            f"After this, the next review step is: {next_label}. Say yes to turn it on, or no to cancel."
+            f"After this, the next review step is: {next_label}."
         )
-        self._queue_pack_enable_confirm_followup(user_id, pack=pack, lifecycle=lifecycle)
-        return self._runtime_truth_response(
-            text=message,
-            route="action_tool",
-            used_runtime_state=False,
-            used_memory=bool(self._current_runtime_setup_state(user_id)),
+        return self._external_pack_plan_confirmation_response(
+            user_id,
+            action_type="external_pack.enable",
+            operation_payload={"pack_id": pack_id, "enabled": True},
+            title=f"Enable external pack: {name}",
+            intro_lines=[
+                message,
+                "This enablement will not grant permissions, invoke adapters, or use the skill.",
+            ],
             used_tools=["pack_lifecycle_action"],
-            payload={
+            preview_payload={
                 "type": "pack_lifecycle_action",
                 "ok": True,
                 "action": "enable_preview",
@@ -9700,6 +9941,29 @@ class Orchestrator:
             return refusal
         context = pending_item.get("context") if isinstance(pending_item.get("context"), dict) else {}
         pack_id = str(context.get("pack_id") or "").strip()
+        existing_pack = self._pack_store.get_external_pack(pack_id)
+        if isinstance(existing_pack, dict):
+            pack_name = str(existing_pack.get("name") or context.get("pack_name") or "the pack").strip()
+            return self._external_pack_plan_confirmation_response(
+                user_id,
+                action_type="external_pack.enable",
+                operation_payload={"pack_id": pack_id, "enabled": True},
+                title=f"Enable external pack: {pack_name}",
+                intro_lines=[
+                    f"Turn on {pack_name}.",
+                    "This enablement will not grant permissions, invoke adapters, or use the skill.",
+                ],
+                used_tools=["pack_lifecycle_action"],
+                preview_payload={
+                    "type": "pack_lifecycle_action",
+                    "ok": True,
+                    "action": "enable_confirm",
+                    "pack": existing_pack,
+                    "did_enable": False,
+                    "did_grant_permissions": False,
+                    "did_use_pack": False,
+                },
+            )
         pack = self._pack_store.set_external_pack_enabled(pack_id, enabled=True)
         if not isinstance(pack, dict):
             message = "I could not enable that pack because the approved candidate is no longer available."
@@ -10114,7 +10378,8 @@ class Orchestrator:
                 used_tools=["capability_gap_import"],
                 payload={"type": "capability_gap_import", "ok": False, "summary": message, "blocked_reason": "portable_text_skill_required"},
             )
-        if not callable(self._pack_install_handler):
+        adapter = self._chat_runtime_adapter
+        if not callable(getattr(adapter, "plan_pack_lifecycle", None)):
             message = "I can show the preview, but this chat surface cannot import packs directly right now. No pack was imported."
             return self._runtime_truth_response(
                 text=message,
@@ -10145,33 +10410,35 @@ class Orchestrator:
             }.items()
             if str(value or "").strip()
         }
-        ok, body = self._pack_install_handler(payload)
-        if not ok:
-            message = str(body.get("message") or "I could not import that pack for review. No pack was enabled or approved.").strip()
-            return self._runtime_truth_response(
-                text=message,
-                route="action_tool",
-                used_runtime_state=False,
-                used_memory=bool(self._current_runtime_setup_state(user_id)),
-                used_tools=["capability_gap_import"],
-                payload={"type": "capability_gap_import", "ok": False, "summary": message, "install_result": body},
-            )
-        pack = body.get("pack") if isinstance(body.get("pack"), dict) else {}
-        pack_name = str(pack.get("name") or context.get("pack_name") or "That pack").strip() or "That pack"
-        lifecycle = PackLifecycleService().evaluate(imported_pack=pack).to_dict() if pack else None
-        if isinstance(lifecycle, dict) and lifecycle.get("state") in {"generated_quarantined", "imported_for_review"}:
-            self._queue_pack_review_approve_followup(user_id, pack=pack, lifecycle=lifecycle)
+        pack_name = str(context.get("pack_name") or "That pack").strip() or "That pack"
         message = (
-            f"Imported {pack_name} for review. It is not enabled, not approved, has no granted permissions, "
-            "and has not been executed."
+            f"Import plan for {pack_name}. This will fetch/import only through the approved source handoff and create a review record. "
+            "It will not approve, enable, grant permissions, execute code, or use the skill."
         )
-        return self._runtime_truth_response(
-            text=message,
-            route="action_tool",
-            used_runtime_state=False,
-            used_memory=bool(self._current_runtime_setup_state(user_id)),
+        lifecycle = context.get("lifecycle") if isinstance(context.get("lifecycle"), dict) else {}
+        return self._external_pack_plan_confirmation_response(
+            user_id,
+            action_type="external_pack.install",
+            operation_payload=payload,
+            title=f"Import external pack for review: {pack_name}",
+            intro_lines=[message],
             used_tools=["capability_gap_import"],
-            payload={"type": "capability_gap_import", "ok": True, "summary": message, "install_result": body, "lifecycle": lifecycle},
+            preview_payload={
+                "type": "capability_gap_import",
+                "ok": True,
+                "summary": message,
+                "install_handoff": {
+                    "source_kind": payload.get("source_kind"),
+                    "ref": payload.get("ref"),
+                    "source_id": payload.get("source_id"),
+                },
+                "lifecycle": lifecycle,
+                "did_import": False,
+                "did_approve": False,
+                "did_enable": False,
+                "did_grant_permissions": False,
+                "did_use_pack": False,
+            },
         )
 
     @staticmethod
