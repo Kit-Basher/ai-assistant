@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-15
-Checkpoint: `v0.2.0-plan-mode-user-confirmation-ux` at `d699ef1`
-Latest clean checkpoint before this pass: `d699ef1` Update checkpoint docs for Plan Mode UX
+Checkpoint: `v0.2.0-release-proof-surfaces` at `48ce105`
+Latest clean checkpoint before this pass: `48ce105` Fix release proof readiness surfaces
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -19,6 +19,7 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 
 ## Latest Known Commits
 
+- `48ce105` Fix release proof readiness surfaces
 - `d699ef1` Update checkpoint docs for Plan Mode UX
 - `7096852` Enforce Plan Mode for external pack lifecycle writes
 - `e88281b` Add central Plan Mode policy layer
@@ -75,7 +76,8 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 - Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows. Stop broad journaling for now; the next work is proof and targeted fixes, not more infrastructure. Package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
 - Core workflow proof now exists in `scripts/prove_core_workflows.py` and is documented in `docs/operator/CORE_WORKFLOW_PROOF.md`. Latest observed result: external skill pack lifecycle PASS for a deterministic approved local source through preview, quarantine/import, review, approval, enablement, metadata-only permission grant, harmless managed-adapter dry-run invocation, disable/remove, tombstone, and source cleanup. Missing-capability public chat PASS: it checks approved pack sources, names a candidate, proposes the preview/install/review path, and does not claim install/use. Model/provider public chat guidance PASS: it distinguishes Ollama, OpenAI-compatible local endpoints, llama.cpp server/LM Studio/vLLM through user-run endpoints, and direct llama.cpp management as absent. Internet/search is BLOCKED until a trusted SearXNG endpoint is configured. Release gates still require direct verification outside the proof harness.
 - SearXNG is now the first managed local service implementation under `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`. `/search/status` reports enabled/provider/endpoint/reachability, a redacted base URL, setup source, blocked reason, and one next action. `/search/setup/plan` and `/search/setup/apply` provide confirmation-gated setup for a user-provided loopback SearXNG URL or the approved `personal-agent-searxng` local container plan. On Linux, rootless Podman is preferred; when Podman is missing the default setup plan is a confirmation-gated Podman prerequisite install for the `podman` package only, verifies rootless Podman, and does not start SearXNG or enable search. If Podman install needs interactive privilege, apply returns a bounded elevated terminal handoff for `sudo apt-get install -y podman` instead of running hidden sudo from the background API service. Docker is marked as an explicit fallback only, with `preferred_engine=podman`, `selected_engine=docker`, fallback reason, rootless expectation, and Docker fallback warning/confirmation metadata. Setup binds only to `127.0.0.1`, seeds a minimal approved SearXNG config that enables JSON metadata output before mounting `/etc/searxng`, does not silently install Podman/Docker/SearXNG/system packages, updates the running search configuration only after a SearXNG JSON probe verifies, persists managed-action journal rows, and restores prior runtime search settings on failed verification. Restart-persistent service env writing remains an operator step/follow-up.
-- Release readiness remains Yellow at `v0.2.0-plan-mode-user-confirmation-ux`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Release proof surfaces are now consistent for the current local runtime: `/ready` no longer emits `UNKNOWN_FAILURE` recovery when `runtime_mode=READY`; optional inactive Telegram is informational and has no required recovery next action; `python -m agent doctor` exits OK when optional Telegram is the only inactive surface. Development `/packs/state` can still show old blocked smoke-test packs without being a release proof failure; clean them only through confirmed remove/tombstone or use a fresh state directory for final proof.
+- Release readiness remains Yellow at `v0.2.0-release-proof-surfaces`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -139,19 +141,19 @@ Run this after external-pack, search, acquisition, or routing changes:
 
 `external_pack_safety_smoke` currently covers 39 hostile-intake, lifecycle, managed-service, and recovery gates. It proves hostile intake gates. `prove_core_workflows.py` proves what actually works and reports `BLOCKED` or `NOT_PROVEN` where runtime configuration or direct verification is still missing. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
 
-Recent `v0.2.0-plan-mode-user-confirmation-ux` verification:
+Recent `v0.2.0-release-proof-surfaces` verification:
 
 - `python -m py_compile agent/api_server.py agent/policy.py agent/bot.py`: PASS
-- `python -m pytest -q tests/test_plan_policy.py tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py`: 58 passed
-- `python -m pytest -q tests/test_managed_local_services.py tests/test_safe_web_search.py tests/test_api_packs_endpoints.py`: 95 passed
-- `python scripts/external_pack_safety_smoke.py`: PASS, 39 gates
-- `python scripts/prove_core_workflows.py`: no FAIL workflows; isolated internet/search remains BLOCKED when no trusted SearXNG backend is configured
-- `python scripts/release_smoke.py`: PASS after updating stale smoke assertions to current Plan Mode and model-router behavior
+- `python -m py_compile agent/runtime_truth_service.py agent/doctor.py`: PASS
+- `python -m pytest -q tests/test_ready_endpoint.py tests/test_doctor_cli.py`: 42 passed
+- `python -m pytest -q tests/test_chat_behavior_audit.py tests/test_assistant_behavior_release_gate.py tests/test_first_run_release_smoke.py tests/test_publishability_smoke.py`: 27 passed
+- `python scripts/release_smoke.py`: 52 passed
+- `python -m agent doctor`: OK
 - `git diff --check`: PASS
 
 ## Next Likely Work
 
-- Continue release proof/operator polish around `/ready`, `/state`, `/packs/state`, `/search/status`, and `python -m agent doctor`; keep these surfaces consistent before final install proof.
+- Continue toward final release proof without adding broad infrastructure. The remaining high-cost proof is the fresh Debian VM install, first launch, setup completion, proof, rollback/uninstall, and live verification pass.
 - Add read-only persistent-journal status surfacing before making broader crash/restart recovery claims.
 - Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.

@@ -1,6 +1,6 @@
 # Roadmap Index
 
-Date: 2026-06-14
+Date: 2026-06-15
 
 This is the authoritative index for roadmap, checkpoint, operator, and design
 documents. It does not delete, rename, or supersede detailed docs; it tells
@@ -90,9 +90,10 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. Keep the current track on release proof and operator polish for `/ready`,
-   `/state`, `/packs/state`, `/search/status`, and `python -m agent doctor`;
-   do not start broad new infrastructure.
+1. Keep the current track on final release proof, not broad new infrastructure.
+   The `/ready`, `/state`, `/packs/state`, `/search/status`, and
+   `python -m agent doctor` proof surfaces have been polished for
+   `v0.2.0-release-proof-surfaces`.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

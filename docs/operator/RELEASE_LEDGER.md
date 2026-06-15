@@ -7,9 +7,9 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.0-plan-mode-user-confirmation-ux`
+Current stable checkpoint: `v0.2.0-release-proof-surfaces`
 
-Commit: `d699ef1` Update checkpoint docs for Plan Mode UX
+Commit: `48ce105` Fix release proof readiness surfaces
 
 Summary:
 
@@ -23,6 +23,13 @@ Summary:
   confirmations now preserve `plan_id`, `confirmation_token`, and
   `mutation_plan` through preview and apply. Telegram output stays concise and
   does not dump raw JSON or confirmation tokens.
+- Operator proof surfaces are internally consistent: `/ready` no longer emits
+  `UNKNOWN_FAILURE` recovery when the runtime is `READY`; optional inactive
+  Telegram is informational, not required recovery; and `python -m agent doctor`
+  exits OK when optional Telegram is the only inactive surface.
+- Development `/packs/state` can retain old blocked smoke-test packs without
+  being a release proof failure. Remove them only through confirmed
+  remove/tombstone, or use a fresh state directory for final proof.
 
 ## Recent Release Tags
 
@@ -32,6 +39,7 @@ Summary:
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |
 | `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 | `d699ef1` | User-facing Plan Mode confirmation UX for managed SearXNG and external pack lifecycle. |
+| `v0.2.0-release-proof-surfaces` | 2026-06-14 | `48ce105` | Release proof surface consistency for `/ready`, doctor, optional Telegram, and dev pack-state interpretation. |
 
 ## Full Tag List
 
@@ -78,6 +86,7 @@ Dates are from `git for-each-ref --sort=creatordate`.
 | `v0.2.0-plan-mode-policy` | 2026-06-14 |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 |
 | `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 |
+| `v0.2.0-release-proof-surfaces` | 2026-06-14 |
 
 ## What Was Proven
 
@@ -142,6 +151,21 @@ Proven:
 - Telegram rendering remains concise and does not dump raw JSON,
   confirmation tokens, raw hostile pack text, raw `SKILL.md`, or raw `AGENTS.md`
   content.
+
+### `v0.2.0-release-proof-surfaces`
+
+Proven:
+
+- `/ready` reports no recovery mode when the runtime is `READY` with no
+  failure, blocker, or reason.
+- Optional inactive Telegram is not treated as required recovery on `/ready`.
+- `python -m agent doctor` exits OK when optional inactive Telegram is the only
+  inactive surface.
+- Required/enabled Telegram failures remain visible when Telegram is expected to
+  run.
+- Development `/packs/state` may include old blocked smoke-test packs; this is
+  local dev state, not a release proof failure. Cleanup must use confirmed
+  remove/tombstone or a fresh state directory for final proof.
 
 ## Deferred
 
@@ -209,6 +233,31 @@ python scripts/prove_core_workflows.py
 
 python scripts/release_smoke.py
 # PASS after updating stale smoke assertions to current Plan Mode and model-router behavior
+
+git diff --check
+# PASS
+```
+
+Release proof surface checkpoint verification:
+
+```bash
+python -m py_compile agent/api_server.py agent/policy.py agent/bot.py
+# PASS
+
+python -m py_compile agent/runtime_truth_service.py agent/doctor.py
+# PASS
+
+python -m pytest -q tests/test_ready_endpoint.py tests/test_doctor_cli.py
+# 42 passed
+
+python -m pytest -q tests/test_chat_behavior_audit.py tests/test_assistant_behavior_release_gate.py tests/test_first_run_release_smoke.py tests/test_publishability_smoke.py
+# 27 passed
+
+python scripts/release_smoke.py
+# 52 passed
+
+python -m agent doctor
+# OK
 
 git diff --check
 # PASS
