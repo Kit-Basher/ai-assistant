@@ -12780,6 +12780,11 @@ class AgentRuntime:
         if float(stored.get("expires_at") or 0) <= time.time():
             return {"ok": False, "error": "confirmation_expired", "mutated": False}
         plan = dict(stored.get("plan") if isinstance(stored.get("plan"), dict) else {})
+        submitted_mutation_plan = payload.get("mutation_plan") if isinstance(payload.get("mutation_plan"), dict) else None
+        if submitted_mutation_plan is not None:
+            stored_mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None
+            if stored_mutation_plan != submitted_mutation_plan:
+                return {"ok": False, "error": "plan_apply_mismatch", "mutated": False}
         policy_ok, policy_error = validate_mutator_apply(
             plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else None,
             expected_action_type="managed_local_service.setup_apply",

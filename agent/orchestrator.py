@@ -2193,6 +2193,42 @@ class Orchestrator:
             return "podman"
         return None
 
+    @staticmethod
+    def _plan_mode_public_payload(mutation_plan: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(mutation_plan, dict):
+            return {}
+        return {
+            "policy_layer": str(mutation_plan.get("policy_layer") or ""),
+            "action_type": str(mutation_plan.get("action_type") or ""),
+            "classification": str(mutation_plan.get("classification") or ""),
+            "resources": dict(mutation_plan.get("resources") if isinstance(mutation_plan.get("resources"), dict) else {}),
+            "rollback_scope": str(mutation_plan.get("rollback_scope") or ""),
+            "rollback_supported": bool(mutation_plan.get("rollback_supported", False)),
+            "requires_confirmation": bool(mutation_plan.get("requires_confirmation", False)),
+            "expires_at": mutation_plan.get("expires_at"),
+            "plan_id": str(mutation_plan.get("plan_id") or ""),
+        }
+
+    @staticmethod
+    def _format_plan_resource_line(label: str, resources: dict[str, Any], key: str) -> str:
+        values = resources.get(key) if isinstance(resources.get(key), list) else []
+        clean = [str(item).strip() for item in values if str(item).strip()]
+        return f"{label}: {', '.join(clean) if clean else 'nothing'}."
+
+    def _render_plan_mode_confirmation_lines(self, mutation_plan: dict[str, Any] | None) -> list[str]:
+        plan = self._plan_mode_public_payload(mutation_plan)
+        resources = plan.get("resources") if isinstance(plan.get("resources"), dict) else {}
+        rollback_scope = str(plan.get("rollback_scope") or "Only the resources listed in this plan.").strip()
+        rollback_supported = "yes" if bool(plan.get("rollback_supported")) else "no"
+        return [
+            "Plan Mode confirmation:",
+            self._format_plan_resource_line("Will create", resources, "created"),
+            self._format_plan_resource_line("Will change", resources, "changed"),
+            self._format_plan_resource_line("Will delete", resources, "deleted"),
+            f"Rollback scope: {rollback_scope}",
+            f"Rollback supported: {rollback_supported}.",
+        ]
+
     def _managed_service_missing_engine_response(self, user_id: str, services_payload: dict[str, Any]) -> OrchestratorResponse:
         searxng = self._searxng_service_from_status(services_payload)
         adapter = self._chat_runtime_adapter
@@ -2282,16 +2318,37 @@ class Orchestrator:
         engine = self._selected_managed_service_engine(services_payload, searxng)
         if not engine:
             return self._managed_service_missing_engine_response(user_id, services_payload)
-        approved = searxng.get("approved_container") if isinstance(searxng.get("approved_container"), dict) else {}
-        preview_payload_from_runtime: dict[str, Any] = {}
         adapter = self._chat_runtime_adapter
-        if callable(getattr(adapter, "preview_managed_service_setup", None)):
+        setup_plan_payload: dict[str, Any] = {}
+        if callable(getattr(adapter, "search_setup_plan", None)):
             try:
-                preview_payload_from_runtime = dict(adapter.preview_managed_service_setup({"service_id": "searxng", "selected_engine": engine}))
+                setup_plan_payload = dict(adapter.search_setup_plan({"allow_docker_fallback": False}))
             except Exception:
-                preview_payload_from_runtime = {}
-        if preview_payload_from_runtime and not bool(preview_payload_from_runtime.get("ok")):
-            blocked_reason = str(preview_payload_from_runtime.get("blocked_reason") or "managed_service_setup_unavailable")
+                setup_plan_payload = {}
+        if not setup_plan_payload:
+            return self._runtime_truth_response(
+                text="\n".join(
+                    [
+                        "Web search is not set up.",
+                        "I cannot prepare the SearXNG Plan Mode setup plan right now.",
+                        "No command has run yet.",
+                    ]
+                ),
+                route="action_tool",
+                used_tools=["managed_local_service_setup_preview", "safe_web_search"],
+                ok=False,
+                error_kind="managed_service_setup_plan_unavailable",
+                payload={
+                    "type": "managed_local_service_setup_unavailable",
+                    "service_id": "searxng",
+                    "selected_engine": engine,
+                    "services_status": services_payload,
+                    "search_status": status_payload,
+                    "mutated": False,
+                },
+            )
+        if not bool(setup_plan_payload.get("ok")):
+            blocked_reason = str(setup_plan_payload.get("blocked_reason") or "managed_service_setup_unavailable")
             if blocked_reason == "managed_service_approved_ports_occupied":
                 text = "\n".join(
                     [
@@ -2320,18 +2377,20 @@ class Orchestrator:
                     "type": "managed_local_service_setup_unavailable",
                     "service_id": "searxng",
                     "selected_engine": engine,
-                    "setup_preview": preview_payload_from_runtime,
+                    "setup_preview": setup_plan_payload.get("setup_preview"),
+                    "setup_plan": setup_plan_payload,
                     "services_status": services_payload,
                     "search_status": status_payload,
                     "mutated": False,
                 },
             )
-        plan = preview_payload_from_runtime.get("plan") if isinstance(preview_payload_from_runtime.get("plan"), dict) else {}
-        image = str(plan.get("image") or approved.get("image") or "docker.io/searxng/searxng:latest")
-        name = str(plan.get("container_name") or approved.get("name") or "personal-agent-searxng")
-        bind = str(plan.get("loopback_bind") or approved.get("bind") or "127.0.0.1:8080:8080")
+        plan = setup_plan_payload.get("plan") if isinstance(setup_plan_payload.get("plan"), dict) else {}
+        mutation_plan = plan.get("mutation_plan") if isinstance(plan.get("mutation_plan"), dict) else {}
+        image = str(plan.get("image") or "docker.io/searxng/searxng:latest")
+        name = str(plan.get("container_name") or "personal-agent-searxng")
+        bind = str(plan.get("loopback_bind") or "127.0.0.1:8080:8080")
         health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
-        fallback_selected = bool(preview_payload_from_runtime.get("fallback_selected"))
+        fallback_selected = str(plan.get("port") or "") == "8888" or ":8888:" in bind
         docker_fallback = engine == "docker" and not bool(services_payload.get("podman_rootless") or searxng.get("podman_rootless"))
         docker_warning = "Podman was not found. Docker is available, but it may use a root-level daemon."
         if fallback_selected:
@@ -2342,6 +2401,8 @@ class Orchestrator:
                 "",
                 "Port 8080 is already being used, so I’ll use 8888 instead.",
                 "",
+                *self._render_plan_mode_confirmation_lines(mutation_plan),
+                "",
                 "Say yes to continue, or no to cancel.",
             ]
         else:
@@ -2350,11 +2411,18 @@ class Orchestrator:
                 "",
                 "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later.",
                 "",
+                *self._render_plan_mode_confirmation_lines(mutation_plan),
+                "",
                 "Say yes to continue, or no to cancel.",
             ]
         if docker_fallback:
             lines.insert(3, docker_warning)
             lines.insert(4, "Rootless Podman remains the preferred managed-service engine on Linux; this is a Docker fallback plan.")
+        apply_payload = {
+            "plan_id": str(plan.get("plan_id") or ""),
+            "confirmation_token": str(plan.get("confirmation_token") or ""),
+            "mutation_plan": mutation_plan,
+        }
         return self._confirmation_preview_response(
             user_id,
             route="action_tool",
@@ -2363,22 +2431,9 @@ class Orchestrator:
             action={
                 "operation": "managed_local_service_setup_preview",
                 "params": {
+                    **apply_payload,
                     "service_id": "searxng",
                     "selected_engine": engine,
-                    "action": "preview_only",
-                    "approved_image": image,
-                    "approved_container_name": name,
-                    "loopback_bind": bind,
-                    "volume_mount": True,
-                    "config_seeded": True,
-                    "approved_volume_path": "memory/local_services/searxng",
-                    "config_purpose": "enable_json_output_for_safe_metadata_search",
-                    "health_url": health_url,
-                    "fallback_selected": fallback_selected,
-                    "preferred_engine": "podman",
-                    "fallback_reason": "rootless_podman_not_found" if docker_fallback else None,
-                    "rootless_expected": False if docker_fallback else True,
-                    "requires_docker_fallback_confirmation": docker_fallback,
                 },
             },
             title="SearXNG setup preview",
@@ -2401,7 +2456,11 @@ class Orchestrator:
                 "rootless_expected": False if docker_fallback else True,
                 "requires_docker_fallback_confirmation": docker_fallback,
                 "engine_warning": docker_warning if docker_fallback else None,
-                "setup_preview": preview_payload_from_runtime,
+                "setup_plan": setup_plan_payload,
+                "plan": plan,
+                "mutation_plan": mutation_plan,
+                "plan_mode": self._plan_mode_public_payload(mutation_plan),
+                "apply_payload": apply_payload,
                 "services_status": services_payload,
                 "search_status": status_payload,
                 "mutated": False,
@@ -2816,7 +2875,9 @@ class Orchestrator:
             service_id = str(params.get("service_id") or "searxng").strip() or "searxng"
             engine = str(params.get("selected_engine") or "docker").strip() or "docker"
             adapter = self._chat_runtime_adapter
-            if not callable(getattr(adapter, "execute_managed_service_setup", None)):
+            apply_with_plan = bool(params.get("plan_id")) and bool(params.get("confirmation_token"))
+            apply_method_name = "apply_search_setup" if apply_with_plan else "execute_managed_service_setup"
+            if not callable(getattr(adapter, apply_method_name, None)):
                 return self._runtime_truth_response(
                     text=(
                         "SearXNG setup could not run because the managed service executor is unavailable. "
@@ -2838,7 +2899,16 @@ class Orchestrator:
                     },
                 )
             try:
-                result = adapter.execute_managed_service_setup(params)
+                if apply_with_plan:
+                    result = adapter.apply_search_setup(
+                        {
+                            "plan_id": str(params.get("plan_id") or ""),
+                            "confirmation_token": str(params.get("confirmation_token") or ""),
+                            "mutation_plan": params.get("mutation_plan") if isinstance(params.get("mutation_plan"), dict) else None,
+                        }
+                    )
+                else:
+                    result = adapter.execute_managed_service_setup(params)
             except Exception as exc:  # noqa: BLE001 - user-facing safe failure.
                 result = {
                     "ok": False,
@@ -2858,6 +2928,52 @@ class Orchestrator:
             did_configure = bool(result.get("did_configure"))
             reachable = bool(result.get("reachable"))
             blocked_reason = str(result.get("blocked_reason") or "").strip()
+            error_code = str(result.get("error") or "").strip()
+            if error_code in {
+                "confirmation_expired",
+                "confirmation_consumed",
+                "invalid_confirmation",
+                "plan_apply_mismatch",
+                "plan_action_type_mismatch",
+                "plan_not_mutating",
+                "plan_policy_missing",
+                "plan_required",
+                "plan_resources_missing",
+                "plan_resources_invalid",
+            }:
+                if error_code == "confirmation_expired":
+                    first = "That SearXNG setup confirmation expired, so I didn’t make any changes."
+                elif error_code == "confirmation_consumed":
+                    first = "That SearXNG setup confirmation was already used, so I didn’t replay it."
+                elif error_code == "plan_apply_mismatch":
+                    first = "That SearXNG setup plan no longer matches the saved Plan Mode confirmation, so I blocked it."
+                else:
+                    first = "That SearXNG setup confirmation was invalid, so I blocked it."
+                return self._runtime_truth_response(
+                    text="\n".join(
+                        [
+                            first,
+                            "I did not pull an image, start a container, install packages, or enable search.",
+                            "Next step: ask me to set up web search again so I can show a fresh plan.",
+                        ]
+                    ),
+                    route="action_tool",
+                    used_tools=["managed_local_service_setup", "safe_web_search"],
+                    ok=False,
+                    error_kind=error_code,
+                    payload={
+                        "type": "managed_local_service_setup_result",
+                        "service_id": service_id,
+                        "selected_engine": engine,
+                        "mutated": False,
+                        "did_pull": False,
+                        "did_run": False,
+                        "did_install": False,
+                        "did_configure": False,
+                        "plan_mode_blocked": True,
+                        "error": error_code,
+                    },
+                )
             plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
             health_url = str(plan.get("health_url") or "http://127.0.0.1:8080")
             lines = [

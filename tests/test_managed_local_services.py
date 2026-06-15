@@ -12,6 +12,7 @@ from unittest import mock
 from pathlib import Path
 
 from agent.api_server import AgentRuntime
+from agent.telegram_bridge import build_telegram_chat_payload_result
 from agent.services.managed_local_services import (
     APPROVED_SEARXNG_IMAGE,
     APPROVED_SEARXNG_VOLUME,
@@ -1262,6 +1263,25 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(second["ok"])
         self.assertEqual("confirmation_consumed", second["error"])
 
+    def test_search_setup_apply_rejects_submitted_mutation_plan_tamper(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        plan_payload = runtime.search_setup_plan({})
+        plan = plan_payload["plan"]
+        mutation_plan = dict(plan["mutation_plan"])
+        mutation_plan["action_type"] = "external_pack.install"
+
+        result = runtime.apply_search_setup(
+            {
+                "plan_id": plan["plan_id"],
+                "confirmation_token": plan["confirmation_token"],
+                "mutation_plan": mutation_plan,
+            }
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual("plan_apply_mismatch", result["error"])
+        self.assertFalse(runtime.config.search_enabled)
+
     def test_search_setup_apply_refuses_expired_confirmation(self) -> None:
         runtime = self._runtime(search_enabled=False, endpoint=None)
         plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
@@ -1385,6 +1405,11 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         body, text = self._chat(runtime, "set up SearXNG")
 
         self.assertIn("Web search is not set up yet", text)
+        self.assertIn("Plan Mode confirmation:", text)
+        self.assertIn("Will create: container:personal-agent-searxng.", text)
+        self.assertIn("Will change: runtime_search_config, memory/local_services/searxng/settings.yml.", text)
+        self.assertIn("Will delete: nothing.", text)
+        self.assertIn("Rollback scope:", text)
         self.assertNotIn("using Podman", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
@@ -1392,6 +1417,72 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("podman", setup.get("selected_engine"))
         self.assertEqual("podman", setup.get("preferred_engine"))
         self.assertFalse(setup.get("requires_docker_fallback_confirmation"))
+        plan_mode = setup.get("plan_mode") if isinstance(setup.get("plan_mode"), dict) else {}
+        self.assertEqual("plan_mode", plan_mode.get("policy_layer"))
+        self.assertEqual("managed_local_service.setup_apply", plan_mode.get("action_type"))
+        self.assertEqual("mutating", plan_mode.get("classification"))
+        self.assertTrue(plan_mode.get("requires_confirmation"))
+        self.assertTrue(plan_mode.get("plan_id"))
+        apply_payload = setup.get("apply_payload") if isinstance(setup.get("apply_payload"), dict) else {}
+        self.assertEqual(plan_mode.get("plan_id"), apply_payload.get("plan_id"))
+        self.assertTrue(apply_payload.get("confirmation_token"))
+        runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
+        self.assertEqual([], runner.calls)
+
+    def test_declining_search_setup_plan_does_not_mutate(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
+        _body, first_text = self._chat(runtime, "set up web search")
+
+        _body, second_text = self._chat(
+            runtime,
+            "no",
+            history=[{"role": "user", "content": "set up web search"}, {"role": "assistant", "content": first_text}],
+        )
+
+        self.assertIn("cancelled", second_text.lower())
+        self.assertEqual([], runner.calls)
+        self.assertFalse(runtime.config.search_enabled)
+
+    def test_tampered_chat_search_setup_plan_is_blocked_before_executor(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        runner = runtime._managed_local_service_executor._runner  # noqa: SLF001
+        _body, first_text = self._chat(runtime, "enable web search")
+        orchestrator = runtime.orchestrator()
+        pending = next(iter(orchestrator.confirmations._pending.values()))  # noqa: SLF001
+        params = pending.action.get("params") if isinstance(pending.action, dict) and isinstance(pending.action.get("params"), dict) else {}
+        mutation_plan = params.get("mutation_plan") if isinstance(params.get("mutation_plan"), dict) else {}
+        mutation_plan["action_type"] = "external_pack.install"
+
+        _body, second_text = self._chat(
+            runtime,
+            "yes",
+            history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}],
+        )
+
+        self.assertIn("blocked", second_text.lower())
+        self.assertIn("did not pull an image", second_text)
+        self.assertEqual([], runner.calls)
+        self.assertFalse(runtime.config.search_enabled)
+
+    def test_telegram_search_setup_plan_text_is_readable_and_redacted(self) -> None:
+        runtime = self._runtime_with_engine("podman")
+        body, _text = self._chat(runtime, "set up web search")
+
+        result = build_telegram_chat_payload_result(
+            body,
+            trace_id="test-trace",
+            ok=bool(body.get("ok", True)),
+            handler_name="chat",
+            legacy_compatibility=False,
+        )
+
+        rendered = str(result.get("text") or "")
+        self.assertIn("Plan Mode confirmation:", rendered)
+        self.assertIn("Will create: container:personal-agent-searxng.", rendered)
+        self.assertNotIn("confirmation_token", rendered)
+        self.assertNotIn("SKILL.md", rendered)
+        self.assertNotIn("AGENTS.md", rendered)
 
     def test_yes_after_preview_runs_bounded_setup_configures_runtime_search_after_verify(self) -> None:
         runtime = self._runtime_with_engine("podman")
