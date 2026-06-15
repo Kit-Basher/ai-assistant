@@ -23,12 +23,14 @@ Check these in order:
 - `curl -sS http://127.0.0.1:8765/ready`
 - `curl -sS http://127.0.0.1:8765/state`
 - `curl -sS http://127.0.0.1:8765/packs/state`
+- `curl -sS http://127.0.0.1:8765/search/status`
 
 Confirm:
 
 - the runtime phase matches expectation
 - `state_label`, `reason`, `next_step`, and `recovery` are present when the system is not healthy
 - installed packs match what you expect to be present on that machine
+- search is either available through a trusted loopback SearXNG backend or clearly blocked with one next action
 - `/version` reports the expected runtime instance
 
 ### During normal operation
@@ -36,12 +38,13 @@ Confirm:
 - spot-check `GET /ready` when behavior feels off
 - check `GET /state` when the assistant sounds contradictory or stale
 - check `GET /packs/state` when pack behavior seems wrong
+- check `GET /search/status` before treating internet/search as available
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 ### After any issue
 
-- re-check all three state surfaces
+- re-check `/ready`, `/state`, `/packs/state`, and `/search/status`
 - confirm the recovery object matches the current condition
 - only treat the system as recovered when the blocker has cleared and the state surface says so
 
@@ -70,6 +73,7 @@ Collect:
 - `/ready`
 - `/state`
 - `/packs/state`
+- `/search/status`
 - `python -m agent doctor`
 - `python -m agent version`
 

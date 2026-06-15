@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
-Date: 2026-06-11
-Checkpoint: `v0.2.0-plan-mode-user-confirmation-ux`
-Latest clean checkpoint before this pass: `e4b4252` Complete core workflow proof fixes
+Date: 2026-06-15
+Checkpoint: `v0.2.0-plan-mode-user-confirmation-ux` at `d699ef1`
+Latest clean checkpoint before this pass: `d699ef1` Update checkpoint docs for Plan Mode UX
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -19,6 +19,10 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 
 ## Latest Known Commits
 
+- `d699ef1` Update checkpoint docs for Plan Mode UX
+- `7096852` Enforce Plan Mode for external pack lifecycle writes
+- `e88281b` Add central Plan Mode policy layer
+- `f26ba6f` Tag managed SearXNG checkpoint
 - `e4b4252` Complete core workflow proof fixes
 - `019ac0c` Persist journals for pack lifecycle
 - `6d7fd86` Persist journals for model acquisition
@@ -71,7 +75,7 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 - Remaining managed-action reliability gaps are audited. A minimal persistent managed-action journal storage skeleton now exists, and preference reset/clear, support bundle creation, provider/API key config, Telegram token/service setup, default model/temporary chat override, model acquisition/import, and pack lifecycle/source cleanup are converted reference flows. Stop broad journaling for now; the next work is proof and targeted fixes, not more infrastructure. Package install/directory creation shell flows, semantic-memory soak before any default-on promotion, quarantine artifact cleanup, and future filesystem writes remain tracked follow-ups. Remote notification delivery and action ledger records remain append-only by design after local readback verification.
 - Core workflow proof now exists in `scripts/prove_core_workflows.py` and is documented in `docs/operator/CORE_WORKFLOW_PROOF.md`. Latest observed result: external skill pack lifecycle PASS for a deterministic approved local source through preview, quarantine/import, review, approval, enablement, metadata-only permission grant, harmless managed-adapter dry-run invocation, disable/remove, tombstone, and source cleanup. Missing-capability public chat PASS: it checks approved pack sources, names a candidate, proposes the preview/install/review path, and does not claim install/use. Model/provider public chat guidance PASS: it distinguishes Ollama, OpenAI-compatible local endpoints, llama.cpp server/LM Studio/vLLM through user-run endpoints, and direct llama.cpp management as absent. Internet/search is BLOCKED until a trusted SearXNG endpoint is configured. Release gates still require direct verification outside the proof harness.
 - SearXNG is now the first managed local service implementation under `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`. `/search/status` reports enabled/provider/endpoint/reachability, a redacted base URL, setup source, blocked reason, and one next action. `/search/setup/plan` and `/search/setup/apply` provide confirmation-gated setup for a user-provided loopback SearXNG URL or the approved `personal-agent-searxng` local container plan. On Linux, rootless Podman is preferred; when Podman is missing the default setup plan is a confirmation-gated Podman prerequisite install for the `podman` package only, verifies rootless Podman, and does not start SearXNG or enable search. If Podman install needs interactive privilege, apply returns a bounded elevated terminal handoff for `sudo apt-get install -y podman` instead of running hidden sudo from the background API service. Docker is marked as an explicit fallback only, with `preferred_engine=podman`, `selected_engine=docker`, fallback reason, rootless expectation, and Docker fallback warning/confirmation metadata. Setup binds only to `127.0.0.1`, seeds a minimal approved SearXNG config that enables JSON metadata output before mounting `/etc/searxng`, does not silently install Podman/Docker/SearXNG/system packages, updates the running search configuration only after a SearXNG JSON probe verifies, persists managed-action journal rows, and restores prior runtime search settings on failed verification. Restart-persistent service env writing remains an operator step/follow-up.
-- Release readiness is Yellow at `e4b4252`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Release readiness remains Yellow at `v0.2.0-plan-mode-user-confirmation-ux`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -129,8 +133,9 @@ Run this after external-pack, search, acquisition, or routing changes:
 2. `python scripts/external_pack_safety_smoke.py`
 3. `python scripts/prove_core_workflows.py`
 4. `python -m pytest -q tests/test_chat_behavior_audit.py tests/test_live_user_barrage.py tests/test_assistant_behavior_release_gate.py`
-5. `python -u scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90 --strict-quality`
-6. `git status`
+5. `python scripts/release_smoke.py`
+6. `python -u scripts/live_user_barrage.py --base-url http://127.0.0.1:8765 --telegram-bridge --timeout 90 --strict-quality`
+7. `git status`
 
 `external_pack_safety_smoke` currently covers 39 hostile-intake, lifecycle, managed-service, and recovery gates. It proves hostile intake gates. `prove_core_workflows.py` proves what actually works and reports `BLOCKED` or `NOT_PROVEN` where runtime configuration or direct verification is still missing. `live_user_barrage` proves normal assistant behavior and answer quality did not regress.
 
@@ -141,11 +146,12 @@ Recent `v0.2.0-plan-mode-user-confirmation-ux` verification:
 - `python -m pytest -q tests/test_managed_local_services.py tests/test_safe_web_search.py tests/test_api_packs_endpoints.py`: 95 passed
 - `python scripts/external_pack_safety_smoke.py`: PASS, 39 gates
 - `python scripts/prove_core_workflows.py`: no FAIL workflows; isolated internet/search remains BLOCKED when no trusted SearXNG backend is configured
+- `python scripts/release_smoke.py`: PASS after updating stale smoke assertions to current Plan Mode and model-router behavior
 - `git diff --check`: PASS
 
 ## Next Likely Work
 
-- Use `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` as the implementation boundary for SearXNG setup. First add detection/setup guidance for a trusted SearXNG endpoint; keep managed rootless Podman setup optional, confirmation-gated, localhost-bound, journaled, and owned-resource rollback only.
+- Continue release proof/operator polish around `/ready`, `/state`, `/packs/state`, `/search/status`, and `python -m agent doctor`; keep these surfaces consistent before final install proof.
 - Add read-only persistent-journal status surfacing before making broader crash/restart recovery claims.
 - Run a clean release-bundle install/launch/onboarding/uninstall pass before any public trial.
 - Continue improving product UX/readability of barrage answers.

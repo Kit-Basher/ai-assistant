@@ -1,8 +1,8 @@
 # Release Readiness Audit
 
-Date: 2026-06-11
-Checkpoint: `e4b4252` Complete core workflow proof fixes
-Updated after defining the managed local service and sandboxed tool boundary.
+Date: 2026-06-15
+Checkpoint: `v0.2.0-plan-mode-user-confirmation-ux` at `d699ef1`
+Updated after managed SearXNG, Plan Mode policy, external pack lifecycle Plan Mode, and user-facing Plan Mode confirmation UX.
 
 This is a release-readiness audit, not a claim that every planned capability is
 finished. It records what is safe to put in front of a public user and what must
@@ -219,10 +219,11 @@ Remaining risk: keep package install, directory creation, Docker/container
 control, and future filesystem writes outside normal assistant actions unless
 they use a managed transaction path.
 
-Before SearXNG setup implementation, use
+Managed SearXNG is now the first Tier 2 implementation. Continue to use
 `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` as the boundary for
-Tier 1 text packs, Tier 2 managed local services, Tier 3 sandboxed tool/MCP
-runtimes, and app/plugin bridges. Do not make Docker/Podman a base dependency.
+future Tier 1 text packs, Tier 2 managed local services, Tier 3 sandboxed
+tool/MCP runtimes, and app/plugin bridges. Do not make Docker/Podman a base
+dependency.
 
 ### Docs
 
@@ -265,7 +266,7 @@ migration story exists.
 2. Build and install the release bundle on a clean user-local environment or VM.
 3. Launch from the desktop launcher and browser URL.
 4. Complete or skip first-run onboarding and confirm it does not re-prompt.
-5. Confirm `python -m agent doctor`, `/ready`, `/state`, and `/packs/state`.
+5. Confirm `python -m agent doctor`, `/ready`, `/state`, `/packs/state`, and `/search/status`.
 6. Confirm Telegram remains off unless explicitly enabled.
 7. Confirm web search reports disabled/missing SearXNG without claiming search
    works.
@@ -291,11 +292,11 @@ migration story exists.
 
 ## Exact Next Recommended Work Item
 
-Implement SearXNG detection/setup guidance against
-`docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`. Keep search
-disabled until explicitly configured/enabled, support user-provided
-`SEARXNG_BASE_URL`, and do not add managed rootless Podman setup until the
-preview/confirm/journal/health/rollback path is ready.
+Finish release proof/operator polish for `/ready`, `/state`, `/packs/state`,
+`/search/status`, and `python -m agent doctor`, then run the final clean
+install proof. Do not claim broad Green release readiness before that clean
+install, first launch, setup completion, proof, rollback/uninstall, and live
+verification pass.
 
 ## Required Verification
 

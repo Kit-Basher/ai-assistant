@@ -152,6 +152,23 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
 
+    def _post(self, path: str, payload: dict[str, object] | None = None) -> tuple[int, dict[str, object]]:
+        handler = _HandlerForTest(self.runtime, path, payload or {})
+        handler.do_POST()
+        return handler.status_code, json.loads(handler.body.decode("utf-8"))
+
+    def _pack_plan_apply(self, operation: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+        plan_status, plan_payload = self._post(f"/packs/{operation}/plan", payload)
+        self.assertEqual(200, plan_status, plan_payload)
+        plan = plan_payload["plan"]
+        self.assertIsInstance(plan, dict)
+        apply_payload = {
+            "plan_id": plan["plan_id"],
+            "confirmation_token": plan["confirmation_token"],
+            "mutation_plan": plan["mutation_plan"],
+        }
+        return self._post(f"/packs/{operation}/apply", apply_payload)
+
     def _write_source_catalog(self, *, source_id: str = "local-registry") -> None:
         with open(self.catalog_path, "w", encoding="utf-8") as handle:
             json.dump(
@@ -289,11 +306,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
             opener=_FakeOpener({remote_url: _FakeResponse(archive, url=remote_url)}),
         )
         with mock.patch("agent.packs.external_ingestion.RemotePackFetcher", return_value=fake_fetcher):
-            install_handler = _HandlerForTest(self.runtime, "/packs/install", handoff)
-            install_handler.do_POST()
-            install_payload = json.loads(install_handler.body.decode("utf-8"))
+            install_status, install_payload = self._pack_plan_apply("install", handoff)
 
-        self.assertEqual(200, install_handler.status_code)
+        self.assertEqual(200, install_status)
         self.assertTrue(install_payload["ok"])
         self.assertEqual("portable_text_skill", install_payload["normalization_result"]["classification"])
         self.assertEqual("normalized", install_payload["normalization_result"]["status"])
@@ -399,11 +414,9 @@ class TestAPIPackSourceEndpoints(unittest.TestCase):
         with open(os.path.join(pack_dir, "scripts", "install.sh"), "w", encoding="utf-8") as handle:
             handle.write("#!/bin/sh\necho hi\n")
 
-        install_handler = _HandlerForTest(self.runtime, "/packs/install", {"source": pack_dir})
-        install_handler.do_POST()
-        install_payload = json.loads(install_handler.body.decode("utf-8"))
+        install_status, install_payload = self._pack_plan_apply("install", {"source": pack_dir})
 
-        self.assertEqual(200, install_handler.status_code)
+        self.assertEqual(200, install_status)
         self.assertTrue(install_payload["ok"])
         self.assertEqual("partial_safe_import", install_payload["normalization_result"]["status"])
         self.assertIn("quarantined", str(install_payload["message"] or "").lower())

@@ -7,9 +7,9 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint target: `v0.2.0-plan-mode-user-confirmation-ux`
+Current stable checkpoint: `v0.2.0-plan-mode-user-confirmation-ux`
 
-Commit: pending tag/commit after this docs update.
+Commit: `d699ef1` Update checkpoint docs for Plan Mode UX
 
 Summary:
 
@@ -31,7 +31,7 @@ Summary:
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |
-| `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 | pending | User-facing Plan Mode confirmation UX for managed SearXNG and external pack lifecycle. |
+| `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 | `d699ef1` | User-facing Plan Mode confirmation UX for managed SearXNG and external pack lifecycle. |
 
 ## Full Tag List
 
@@ -77,7 +77,7 @@ Dates are from `git for-each-ref --sort=creatordate`.
 | `v0.2.0-managed-searxng` | 2026-06-14 |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 |
-| `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 pending tag |
+| `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 |
 
 ## What Was Proven
 
@@ -206,6 +206,9 @@ python scripts/prove_core_workflows.py
 # PASS: external skill pack lifecycle, missing capability flow, model scout/provider behavior
 # BLOCKED: internet/search in isolated proof environment when no trusted SearXNG backend is configured
 # FAIL: none
+
+python scripts/release_smoke.py
+# PASS after updating stale smoke assertions to current Plan Mode and model-router behavior
 
 git diff --check
 # PASS

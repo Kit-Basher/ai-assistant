@@ -588,7 +588,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual("model_status", switch_confirm_meta.get("route"))
         self.assertEqual(["model_controller"], switch_confirm_meta.get("used_tools"))
         self.assertFalse(bool(switch_confirm_meta.get("used_llm")))
-        self.assertIn("Temporarily using ollama:qwen2.5:7b-instruct for chat.", str(switch_confirm.get("message") or ""))
+        self.assertIn("Temporary chat model switched to ollama:qwen2.5:7b-instruct.", str(switch_confirm.get("message") or ""))
 
         mkdir_preview, _ = self._chat(
             runtime,
@@ -635,7 +635,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
         switch_back_meta = self._chat_meta(switch_back_confirm)
         self.assertEqual(["model_controller"], switch_back_meta.get("used_tools"))
         self.assertFalse(bool(switch_back_meta.get("used_llm")))
-        self.assertIn("Now using ollama:qwen3.5:4b for chat.", str(switch_back_confirm.get("message") or ""))
+        self.assertIn("Temporary chat model switched to ollama:qwen3.5:4b.", str(switch_back_confirm.get("message") or ""))
 
         baseline = self._post(runtime, "/llm/control_mode", {"mode": "baseline", "confirm": True})
         baseline_policy = baseline.get("policy") if isinstance(baseline.get("policy"), dict) else {}

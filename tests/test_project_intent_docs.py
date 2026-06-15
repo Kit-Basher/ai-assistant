@@ -265,7 +265,7 @@ def test_release_readiness_audit_exists_and_keeps_yellow_boundary() -> None:
     lowered = text.lower()
     lowered_flat = " ".join(lowered.split())
     assert "yellow" in lowered
-    assert "e4b4252" in text
+    assert "d699ef1" in text
     assert "controlled public trial" in lowered
     assert "persistent managed-action journal storage" in lowered
     assert (
