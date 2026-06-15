@@ -58,6 +58,32 @@ class TestPackStateTruth(unittest.TestCase):
         self.assertEqual("Installed · Disabled", truth["state_label"])
         self.assertEqual("Installed, but disabled.", truth["status_note"])
 
+    def test_approved_enabled_text_pack_is_usable(self) -> None:
+        truth = normalize_installed_pack_truth(
+            {
+                "status": "normalized",
+                "enabled": True,
+                "classification": "portable_text_skill",
+                "content_hash": "hash-linux",
+                "normalized_path": str(Path(__file__).resolve()),
+                "canonical_pack": {
+                    "display_name": "Linux Troubleshooting Workflow",
+                    "source": {"name": "Local"},
+                    "pack_identity": {"canonical_id": "pack.linux.troubleshooting", "content_hash": "hash-linux"},
+                    "capabilities": {"declared": ["linux_troubleshooting"]},
+                    "trust_anchor": {"local_review_status": "approved", "user_approved_hashes": ["hash-linux"]},
+                },
+            }
+        )
+        self.assertEqual("enabled", truth["activation_state"])
+        self.assertEqual("usable", truth["usability_state"])
+        self.assertTrue(truth["enabled"])
+        self.assertTrue(truth["healthy"])
+        self.assertTrue(truth["machine_usable"])
+        self.assertTrue(truth["task_usable"])
+        self.assertEqual("Installed · Usable", truth["state_label"])
+        self.assertIsNone(truth["blocker"])
+
     def test_installed_partial_and_blocked_packs_stay_distinct(self) -> None:
         limited = normalize_installed_pack_truth(
             {

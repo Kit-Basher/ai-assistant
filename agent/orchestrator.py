@@ -8108,6 +8108,96 @@ class Orchestrator:
         }
 
     @staticmethod
+    def _external_text_pack_guidance_lines(skill_text: str, *, limit: int = 8) -> list[str]:
+        text = str(skill_text or "").strip()
+        if text.startswith("---"):
+            parts = text.split("---", 2)
+            if len(parts) == 3:
+                text = parts[2].strip()
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = " ".join(raw_line.strip().split())
+            if not line or line.startswith("#"):
+                continue
+            if line.endswith(":"):
+                continue
+            if line.startswith("- "):
+                line = line[2:].strip()
+            line = re.sub(r"^\d+\.\s+", "", line).strip()
+            if not line:
+                continue
+            if line not in lines:
+                lines.append(line)
+            if len(lines) >= limit:
+                break
+        return lines
+
+    def _external_text_pack_use_response(
+        self,
+        user_id: str,
+        *,
+        pack_name: str,
+        row: dict[str, Any],
+        skill_text: str,
+        lifecycle: dict[str, Any],
+        status: str,
+    ) -> OrchestratorResponse:
+        guidance = self._external_text_pack_guidance_lines(skill_text)
+        if not guidance:
+            message = (
+                f"{pack_name} is enabled, but I could not read usable text guidance from its normalized skill file. "
+                "Preview the pack before relying on it."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="action_tool",
+                used_runtime_state=False,
+                used_memory=bool(self._current_runtime_setup_state(user_id)),
+                used_tools=["external_pack_lookup"],
+                payload={
+                    "type": "external_pack_text_skill_unavailable",
+                    "summary": message,
+                    "pack_id": str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None,
+                    "pack_name": pack_name,
+                    "status": status or None,
+                    "lifecycle": lifecycle,
+                    "did_use_pack": False,
+                    "executes_code": False,
+                },
+            )
+        numbered = "\n".join(f"{index}. {line}" for index, line in enumerate(guidance, start=1))
+        message = (
+            f"Using {pack_name} as a reviewed text-only skill. I did not run commands, execute pack code, "
+            "read files, use the network, or change system state.\n\n"
+            f"{numbered}\n\n"
+            "For your case, start by telling me the symptom, what changed recently, your distribution, and the impact. "
+            "I can then turn this into a read-only evidence plan before any repair action."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_runtime_state=False,
+            used_memory=bool(self._current_runtime_setup_state(user_id)),
+            used_tools=["external_pack_lookup"],
+            payload={
+                "type": "external_pack_text_skill_use",
+                "summary": message,
+                "pack_id": str(row.get("pack_id") or row.get("canonical_id") or "").strip() or None,
+                "pack_name": pack_name,
+                "status": status or None,
+                "lifecycle": lifecycle,
+                "guidance_lines": guidance,
+                "did_use_pack": True,
+                "executes_code": False,
+                "reads_files": False,
+                "writes_files": False,
+                "network_allowed": False,
+                "shell_allowed": False,
+                "task_completed": False,
+            },
+        )
+
+    @staticmethod
     def _external_pack_managed_adapters(row: dict[str, Any]) -> list[dict[str, Any]]:
         canonical_pack = row.get("canonical_pack") if isinstance(row.get("canonical_pack"), dict) else {}
         for source in (
@@ -8549,7 +8639,7 @@ class Orchestrator:
         if operation is None:
             message = (
                 f"{pack_name} is turned on and ready for a safe adapter check. "
-                "Tell me the specific check to run: validate grant, describe capability, or dry run. "
+                "Tell me the specific adapter operation to run: validate grant, describe capability, or dry run. "
                 "I will preview it before running anything."
             )
             return self._runtime_truth_response(
@@ -8594,10 +8684,10 @@ class Orchestrator:
         reads = bool(operation_row.reads_content) if operation_row else False
         writes = bool(operation_row.writes_content) if operation_row else False
         message = (
-            f"Safe check preview for {pack_name}: run {operation}. "
+            f"Managed adapter invocation preview for {pack_name}: run {operation}. "
             f"Selected file: {path_text}. Reads file contents: {'yes' if reads else 'no'}. Writes data: {'yes' if writes else 'no'}. "
             "No network, browser, OAuth, shell, subprocess, or external pack code is allowed. "
-            "This uses the agent's built-in safe adapter, not code from the skill. "
+            "This uses the agent's core-owned managed adapter, not code from the skill; external pack instructions remain untrusted. "
             "Say yes to run this safe check, or no to cancel."
         )
         self._queue_managed_adapter_invocation_confirm_followup(
@@ -9004,6 +9094,22 @@ class Orchestrator:
         if status == "blocked":
             message = f"{pack_name} is blocked, so I cannot use it through chat."
         else:
+            normalized_path = str(row.get("normalized_path") or "").strip()
+            skill_text = ""
+            if normalized_path:
+                try:
+                    skill_text = (Path(normalized_path) / "SKILL.md").read_text(encoding="utf-8")
+                except OSError:
+                    skill_text = ""
+            if lifecycle.usable and not managed_adapters and str(row.get("classification") or "").strip() == "portable_text_skill":
+                return self._external_text_pack_use_response(
+                    user_id,
+                    pack_name=pack_name,
+                    row=row,
+                    skill_text=skill_text,
+                    lifecycle=lifecycle_payload,
+                    status=status,
+                )
             message = render_lifecycle_response(lifecycle)
             if status == "partial_safe_import":
                 message = f"{message} Some unsafe files were stripped during import."

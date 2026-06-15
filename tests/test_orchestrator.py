@@ -5553,6 +5553,79 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn(repeat.data["route"], {"assistant_clarification", "generic_chat"})
         self.assertIn("current action", repeat.text.lower())
 
+    def test_usable_text_only_external_pack_returns_guidance(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+        )
+        normalized_path = Path(self.tmpdir.name) / "linux_troubleshooting_pack"
+        normalized_path.mkdir(parents=True, exist_ok=True)
+        (normalized_path / "SKILL.md").write_text(
+            """---
+name: Linux Troubleshooting Workflow
+---
+
+# Linux Troubleshooting Workflow
+
+Use this pack when the user asks for Linux debugging or repair guidance.
+
+Rules:
+- Stay text-only. Do not run commands, edit system files, install packages, restart services, or escalate privileges from this pack.
+- Separate read-only diagnostics from mutating repair actions.
+
+Workflow:
+1. Capture symptoms, recent changes, distribution, environment, and impact.
+2. Build a read-only evidence plan.
+3. Propose the least risky repair first.
+""",
+            encoding="utf-8",
+        )
+        pack = orchestrator._pack_store.record_external_pack(  # noqa: SLF001
+            canonical_pack={
+                "name": "Linux Troubleshooting Workflow",
+                "display_name": "Linux Troubleshooting Workflow",
+                "version": "1.0.0",
+                "pack_identity": {"canonical_id": "pack.linux.troubleshooting", "content_hash": "hash-1"},
+                "capabilities": {"summary": "Linux debugging, troubleshooting, and rollback-safe repair planning."},
+            },
+            classification="portable_text_skill",
+            status="normalized",
+            risk_report={},
+            review_envelope={"pack_name": "Linux Troubleshooting Workflow"},
+            quarantine_path=str(normalized_path),
+            normalized_path=str(normalized_path),
+        )
+        pack = orchestrator._pack_store.set_external_pack_review_status(  # noqa: SLF001
+            str(pack["pack_id"]),
+            local_review_status="approved",
+            approve_current_hash=True,
+        )
+        assert isinstance(pack, dict)
+        pack = orchestrator._pack_store.set_external_pack_enabled(str(pack["pack_id"]), enabled=True)  # noqa: SLF001
+        assert isinstance(pack, dict)
+
+        response = orchestrator.handle_message(
+            "My Linux laptop is suddenly slow. Use the Linux troubleshooting workflow and give me a safe diagnostic plan before running commands.",
+            "user1",
+        )
+
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual(["external_pack_lookup"], response.data["used_tools"])
+        self.assertEqual("external_pack_text_skill_use", payload.get("type"))
+        self.assertTrue(payload.get("did_use_pack"))
+        self.assertFalse(payload.get("executes_code"))
+        self.assertFalse(payload.get("shell_allowed"))
+        self.assertIn("Using Linux Troubleshooting Workflow as a reviewed text-only skill", response.text)
+        self.assertIn("Stay text-only", response.text)
+        self.assertIn("Build a read-only evidence plan", response.text)
+        self.assertIn("I did not run commands", response.text)
+        self.assertFalse(response.data.get("used_llm"))
+
     def test_usable_external_pack_blocks_unsupported_content_search(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         orchestrator = Orchestrator(

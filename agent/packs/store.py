@@ -264,7 +264,10 @@ class PackStore:
         except json.JSONDecodeError:
             review = {}
         trust = canonical.get("trust") if isinstance(canonical.get("trust"), dict) else {}
+        runtime = canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}
         pack_identity = canonical.get("pack_identity") if isinstance(canonical.get("pack_identity"), dict) else {}
+        enabled_raw = runtime.get("enabled") if "enabled" in runtime else None
+        enabled = enabled_raw if enabled_raw is True or enabled_raw is False else None
         return {
             "pack_id": str(row["pack_id"]),
             "canonical_id": str(pack_identity.get("canonical_id") or row["pack_id"]),
@@ -284,7 +287,7 @@ class PackStore:
             ),
             "review_required": bool(review.get("review_required", True)),
             "non_executable": True,
-            "enabled": None,
+            "enabled": enabled,
             "permissions": canonical.get("permissions") if isinstance(canonical.get("permissions"), dict) else {},
             "capabilities": canonical.get("capabilities") if isinstance(canonical.get("capabilities"), dict) else {},
             "components": list(PackStore._sequence(canonical.get("components"))),

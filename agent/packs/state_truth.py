@@ -31,7 +31,7 @@ def _path_exists(value: Any) -> bool:
 
 def _state_severity(state: str) -> str:
     normalized = str(state or "").strip().lower()
-    if normalized in {"installed_healthy", "available"}:
+    if normalized in {"installed_healthy", "installed_usable", "available"}:
         return "ready"
     if normalized in {"installed_disabled", "installed_limited", "installed_unknown", "previewable"}:
         return "degraded"
@@ -72,6 +72,43 @@ def _base_normalized_state() -> dict[str, Any]:
         "blocked": False,
         "unknown": True,
     }
+
+
+def _approved_for_use(pack_row: dict[str, Any], canonical: dict[str, Any]) -> bool:
+    if pack_row.get("approved") is True:
+        return True
+    trust = canonical.get("trust_anchor") if isinstance(canonical.get("trust_anchor"), dict) else {}
+    review_state = str(pack_row.get("local_review_status") or trust.get("local_review_status") or "").strip().lower()
+    if review_state in {"approved", "accepted", "reviewed"}:
+        return True
+    if trust.get("approved") is True:
+        return True
+    approved_hashes = trust.get("user_approved_hashes") if isinstance(trust.get("user_approved_hashes"), list) else []
+    identity = canonical.get("pack_identity") if isinstance(canonical.get("pack_identity"), dict) else {}
+    content_hash = str(pack_row.get("content_hash") or identity.get("content_hash") or "").strip()
+    return bool(content_hash and content_hash in {str(item or "").strip() for item in approved_hashes})
+
+
+def _managed_adapter_declarations(canonical: dict[str, Any]) -> list[dict[str, Any]]:
+    for value in (
+        canonical.get("managed_adapters"),
+        (canonical.get("runtime") if isinstance(canonical.get("runtime"), dict) else {}).get("managed_adapters"),
+        (canonical.get("permissions") if isinstance(canonical.get("permissions"), dict) else {}).get("managed_adapters"),
+    ):
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+    return []
+
+
+def _is_reviewed_enabled_text_skill(pack_row: dict[str, Any], canonical: dict[str, Any], enabled_raw: Any) -> bool:
+    if enabled_raw is not True:
+        return False
+    classification = str(pack_row.get("classification") or "").strip()
+    if classification != "portable_text_skill":
+        return False
+    if _managed_adapter_declarations(canonical):
+        return False
+    return _approved_for_use(pack_row, canonical)
 
 
 def normalize_installed_pack_truth(row: dict[str, Any] | None) -> dict[str, Any]:
@@ -224,7 +261,24 @@ def normalize_installed_pack_truth(row: dict[str, Any] | None) -> dict[str, Any]
                 }
             )
         if str(normalized.get("state_key") or "").strip().lower() not in {"installed_blocked", "installed_unknown"}:
-            if enabled_raw is True:
+            if _is_reviewed_enabled_text_skill(pack_row, canonical, enabled_raw):
+                normalized.update(
+                    {
+                        "activation_state": "enabled",
+                        "health_state": "healthy",
+                        "compatibility_state": "compatible",
+                        "usability_state": "usable",
+                        "healthy": True,
+                        "machine_usable": True,
+                        "task_usable": True,
+                        "state_key": "installed_usable",
+                        "state_label": "Installed · Usable",
+                        "status_note": "Installed, enabled, and usable as reviewed text-only guidance.",
+                        "blocker": None,
+                        "next_action": "Use it through chat as text-only guidance.",
+                    }
+                )
+            elif enabled_raw is True:
                 normalized.update(
                     {
                         "activation_state": "enabled",
@@ -470,6 +524,8 @@ def _pack_state_installed_row(row: dict[str, Any]) -> tuple[dict[str, Any], set[
             blocker=str(normalized.get("blocker") or ""),
             state_label=str(normalized.get("state_label") or "Installed · Unknown"),
         )
+    elif state_key == "installed_usable":
+        recovery = None
     else:
         recovery = build_failure_recovery(
             "pack_task_unconfirmed",
