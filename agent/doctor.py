@@ -460,11 +460,38 @@ def _telegram_enabled_for_doctor() -> bool:
         return False
 
 
+def _telegram_required_for_doctor() -> bool:
+    try:
+        return bool(load_config().telegram_required)
+    except Exception:
+        return _env_truthy("TELEGRAM_REQUIRED", default=False)
+
+
 def _telegram_optional_check(check_id: str) -> DoctorCheck:
     return DoctorCheck(
         check_id=check_id,
         status="OK",
-        detail_short="telegram adapter disabled (optional)",
+        detail_short="telegram adapter optional; no action needed unless you want Telegram",
+    )
+
+
+def _check_telegram_service_for_doctor(*, required: bool) -> DoctorCheck:
+    if required:
+        return _check_systemd_service("personal-agent-telegram.service", "systemd.telegram_service")
+    active, state = _run_systemctl_user("personal-agent-telegram.service")
+    if active:
+        return DoctorCheck(
+            check_id="systemd.telegram_service",
+            status="OK",
+            detail_short="personal-agent-telegram.service active",
+        )
+    return DoctorCheck(
+        check_id="systemd.telegram_service",
+        status="OK",
+        detail_short=(
+            f"personal-agent-telegram.service state={state}; "
+            "Telegram is optional. No action needed unless you want Telegram."
+        ),
     )
 
 
@@ -763,6 +790,7 @@ def _doctor_checks(
     api_base_url: str,
 ) -> list[DoctorCheck]:
     telegram_enabled = _telegram_enabled_for_doctor()
+    telegram_required = _telegram_required_for_doctor()
     checks = [
         _check_python_runtime(),
         _check_repo_readable(repo_root),
@@ -777,7 +805,7 @@ def _doctor_checks(
         checks.extend(
             [
                 _check_telegram_dropin(),
-                _check_systemd_service("personal-agent-telegram.service", "systemd.telegram_service"),
+                _check_telegram_service_for_doctor(required=telegram_required),
                 _check_telegram_poller_singleton(),
                 _check_telegram_token(online=online),
             ]

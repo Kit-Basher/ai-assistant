@@ -665,6 +665,64 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertEqual("OK", rows["process.telegram_pollers"].status)
         self.assertEqual("OK", rows["telegram.token"].status)
 
+    def test_doctor_optional_enabled_telegram_inactive_is_not_required_recovery(self) -> None:
+        ok = DoctorCheck("ok", "OK", "ok")
+
+        with (
+            patch("agent.doctor._telegram_enabled_for_doctor", return_value=True),
+            patch("agent.doctor._telegram_required_for_doctor", return_value=False),
+            patch("agent.doctor._check_python_runtime", return_value=ok),
+            patch("agent.doctor._check_repo_readable", return_value=ok),
+            patch("agent.doctor._check_secret_store_path", return_value=ok),
+            patch("agent.doctor._check_required_dirs", return_value=ok),
+            patch("agent.doctor._check_write_mode_safe", return_value=ok),
+            patch("agent.doctor._check_systemd_service", return_value=ok),
+            patch("agent.doctor._check_llm_availability", return_value=ok),
+            patch("agent.doctor._check_logging_to_stdout", return_value=ok),
+            patch("agent.doctor._check_telegram_dropin", return_value=ok),
+            patch("agent.doctor._check_telegram_poller_singleton", return_value=ok),
+            patch("agent.doctor._check_telegram_token", return_value=ok),
+            patch("agent.doctor._run_systemctl_user", return_value=(False, "inactive")),
+        ):
+            checks = _doctor_checks(repo_root=Path("."), online=False, api_base_url="http://127.0.0.1:8765")
+
+        rows = {row.check_id: row for row in checks}
+        telegram_service = rows["systemd.telegram_service"]
+        self.assertEqual("OK", telegram_service.status)
+        self.assertIn("Telegram is optional", telegram_service.detail_short)
+        self.assertIn("No action needed unless you want Telegram", telegram_service.detail_short)
+        self.assertIsNone(telegram_service.next_action)
+
+    def test_doctor_required_telegram_inactive_remains_visible(self) -> None:
+        ok = DoctorCheck("ok", "OK", "ok")
+        telegram_warn = DoctorCheck(
+            "systemd.telegram_service",
+            "WARN",
+            "personal-agent-telegram.service state=inactive",
+            next_action="Run: systemctl --user restart personal-agent-telegram.service",
+        )
+
+        with (
+            patch("agent.doctor._telegram_enabled_for_doctor", return_value=True),
+            patch("agent.doctor._telegram_required_for_doctor", return_value=True),
+            patch("agent.doctor._check_python_runtime", return_value=ok),
+            patch("agent.doctor._check_repo_readable", return_value=ok),
+            patch("agent.doctor._check_secret_store_path", return_value=ok),
+            patch("agent.doctor._check_required_dirs", return_value=ok),
+            patch("agent.doctor._check_write_mode_safe", return_value=ok),
+            patch("agent.doctor._check_systemd_service", side_effect=[ok, telegram_warn]),
+            patch("agent.doctor._check_llm_availability", return_value=ok),
+            patch("agent.doctor._check_logging_to_stdout", return_value=ok),
+            patch("agent.doctor._check_telegram_dropin", return_value=ok),
+            patch("agent.doctor._check_telegram_poller_singleton", return_value=ok),
+            patch("agent.doctor._check_telegram_token", return_value=ok),
+        ):
+            checks = _doctor_checks(repo_root=Path("."), online=False, api_base_url="http://127.0.0.1:8765")
+
+        rows = {row.check_id: row for row in checks}
+        self.assertEqual("WARN", rows["systemd.telegram_service"].status)
+        self.assertIn("restart personal-agent-telegram.service", str(rows["systemd.telegram_service"].next_action))
+
     def test_telegram_enabled_for_doctor_uses_live_runtime_state(self) -> None:
         with patch(
             "agent.doctor.get_telegram_runtime_state",

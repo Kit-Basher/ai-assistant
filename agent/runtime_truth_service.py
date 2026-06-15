@@ -476,11 +476,12 @@ class RuntimeTruthService:
         telegram_next_action = str(telegram.get("next_action") or "").strip() or None
         if telegram_enabled and not telegram_required and telegram_state in {"stopped", "crash_loop", "disabled_missing_token"}:
             if telegram_state == "stopped":
-                telegram_warning = "Telegram is stopped. Restart Telegram if you want that surface."
+                telegram_warning = "Telegram is stopped. No action needed unless you want Telegram."
             elif telegram_state == "crash_loop":
-                telegram_warning = "Telegram is failing to stay running. Restart or diagnose Telegram if you want that surface."
+                telegram_warning = "Telegram is failing to stay running. No action needed unless you want Telegram."
             else:
-                telegram_warning = "Telegram is missing a token. Configure Telegram if you want that surface."
+                telegram_warning = "Telegram is missing a token. No action needed unless you want Telegram."
+            telegram_next_action = None
         setup_context_ready_payload: dict[str, Any] = {
             "ok": True,
             "ready": bool(ready),
@@ -505,17 +506,27 @@ class RuntimeTruthService:
             ready_payload=setup_context_ready_payload,
             llm_status=llm_status,
         )
-        recovery_mode = detect_recovery_mode(
-            ready_payload=setup_context_ready_payload,
-            llm_status=llm_status,
-            failure_code=str(normalized_status.get("failure_code") or "").strip() or None,
-            api_reachable=True,
+        failure_code = str(normalized_status.get("failure_code") or "").strip() or None
+        recovery_needed = bool(
+            not ready
+            or failure_code
+            or str(normalized_status.get("runtime_mode") or "").strip().lower() != "ready"
+        )
+        recovery_mode = (
+            detect_recovery_mode(
+                ready_payload=setup_context_ready_payload,
+                llm_status=llm_status,
+                failure_code=failure_code,
+                api_reachable=True,
+            )
+            if recovery_needed
+            else None
         )
         onboarding_next = onboarding_next_action(
             onboarding_state,
             ready_payload=setup_context_ready_payload,
         )
-        if str(onboarding_state).strip().upper() == "DEGRADED":
+        if str(onboarding_state).strip().upper() == "DEGRADED" and recovery_mode:
             onboarding_next = recovery_next_action(recovery_mode)
         onboarding_payload = {
             "state": onboarding_state,
@@ -527,11 +538,19 @@ class RuntimeTruthService:
             "next_action": onboarding_next,
             "steps": onboarding_steps(onboarding_state),
         }
-        recovery_payload = {
-            "mode": recovery_mode,
-            "summary": recovery_summary(recovery_mode),
-            "next_action": recovery_next_action(recovery_mode),
-        }
+        recovery_payload = (
+            {
+                "mode": recovery_mode,
+                "summary": recovery_summary(recovery_mode),
+                "next_action": recovery_next_action(recovery_mode),
+            }
+            if recovery_mode
+            else {
+                "mode": None,
+                "summary": "No recovery needed.",
+                "next_action": None,
+            }
+        )
         failure_recovery = self._runtime_failure_recovery(
             ready=setup_context_ready_payload,
             llm_status=llm_status if isinstance(llm_status, dict) else {},
@@ -604,6 +623,7 @@ class RuntimeTruthService:
                 **telegram,
                 "required": telegram_required,
                 "warning": telegram_warning,
+                "next_action": telegram_next_action,
                 "status": telegram_state,
                 "recent_messages": recent_messages,
             },

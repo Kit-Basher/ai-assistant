@@ -255,14 +255,24 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertTrue(payload["chat_ready"])
         self.assertTrue(payload["chat_usable"])
         self.assertEqual("READY", payload["runtime_mode"])
+        self.assertIsNone(payload["recovery"]["mode"])
+        self.assertEqual("No recovery needed.", payload["recovery"]["summary"])
+        self.assertIsNone(payload["recovery"]["next_action"])
+        self.assertIsNone(payload["failure_recovery"])
+        self.assertIsNone(payload["reason"])
+        self.assertIsNone(payload["blocker"])
+        self.assertIsNone(payload["next_step"])
         self.assertEqual("stopped", payload["telegram"]["state"])
         self.assertFalse(payload["telegram"]["required"])
         self.assertIn("Telegram is stopped", payload["telegram"]["warning"])
+        self.assertIn("No action needed unless you want Telegram", payload["telegram"]["warning"])
+        self.assertIsNone(payload["telegram"]["next_action"])
         self.assertIn("Core chat is ready", payload["message"])
         surfaces = payload.get("surfaces") if isinstance(payload.get("surfaces"), dict) else {}
         telegram_surface = surfaces.get("telegram") if isinstance(surfaces.get("telegram"), dict) else {}
         self.assertEqual("stopped", telegram_surface.get("state"))
         self.assertFalse(telegram_surface.get("required"))
+        self.assertIsNone(telegram_surface.get("next_action"))
         self.assertTrue(payload.get("surface_warnings"))
         self.assertNotEqual("SERVICES_DOWN", payload["onboarding"]["state"])
         self.assertNotEqual("TELEGRAM_DOWN", payload["recovery"]["mode"])
@@ -284,6 +294,7 @@ class TestReadyEndpoint(unittest.TestCase):
         self.assertEqual("DEGRADED", payload["runtime_mode"])
         self.assertTrue(payload["telegram"]["required"])
         self.assertEqual("TELEGRAM_DOWN", payload["recovery"]["mode"])
+        self.assertTrue(str(payload["recovery"]["next_action"] or "").strip())
 
     def test_ready_chat_unhealthy_degraded_regardless_of_optional_telegram(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path, telegram_enabled=True))

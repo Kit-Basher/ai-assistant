@@ -42,6 +42,13 @@ Confirm:
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
+Development runtimes can retain old blocked smoke-test external packs from earlier
+manual or release-smoke runs. Treat them as local dev state when `/packs/state`
+labels them `Installed · Blocked` with an explicit blocker such as executable
+code. They are not release proof failures by themselves. Clean them only through
+the confirmed pack remove/tombstone flow, or use a fresh state directory for
+final install proof.
+
 ### After any issue
 
 - re-check `/ready`, `/state`, `/packs/state`, and `/search/status`
