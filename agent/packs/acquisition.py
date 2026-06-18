@@ -9,6 +9,7 @@ from agent.packs.capability_recommendation import (
     classify_capability_gap_request,
     detect_pack_capability_need,
     recommend_packs_for_capability,
+    render_pack_capability_response,
 )
 from agent.packs.lifecycle import PackLifecycleResult, PackLifecycleService, render_lifecycle_response
 from agent.packs.lifecycle_actions import PackLifecycleActionController
@@ -260,7 +261,12 @@ class PackAcquisitionCoordinator:
         if installed is not None:
             pack_id = _clean(installed.get("pack_id") or installed.get("canonical_id"))
             pack = self.pack_store.get_external_pack(pack_id) if pack_id and callable(getattr(self.pack_store, "get_external_pack", None)) else None
-            lifecycle = self.lifecycle_service.evaluate(capability=capability, imported_pack=pack or installed).to_dict()
+            if isinstance(pack, dict):
+                lifecycle = self.lifecycle_service.evaluate(capability=capability, imported_pack=pack).to_dict()
+            elif isinstance(installed.get("lifecycle"), dict):
+                lifecycle = dict(installed.get("lifecycle") or {})
+            else:
+                lifecycle = self.lifecycle_service.evaluate(capability=capability, imported_pack=installed).to_dict()
             source_status = "installed"
             candidate = installed
         elif recommended is not None:
@@ -472,6 +478,8 @@ class PackAcquisitionCoordinator:
         label = _clean(recommendation.get("capability_label") or capability.replace("_", " "))
         next_label = _clean((lifecycle.get("next_step") if isinstance(lifecycle.get("next_step"), dict) else {}).get("label"))
         if source_status == "trusted_catalog_candidate" and isinstance(candidate, dict):
+            if str(recommendation.get("comparison_mode") or "").strip() == "recommended_plus_alternate":
+                return render_pack_capability_response(recommendation)
             name = _clean(candidate.get("name")) or "a candidate pack"
             return (
                 f"I don’t have that skill active yet. I found a candidate called {name} in the approved catalog. "
@@ -507,7 +515,9 @@ class PackAcquisitionCoordinator:
             return "\n".join(lines)
         if isinstance(scaffold, dict):
             title = _clean(scaffold.get("title")) or f"{label} draft skill"
+            prefix = "I couldn't check for an existing match cleanly just now. " if source_errors else ""
             return (
+                prefix +
                 f"I do not have {label} active yet, and I did not find a trusted catalog skill ready to preview. "
                 f"I can create a draft skill for review called {title}. It will not read files, install anything, connect to Google, or run code. "
                 "Say yes to preview it safely."

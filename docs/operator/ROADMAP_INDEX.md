@@ -91,9 +91,9 @@ because they overlap current docs.
 ## Current Next Work
 
 1. Keep the current track on final release proof, not broad new infrastructure.
-   The `/ready`, `/state`, `/packs/state`, `/search/status`, and
-   `python -m agent doctor` proof surfaces have been polished for
-   `v0.2.0-release-proof-surfaces`.
+   The current checkpoint is `v0.2.0-live-usefulness-proof` at `e5dc9f8`.
+   Live managed SearXNG search and starter text-pack use have been proven
+   through user-facing `/chat` and API paths.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured
@@ -103,13 +103,15 @@ because they overlap current docs.
    write, verify the result, and roll back only owned resources.
 4. If adding more managed local services or sandboxed tool/MCP runtimes, start
    from `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`.
-5. Before any public trial, rerun the verification command groups in
+5. Before any public trial, run the final fresh Debian VM install proof and
+   rerun the verification command groups in
    `docs/operator/RELEASE_LEDGER.md`.
 
 ## Do Not Start Until Later
 
-- Fresh Debian VM install proof: defer until the very end because it is
-  high-cost and time-consuming.
+- Fresh Debian VM install proof: now the next release-track step, but do not
+  start it until explicitly requested because it is high-cost and
+  time-consuming.
 - Broad persistent-journal rollout beyond the proof-critical flows.
 - Startup auto-recovery that mutates state.
 - Direct llama.cpp binary/library management.

@@ -236,8 +236,10 @@ class TestDoctorCLI(unittest.TestCase):
         self.assertTrue(bool(check.next_action))
 
     def test_llm_availability_prefers_ready_embedded_llm_payload(self) -> None:
+        calls: list[tuple[str, float]] = []
+
         def _fetch(url: str, timeout_seconds: float = 0.8) -> tuple[bool, dict[str, object] | str]:
-            _ = timeout_seconds
+            calls.append((url, timeout_seconds))
             if url.endswith("/ready"):
                 return True, {
                     "ok": True,
@@ -258,6 +260,9 @@ class TestDoctorCLI(unittest.TestCase):
 
         self.assertEqual("OK", check.status)
         self.assertIn("provider=ollama", check.detail_short)
+        self.assertEqual(1, len(calls))
+        self.assertTrue(calls[0][0].endswith("/ready"))
+        self.assertGreaterEqual(calls[0][1], 10.0)
 
     def test_enable_writes_off_is_safe_mode_pass(self) -> None:
         with patch.dict(os.environ, {"ENABLE_WRITES": "0"}, clear=False):

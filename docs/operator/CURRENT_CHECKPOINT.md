@@ -1,8 +1,8 @@
 # Release Readiness Audit Baseline
 
 Date: 2026-06-15
-Checkpoint: `v0.2.0-release-proof-surfaces` at `48ce105`
-Latest clean checkpoint before this pass: `48ce105` Fix release proof readiness surfaces
+Checkpoint: `v0.2.0-live-usefulness-proof` at `e5dc9f8`
+Latest clean checkpoint before this pass: `e5dc9f8` Prove live search and external pack usefulness
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 
@@ -19,6 +19,8 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 
 ## Latest Known Commits
 
+- `e5dc9f8` Prove live search and external pack usefulness
+- `f00069d` Record release proof surfaces checkpoint
 - `48ce105` Fix release proof readiness surfaces
 - `d699ef1` Update checkpoint docs for Plan Mode UX
 - `7096852` Enforce Plan Mode for external pack lifecycle writes
@@ -77,7 +79,8 @@ For the compact release history and roadmap routing layer, use `docs/operator/RE
 - Core workflow proof now exists in `scripts/prove_core_workflows.py` and is documented in `docs/operator/CORE_WORKFLOW_PROOF.md`. Latest observed result: external skill pack lifecycle PASS for a deterministic approved local source through preview, quarantine/import, review, approval, enablement, metadata-only permission grant, harmless managed-adapter dry-run invocation, disable/remove, tombstone, and source cleanup. Missing-capability public chat PASS: it checks approved pack sources, names a candidate, proposes the preview/install/review path, and does not claim install/use. Model/provider public chat guidance PASS: it distinguishes Ollama, OpenAI-compatible local endpoints, llama.cpp server/LM Studio/vLLM through user-run endpoints, and direct llama.cpp management as absent. Internet/search is BLOCKED until a trusted SearXNG endpoint is configured. Release gates still require direct verification outside the proof harness.
 - SearXNG is now the first managed local service implementation under `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`. `/search/status` reports enabled/provider/endpoint/reachability, a redacted base URL, setup source, blocked reason, and one next action. `/search/setup/plan` and `/search/setup/apply` provide confirmation-gated setup for a user-provided loopback SearXNG URL or the approved `personal-agent-searxng` local container plan. On Linux, rootless Podman is preferred; when Podman is missing the default setup plan is a confirmation-gated Podman prerequisite install for the `podman` package only, verifies rootless Podman, and does not start SearXNG or enable search. If Podman install needs interactive privilege, apply returns a bounded elevated terminal handoff for `sudo apt-get install -y podman` instead of running hidden sudo from the background API service. Docker is marked as an explicit fallback only, with `preferred_engine=podman`, `selected_engine=docker`, fallback reason, rootless expectation, and Docker fallback warning/confirmation metadata. Setup binds only to `127.0.0.1`, seeds a minimal approved SearXNG config that enables JSON metadata output before mounting `/etc/searxng`, does not silently install Podman/Docker/SearXNG/system packages, updates the running search configuration only after a SearXNG JSON probe verifies, persists managed-action journal rows, and restores prior runtime search settings on failed verification. Restart-persistent service env writing remains an operator step/follow-up.
 - Release proof surfaces are now consistent for the current local runtime: `/ready` no longer emits `UNKNOWN_FAILURE` recovery when `runtime_mode=READY`; optional inactive Telegram is informational and has no required recovery next action; `python -m agent doctor` exits OK when optional Telegram is the only inactive surface. Development `/packs/state` can still show old blocked smoke-test packs without being a release proof failure; clean them only through confirmed remove/tombstone or use a fresh state directory for final proof.
-- Release readiness remains Yellow at `v0.2.0-release-proof-surfaces`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
+- Live usefulness proof is now captured at `v0.2.0-live-usefulness-proof`: managed SearXNG was previewed/applied through Plan Mode, live `/search/status` reported enabled/provider/endpoint/available with a loopback URL, `/search/query` and `/chat` returned metadata-only untrusted results, and the starter `Linux Troubleshooting Workflow` text pack was previewed/imported/approved/enabled and then used through normal chat without executing pack code, running commands, reading files, using the network, or changing system state.
+- Release readiness remains Yellow at `v0.2.0-live-usefulness-proof`: suitable for a controlled public trial only after clean install verification and the remaining proof blockers are either resolved or explicitly scoped out, not a broad Green release. See `docs/operator/RELEASE_READINESS_AUDIT.md`.
 - External pack format is documented.
 - Live barrage quality now rejects weak fallback answers like "I’m not sure" and generic "try rephrasing".
 
@@ -178,3 +181,17 @@ Verified:
 - behavior/release tests pass
 - project intent docs pass
 - git status clean at tag v0.2.0-managed-searxng
+
+## v0.2.0-live-usefulness-proof checkpoint
+
+Live usefulness proof is working on the primary Debian workstation.
+
+Verified:
+- /search/status can start disabled/unconfigured, then managed SearXNG setup is previewed and confirmed through Plan Mode
+- /search/status reports enabled=true, provider=searxng, endpoint_configured=true, available=true, and a loopback base URL after setup
+- /search/query returns metadata-only untrusted results
+- /chat uses safe_web_search for an explicit search request
+- Linux Troubleshooting Workflow starter text pack is previewed, imported, approved, enabled, and reported usable by /packs/state
+- /chat uses the installed text-only pack for a normal Linux troubleshooting request
+- no pack code, shell, page fetching, browser automation, downloads, or pack install/import from search results
+- final fresh Debian VM install proof remains intentionally deferred

@@ -3255,6 +3255,7 @@ class Orchestrator:
                 )
             pack = result.get("pack") if isinstance(result.get("pack"), dict) else {}
             pack_name = str(pack.get("name") or pack.get("display_name") or "External pack").strip()
+            lifecycle: dict[str, Any] = {}
             if ok and pack:
                 try:
                     grants = list_adapter_grants(self._pack_store.external_storage_root())
@@ -3302,6 +3303,8 @@ class Orchestrator:
                     lines.append("It is still not enabled, no permissions were granted, and I did not use it.")
                 elif action_type == "external_pack.enable":
                     lines.append("No permissions were granted, no adapter ran, and I did not use it.")
+                    if str(lifecycle.get("state") or "").strip() == "needs_permission":
+                        lines.append("Next safe step: permission preview is required before use.")
                 elif action_type == "external_pack.grant":
                     lines.append("The grant is metadata-only. I did not read the file, invoke an adapter, or use the pack.")
                 elif action_type == "external_pack.remove":
@@ -3310,10 +3313,32 @@ class Orchestrator:
                 lines.append(f"Reason: {error_code or result.get('error_kind') or 'external_pack_lifecycle_failed'}.")
                 lines.append("No pack was invoked or used.")
             payload = dict(result)
+            canonical_pack = pack.get("canonical_pack") if isinstance(pack.get("canonical_pack"), dict) else {}
+            trust_anchor = canonical_pack.get("trust_anchor") if isinstance(canonical_pack.get("trust_anchor"), dict) else {}
+            runtime = canonical_pack.get("runtime") if isinstance(canonical_pack.get("runtime"), dict) else {}
+            action_name = {
+                "external_pack.install": "install",
+                "external_pack.approve": "review_approve",
+                "external_pack.enable": "enable",
+                "external_pack.grant": "grant_permission",
+                "external_pack.remove": "remove",
+            }.get(action_type)
             payload.update(
                 {
                     "type": "external_pack_lifecycle_result",
                     "action_type": action_type,
+                    "action": action_name,
+                    "lifecycle": lifecycle or payload.get("lifecycle"),
+                    "did_approve": bool(ok and action_type == "external_pack.approve"),
+                    "did_enable": bool(ok and action_type == "external_pack.enable"),
+                    "did_grant_permissions": bool(ok and action_type == "external_pack.grant"),
+                    "did_use_pack": False,
+                    "approved": bool(
+                        str(trust_anchor.get("local_review_status") or "").strip().lower()
+                        in {"approved", "accepted", "reviewed"}
+                    ),
+                    "enabled": bool(pack.get("enabled") is True or runtime.get("enabled") is True),
+                    "permissions_granted": list(payload.get("permissions_granted") if isinstance(payload.get("permissions_granted"), list) else []),
                     "mutated": bool(result.get("mutated", ok)),
                 }
             )
@@ -7830,7 +7855,29 @@ class Orchestrator:
         if not self._looks_like_vague_continuation_prompt(text):
             return None
         normalized = normalize_setup_text(text).replace("/", " ")
+        setup_state = self._current_runtime_setup_state(user_id)
+        if normalized in {"1", "2"}:
+            if str(setup_state.get("action_type") or "").strip().lower() == "provider_repair_options":
+                return None
+        if normalized in {"yes", "y", "ok", "okay", "sure", "continue", "do it"}:
+            if str(setup_state.get("step") or "").strip().lower() in {
+                "awaiting_switch_confirm",
+                "awaiting_openrouter_reuse_confirm",
+            }:
+                return None
         pending_summary = self._active_action_pending_summary(user_id)
+        if normalized == "yes":
+            thread_id = self._active_thread_id_for_user(user_id)
+            rows = self._memory_runtime.list_pending_items(user_id, thread_id=thread_id, include_expired=False)
+            if rows:
+                return None
+            now_epoch = int(datetime.now(timezone.utc).timestamp())
+            expired_rows = self._memory_runtime.list_pending_items(user_id, thread_id=thread_id, include_expired=True)
+            if any(
+                isinstance(row, dict) and int(row.get("expires_at") or 0) <= now_epoch
+                for row in expired_rows
+            ):
+                return None
         if pending_summary and normalized == "yes":
             return None
         if pending_summary:
@@ -7854,6 +7901,7 @@ class Orchestrator:
                 "type": "assistant_continuation_clarification",
                 "summary": message,
                 "has_pending_action": bool(pending_summary),
+                "reason": "pending_action_available" if pending_summary else "no_resumable_work",
             },
         )
 
@@ -9181,24 +9229,44 @@ class Orchestrator:
                 "type": "pack_acquisition",
                 "summary": message,
                 "acquisition": acquisition.to_dict(),
+                "recommendation": acquisition.recommendation,
                 "classification": gap.get("classification"),
                 "capability_required": acquisition.detected_capability,
                 "source_status": acquisition.source_status,
+                "fallback": (
+                    "install_preview"
+                    if acquisition.source_status == "trusted_catalog_candidate"
+                    else "scaffold_preview"
+                    if acquisition.scaffold_preview is not None
+                    else None
+                ),
                 "lifecycle_state": acquisition.lifecycle_state,
                 "missing_gate": acquisition.missing_gate,
                 "next_step": acquisition.next_step.to_dict() if acquisition.next_step is not None else None,
                 "scaffold_preview": acquisition.scaffold_preview,
                 "source_leads": [dict(row) for row in acquisition.source_leads],
                 "lead_search": acquisition.lead_search,
+                "comparison_mode": (
+                    acquisition.recommendation.get("comparison_mode")
+                    if isinstance(acquisition.recommendation, dict)
+                    else None
+                ),
                 "capability_gap_rescue": {
+                    "type": "capability_gap_rescue",
                     "candidate_packs": (
                         [dict(acquisition.candidate_pack)]
                         if isinstance(acquisition.candidate_pack, dict)
                         else []
                     ),
                     "missing_capability": acquisition.detected_capability,
+                    "source_scope": "approved_pack_sources_only",
                     "preview_required": acquisition.source_status == "trusted_catalog_candidate",
                     "install_allowed_initially": False,
+                    "candidate_actions": [
+                        {"action": "show_preview", "requires_confirmation": True}
+                    ]
+                    if isinstance(acquisition.candidate_pack, dict)
+                    else [],
                 },
             },
         )
@@ -9285,13 +9353,21 @@ class Orchestrator:
             return
         if action == "review_approve":
             pack_id = str((acquisition.candidate_pack or {}).get("pack_id") or acquisition.lifecycle.get("pack_id") or "").strip()
-            pack = self._pack_store.get_external_pack(pack_id) if pack_id else None
+            pack = (
+                self._pack_store.get_external_pack(pack_id)
+                if pack_id and callable(getattr(self._pack_store, "get_external_pack", None))
+                else None
+            )
             if isinstance(pack, dict):
                 self._queue_pack_review_approve_followup(user_id, pack=pack, lifecycle=dict(lifecycle or acquisition.lifecycle))
             return
         if action == "enable":
             pack_id = str((acquisition.candidate_pack or {}).get("pack_id") or acquisition.lifecycle.get("pack_id") or "").strip()
-            pack = self._pack_store.get_external_pack(pack_id) if pack_id else None
+            pack = (
+                self._pack_store.get_external_pack(pack_id)
+                if pack_id and callable(getattr(self._pack_store, "get_external_pack", None))
+                else None
+            )
             if isinstance(pack, dict):
                 self._queue_pack_enable_followup(user_id, pack=pack, lifecycle=dict(lifecycle or acquisition.lifecycle))
 
@@ -10781,13 +10857,45 @@ class Orchestrator:
                 "type": "pack_acquisition",
                 "summary": message,
                 "acquisition": acquisition.to_dict(),
+                "recommendation": acquisition.recommendation,
                 "classification": assessment.get("classification"),
                 "capability_required": acquisition.detected_capability,
                 "source_status": acquisition.source_status,
+                "fallback": (
+                    "install_preview"
+                    if acquisition.source_status == "trusted_catalog_candidate"
+                    else "scaffold_preview"
+                    if acquisition.scaffold_preview is not None
+                    else None
+                ),
                 "lifecycle_state": acquisition.lifecycle_state,
                 "missing_gate": acquisition.missing_gate,
                 "next_step": acquisition.next_step.to_dict() if acquisition.next_step is not None else None,
+                "scaffold_preview": acquisition.scaffold_preview,
                 "source_leads": [dict(row) for row in acquisition.source_leads],
+                "lead_search": acquisition.lead_search,
+                "comparison_mode": (
+                    acquisition.recommendation.get("comparison_mode")
+                    if isinstance(acquisition.recommendation, dict)
+                    else None
+                ),
+                "capability_gap_rescue": {
+                    "type": "capability_gap_rescue",
+                    "candidate_packs": (
+                        [dict(acquisition.candidate_pack)]
+                        if isinstance(acquisition.candidate_pack, dict)
+                        else []
+                    ),
+                    "missing_capability": acquisition.detected_capability,
+                    "source_scope": "approved_pack_sources_only",
+                    "preview_required": acquisition.source_status == "trusted_catalog_candidate",
+                    "install_allowed_initially": False,
+                    "candidate_actions": [
+                        {"action": "show_preview", "requires_confirmation": True}
+                    ]
+                    if isinstance(acquisition.candidate_pack, dict)
+                    else [],
+                },
             },
         )
 
@@ -15799,6 +15907,8 @@ class Orchestrator:
         context = dict(chat_context) if isinstance(chat_context, dict) else {}
         if bool(context.get("assistant_planner_skip")):
             return None
+        if not bool(context.get("assistant_planner_enabled")):
+            return None
         normalized = " ".join(str(text or "").strip().lower().split())
         if not normalized or normalized.startswith("/"):
             return None
@@ -20117,9 +20227,6 @@ class Orchestrator:
 
             runtime_text = cleaned_text if override else text
             if not runtime_text.strip().startswith("/"):
-                planner_response = self._assistant_planning_response(user_id, runtime_text, chat_context=context)
-                if planner_response is not None:
-                    return planner_response
                 runtime_route_decision = classify_runtime_chat_route(runtime_text)
                 runtime_route_kind = str(runtime_route_decision.get("kind") or "").strip().lower()
                 if runtime_route_kind == "safe_web_search_status":
@@ -20190,6 +20297,9 @@ class Orchestrator:
                 containment_response = self._safe_mode_containment_response(user_id, runtime_text)
                 if containment_response is not None:
                     return containment_response
+                planner_response = self._assistant_planning_response(user_id, runtime_text, chat_context=context)
+                if planner_response is not None:
+                    return planner_response
 
             thread_id = self._active_thread_id_for_user(user_id)
             if (

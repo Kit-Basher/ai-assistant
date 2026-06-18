@@ -700,12 +700,22 @@ def _api_get_json(url: str, timeout_seconds: float = 0.8) -> tuple[bool, dict[st
     return False, "non_object_json"
 
 
+_LLM_READY_TIMEOUT_SECONDS = 15.0
+_LLM_STATUS_TIMEOUT_SECONDS = 15.0
+
+
 def _check_llm_availability(api_base: str) -> DoctorCheck:
-    ready_ok, ready_payload_or_error = _api_get_json(f"{api_base.rstrip('/')}/ready", timeout_seconds=0.8)
+    ready_ok, ready_payload_or_error = _api_get_json(
+        f"{api_base.rstrip('/')}/ready",
+        timeout_seconds=_LLM_READY_TIMEOUT_SECONDS,
+    )
     ready_payload = ready_payload_or_error if ready_ok and isinstance(ready_payload_or_error, dict) else {}
     payload = ready_payload.get("llm") if isinstance(ready_payload.get("llm"), dict) else {}
     if not payload:
-        status_ok, payload_or_error = _api_get_json(f"{api_base.rstrip('/')}/llm/status", timeout_seconds=0.8)
+        status_ok, payload_or_error = _api_get_json(
+            f"{api_base.rstrip('/')}/llm/status",
+            timeout_seconds=_LLM_STATUS_TIMEOUT_SECONDS,
+        )
         if not status_ok:
             return DoctorCheck(
                 check_id="llm.availability",

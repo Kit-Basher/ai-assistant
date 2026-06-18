@@ -12,6 +12,7 @@ from agent.filesystem_skill import FileSystemSkill
 from agent.knowledge_cache import facts_hash
 from agent.onboarding_flow import onboarding_completed_key
 from agent.orchestrator import Orchestrator, OrchestratorResponse
+from agent.policy import build_mutator_plan
 from skills.resource_governor import collector
 from agent.shell_skill import ShellSkill
 from agent.public_chat import build_no_llm_public_message
@@ -84,11 +85,110 @@ class _FrontdoorRuntimeAdapter:
 
 
 class _RuntimeChatAvailableAdapter:
+    def __init__(self) -> None:
+        self.pack_store = None
+        self.pack_install_handler = None
+        self._pack_lifecycle_confirmations: dict[str, dict[str, object]] = {}
+
     def _safe_mode_enabled(self) -> bool:
         return False
 
     def assistant_chat_available(self) -> bool:
         return True
+
+    @staticmethod
+    def _pack_resources(action_type: str, pack_id: str) -> dict[str, list[str]]:
+        if action_type == "external_pack.approve":
+            return {"created": [], "changed": [f"pack:{pack_id}:approval"], "deleted": []}
+        if action_type == "external_pack.enable":
+            return {"created": [], "changed": [f"pack:{pack_id}:enabled"], "deleted": []}
+        if action_type == "external_pack.grant":
+            return {"created": [f"pack:{pack_id}:managed_adapter_grant"], "changed": ["managed_adapter_grants"], "deleted": []}
+        if action_type == "external_pack.remove":
+            return {"created": [f"pack:{pack_id}:tombstone"], "changed": ["external_pack_store"], "deleted": [f"pack:{pack_id}:installed_artifacts"]}
+        return {"created": [], "changed": ["external_pack_lifecycle"], "deleted": []}
+
+    def plan_pack_lifecycle(self, action_type: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+        payload = dict(payload or {})
+        pack_id = str(payload.get("pack_id") or "").strip()
+        plan_id = f"test-pack-{action_type.rsplit('.', 1)[-1]}-{len(self._pack_lifecycle_confirmations) + 1}"
+        token = f"confirm-test-{len(self._pack_lifecycle_confirmations) + 1}"
+        expires_at = int(time.time() + 600)
+        mutation_plan = build_mutator_plan(
+            action_type=action_type,
+            resources=self._pack_resources(action_type, pack_id),
+            rollback_scope="test adapter scoped external pack lifecycle metadata",
+            rollback_supported=True,
+            confirmation_token=token,
+            expires_at=expires_at,
+            plan_id=plan_id,
+        )
+        plan = {
+            "plan_id": plan_id,
+            "confirmation_token": token,
+            "expires_at": expires_at,
+            "requires_confirmation": True,
+            "action_type": action_type,
+            "operation_payload": {"pack_id": pack_id},
+            "mutation_plan": mutation_plan,
+        }
+        self._pack_lifecycle_confirmations[plan_id] = {
+            "token": token,
+            "plan": plan,
+            "payload": payload,
+            "consumed": False,
+        }
+        return {"ok": True, "requires_confirmation": True, "plan": plan}
+
+    def apply_pack_lifecycle(self, action_type: str, payload: dict[str, object] | None = None) -> dict[str, object]:
+        payload = dict(payload or {})
+        plan_id = str(payload.get("plan_id") or "").strip()
+        token = str(payload.get("confirmation_token") or "").strip()
+        stored = self._pack_lifecycle_confirmations.get(plan_id)
+        if not stored or stored.get("token") != token:
+            return {"ok": False, "error": "invalid_confirmation", "mutated": False}
+        if bool(stored.get("consumed")):
+            return {"ok": False, "error": "confirmation_consumed", "mutated": False}
+        plan = stored.get("plan") if isinstance(stored.get("plan"), dict) else {}
+        if payload.get("mutation_plan") != plan.get("mutation_plan"):
+            return {"ok": False, "error": "plan_apply_mismatch", "mutated": False}
+        stored["consumed"] = True
+        operation_payload = stored.get("payload") if isinstance(stored.get("payload"), dict) else {}
+        pack_id = str(operation_payload.get("pack_id") or "").strip()
+        store = self.pack_store
+        if action_type == "external_pack.install":
+            if not callable(self.pack_install_handler):
+                return {"ok": False, "error": "pack_install_unavailable", "mutated": False}
+            ok, body = self.pack_install_handler(dict(operation_payload))
+            body = dict(body if isinstance(body, dict) else {})
+            body.setdefault("ok", bool(ok))
+            body.setdefault("mutated", bool(ok))
+            return body
+        if store is None:
+            return {"ok": False, "error": "pack_store_unavailable", "mutated": False}
+        if action_type == "external_pack.approve":
+            pack = store.set_external_pack_review_status(pack_id, local_review_status="approved", approve_current_hash=True)
+        elif action_type == "external_pack.enable":
+            pack = store.set_external_pack_enabled(pack_id, enabled=bool(operation_payload.get("enabled", True)))
+        elif action_type == "external_pack.grant":
+            pack = store.get_external_pack(pack_id)
+            adapter = ManagedAdapterSpec.from_mapping(
+                operation_payload.get("adapter") if isinstance(operation_payload.get("adapter"), dict) else {}
+            )
+            request = build_permission_request(
+                pack_id=pack_id,
+                pack_name=str((pack or {}).get("name") or "External pack"),
+                adapter=adapter,
+                requested_path=str(operation_payload.get("requested_path") or ""),
+            )
+            grant = create_metadata_only_grant(request=request, path_metadata={})
+            record_adapter_grant(store.external_storage_root(), grant)
+        elif action_type == "external_pack.remove":
+            result = store.remove_external_pack(pack_id, changed_by="test")
+            pack = result.get("pack") if isinstance(result, dict) else None
+        else:
+            return {"ok": False, "error": "unknown_pack_lifecycle_action", "mutated": False}
+        return {"ok": isinstance(pack, dict), "pack": pack if isinstance(pack, dict) else {}, "mutated": isinstance(pack, dict)}
 
 
 class _PreparedChatAdapter:
@@ -2369,8 +2469,8 @@ class TestOrchestrator(unittest.TestCase):
         with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
             response = orchestrator.handle_message("what can you help me with?", "user1")
         self.assertEqual("assistant_capabilities", response.data["route"])
-        self.assertIn("Pack suggestions", response.text)
-        self.assertIn("missing capability", response.text.lower())
+        self.assertIn("External skill acquisition", response.text)
+        self.assertIn("missing capabilit", response.text.lower())
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(0, len(llm.chat_calls))
         self.assertTrue(response.data.get("skip_post_response_hooks", False))
@@ -2396,7 +2496,7 @@ class TestOrchestrator(unittest.TestCase):
             )
         self.assertEqual("assistant_capabilities", response.data["route"])
         self.assertNotIn("- System inspection:", response.text)
-        self.assertIn("I can help inspect this system", response.text)
+        self.assertIn("I can check runtime/model status", response.text)
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertTrue(bool(payload.get("brief_prompt")))
         self.assertFalse(response.data["used_llm"])
@@ -2421,7 +2521,7 @@ class TestOrchestrator(unittest.TestCase):
             )
         self.assertEqual("assistant_capabilities", response.data["route"])
         self.assertNotIn("- System inspection:", response.text)
-        self.assertIn("I can help inspect this system", response.text)
+        self.assertIn("I can check runtime/model status", response.text)
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertTrue(bool(payload.get("brief_prompt")))
         self.assertFalse(response.data["used_llm"])
@@ -3297,7 +3397,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(third.data["ok"])
         self.assertIn("no longer available", third.text.lower())
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
-        self.assertIn("No resumable work is active", fourth.text)
+        self.assertIn("don’t have a current action to continue", fourth.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_direct_model_switch_uses_exact_target_without_drift(self) -> None:
@@ -3317,7 +3417,7 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("model_status", response.data["route"])
         self.assertEqual(
-            "I will switch chat to ollama:qwen2.5:7b-instruct. This mutates the active chat target. Say yes to continue, or no to cancel.",
+            "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
             response.text,
         )
         self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen2.5:7b-instruct", "provider_id": "ollama"}), runtime_truth.calls)
@@ -3342,7 +3442,7 @@ class TestOrchestrator(unittest.TestCase):
             second = orchestrator.handle_message("switch back", "user1")
 
         self.assertEqual(
-            "I will switch chat to ollama:qwen2.5:7b-instruct. This mutates the active chat target. Say yes to continue, or no to cancel.",
+            "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
             first.text,
         )
         self.assertIn("do not have a recent trial model switch", second.text.lower())
@@ -3386,7 +3486,8 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertEqual("model_status", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertIn("i will switch chat to ollama:qwen2.5:7b-instruct", response.text.lower())
+        self.assertIn("i will switch chat temporarily to ollama:qwen2.5:7b-instruct", response.text.lower())
+        self.assertIn("does not change your default model", response.text.lower())
         self.assertIn("say yes to continue, or no to cancel", response.text.lower())
         self.assertNotIn("isn't responding properly right now", response.text.lower())
         self.assertIn("do not have a recent trial model switch", rollback.text.lower())
@@ -4483,7 +4584,7 @@ class TestOrchestrator(unittest.TestCase):
             response = orchestrator._setup_explanation_response(used_memory=False)
 
         self.assertEqual("setup_flow", response.data["route"])
-        self.assertIn("setup looks okay right now", response.text.lower())
+        self.assertIn("setup is complete", response.text.lower())
         self.assertIn("ollama is reachable", response.text.lower())
         self.assertIn("ollama:qwen2.5:3b-instruct", response.text.lower())
         self.assertTrue(response.data.get("skip_post_response_hooks", False))
@@ -4683,9 +4784,9 @@ class TestOrchestrator(unittest.TestCase):
         response = orchestrator.handle_message("Talk to me out loud", "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("pack_acquisition", payload.get("type"))
         self.assertEqual("voice_output", payload.get("capability_required"))
         self.assertEqual("install_preview", payload.get("fallback"))
         rescue = payload.get("capability_gap_rescue")
@@ -4700,11 +4801,10 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(actions, list)
         assert isinstance(actions, list)
         self.assertTrue(any(isinstance(row, dict) and row.get("action") == "show_preview" for row in actions))
-        self.assertIn("I don't have Voice output installed yet", response.text)
-        self.assertIn("searched the approved pack sources", response.text)
-        self.assertIn("safe text-only pack: Local Voice", response.text)
-        self.assertIn("show you the preview first", response.text)
-        self.assertIn("Say yes to preview it.", response.text)
+        self.assertIn("I found a candidate called Local Voice", response.text)
+        self.assertIn("approved catalog", response.text)
+        self.assertIn("not installed or usable yet", response.text)
+        self.assertIn("preview it safely", response.text)
         self.assertNotIn("lighter option", response.text.lower())
         self.assertNotIn("fetch and inspect", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
@@ -4726,13 +4826,13 @@ class TestOrchestrator(unittest.TestCase):
         candidates = rescue.get("candidate_packs") if isinstance(rescue.get("candidate_packs"), list) else []
 
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         self.assertEqual("install_preview", payload.get("fallback"))
         self.assertTrue(any(row.get("remote_id") == "qr-code-guidance" for row in candidates if isinstance(row, dict)))
         self.assertIn("QR Code Creation Guidance", response.text)
-        self.assertIn("searched the approved starter catalog sources", response.text)
-        self.assertIn("show you the preview first", response.text)
-        self.assertIn("Say yes to preview it.", response.text)
+        self.assertIn("approved catalog", response.text)
+        self.assertIn("not installed or usable yet", response.text)
+        self.assertIn("preview it safely", response.text)
         self.assertNotIn("coding helper", response.text.lower())
         self.assertNotIn("coding tools isn't installed", response.text.lower())
         self.assertNotIn("lighter option", response.text.lower())
@@ -4765,11 +4865,11 @@ class TestOrchestrator(unittest.TestCase):
         candidates = rescue.get("candidate_packs") if isinstance(rescue.get("candidate_packs"), list) else []
 
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         self.assertEqual("install_preview", payload.get("fallback"))
         self.assertTrue(any(row.get("remote_id") == "qr-code-guidance" for row in candidates if isinstance(row, dict)))
         self.assertIn("QR Code Creation Guidance", response.text)
-        self.assertIn("show you the preview first", response.text)
+        self.assertIn("preview it safely", response.text)
         self.assertNotIn("apt-get", response.text.lower())
         self.assertNotIn("lighter option", response.text.lower())
         self.assertFalse(any(call[0] == "shell_preview_install_package" for call in runtime_truth.calls))
@@ -4856,7 +4956,7 @@ class TestOrchestrator(unittest.TestCase):
 
         response = orchestrator.handle_message("hey can you read something to me?", "user1")
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         rescue = payload.get("capability_gap_rescue")
         self.assertIsInstance(rescue, dict)
@@ -4864,7 +4964,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("capability_gap_rescue", rescue.get("type"))
         self.assertEqual("voice_output", rescue.get("missing_capability"))
         self.assertFalse(rescue.get("install_allowed_initially"))
-        self.assertIn("voice helper", response.text.lower())
+        self.assertIn("voice output scaffold", response.text.lower())
+        self.assertIn("will not read files", response.text.lower())
+        self.assertIn("run code", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_generic_unsupported_tool_request_returns_capability_rescue(self) -> None:
@@ -4898,16 +5000,17 @@ class TestOrchestrator(unittest.TestCase):
 
         response = orchestrator.handle_message("Generate a QR code for https://example.com", "user1")
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("pack_acquisition", payload.get("type"))
         rescue = payload.get("capability_gap_rescue")
         self.assertIsInstance(rescue, dict)
         assert isinstance(rescue, dict)
         self.assertEqual("capability_gap_rescue", rescue.get("type"))
         self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
-        self.assertTrue(rescue.get("preview_required"))
         self.assertFalse(rescue.get("install_allowed_initially"))
+        self.assertEqual("no_candidate_scaffold_available", payload.get("source_status"))
+        self.assertTrue(payload.get("scaffold_preview"))
         self.assertNotIn("not sure what you need", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
@@ -4946,7 +5049,7 @@ class TestOrchestrator(unittest.TestCase):
         response = orchestrator.handle_message("Generate a QR code for https://example.com", "user1")
 
         self.assertEqual("action_tool", response.data["route"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         rescue = payload.get("capability_gap_rescue") if isinstance(payload.get("capability_gap_rescue"), dict) else {}
         self.assertEqual("capability_gap_rescue", rescue.get("type"))
@@ -5000,8 +5103,16 @@ class TestOrchestrator(unittest.TestCase):
                     rescue = plan.get("capability_gap_rescue") if isinstance(plan.get("capability_gap_rescue"), dict) else {}
                 self.assertEqual("capability_gap_rescue", rescue.get("type"))
                 self.assertEqual("approved_pack_sources_only", rescue.get("source_scope"))
-                self.assertTrue(rescue.get("preview_required"))
                 self.assertFalse(rescue.get("install_allowed_initially"))
+                if rescue.get("preview_required"):
+                    actions = rescue.get("candidate_actions")
+                    self.assertIsInstance(actions, list)
+                else:
+                    self.assertIn(
+                        payload.get("source_status"),
+                        {"no_sources_configured", "no_candidate", "no_candidate_scaffold_available"},
+                    )
+                    self.assertTrue(payload.get("scaffold_preview"))
                 lowered = response.text.lower()
                 self.assertNotIn("i can't help", lowered)
                 self.assertNotIn("not sure what you need", lowered)
@@ -5154,13 +5265,15 @@ class TestOrchestrator(unittest.TestCase):
 
         discovery = _FakePackDiscovery()
         llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_adapter = _RuntimeChatAvailableAdapter()
+        runtime_adapter.pack_install_handler = _install
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=llm,
-            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            chat_runtime_adapter=runtime_adapter,
             pack_install_handler=_install,
         )
         orchestrator._pack_store = _FakePackStore()
@@ -5205,13 +5318,15 @@ class TestOrchestrator(unittest.TestCase):
 
         discovery = _FakePackDiscovery()
         llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_adapter = _RuntimeChatAvailableAdapter()
+        runtime_adapter.pack_install_handler = _install
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=llm,
-            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            chat_runtime_adapter=runtime_adapter,
             pack_install_handler=_install,
         )
         orchestrator._pack_store = _FakePackStore()
@@ -5223,7 +5338,7 @@ class TestOrchestrator(unittest.TestCase):
             "user1",
         )
         self.assertEqual("action_tool", first.data["route"])
-        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], first.data["used_tools"])
         payload = first.data.get("runtime_payload") if isinstance(first.data.get("runtime_payload"), dict) else {}
         self.assertEqual("scaffold_preview", payload.get("fallback"))
         lifecycle = payload.get("recommendation", {}).get("lifecycle") if isinstance(payload.get("recommendation"), dict) else {}
@@ -5232,8 +5347,10 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("missing", lifecycle.get("state"))
         self.assertEqual("scaffold_preview", (lifecycle.get("next_step") or {}).get("action"))
         self.assertEqual("youtube_history_search", payload.get("capability_required"))
-        self.assertIn("cannot read or search your history today", first.text.lower())
-        self.assertIn("say yes to preview the scaffold", first.text.lower())
+        self.assertIn("did not find a trusted catalog skill ready to preview", first.text.lower())
+        self.assertIn("will not read files", first.text.lower())
+        self.assertIn("connect to google", first.text.lower())
+        self.assertIn("say yes to preview it safely", first.text.lower())
         self.assertNotIn("browser automation planning helper", first.text.lower())
         self.assertNotIn("i can access your youtube history", first.text.lower())
         scaffold_preview = payload.get("scaffold_preview")
@@ -5252,9 +5369,9 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(second_payload.get("creates_files"))
         self.assertFalse(second_payload.get("executes_code"))
         self.assertIn("no files were created", second.text.lower())
-        self.assertIn("no oauth", second.text.lower())
-        self.assertIn("no browser history scraping", second.text.lower())
-        self.assertIn("no transcript fetching", second.text.lower())
+        self.assertIn("will not read your history yet", second.text.lower())
+        self.assertIn("will not install, run code, or connect to google", second.text.lower())
+        self.assertIn("cannot read, parse, index, or search the file contents yet", second.text.lower())
         self.assertEqual([], discovery.preview_calls)
         self.assertEqual([], install_calls)
         self.assertEqual(0, len(llm.chat_calls))
@@ -5263,14 +5380,16 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_second_yes_after_scaffold_preview_creates_review_only_candidate(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_adapter = _RuntimeChatAvailableAdapter()
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=llm,
-            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            chat_runtime_adapter=runtime_adapter,
         )
+        runtime_adapter.pack_store = orchestrator._pack_store
         storage_root = Path(orchestrator._pack_store.external_storage_root())  # noqa: SLF001
 
         first = orchestrator.handle_message(
@@ -5287,9 +5406,9 @@ class TestOrchestrator(unittest.TestCase):
 
         third = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["capability_scaffold_create"], third.data["used_tools"])
-        self.assertIn("I created a review-only scaffolded pack candidate", third.text)
-        self.assertIn("not enabled and cannot access your files yet", third.text)
-        self.assertIn("Next step: review/approve/import path.", third.text)
+        self.assertIn("I created a draft skill for review", third.text)
+        self.assertIn("not usable yet, not turned on, and cannot access your files", third.text)
+        self.assertIn("Next review step: approve the draft before turning it on", third.text)
         payload = third.data.get("runtime_payload") if isinstance(third.data.get("runtime_payload"), dict) else {}
         self.assertFalse(payload.get("approved"))
         self.assertFalse(payload.get("enabled"))
@@ -5331,19 +5450,22 @@ class TestOrchestrator(unittest.TestCase):
 
         review_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], review_preview.data["used_tools"])
-        self.assertIn("review approval preview", review_preview.text.lower())
+        self.assertIn("review preview", review_preview.text.lower())
+        self.assertIn("plan mode confirmation", review_preview.text.lower())
         approved = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], approved.data["used_tools"])
-        self.assertIn("review approval recorded", approved.text.lower())
+        self.assertIn("approved for the next setup step", approved.text.lower())
         enable_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
-        self.assertIn("enablement preview", enable_preview.text.lower())
+        self.assertIn("turn-on preview", enable_preview.text.lower())
+        self.assertIn("plan mode confirmation", enable_preview.text.lower())
         enabled = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enabled.data["used_tools"])
-        self.assertIn("needs_permission", enabled.text)
+        self.assertIn("permission preview is required", enabled.text)
         permission_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["managed_adapter_permission"], permission_preview.data["used_tools"])
-        self.assertIn("permission/configuration preview", permission_preview.text.lower())
+        self.assertIn("needs your permission to use one selected file", permission_preview.text.lower())
+        self.assertIn("will not run code", permission_preview.text.lower())
 
         selected_path = storage_root / "watch-history.json"
         selected_path.write_text('{"private": "history contents"}\n', encoding="utf-8")
@@ -5353,9 +5475,13 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("<redacted-local-history-path>/watch-history.json", path_response.text)
         self.assertIn("I will not read or parse the file", path_response.text)
 
+        grant_plan = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["managed_adapter_permission_grant"], grant_plan.data["used_tools"])
+        self.assertIn("selected-file permission plan", grant_plan.text.lower())
+        self.assertIn("plan mode confirmation", grant_plan.text.lower())
         grant_response = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["managed_adapter_permission_grant"], grant_response.data["used_tools"])
-        self.assertIn("permission/configuration recorded", grant_response.text.lower())
+        self.assertEqual(["pack_lifecycle_action"], grant_response.data["used_tools"])
+        self.assertIn("permission metadata recorded", grant_response.text.lower())
         grant_payload = grant_response.data.get("runtime_payload") if isinstance(grant_response.data.get("runtime_payload"), dict) else {}
         self.assertTrue(grant_payload.get("approved"))
         self.assertTrue(grant_payload.get("enabled"))
@@ -5369,14 +5495,16 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_generated_scaffold_yes_continues_one_lifecycle_gate_at_a_time(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_adapter = _RuntimeChatAvailableAdapter()
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=llm,
-            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            chat_runtime_adapter=runtime_adapter,
         )
+        runtime_adapter.pack_store = orchestrator._pack_store
 
         orchestrator.handle_message(
             "Look through my YouTube history and find the video about neurons differentiating during animal infancy.",
@@ -5392,7 +5520,8 @@ class TestOrchestrator(unittest.TestCase):
         approval_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], approval_preview.data["used_tools"])
         preview_payload = approval_preview.data.get("runtime_payload") if isinstance(approval_preview.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("review_approve_preview", preview_payload.get("action"))
+        self.assertEqual("external_pack_lifecycle_plan", preview_payload.get("action"))
+        self.assertEqual("external_pack.approve", preview_payload.get("action_type"))
         self.assertFalse(preview_payload.get("did_approve"))
         self.assertIn("does not turn the skill on", approval_preview.text.lower())
         self.assertIn("grant file permission", approval_preview.text.lower())
@@ -5406,12 +5535,13 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(approved_payload.get("did_enable"))
         self.assertFalse(approved_payload.get("did_grant_permissions"))
         self.assertFalse(approved_payload.get("did_use_pack"))
-        self.assertIn("still not turned on", approved.text.lower())
+        self.assertIn("still not enabled", approved.text.lower())
 
         enable_preview = orchestrator.handle_message("yes", "user1")
         self.assertEqual(["pack_lifecycle_action"], enable_preview.data["used_tools"])
         enable_preview_payload = enable_preview.data.get("runtime_payload") if isinstance(enable_preview.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("enable_preview", enable_preview_payload.get("action"))
+        self.assertEqual("external_pack_lifecycle_plan", enable_preview_payload.get("action"))
+        self.assertEqual("external_pack.enable", enable_preview_payload.get("action_type"))
         self.assertFalse(enable_preview_payload.get("did_enable"))
         self.assertIn("will not grant file permission", enable_preview.text.lower())
 
@@ -5814,21 +5944,23 @@ Workflow:
 
         discovery = _FakePackDiscovery()
         llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_adapter = _RuntimeChatAvailableAdapter()
+        runtime_adapter.pack_install_handler = _install
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=llm,
-            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            chat_runtime_adapter=runtime_adapter,
             pack_install_handler=_install,
         )
         orchestrator._pack_store = _FakePackStore()
         orchestrator._pack_registry_discovery = lambda: discovery  # type: ignore[assignment]
 
         first = orchestrator.handle_message("Talk to me out loud", "user1")
-        self.assertEqual(["pack_capability_recommendation"], first.data["used_tools"])
-        self.assertIn("show you the preview first", first.text.lower())
+        self.assertEqual(["pack_acquisition"], first.data["used_tools"])
+        self.assertIn("preview it safely", first.text.lower())
         self.assertNotIn("lighter option", first.text.lower())
         self.assertNotIn("fetch and inspect", first.text.lower())
 
@@ -5905,13 +6037,15 @@ Workflow:
             }
 
         llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_adapter = _RuntimeChatAvailableAdapter()
+        runtime_adapter.pack_install_handler = _install
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
             llm_client=llm,
-            chat_runtime_adapter=_RuntimeChatAvailableAdapter(),
+            chat_runtime_adapter=runtime_adapter,
             pack_install_handler=_install,
         )
         orchestrator._pack_store = _FakePackStore()
@@ -5922,17 +6056,20 @@ Workflow:
         self.assertEqual(["capability_gap_preview"], preview.data["used_tools"])
         self.assertEqual([], install_calls)
 
+        import_plan = orchestrator.handle_message("yes", "user1")
+        self.assertEqual(["capability_gap_import"], import_plan.data["used_tools"])
+        self.assertIn("plan mode confirmation", import_plan.text.lower())
         imported = orchestrator.handle_message("yes", "user1")
-        self.assertEqual(["capability_gap_import"], imported.data["used_tools"])
+        self.assertEqual(["pack_lifecycle_action"], imported.data["used_tools"])
         self.assertEqual(1, len(install_calls))
         self.assertEqual("https://github.com/example/local-voice/archive/main.zip", install_calls[0]["source"])
         self.assertEqual("github_archive", install_calls[0]["source_kind"])
         self.assertEqual("local", install_calls[0]["source_id"])
-        self.assertIn("imported local voice for review", imported.text.lower())
+        self.assertIn("imported for review", imported.text.lower())
         self.assertIn("not enabled", imported.text.lower())
         self.assertIn("not approved", imported.text.lower())
         self.assertIn("no granted permissions", imported.text.lower())
-        self.assertIn("not been executed", imported.text.lower())
+        self.assertIn("was not used", imported.text.lower())
 
     def test_native_preview_does_not_offer_chat_import(self) -> None:
         class _FakePackStore:
@@ -6074,10 +6211,10 @@ Workflow:
         response = orchestrator.handle_message("Talk to me out loud", "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
         self.assertEqual("recommended_plus_alternate", payload.get("comparison_mode"))
-        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("pack_acquisition", payload.get("type"))
         self.assertIn("I found 2 packs that fit this machine.", response.text)
         self.assertIn("Local Voice looks like the lighter option.", response.text)
         self.assertIn("Studio Voice may need more resources.", response.text)
@@ -6099,6 +6236,11 @@ Workflow:
                             "display_name": "Local Voice",
                             "pack_identity": {"canonical_id": "pack.voice.local_fast"},
                             "source": {"source_id": "local", "source_type": "local"},
+                            "trust_anchor": {
+                                "local_review_status": "approved",
+                                "user_approved_hashes": ["pack.voice.local_fast"],
+                            },
+                            "runtime": {"enabled": False},
                             "capabilities": {
                                 "summary": "Local speech output for this machine.",
                                 "declared": ["voice_output"],
@@ -6134,14 +6276,13 @@ Workflow:
         response = orchestrator.handle_message("Talk to me out loud", "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("pack_acquisition", payload.get("type"))
         self.assertEqual("voice_output", payload.get("capability_required"))
-        self.assertIn("installed, but it is disabled", response.text)
+        self.assertIn("approved, but it is not enabled", response.text)
         self.assertIn("not enabled as a live capability", response.text)
-        self.assertIn("Enable it before using it.", response.text)
-        self.assertIn("keep this in text", response.text.lower())
+        self.assertIn("Enable the approved pack before use", response.text)
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_installed_and_healthy_pack_is_task_unconfirmed_without_auto_install(self) -> None:
@@ -6158,6 +6299,11 @@ Workflow:
                             "display_name": "Local Voice",
                             "pack_identity": {"canonical_id": "pack.voice.local_fast"},
                             "source": {"source_id": "local", "source_type": "local"},
+                            "trust_anchor": {
+                                "local_review_status": "approved",
+                                "user_approved_hashes": ["pack.voice.local_fast"],
+                            },
+                            "runtime": {"enabled": True},
                             "capabilities": {
                                 "summary": "Local speech output for this machine.",
                                 "declared": ["voice_output"],
@@ -6193,14 +6339,13 @@ Workflow:
         response = orchestrator.handle_message("Talk to me out loud", "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
-        self.assertEqual("pack_capability_recommendation", payload.get("type"))
+        self.assertEqual("pack_acquisition", payload.get("type"))
         self.assertEqual("voice_output", payload.get("capability_required"))
-        self.assertIn("installed and healthy", response.text)
-        self.assertIn("can't confirm it's usable for this task yet", response.text)
-        self.assertIn("task compatibility not confirmed", response.text)
-        self.assertIn("Open the pack preview before relying on it.", response.text)
+        self.assertIn("passed review, enablement, configuration, and permission gates", response.text)
+        self.assertIn("Use the enabled pack through its approved runtime path", response.text)
+        self.assertNotIn("apt-get", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_paraphrased_voice_request_routes_to_existing_pack_flow(self) -> None:
@@ -6253,10 +6398,10 @@ Workflow:
         response = orchestrator.handle_message("Can you read this page back to me in speech?", "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
-        self.assertIn("I don't have Voice output installed yet", response.text)
-        self.assertIn("Local Voice", response.text)
-        self.assertIn("show you the preview first", response.text.lower())
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
+        self.assertIn("I found a candidate called Local Voice", response.text)
+        self.assertIn("not installed or usable yet", response.text)
+        self.assertIn("preview it safely", response.text.lower())
         self.assertNotIn("lighter option", response.text.lower())
         self.assertNotIn("fetch and inspect", response.text.lower())
         self.assertNotIn("best fit for this machine", response.text.lower())
@@ -6294,11 +6439,11 @@ Workflow:
         response = orchestrator.handle_message(prompt, "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
-        self.assertIn("I can help in text", response.text)
-        self.assertIn("small helper", response.text.lower())
-        self.assertIn("simplest way to add it", response.text.lower())
-        self.assertIn("sketch that with you", response.text.lower())
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
+        self.assertIn("draft skill", response.text.lower())
+        self.assertIn("will not read files", response.text.lower())
+        self.assertIn("run code", response.text.lower())
+        self.assertIn("say yes to preview", response.text.lower())
         self.assertNotIn("helper isn't installed", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
@@ -6334,11 +6479,11 @@ Workflow:
         response = orchestrator.handle_message(prompt, "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["capability_gap_planning"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         self.assertNotIn("I can help with the text side", response.text)
-        self.assertIn("couldn't find a ready-made helper", response.text.lower())
-        self.assertIn("simplest way to add it", response.text.lower())
-        self.assertIn("sketch that with you", response.text.lower())
+        self.assertIn("did not find a trusted catalog skill", response.text.lower())
+        self.assertIn("draft skill", response.text.lower())
+        self.assertIn("say yes to preview", response.text.lower())
         self.assertNotIn("make an assistant that", response.text.lower())
         self.assertNotIn("install preview", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
@@ -6373,14 +6518,14 @@ Workflow:
 
         first = orchestrator.handle_message("Make an assistant that coordinates my studio light cues with my music cues during live shows.", "user1")
         self.assertEqual("action_tool", first.data["route"])
-        self.assertEqual(["capability_gap_planning"], first.data["used_tools"])
-        self.assertIn("small helper", first.text.lower())
+        self.assertEqual(["pack_acquisition"], first.data["used_tools"])
+        self.assertIn("draft skill", first.text.lower())
 
         second = orchestrator.handle_message("yes please", "user1")
         self.assertEqual("action_tool", second.data["route"])
-        self.assertEqual(["capability_gap_planning"], second.data["used_tools"])
-        self.assertIn("sketch a small", second.text.lower())
-        self.assertIn("what should it read from first", second.text.lower())
+        self.assertEqual(["capability_scaffold_preview"], second.data["used_tools"])
+        self.assertIn("no files were created", second.text.lower())
+        self.assertIn("no code was executed", second.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_discovery_unavailable_still_proposes_a_narrow_helper(self) -> None:
@@ -6409,10 +6554,11 @@ Workflow:
         response = orchestrator.handle_message("Can you read this page back to me in speech?", "user1")
         self.assertEqual("action_tool", response.data["route"])
         self.assertFalse(response.data["used_llm"])
-        self.assertEqual(["pack_capability_recommendation"], response.data["used_tools"])
+        self.assertEqual(["pack_acquisition"], response.data["used_tools"])
         self.assertIn("couldn't check", response.text.lower())
-        self.assertIn("voice helper", response.text.lower())
-        self.assertIn("reads text aloud", response.text.lower())
+        self.assertIn("voice output scaffold", response.text.lower())
+        self.assertIn("will not read files", response.text.lower())
+        self.assertIn("run code", response.text.lower())
         self.assertEqual(0, len(llm.chat_calls))
 
     def test_task_model_recommendation_questions_use_model_scout_without_llm(self) -> None:
@@ -7331,7 +7477,7 @@ Workflow:
         self.assertFalse(third.data["used_llm"])
         self.assertEqual(["model_controller"], third.data["used_tools"])
         self.assertTrue(third_payload.get("requires_confirmation"))
-        self.assertIn("switch chat back", third.text.lower())
+        self.assertIn("switch this chat back", third.text.lower())
         self.assertEqual("model_status", third_confirm.data["route"])
         self.assertFalse(third_confirm.data["used_llm"])
         self.assertEqual(["model_controller"], third_confirm.data["used_tools"])
@@ -7429,7 +7575,8 @@ Workflow:
         self.assertIn("make ollama:qwen2.5:7b-instruct the default chat model", second.text.lower())
         self.assertFalse(confirm.data["used_llm"])
         self.assertEqual(["model_controller"], confirm.data["used_tools"])
-        self.assertEqual("ollama:qwen2.5:7b-instruct is now the default chat model, and chat is now using it.", confirm.text)
+        self.assertIn("New default: ollama:qwen2.5:7b-instruct.", confirm.text)
+        self.assertIn("Chat is now using it.", confirm.text)
         self.assertIn(
             (
                 "set_default_chat_model",
@@ -7471,7 +7618,8 @@ Workflow:
         self.assertIn("make ollama:qwen2.5:7b-instruct the default chat model", preview.text.lower())
         self.assertFalse(confirm.data["used_llm"])
         self.assertEqual(["model_controller"], confirm.data["used_tools"])
-        self.assertIn("ollama:qwen2.5:7b-instruct is now the default chat model", confirm.text)
+        self.assertIn("New default: ollama:qwen2.5:7b-instruct", confirm.text)
+        self.assertIn("Chat is now using it", confirm.text)
         self.assertIn(
             (
                 "set_confirmed_chat_model_target",
@@ -7605,7 +7753,7 @@ Workflow:
         self.assertIn("make ollama:deepseek-r1:7b the default chat model", preview.text.lower())
         self.assertFalse(confirm.data["used_llm"])
         self.assertEqual(["model_controller"], confirm.data["used_tools"])
-        self.assertIn("ollama:deepseek-r1:7b is now the default chat model.", confirm.text)
+        self.assertIn("New default: ollama:deepseek-r1:7b.", confirm.text)
         self.assertIn("Chat is still using ollama:qwen2.5:7b-instruct.", confirm.text)
         self.assertIn(("set_default_chat_model", "ollama:deepseek-r1:7b"), runtime_truth.calls)
         self.assertEqual("ollama:qwen2.5:7b-instruct", runtime_truth.current_model)
@@ -9344,9 +9492,9 @@ Workflow:
     def test_followup_yes_without_pending_returns_no_resumable_error(self) -> None:
         orchestrator = self._orchestrator()
         response = orchestrator.handle_message("yes", "user1")
-        self.assertIn("failure_code: no_resumable_work", response.text)
-        self.assertIn("trace_id:", response.text)
-        self.assertIn("next_action:", response.text)
+        self.assertIn("don’t have a current action to continue", response.text)
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("no_resumable_work", payload.get("reason"))
 
     def test_followup_yes_with_expired_pending_returns_expired_error(self) -> None:
         orchestrator = self._orchestrator()
@@ -9366,8 +9514,11 @@ Workflow:
             },
         )
         response = orchestrator.handle_message("yes", "user1")
-        self.assertIn("failure_code: pending_expired", response.text)
-        self.assertIn("trace_id:", response.text)
+        self.assertIn("confirmation expired", response.text.lower())
+        self.assertIn("didn’t make any changes", response.text)
+        payload = response.data.get("runtime_payload") if isinstance(response.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("pending_confirmation_expired", payload.get("reason"))
+        self.assertFalse(payload.get("mutated"))
 
     def test_memory_command_returns_deterministic_summary(self) -> None:
         orchestrator = self._orchestrator()

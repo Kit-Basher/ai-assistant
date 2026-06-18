@@ -7,9 +7,9 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.0-release-proof-surfaces`
+Current stable checkpoint: `v0.2.0-live-usefulness-proof`
 
-Commit: `48ce105` Fix release proof readiness surfaces
+Commit: `e5dc9f8` Prove live search and external pack usefulness
 
 Summary:
 
@@ -30,6 +30,11 @@ Summary:
 - Development `/packs/state` can retain old blocked smoke-test packs without
   being a release proof failure. Remove them only through confirmed
   remove/tombstone, or use a fresh state directory for final proof.
+- Live usefulness proof now demonstrates both core user-facing promises on the
+  primary workstation: managed SearXNG can be previewed/applied through Plan
+  Mode and then used through `/chat`, and a starter text-only external pack can
+  be previewed, imported, approved, enabled, reported usable by `/packs/state`,
+  and used through normal chat without executing pack code.
 
 ## Recent Release Tags
 
@@ -40,6 +45,7 @@ Summary:
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |
 | `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 | `d699ef1` | User-facing Plan Mode confirmation UX for managed SearXNG and external pack lifecycle. |
 | `v0.2.0-release-proof-surfaces` | 2026-06-14 | `48ce105` | Release proof surface consistency for `/ready`, doctor, optional Telegram, and dev pack-state interpretation. |
+| `v0.2.0-live-usefulness-proof` | 2026-06-15 | `e5dc9f8` | Live managed SearXNG search and external text-pack usefulness proof. |
 
 ## Full Tag List
 
@@ -87,6 +93,7 @@ Dates are from `git for-each-ref --sort=creatordate`.
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 |
 | `v0.2.0-plan-mode-user-confirmation-ux` | 2026-06-15 |
 | `v0.2.0-release-proof-surfaces` | 2026-06-14 |
+| `v0.2.0-live-usefulness-proof` | 2026-06-15 |
 
 ## What Was Proven
 
@@ -166,6 +173,26 @@ Proven:
 - Development `/packs/state` may include old blocked smoke-test packs; this is
   local dev state, not a release proof failure. Cleanup must use confirmed
   remove/tombstone or a fresh state directory for final proof.
+
+### `v0.2.0-live-usefulness-proof`
+
+Proven:
+
+- Live `/search/status` started disabled/unconfigured, then managed SearXNG was
+  previewed and applied through the existing Plan Mode setup path.
+- After confirmation, live `/search/status` reported `enabled=true`,
+  `provider=searxng`, `endpoint_configured=true`, `available=true`, and a
+  loopback base URL.
+- Live `/search/query` returned untrusted metadata-only results and did not
+  fetch pages, run JavaScript, download files, or import packs.
+- Live `/chat` used `safe_web_search` for an explicit web-search request and
+  returned metadata result titles with the same safety limits.
+- The starter `Linux Troubleshooting Workflow` text pack was previewed,
+  imported through Plan Mode, approved, enabled, and reported by `/packs/state`
+  as installed, enabled, healthy, and usable.
+- Live `/chat` used the installed text-only pack in a normal Linux
+  troubleshooting request and stated that it did not run commands, execute pack
+  code, read files, use the network, or change system state.
 
 ## Deferred
 
