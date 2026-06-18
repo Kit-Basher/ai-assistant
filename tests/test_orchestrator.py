@@ -2937,6 +2937,40 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn(("shell_install_package", ("apt", "ripgrep", None, False, None)), runtime_truth.calls)
         self.assertEqual(0, len(llm.chat_calls))
 
+    def test_natural_package_install_request_gets_confirmation_preview(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        safe_root = os.path.join(self.tmpdir.name, "workspace")
+        os.makedirs(safe_root, exist_ok=True)
+        runtime_truth.shell_skill = ShellSkill(
+            allowed_roots=[safe_root],
+            base_dir=safe_root,
+            sensitive_roots=[os.path.join(safe_root, "private")],
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            preview = orchestrator.handle_message("Can you install htop on this machine?", "user1")
+
+        preview_payload = preview.data.get("runtime_payload") if isinstance(preview.data.get("runtime_payload"), dict) else {}
+        self.assertEqual("action_tool", preview.data["route"])
+        self.assertEqual(["shell"], preview.data["used_tools"])
+        self.assertFalse(preview.data["used_llm"])
+        self.assertTrue(preview_payload.get("requires_confirmation"))
+        self.assertIn("install htop", preview.text.lower())
+        self.assertIn("say yes to continue", preview.text.lower())
+        self.assertIn(("shell_preview_install_package", ("apt", "htop", None, False, None)), runtime_truth.calls)
+        self.assertFalse(any(call[0] == "shell_install_package" for call in runtime_truth.calls))
+        self.assertEqual(0, len(llm.chat_calls))
+
     def test_agent_skill_pack_language_never_becomes_apt_install(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()

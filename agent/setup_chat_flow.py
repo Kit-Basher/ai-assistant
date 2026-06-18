@@ -1610,7 +1610,7 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
         }
 
     install_match = re.search(
-        r"\b(?:(?:sudo\s+)?apt(?:-get)?\s+install|install\s+(?:a\s+)?(?:linux\s+|debian\s+|system\s+)?package|install\s+(?:a\s+)?(?:python\s+|pip\s+)?package|pip\s+install)\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
+        r"\b(?:(?:sudo\s+)?apt(?:-get)?\s+install|(?:can|could|would)\s+you\s+install|please\s+install|install\s+(?:a\s+)?(?:linux\s+|debian\s+|system\s+)?package|install\s+(?:a\s+)?(?:python\s+|pip\s+)?package|pip\s+install)\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
         raw_text,
         re.IGNORECASE,
     )
