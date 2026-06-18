@@ -175,6 +175,22 @@ class TestChatBehaviorAudit(unittest.TestCase):
                 self.assertNotIn("runtime_payload", lowered)
                 self.assertNotIn("trace_id", lowered)
 
+    def test_daily_driver_package_install_prompt_uses_confirmation_preview(self) -> None:
+        status, body, text = self._post_chat("Can you install htop on this machine?")
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        setup = body.get("setup") if isinstance(body.get("setup"), dict) else {}
+        lowered = text.lower()
+
+        self.assertEqual(200, status)
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("shell", meta.get("used_tools", []))
+        self.assertFalse(meta.get("used_llm"))
+        self.assertIn("install htop", lowered)
+        self.assertIn("say yes to continue", lowered)
+        self.assertIn("mutates the local system", lowered)
+        self.assertNotIn("installing htop", lowered)
+        self.assertTrue(setup.get("requires_confirmation"))
+
     def test_direct_questions_do_not_fall_into_stale_clarification_context(self) -> None:
         cases = {
             "is the local API healthy": ("runtime_status", ("ready", "chat")),
