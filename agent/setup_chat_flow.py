@@ -162,7 +162,11 @@ _SHELL_INLINE_PATH_TOKEN_RE = re.compile(
     r"(?P<path>(?:~|/|\./|\.\./)[^\s'\"`]+|[A-Za-z0-9._-]+)"
 )
 _RUNTIME_STATUS_PHRASES = (
+    "runtime check",
+    "give me a runtime check",
     "are you ready",
+    "are you working",
+    "are you alive",
     "is the agent ready",
     "is the agent healthy right now",
     "is the agent healthy",
@@ -218,6 +222,9 @@ _GOVERNANCE_OVERVIEW_PHRASES = (
 )
 _TELEGRAM_STATUS_PHRASES = (
     "telegram status",
+    "check telegram",
+    "no check telegram",
+    "no, check telegram",
     "is telegram configured",
     "is telegram running",
     "is telegram working",
@@ -676,7 +683,7 @@ def _looks_like_current_model_query(normalized: str) -> bool:
 def _looks_like_runtime_status_query(normalized: str) -> bool:
     normalized_space = normalized.replace("/", " ")
     words = {piece for piece in normalized_space.split(" ") if piece}
-    if normalized == "runtime":
+    if normalized in {"status", "runtime"}:
         return True
     if any(phrase in normalized for phrase in _RUNTIME_STATUS_PHRASES):
         return True
@@ -1281,6 +1288,8 @@ def _contains_safe_web_search_suppression(working: str) -> bool:
 
 
 def _looks_like_provided_text_transform(working: str) -> bool:
+    if re.search(r"\bmake\s+this\s+sound\s+(?:nicer|better|more)\b", working):
+        return True
     if re.search(r"\b(rewrite|reword|edit|proofread|translate|summarize|condense|shorten)\s+(this|the following|my)\b", working):
         return True
     return bool(re.search(r"\b(rewrite|reword|edit|proofread|translate|summarize|condense|shorten)\b", working) and ":" in working)
@@ -1292,7 +1301,10 @@ def _looks_like_simple_timeless_explanation(working: str) -> bool:
         "why is the sky blue",
         "what is photosynthesis",
         "what is gravity",
+        "what is a hyperlink",
+        "what is hyperlink",
         "explain gravity",
+        "explain recursion",
     )
     return any(phrase in working for phrase in timeless)
 
@@ -1301,11 +1313,15 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
     if _looks_like_provided_text_transform(working) or _looks_like_simple_timeless_explanation(working):
         return False
     if re.search(
-        r"\b(local api|web ui|runtime|current task|this task|my task|this repo|local repo|this project|my project|my system|my machine|this machine)\b",
+        r"\b(local api|web ui|runtime|current task|this task|my task|this repo|local repo|this project|my project|my system|my machine|this machine|controlled mode|control mode)\b",
         working,
     ):
         return False
+    if re.search(r"\bwhat is (?:using|eating) (?:resources|memory|cpu|ram)\b", working):
+        return False
     if re.search(r"\b(still active|active anymore|latest|currently|recent|newest|release|released|changelog|price|pricing|compatibility|compatible|recommendations?)\b", working):
+        return True
+    if re.search(r"\bstill around\b", working):
         return True
     if re.search(r"\b(current|latest|public)\s+status\b|\bstatus\s+(?:of|for)\s+\S", working):
         return True
@@ -1318,6 +1334,12 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
         or re.search(r"\b(any good|useful|worth|should|model|tool|library|project|people are talking about)\b", working)
     ):
         return True
+    if (
+        "?" in working
+        and re.search(r"\b(?:tts|agi|llm|mcp|ai|dev)\b", working)
+        and 2 <= len(working.split()) <= 6
+    ):
+        return True
     if re.search(
         r"\b(company|startup|project|library|package|tool|model|api|site|website|repo|github|channel|creator|streamer|plugin|sdk|app|service)\b",
         working,
@@ -1327,7 +1349,39 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
         return True
     if re.search(r"\b(?:what is|tell me about)\s+[a-z0-9][a-z0-9_.-]*(?:tts|llm|mcp|ai|dev|js|py|rs|gguf)\b", working):
         return True
+    if re.fullmatch(r"[a-z][a-z0-9_.-]{2,40}\?", working.strip()):
+        return True
+    if re.search(r"\b(?:what is|who is|tell me about)\s+[a-z][a-z0-9_.-]{2,40}\s+[a-z][a-z0-9_.-]{2,40}\b", working):
+        return True
     return False
+
+
+def _looks_like_bare_public_lookup_question(raw_text: str | None, normalized: str) -> bool:
+    raw = str(raw_text or "").strip()
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not raw.endswith("?") or not re.fullmatch(r"[a-z][a-z0-9_.-]{3,40}", working):
+        return False
+    common_direct = {
+        "hello",
+        "thanks",
+        "what",
+        "status",
+        "runtime",
+        "recursion",
+        "photosynthesis",
+        "hyperlink",
+        "wat",
+    }
+    return working not in common_direct
+
+
+def _looks_like_raw_niche_public_lookup_question(raw_text: str | None, normalized: str) -> bool:
+    raw = str(raw_text or "").strip()
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not raw.endswith("?"):
+        return False
+    words = working.split()
+    return bool(2 <= len(words) <= 6 and re.search(r"\b(?:tts|agi|llm|mcp|ai|dev)\b", working))
 
 
 def _looks_like_safe_web_search_clarification_request(normalized: str) -> bool:
@@ -1343,11 +1397,15 @@ def _looks_like_safe_web_search_clarification_request(normalized: str) -> bool:
         "what is that?",
         "what's that",
         "whats that",
+        "that thing",
+        "the thing",
+        "the tts thing",
+        "what thing",
     }
     if working in bare_referents:
         return True
     return bool(
-        re.search(r"\bthat\s+(?:tts|llm|agi|ai|mcp)?\s*thing\b", working)
+        re.search(r"\b(?:that|the)\s+(?:tts|llm|agi|ai|mcp)?\s*thing\b", working)
         and re.search(r"\b(?:people are talking about|everyone is talking about|trending|going around|you mentioned)\b", working)
     )
 
@@ -1401,6 +1459,9 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
         "what's your search status",
         "web search status",
         "search status",
+        "i meant search",
+        "no i meant search",
+        "no, i meant search",
     )
     if any(phrase in working for phrase in explicit):
         return True
@@ -1742,10 +1803,16 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
         }
 
     install_match = re.search(
-        r"\b(?:(?:sudo\s+)?apt(?:-get)?\s+install|(?:can|could|would)\s+you\s+install|please\s+install|install\s+(?:a\s+)?(?:linux\s+|debian\s+|system\s+)?package|install\s+(?:a\s+)?(?:python\s+|pip\s+)?package|pip\s+install)\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
+        r"\b(?:(?:sudo\s+)?apt(?:-get)?\s+install|(?:can|could|would)\s+you\s+install|please\s+install|install\s+(?:a\s+)?(?:linux\s+|debian\s+|system\s+)?package|install\s+(?:a\s+)?(?:python\s+|pip\s+)?package|pip\s+install|install\s+(?=[A-Za-z0-9][A-Za-z0-9+._-]{0,127}(?:\s|$|[?.!,])))\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
         raw_text,
         re.IGNORECASE,
     )
+    if install_match is None:
+        install_match = re.search(
+            r"^\s*install\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\s*$",
+            raw_text,
+            re.IGNORECASE,
+        )
     if install_match is not None and not _looks_like_agent_pack_language(normalized_space):
         package = str(install_match.group("package") or "").strip() or None
         manager = "pip" if re.search(r"\b(?:pip\s+install|python\s+package|pip\s+package)\b", normalized_space) else "apt"
@@ -1977,6 +2044,9 @@ def _with_semantic_intent(route_decision: dict[str, Any]) -> dict[str, Any]:
     semantic = _semantic_intent_for_route(route_decision)
     enriched = dict(route_decision)
     enriched["semantic_intent"] = semantic.intent
+    enriched["confidence"] = semantic.confidence
+    enriched["evidence"] = list(semantic.evidence)
+    enriched.setdefault("stale_context_cleared", False)
     enriched["semantic"] = asdict(semantic)
     return enriched
 
@@ -2076,12 +2146,26 @@ def _classify_runtime_chat_route_raw(
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }
+    if _looks_like_runtime_status_query(normalized):
+        return {
+            "route": "runtime_status",
+            "kind": "runtime_status",
+            "generic_allowed": False,
+            "fallback_reason": "runtime_status",
+        }
     if _looks_like_safe_web_search_status_request(normalized):
         return {
             "route": "action_tool",
             "kind": "safe_web_search_status",
             "generic_allowed": False,
             "fallback_reason": "action_tool",
+        }
+    if _looks_like_provided_text_transform(normalized):
+        return {
+            "route": "generic_chat",
+            "kind": "generic_chat",
+            "generic_allowed": True,
+            "fallback_reason": "provided_text_transform",
         }
     if _looks_like_safe_web_search_request(normalized):
         return {
@@ -2142,19 +2226,16 @@ def _classify_runtime_chat_route_raw(
             "generic_allowed": False,
             "fallback_reason": "ambiguous_search_target",
         }
-    if _looks_like_safe_web_search_fallback_request(normalized):
+    if (
+        _looks_like_bare_public_lookup_question(text, normalized)
+        or _looks_like_raw_niche_public_lookup_question(text, normalized)
+        or _looks_like_safe_web_search_fallback_request(normalized)
+    ):
         return {
             "route": "action_tool",
             "kind": "safe_web_search",
             "generic_allowed": False,
             "fallback_reason": "search_fallback",
-        }
-    if _looks_like_provided_text_transform(normalized):
-        return {
-            "route": "generic_chat",
-            "kind": "generic_chat",
-            "generic_allowed": True,
-            "fallback_reason": "provided_text_transform",
         }
     capability_gap = classify_capability_gap_request(normalized)
     if str(capability_gap.get("request_kind") or "").strip().lower() == "capability" and str(
@@ -2192,13 +2273,6 @@ def _classify_runtime_chat_route_raw(
             "inventory_scope": _model_inventory_scope(normalized),
             "generic_allowed": False,
             "fallback_reason": "model_status",
-        }
-    if _looks_like_runtime_status_query(normalized):
-        return {
-            "route": "runtime_status",
-            "kind": "runtime_status",
-            "generic_allowed": False,
-            "fallback_reason": "runtime_status",
         }
     agent_memory_route = _classify_agent_memory_route(normalized)
     if agent_memory_route is not None:

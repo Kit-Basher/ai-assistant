@@ -18427,6 +18427,33 @@ class Orchestrator:
             return "memory_summary"
         return None
 
+    @staticmethod
+    def _looks_like_context_reset_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return normalized in {
+            "new",
+            "new chat",
+            "start over",
+            "cancel",
+            "never mind",
+            "nevermind",
+            "forget that",
+            "drop that",
+            "clear that",
+        }
+
+    @staticmethod
+    def _looks_like_fresh_intent_override(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        if normalized.startswith(("i said ", "no, i meant ", "no i meant ", "actually ", "that's not what i asked", "thats not what i asked")):
+            return True
+        decision = classify_runtime_chat_route(text)
+        route = str(decision.get("route") or "").strip().lower()
+        kind = str(decision.get("kind") or "").strip().lower()
+        return route != "generic_chat" or kind not in {"", "none", "generic_chat"}
+
     def _handle_message_impl(
         self,
         text: str,
@@ -18460,6 +18487,28 @@ class Orchestrator:
                 except Exception:
                     pass
             normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
+            if not cmd and self._looks_like_context_reset_request(effective_user_text):
+                thread_id = self._active_thread_id_for_user(user_id)
+                self._clear_runtime_setup_state(user_id)
+                self._clear_model_trial_state(user_id)
+                self._pending_compare.pop(user_id, None)
+                self._pending_managed_adapter_requests.pop(user_id, None)
+                self.confirmations.pop(user_id)
+                self._memory_runtime.abort_pending_for_thread(user_id, thread_id)
+                message = "Okay — I cleared the pending chat step. What do you want to do next?"
+                return self._runtime_truth_response(
+                    text=message,
+                    route="assistant_clarification",
+                    used_runtime_state=False,
+                    used_memory=True,
+                    used_tools=[],
+                    next_question="What do you want to do next?",
+                    payload={
+                        "type": "context_reset",
+                        "summary": message,
+                        "stale_context_cleared": True,
+                    },
+                )
             if not cmd and ("joke" in normalized_effective_user_text or "funny" in normalized_effective_user_text):
                 return OrchestratorResponse(
                     "Why did the task queue stay calm? It already had a good backlog.",
@@ -20497,6 +20546,10 @@ class Orchestrator:
                 and str(self._last_offer_topic.get(user_id) or "").strip() != "brief_offer"
             ):
                 self._memory_runtime.abort_pending_for_thread(user_id, thread_id)
+            if not cmd and self._looks_like_fresh_intent_override(text):
+                normalized_override = " ".join(str(text or "").strip().lower().split())
+                if normalized_override not in {"yes", "y", "yes please", "sure", "ok", "okay", "please", "continue", "do it"}:
+                    self._memory_runtime.abort_pending_for_thread(user_id, thread_id)
 
             followup = self._memory_runtime.resolve_followup(user_id, text, thread_id)
             followup_type = str(followup.get("type") or "")
