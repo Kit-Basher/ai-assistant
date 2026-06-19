@@ -1,4 +1,16 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useLayoutEffect, useRef } from "react";
+
+const BOTTOM_STICKINESS_PX = 96;
+
+function isNearBottom(container) {
+  if (!container) return true;
+  return container.scrollHeight - container.scrollTop - container.clientHeight <= BOTTOM_STICKINESS_PX;
+}
+
+function scrollToBottom(container) {
+  if (!container) return;
+  container.scrollTop = container.scrollHeight;
+}
 
 function ApprovalCard({ confirmation, disabled, onReply }) {
   if (!confirmation) return null;
@@ -177,46 +189,75 @@ export default function ChatExperience({
   theme
 }) {
   const transcriptRef = useRef(null);
-  const transcriptEndRef = useRef(null);
   const shouldStickToBottomRef = useRef(true);
   const forceNextScrollRef = useRef(false);
+  const userTurnInProgressRef = useRef(false);
   const previousMessageCountRef = useRef(messages.length);
+  const previousBusyRef = useRef(chatBusy);
+  const scrollFrameRef = useRef(null);
+  const settleFrameRef = useRef(null);
 
-  const scrollTranscriptToBottom = useCallback((behavior = "smooth") => {
+  const maybeScrollToBottom = useCallback(({ force = false } = {}) => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
-    transcript.scrollTo({ top: transcript.scrollHeight, behavior });
+
+    if (!force && !shouldStickToBottomRef.current) return;
+
+    // The transcript div is the only scroll container. Setting scrollTop
+    // directly avoids child scrollIntoView alignment jumps in nested layouts.
+    scrollToBottom(transcript);
+    if (scrollFrameRef.current) window.cancelAnimationFrame(scrollFrameRef.current);
+    if (settleFrameRef.current) window.cancelAnimationFrame(settleFrameRef.current);
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollToBottom(transcript);
+      settleFrameRef.current = window.requestAnimationFrame(() => {
+        scrollToBottom(transcript);
+        shouldStickToBottomRef.current = true;
+        settleFrameRef.current = null;
+      });
+      scrollFrameRef.current = null;
+    });
   }, []);
 
   const updateStickiness = useCallback(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
-    const distanceFromBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
-    shouldStickToBottomRef.current = distanceFromBottom <= 96;
+    shouldStickToBottomRef.current = isNearBottom(transcript);
   }, []);
 
   const handleSendMessage = useCallback(
     (message) => {
       forceNextScrollRef.current = true;
+      userTurnInProgressRef.current = true;
       shouldStickToBottomRef.current = true;
       onSendMessage(message);
+      maybeScrollToBottom({ force: true });
     },
-    [onSendMessage]
+    [maybeScrollToBottom, onSendMessage]
   );
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const messageCountChanged = previousMessageCountRef.current !== messages.length;
     previousMessageCountRef.current = messages.length;
-    const shouldScroll = forceNextScrollRef.current || shouldStickToBottomRef.current;
-    if (!shouldScroll) return;
-    const behavior = forceNextScrollRef.current || messageCountChanged ? "smooth" : "auto";
+
+    const assistantCompleted = previousBusyRef.current && !chatBusy;
+    previousBusyRef.current = chatBusy;
+
+    const forceScroll =
+      forceNextScrollRef.current ||
+      (userTurnInProgressRef.current && (messageCountChanged || assistantCompleted));
     forceNextScrollRef.current = false;
-    const frameId = window.requestAnimationFrame(() => {
-      scrollTranscriptToBottom(behavior);
-      shouldStickToBottomRef.current = true;
-    });
-    return () => window.cancelAnimationFrame(frameId);
-  }, [chatPlaceholderVisible, messages, scrollTranscriptToBottom]);
+    if (assistantCompleted) userTurnInProgressRef.current = false;
+
+    maybeScrollToBottom({ force: forceScroll });
+  }, [chatBusy, chatPlaceholderVisible, maybeScrollToBottom, messages]);
+
+  useLayoutEffect(() => {
+    return () => {
+      if (scrollFrameRef.current) window.cancelAnimationFrame(scrollFrameRef.current);
+      if (settleFrameRef.current) window.cancelAnimationFrame(settleFrameRef.current);
+    };
+  }, []);
 
   return (
     <div className="chat-product-shell">
@@ -264,7 +305,6 @@ export default function ChatExperience({
                 <MessageBubble busy={chatBusy} key={`${message.role}-${index}-${message.content.slice(0, 24)}`} message={message} onReply={handleSendMessage} />
               ))}
               {chatPlaceholderVisible ? <ThinkingBubble /> : null}
-              <div ref={transcriptEndRef} />
             </div>
           )}
 
