@@ -1236,6 +1236,13 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
         return True
     if working.startswith("look up ") and " online" in working:
         return True
+    explicit_lookup = re.match(r"^(?:can you|could you|please)?\s*look up\s+(.+)$", working)
+    if explicit_lookup is not None:
+        lookup_target = explicit_lookup.group(1).strip()
+        if re.search(r"\b[a-z0-9][a-z0-9_.-]*\.[a-z0-9_.-]+\b", lookup_target):
+            return True
+        if re.search(r"\b(model|tool|library|project|package|repo|company|site|website|channel|creator)\b", lookup_target):
+            return True
     if working.startswith("find ") and (" on the web" in working or " online" in working):
         return True
     if re.search(r"\b(?:tell me about|what is|who is|who are|summarize|explain)\b", working) and re.search(

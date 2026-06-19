@@ -338,6 +338,19 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
 
     def test_post_setup_online_entity_followup_uses_native_search(self) -> None:
         runtime = self._runtime(search_enabled=False)
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": False,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": False,
+                "base_url": None,
+                "reason": "search_disabled",
+            },
+            services_status=self._managed_services_status(enabled=False, configured=False, reachable=False),
+        )
         setup_handler = _MemoryHandlerForTest(
             runtime,
             "/chat",
@@ -431,6 +444,26 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
                 self.assertIn("did not open pages", text.lower())
                 self.assertEqual(1, len(opener.opened_urls))
 
+    def test_explicit_lookup_tts_model_uses_search_not_voice_or_linux_pack(self) -> None:
+        runtime = self._runtime()
+        opener = self._install_fake_search_client(runtime, "dot.tts project result")
+
+        _body, text, meta = self._chat(
+            runtime,
+            "can you look up dot.tts im wondering if it would be a good model to use for a project",
+            session_id="lookup-dot-tts",
+        )
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("metadata-only web results", text.lower())
+        self.assertIn("dot.tts project result", text)
+        self.assertNotIn("Linux Troubleshooting Workflow", text)
+        self.assertNotIn("voice output", text.lower())
+        self.assertNotIn("127.0.0.1:8888", text)
+        self.assertEqual(1, len(opener.opened_urls))
+        self.assertIn("dot.tts", opener.opened_urls[-1])
+
     def test_search_fallback_does_not_force_search_for_timeless_or_text_transform(self) -> None:
         examples = (
             "explain why the sky is blue in two sentences",
@@ -456,6 +489,19 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
 
     def test_search_fallback_disabled_offers_plan_mode_setup(self) -> None:
         runtime = self._runtime(search_enabled=False)
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": False,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": False,
+                "base_url": None,
+                "reason": "search_disabled",
+            },
+            services_status=self._managed_services_status(enabled=False, configured=False, reachable=False),
+        )
 
         _body, text, meta = self._chat(runtime, "what is dots.tts?", session_id="disabled-search-dots")
 

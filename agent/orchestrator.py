@@ -2047,6 +2047,9 @@ class Orchestrator:
         if lowered.startswith("look up ") and " online" in lowered:
             value = normalized[len("look up ") :]
             return re.sub(r"\s+online\b", "", value, flags=re.IGNORECASE).strip(" .?!")
+        lookup_match = re.match(r"^(?:can you|could you|please)?\s*look up\s+(.+)$", normalized, flags=re.IGNORECASE)
+        if lookup_match is not None:
+            return lookup_match.group(1).strip(" .?!")
         if lowered.startswith("find ") and (" on the web" in lowered or " online" in lowered):
             value = normalized[len("find ") :]
             value = re.sub(r"\s+on the web\b", "", value, flags=re.IGNORECASE)
