@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.error import URLError
 
 from agent.api_server import AgentRuntime
+from agent.policy import build_mutator_plan
 from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig, redact_search_query
 from agent.setup_chat_flow import classify_runtime_chat_route
 from tests.test_api_packs_endpoints import _HandlerForTest, _config
@@ -184,6 +185,77 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
         self.assertEqual(200, handler.status_code)
         return body, text, meta
+
+    @staticmethod
+    def _managed_services_status(*, enabled: bool = False, configured: bool = False, reachable: bool = False) -> dict[str, object]:
+        return {
+            "ok": True,
+            "read_only": True,
+            "podman_available": True,
+            "podman_rootless": True,
+            "docker_available": False,
+            "services": [
+                {
+                    "service_id": "searxng",
+                    "display_name": "SearXNG",
+                    "enabled": enabled,
+                    "configured": configured,
+                    "reachable": reachable,
+                    "url": "http://127.0.0.1:8888",
+                    "podman_available": True,
+                    "podman_rootless": True,
+                }
+            ],
+        }
+
+    @staticmethod
+    def _managed_setup_plan(_payload: dict[str, object] | None = None) -> dict[str, object]:
+        mutation_plan = build_mutator_plan(
+            action_type="managed_local_service.setup_apply",
+            resources={
+                "created": ["container:personal-agent-searxng"],
+                "changed": ["runtime_search_config", "memory/local_services/searxng/settings.yml"],
+                "deleted": [],
+            },
+            rollback_scope="remove only the owned personal-agent-searxng container created by this action and restore previous runtime search config",
+            rollback_supported=True,
+            confirmation_token="confirm-test-search",
+            expires_at=4102444800,
+            plan_id="search-setup-test",
+        )
+        return {
+            "ok": True,
+            "requires_confirmation": True,
+            "plan": {
+                "service_id": "searxng",
+                "setup_mode": "managed_container",
+                "provider": "searxng",
+                "selected_engine": "podman",
+                "preferred_engine": "podman",
+                "image": "docker.io/searxng/searxng:latest",
+                "container_name": "personal-agent-searxng",
+                "loopback_bind": "127.0.0.1:8888:8080",
+                "bind_address": "127.0.0.1",
+                "port": 8888,
+                "health_url": "http://127.0.0.1:8888",
+                "rollback_scope": str(mutation_plan["rollback_scope"]),
+                "mutation_plan": mutation_plan,
+                "plan_id": "search-setup-test",
+                "confirmation_token": "confirm-test-search",
+                "expires_at": 4102444800,
+            },
+        }
+
+    def _install_managed_search_adapter(
+        self,
+        runtime: AgentRuntime,
+        *,
+        search_status: dict[str, object],
+        services_status: dict[str, object],
+    ) -> None:
+        runtime.search_status = lambda: dict(search_status)  # type: ignore[method-assign]
+        runtime.managed_services_status = lambda: dict(services_status)  # type: ignore[method-assign]
+        runtime.search_setup_plan = self._managed_setup_plan  # type: ignore[method-assign]
 
     def test_search_status_and_query_endpoints(self) -> None:
         runtime = self._runtime()
@@ -389,5 +461,112 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
 
         self.assertEqual("action_tool", meta.get("route"))
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
-        self.assertIn("Web search is not set up", text)
+        self.assertIn("Search is not currently working", text)
         self.assertIn("Plan Mode confirmation", text)
+
+    def test_search_status_disabled_says_not_working_and_offers_managed_start(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": False,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": False,
+                "base_url": None,
+                "reason": "search_disabled",
+            },
+            services_status=self._managed_services_status(enabled=False, configured=False, reachable=False),
+        )
+
+        _body, text, meta = self._chat(runtime, "is search working?", session_id="search-working-disabled")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("Search is not currently working", text)
+        self.assertIn("Plan Mode confirmation", text)
+        self.assertNotIn("Assistant web search is available", text)
+        self.assertNotIn("visit http://127.0.0.1:8888", text.lower())
+
+    def test_unreachable_direct_page_offers_managed_recovery(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": True,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": True,
+                "base_url": "http://127.0.0.1:8888",
+                "reason": "endpoint_unreachable",
+            },
+            services_status=self._managed_services_status(enabled=True, configured=True, reachable=False),
+        )
+
+        _body, text, meta = self._chat(
+            runtime,
+            "hmm weird, i went to http://127.0.0.1:8888/ and it worked but now it says it cant be reached",
+            session_id="search-page-unreachable",
+        )
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("Search is not currently working", text)
+        self.assertIn("direct local SearXNG page will refuse connection", text)
+        self.assertNotIn("podman", text.lower())
+
+    def test_restart_it_after_search_failure_uses_managed_plan_mode_not_manual_commands(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": True,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": True,
+                "base_url": "http://127.0.0.1:8888",
+                "reason": "endpoint_unreachable",
+            },
+            services_status=self._managed_services_status(enabled=True, configured=True, reachable=False),
+        )
+        self._chat(
+            runtime,
+            "hmm weird, i went to http://127.0.0.1:8888/ and it worked but now it says it cant be reached",
+            session_id="search-restart-followup",
+        )
+
+        _body, text, meta = self._chat(runtime, "can you restart it for me?", session_id="search-restart-followup")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("I can start or repair the managed search service for you", text)
+        self.assertIn("Plan Mode confirmation", text)
+        self.assertNotIn("podman run", text.lower())
+        self.assertNotIn("docker run", text.lower())
+
+    def test_search_status_available_mentions_assistant_and_direct_page(self) -> None:
+        runtime = self._runtime()
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": True,
+                "provider": "searxng",
+                "available": True,
+                "endpoint_configured": True,
+                "base_url": "http://127.0.0.1:8888",
+                "reason": None,
+            },
+            services_status=self._managed_services_status(enabled=True, configured=True, reachable=True),
+        )
+
+        _body, text, meta = self._chat(runtime, "is search working?", session_id="search-working-available")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("Assistant web search is available", text)
+        self.assertIn("Direct local search page: http://127.0.0.1:8888", text)
+        self.assertIn("Use assistant search for metadata-only summaries", text)

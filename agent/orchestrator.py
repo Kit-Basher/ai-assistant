@@ -2433,11 +2433,20 @@ class Orchestrator:
         *,
         status_payload: dict[str, Any],
         services_payload: dict[str, Any],
+        status_check: bool = False,
     ) -> OrchestratorResponse:
         searxng = self._searxng_service_from_status(services_payload)
         if bool(status_payload.get("available")) or (searxng.get("enabled") and searxng.get("configured") and searxng.get("reachable")):
+            base_url = str(status_payload.get("base_url") or searxng.get("url") or "http://127.0.0.1:8888").strip()
             return self._runtime_truth_response(
-                text="Web search is configured and available. Safe web search uses SearXNG metadata only; results remain untrusted.",
+                text="\n".join(
+                    [
+                        "Assistant web search is available.",
+                        f"Direct local search page: {base_url}",
+                        "Use assistant search for metadata-only summaries; use the SearXNG page directly for links and result lists.",
+                        "Search results are untrusted metadata. I did not fetch pages, run JavaScript, download files, or import packs.",
+                    ]
+                ),
                 route="action_tool",
                 used_tools=["safe_web_search", "managed_local_services"],
                 payload={
@@ -2527,9 +2536,15 @@ class Orchestrator:
         docker_warning = "Podman was not found. Docker is available, but it may use a root-level daemon."
         if fallback_selected:
             lines = [
-                "Web search is not set up yet.",
+                "Search is not currently working." if status_check else "Web search is not set up yet.",
                 "",
-                "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later.",
+                "The direct local SearXNG page will refuse connection until managed search is started again." if status_check else "",
+                "",
+                (
+                    "I can start or repair the managed search service for you. It will run only on this computer in the background, and you can ask me to stop it later."
+                    if status_check
+                    else "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later."
+                ),
                 "",
                 "Port 8080 is already being used, so I’ll use 8888 instead.",
                 "",
@@ -2539,9 +2554,15 @@ class Orchestrator:
             ]
         else:
             lines = [
-                "Web search is not set up yet.",
+                "Search is not currently working." if status_check else "Web search is not set up yet.",
                 "",
-                "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later.",
+                "The direct local SearXNG page will refuse connection until managed search is started again." if status_check else "",
+                "",
+                (
+                    "I can start or repair the managed search service for you. It will run only on this computer in the background, and you can ask me to stop it later."
+                    if status_check
+                    else "I can set it up for you. It will run only on this computer in the background, and you can ask me to stop it later."
+                ),
                 "",
                 *self._render_plan_mode_confirmation_lines(mutation_plan),
                 "",
@@ -2609,6 +2630,47 @@ class Orchestrator:
             re.search(r"\b(stop|turn off|shut down|remove|cleanup|clean up)\b.*\b(web search|searxng)\b", normalized)
             or re.search(r"\b(web search|searxng)\b.*\b(stop|turn off|shut down|remove|cleanup|clean up)\b", normalized)
         )
+
+    @staticmethod
+    def _looks_like_managed_service_start_restart_request(text: str) -> bool:
+        normalized = " ".join(normalize_setup_text(text).replace("/", " ").lower().split())
+        if "external pack" in normalized or "skill pack" in normalized or "imported pack" in normalized:
+            return False
+        if re.search(r"\b(start|restart|bring up|turn on)\b.*\b(web search|searxng|search service|managed search)\b", normalized):
+            return True
+        if re.search(r"\b(web search|searxng|search service|managed search)\b.*\b(start|restart|bring up|turn on)\b", normalized):
+            return True
+        return bool(re.search(r"\b(can you|could you|please)?\s*(restart|start)\s+it\s+(for me|again)\b", normalized))
+
+    def _managed_service_start_restart_preview_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        status_payload: dict[str, Any]
+        if callable(getattr(self._chat_runtime_adapter, "search_status", None)):
+            try:
+                status_payload = dict(self._chat_runtime_adapter.search_status())
+            except Exception:
+                status_payload = {"available": False, "enabled": False, "reason": "search_status_unavailable"}
+        else:
+            status_payload = {"available": False, "enabled": False, "reason": "search_status_unavailable"}
+        services_payload = self._managed_service_status_payload()
+        response = self._managed_service_setup_preview_response(
+            user_id,
+            status_payload=status_payload,
+            services_payload=services_payload,
+            status_check=True,
+        )
+        if "managed_service_setup_preview" in response.data.get("used_tools", []):
+            response.text = response.text.replace(
+                "I can set it up for you.",
+                "I can start or repair the managed search service for you.",
+                1,
+            )
+            response.data["text"] = response.text
+            response.data["message"] = response.text
+            payload = response.data.get("runtime_payload")
+            if isinstance(payload, dict):
+                payload["requested_action"] = "start_or_restart"
+                payload["source_request"] = text
+        return response
 
     def _managed_service_stop_preview_response(self, user_id: str) -> OrchestratorResponse:
         services_payload = self._managed_service_status_payload()
@@ -2713,6 +2775,7 @@ class Orchestrator:
                 user_id,
                 status_payload=status_payload,
                 services_payload=services_payload,
+                status_check=True,
             )
         rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
         return self._runtime_truth_response(
@@ -15422,6 +15485,8 @@ class Orchestrator:
             return repair_followup
         if self._looks_like_managed_adapter_execution_request(text):
             return self._managed_adapter_block_response(user_id, text)
+        if self._looks_like_managed_service_start_restart_request(text):
+            return self._managed_service_start_restart_preview_response(user_id, text)
         if self._looks_like_managed_service_stop_request(text):
             return self._managed_service_stop_preview_response(user_id)
         if self._looks_like_unbounded_install_request(text):

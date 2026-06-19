@@ -1331,8 +1331,16 @@ def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
         return False
     if "searxng" in working and any(phrase in working for phrase in ("set up", "setup", "configure", "status", "enabled")):
         return True
+    if re.search(r"\b(?:127\.0\.0\.1|localhost):(?:8080|8888)\b", working) and re.search(
+        r"\b(?:cannot be reached|can't be reached|cant be reached|connection refused|refused connection|unreachable|not reachable|stopped working)\b",
+        working,
+    ):
+        return True
     explicit = (
         "is web search enabled",
+        "is search working",
+        "is web search working",
+        "is internet search working",
         "is search configured",
         "how do i set up web search",
         "how do i setup web search",
