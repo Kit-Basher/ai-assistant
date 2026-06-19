@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
 from typing import Any
 import re
 
@@ -219,6 +220,11 @@ _TELEGRAM_STATUS_PHRASES = (
     "telegram status",
     "is telegram configured",
     "is telegram running",
+    "is telegram working",
+    "check if telegram is set up",
+    "check if telegram is setup",
+    "is telegram set up",
+    "is telegram setup",
     "how is telegram",
 )
 _PLAN_DAY_PHRASES = (
@@ -1917,7 +1923,65 @@ def classify_setup_intent(
     return {"kind": "none"}
 
 
-def classify_runtime_chat_route(
+@dataclass(frozen=True)
+class SemanticChatIntent:
+    intent: str
+    route: str
+    kind: str
+    confidence: float
+    evidence: tuple[str, ...] = ()
+
+
+def _semantic_intent_for_route(route_decision: dict[str, Any]) -> SemanticChatIntent:
+    route = str(route_decision.get("route") or "generic_chat").strip().lower() or "generic_chat"
+    kind = str(route_decision.get("kind") or "generic_chat").strip().lower() or "generic_chat"
+    fallback_reason = str(route_decision.get("fallback_reason") or "").strip().lower()
+    evidence = tuple(
+        item
+        for item in (
+            kind,
+            fallback_reason,
+        )
+        if item
+    )
+    if kind in {"safe_web_search", "safe_web_search_status", "safe_web_search_suppressed"}:
+        intent = "web_search" if kind == "safe_web_search" else "status_check" if kind == "safe_web_search_status" else "answer_directly"
+        return SemanticChatIntent(intent=intent, route=route, kind=kind, confidence=0.9, evidence=evidence)
+    if kind == "safe_web_search_clarify" or route == "assistant_clarification":
+        return SemanticChatIntent(intent="ask_clarifying_question", route=route, kind=kind, confidence=0.85, evidence=evidence)
+    if kind in {"telegram_status", "runtime_status", "provider_status", "providers_status"} or route in {
+        "runtime_status",
+        "provider_status",
+        "model_status",
+        "governance_status",
+        "model_policy_status",
+    }:
+        return SemanticChatIntent(intent="status_check", route=route, kind=kind, confidence=0.9, evidence=evidence)
+    if kind in {"shell_install_package", "shell_create_directory", "shell_safe_command", "shell_blocked_request"}:
+        intent = "package_or_system_mutation_preview" if kind in {"shell_install_package", "shell_create_directory"} else "status_check"
+        if kind == "shell_blocked_request":
+            intent = "refusal_or_safe_redirect"
+        return SemanticChatIntent(intent=intent, route=route, kind=kind, confidence=0.9, evidence=evidence)
+    if kind in {"pack_capability_recommendation", "capability_gap_plan"}:
+        return SemanticChatIntent(intent="pack_guidance", route=route, kind=kind, confidence=0.8, evidence=evidence)
+    if route == "setup_flow" or kind in {"configure_openrouter", "configure_ollama", "provide_openrouter_key"}:
+        return SemanticChatIntent(intent="managed_service_action", route=route, kind=kind, confidence=0.85, evidence=evidence)
+    if route == "runtime_guard" or "blocked" in kind:
+        return SemanticChatIntent(intent="refusal_or_safe_redirect", route=route, kind=kind, confidence=0.85, evidence=evidence)
+    if route == "generic_chat" or kind in {"generic_chat", "none"}:
+        return SemanticChatIntent(intent="answer_directly", route=route, kind=kind, confidence=0.65, evidence=evidence)
+    return SemanticChatIntent(intent="answer_directly", route=route, kind=kind, confidence=0.6, evidence=evidence)
+
+
+def _with_semantic_intent(route_decision: dict[str, Any]) -> dict[str, Any]:
+    semantic = _semantic_intent_for_route(route_decision)
+    enriched = dict(route_decision)
+    enriched["semantic_intent"] = semantic.intent
+    enriched["semantic"] = asdict(semantic)
+    return enriched
+
+
+def _classify_runtime_chat_route_raw(
     text: str | None,
     *,
     awaiting_secret: bool = False,
@@ -2168,6 +2232,21 @@ def classify_runtime_chat_route(
         "generic_allowed": True,
         "fallback_reason": "ordinary_open_chat",
     }
+
+
+def classify_runtime_chat_route(
+    text: str | None,
+    *,
+    awaiting_secret: bool = False,
+    awaiting_confirmation: bool = False,
+) -> dict[str, Any]:
+    return _with_semantic_intent(
+        _classify_runtime_chat_route_raw(
+            text,
+            awaiting_secret=awaiting_secret,
+            awaiting_confirmation=awaiting_confirmation,
+        )
+    )
 
 
 def is_setup_related_text(text: str | None) -> bool:

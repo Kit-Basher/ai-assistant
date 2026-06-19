@@ -486,6 +486,25 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
                 self.assertNotIn("voice output", text.lower())
                 self.assertEqual(1, len(opener.opened_urls))
 
+    def test_structured_semantic_intents_cover_daily_driver_boundaries(self) -> None:
+        cases = (
+            ("what is dots.tts", "web_search"),
+            ("dots tts any good?", "web_search"),
+            ("what is it?", "ask_clarifying_question"),
+            ("do not search, what is dots.tts?", "answer_directly"),
+            ("can you install dots.tts?", "package_or_system_mutation_preview"),
+            ("what is photosynthesis?", "answer_directly"),
+            ("rewrite this: what is dots.tts", "answer_directly"),
+            ("is telegram working?", "status_check"),
+        )
+        for message, semantic_intent in cases:
+            with self.subTest(message=message):
+                decision = classify_runtime_chat_route(message)
+
+                self.assertEqual(semantic_intent, decision.get("semantic_intent"))
+                self.assertIsInstance(decision.get("semantic"), dict)
+                self.assertEqual(semantic_intent, decision["semantic"].get("intent"))
+
     def test_messy_search_inputs_ask_one_followup_when_too_ambiguous(self) -> None:
         examples = (
             "that tts thing people are talking about",

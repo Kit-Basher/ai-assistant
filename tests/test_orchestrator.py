@@ -796,11 +796,17 @@ class _FakeRuntimeTruthService:
     def runtime_status(self, kind: str = "runtime_status") -> dict[str, object]:
         self.calls.append(("runtime_status", kind))
         if kind == "telegram_status":
+            configured = bool(getattr(self, "telegram_configured", True))
+            service_active = bool(getattr(self, "telegram_service_active", True))
+            embedded_running = bool(getattr(self, "telegram_embedded_running", False))
+            state = str(getattr(self, "telegram_state", "running" if service_active else "inactive"))
             return {
                 "scope": "telegram",
-                "configured": True,
-                "state": "running",
-                "summary": "Telegram is running.",
+                "configured": configured,
+                "state": state,
+                "service_active": service_active,
+                "embedded_running": embedded_running,
+                "summary": "Telegram is running." if configured and service_active else "Telegram is not running.",
             }
         return {
             "scope": "ready",
@@ -2526,6 +2532,77 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(bool(payload.get("brief_prompt")))
         self.assertFalse(response.data["used_llm"])
         self.assertEqual(0, len(llm.chat_calls))
+
+    def test_telegram_working_question_uses_deterministic_local_status_when_inactive_optional(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.telegram_configured = True
+        runtime_truth.telegram_service_active = False
+        runtime_truth.telegram_embedded_running = False
+        runtime_truth.telegram_state = "inactive"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("is telegram working?", "user1")
+
+        self.assertEqual("runtime_status", response.data["route"])
+        self.assertEqual(["telegram_status"], response.data["used_tools"])
+        self.assertIn("Telegram is configured, but the Telegram service is not currently running.", response.text)
+        self.assertIn("Telegram is optional, so the web app still works.", response.text)
+        self.assertNotIn("open Telegram", response.text.lower())
+        self.assertFalse(response.data["used_llm"])
+
+    def test_telegram_setup_question_reports_not_configured_without_generic_advice(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.telegram_configured = False
+        runtime_truth.telegram_service_active = False
+        runtime_truth.telegram_state = "disabled_missing_token"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("check if telegram is set up", "user1")
+
+        self.assertEqual("runtime_status", response.data["route"])
+        self.assertIn("Telegram is not configured yet. I can help set it up.", response.text)
+        self.assertNotIn("send a message", response.text.lower())
+        self.assertFalse(response.data["used_llm"])
+
+    def test_telegram_running_question_reports_configured_and_running(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.telegram_configured = True
+        runtime_truth.telegram_service_active = True
+        runtime_truth.telegram_state = "running"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("is telegram running?", "user1")
+
+        self.assertEqual("runtime_status", response.data["route"])
+        self.assertIn("Telegram is configured and running.", response.text)
+        self.assertFalse(response.data["used_llm"])
 
     def test_bluejay_canary_uses_deterministic_general_knowledge_reply(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")

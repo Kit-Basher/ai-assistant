@@ -12123,6 +12123,43 @@ class Orchestrator:
             },
         )
 
+    def _telegram_status_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        if truth is None:
+            return self._runtime_state_unavailable_response(
+                route="runtime_status",
+                reason="runtime_truth_service_unavailable",
+                skip_post_response_hooks=True,
+            )
+        status_payload = dict(truth.runtime_status("telegram_status"))
+        configured = bool(status_payload.get("configured", False))
+        state = str(status_payload.get("state") or status_payload.get("effective_state") or "unknown").strip().lower()
+        service_active = bool(status_payload.get("service_active", False))
+        embedded_running = bool(status_payload.get("embedded_running", False))
+        running = service_active or embedded_running or state in {"running", "enabled_running", "ready", "active"}
+        if not configured:
+            message = "Telegram is not configured yet. I can help set it up."
+        elif running:
+            message = "Telegram is configured and running."
+        else:
+            message = (
+                "Telegram is configured, but the Telegram service is not currently running. "
+                "Telegram is optional, so the web app still works. I can start Telegram for you if you want."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="runtime_status",
+            used_tools=["telegram_status"],
+            skip_post_response_hooks=True,
+            payload={
+                "type": "telegram_status",
+                **status_payload,
+                "configured": configured,
+                "running": running,
+                "summary": message,
+            },
+        )
+
     @staticmethod
     def _governance_component_label(identifier: str | None) -> str:
         normalized = str(identifier or "").strip()
@@ -15649,7 +15686,9 @@ class Orchestrator:
             return self._providers_status_response()
         if kind == "provider_status":
             return self._provider_status_response(str(decision.get("provider_id") or ""))
-        if kind in {"runtime_status", "telegram_status"}:
+        if kind == "telegram_status":
+            return self._telegram_status_response()
+        if kind == "runtime_status":
             return self._runtime_status_response(kind)
         if kind == "model_controller_policy":
             return self._model_controller_policy_response()
@@ -15983,7 +16022,7 @@ class Orchestrator:
             )
         if capability == "telegram":
             if action in {"status", "setup"}:
-                return self._runtime_status_response("telegram_status")
+                return self._telegram_status_response()
         if capability == "chat_model":
             if action == "status":
                 return self._current_model_response()

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 function ApprovalCard({ confirmation, disabled, onReply }) {
   if (!confirmation) return null;
@@ -176,11 +176,47 @@ export default function ChatExperience({
   starterPrompts,
   theme
 }) {
+  const transcriptRef = useRef(null);
   const transcriptEndRef = useRef(null);
+  const shouldStickToBottomRef = useRef(true);
+  const forceNextScrollRef = useRef(false);
+  const previousMessageCountRef = useRef(messages.length);
+
+  const scrollTranscriptToBottom = useCallback((behavior = "smooth") => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    transcript.scrollTo({ top: transcript.scrollHeight, behavior });
+  }, []);
+
+  const updateStickiness = useCallback(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    const distanceFromBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+    shouldStickToBottomRef.current = distanceFromBottom <= 96;
+  }, []);
+
+  const handleSendMessage = useCallback(
+    (message) => {
+      forceNextScrollRef.current = true;
+      shouldStickToBottomRef.current = true;
+      onSendMessage(message);
+    },
+    [onSendMessage]
+  );
 
   useEffect(() => {
-    transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages, chatBusy]);
+    const messageCountChanged = previousMessageCountRef.current !== messages.length;
+    previousMessageCountRef.current = messages.length;
+    const shouldScroll = forceNextScrollRef.current || shouldStickToBottomRef.current;
+    if (!shouldScroll) return;
+    const behavior = forceNextScrollRef.current || messageCountChanged ? "smooth" : "auto";
+    forceNextScrollRef.current = false;
+    const frameId = window.requestAnimationFrame(() => {
+      scrollTranscriptToBottom(behavior);
+      shouldStickToBottomRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [chatPlaceholderVisible, messages, scrollTranscriptToBottom]);
 
   return (
     <div className="chat-product-shell">
@@ -215,17 +251,17 @@ export default function ChatExperience({
               <p>{status.description}</p>
               <div className="starter-prompts">
                 {starterPrompts.map((prompt) => (
-                  <button key={prompt} onClick={() => onStarterPrompt(prompt)} type="button">
+                  <button key={prompt} onClick={() => handleSendMessage(prompt)} type="button">
                     {prompt}
                   </button>
                 ))}
               </div>
             </div>
           ) : (
-            <div className="chat-transcript">
+            <div className="chat-transcript" onScroll={updateStickiness} ref={transcriptRef}>
               {!status.ready ? <p className="chat-surface-note">{status.description}</p> : null}
               {messages.map((message, index) => (
-                <MessageBubble busy={chatBusy} key={`${message.role}-${index}-${message.content.slice(0, 24)}`} message={message} onReply={onSendMessage} />
+                <MessageBubble busy={chatBusy} key={`${message.role}-${index}-${message.content.slice(0, 24)}`} message={message} onReply={handleSendMessage} />
               ))}
               {chatPlaceholderVisible ? <ThinkingBubble /> : null}
               <div ref={transcriptEndRef} />
@@ -247,7 +283,7 @@ export default function ChatExperience({
             className="chat-composer"
             onSubmit={(event) => {
               event.preventDefault();
-              onSendMessage();
+              handleSendMessage();
             }}
           >
             <button className="attachment-button" disabled type="button">
@@ -258,7 +294,7 @@ export default function ChatExperience({
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
-                  onSendMessage();
+                  handleSendMessage();
                 }
               }}
               placeholder={composerPlaceholder}
