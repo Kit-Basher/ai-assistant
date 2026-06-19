@@ -2111,10 +2111,11 @@ class Orchestrator:
                 },
             )
         results = body.get("results") if isinstance(body.get("results"), list) else []
-        lines = [
+        lines = [f"I searched metadata-only web results for {query}."]
+        lines.append(
             message
-            or "Search returned untrusted metadata results. I did not open pages, run JavaScript, download files, or import packs.",
-        ]
+            or "Search returned untrusted metadata results. I did not open pages, run JavaScript, download files, or import packs."
+        )
         for index, row in enumerate(results[:5], start=1):
             if not isinstance(row, dict):
                 continue
@@ -2141,6 +2142,31 @@ class Orchestrator:
                 "type": "safe_web_search",
                 "summary": message or "Search returned metadata results.",
                 "search": body,
+            },
+        )
+
+
+    def _safe_web_search_suppressed_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = user_id
+        _ = text
+        message = (
+            "I will not search. Based only on built-in knowledge, my answer may be limited or outdated. "
+            "If you want current metadata-only web results later, ask me to search."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=[],
+            payload={
+                "type": "safe_web_search_suppressed",
+                "summary": message,
+                "search_used": False,
+                "safety": {
+                    "page_fetching": False,
+                    "browser_automation": False,
+                    "downloads": False,
+                    "pack_install_import": False,
+                },
             },
         )
 
@@ -15413,6 +15439,8 @@ class Orchestrator:
         kind = str(decision.get("kind") or "none").strip().lower()
         if kind == "safe_web_search_status":
             return self._safe_web_search_status_response(user_id, text)
+        if kind == "safe_web_search_suppressed":
+            return self._safe_web_search_suppressed_response(user_id, text)
         if kind == "safe_web_search":
             return self._safe_web_search_response(user_id, text)
         if kind == "product_specific_guard":
@@ -16004,6 +16032,8 @@ class Orchestrator:
         search_route_kind = str(classify_runtime_chat_route(text).get("kind") or "").strip().lower()
         if search_route_kind == "safe_web_search_status":
             return self._safe_web_search_status_response(user_id, text)
+        if search_route_kind == "safe_web_search_suppressed":
+            return self._safe_web_search_suppressed_response(user_id, text)
         if search_route_kind == "safe_web_search":
             return self._safe_web_search_response(user_id, text)
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
@@ -20231,6 +20261,8 @@ class Orchestrator:
                 runtime_route_kind = str(runtime_route_decision.get("kind") or "").strip().lower()
                 if runtime_route_kind == "safe_web_search_status":
                     return self._safe_web_search_status_response(user_id, runtime_text)
+                if runtime_route_kind == "safe_web_search_suppressed":
+                    return self._safe_web_search_suppressed_response(user_id, runtime_text)
                 if runtime_route_kind == "safe_web_search":
                     return self._safe_web_search_response(user_id, runtime_text)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)

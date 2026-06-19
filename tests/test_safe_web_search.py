@@ -11,6 +11,7 @@ from urllib.error import URLError
 
 from agent.api_server import AgentRuntime
 from agent.search.safe_web_search import SafeWebSearchClient, SafeWebSearchConfig, redact_search_query
+from agent.setup_chat_flow import classify_runtime_chat_route
 from tests.test_api_packs_endpoints import _HandlerForTest, _config
 from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _assistant_text
 
@@ -145,6 +146,45 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         )
         return AgentRuntime(config)
 
+    def _install_fake_search_client(self, runtime: AgentRuntime, title: str = "Metadata result") -> _FakeOpener:
+        opener = _FakeOpener(
+            {
+                "results": [
+                    {
+                        "title": title,
+                        "url": "https://example.com/result",
+                        "content": "Metadata-only snippet.",
+                        "engine": "test-engine",
+                    }
+                ]
+            }
+        )
+        runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+        return opener
+
+    def _chat(self, runtime: AgentRuntime, message: str, *, session_id: str = "safe-search-test") -> tuple[dict, str, dict]:
+        handler = _MemoryHandlerForTest(
+            runtime,
+            "/chat",
+            {
+                "messages": [{"role": "user", "content": message}],
+                "session_id": session_id,
+                "thread_id": f"{session_id}-thread",
+                "source_surface": "webui",
+                "purpose": "chat",
+                "task_type": "chat",
+            },
+        )
+        handler.do_POST()
+        body = json.loads(handler.body.decode("utf-8"))
+        text = _assistant_text(body)
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        self.assertEqual(200, handler.status_code)
+        return body, text, meta
+
     def test_search_status_and_query_endpoints(self) -> None:
         runtime = self._runtime()
         runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
@@ -223,3 +263,131 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("did not open pages", text.lower())
         self.assertNotIn("pack", " ".join(str(item) for item in meta.get("used_tools", [])))
         self.assertEqual(1, len(opener.opened_urls))
+
+    def test_post_setup_online_entity_followup_uses_native_search(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+        setup_handler = _MemoryHandlerForTest(
+            runtime,
+            "/chat",
+            {
+                "messages": [{"role": "user", "content": "can you search for something for me online"}],
+                "session_id": "safe-search-handoff",
+                "thread_id": "safe-search-handoff-thread",
+                "source_surface": "webui",
+                "purpose": "chat",
+                "task_type": "chat",
+            },
+        )
+        setup_handler.do_POST()
+        setup_body = json.loads(setup_handler.body.decode("utf-8"))
+        setup_meta = setup_body.get("meta") if isinstance(setup_body.get("meta"), dict) else {}
+        setup_text = _assistant_text(setup_body)
+
+        self.assertEqual(200, setup_handler.status_code)
+        self.assertIn("managed_local_service_setup_preview", setup_meta.get("used_tools", []))
+        self.assertIn("Say yes to continue", setup_text)
+
+        runtime.config = replace(
+            runtime.config,
+            search_enabled=True,
+            search_provider="searxng",
+            searxng_base_url="http://127.0.0.1:8888",
+        )
+        opener = _FakeOpener(
+            {
+                "results": [
+                    {
+                        "title": "Kwite - YouTube",
+                        "url": "https://www.youtube.com/@Kwite",
+                        "content": "Kwite is a YouTube channel with commentary videos.",
+                        "engine": "test-engine",
+                    }
+                ]
+            }
+        )
+        runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+        followup_handler = _MemoryHandlerForTest(
+            runtime,
+            "/chat",
+            {
+                "messages": [{"role": "user", "content": "can you tell me about the youtube channel Kwite?"}],
+                "session_id": "safe-search-handoff",
+                "thread_id": "safe-search-handoff-thread",
+                "source_surface": "webui",
+                "purpose": "chat",
+                "task_type": "chat",
+            },
+        )
+
+        followup_handler.do_POST()
+        body = json.loads(followup_handler.body.decode("utf-8"))
+        text = _assistant_text(body)
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+
+        self.assertEqual(200, followup_handler.status_code)
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("metadata-only web results", text.lower())
+        self.assertIn("Kwite - YouTube", text)
+        self.assertIn("untrusted", text.lower())
+        self.assertIn("did not open pages", text.lower())
+        self.assertNotIn("127.0.0.1:8888", text)
+        self.assertGreaterEqual(len(opener.opened_urls), 1)
+        self.assertIn("Kwite", opener.opened_urls[-1])
+
+    def test_search_fallback_routes_online_and_project_entities(self) -> None:
+        examples = (
+            ("can you tell me about the youtube channel Kwite?", "Kwite result"),
+            ("what is dots.tts?", "dots.tts result"),
+            ("is pi.dev useful for my assistant project?", "pi.dev result"),
+        )
+        for message, title in examples:
+            with self.subTest(message=message):
+                runtime = self._runtime()
+                opener = self._install_fake_search_client(runtime, title)
+
+                _body, text, meta = self._chat(runtime, message, session_id=f"search-fallback-{title}")
+
+                self.assertEqual("action_tool", meta.get("route"))
+                self.assertIn("safe_web_search", meta.get("used_tools", []))
+                self.assertIn(title, text)
+                self.assertIn("metadata-only web results", text.lower())
+                self.assertIn("untrusted", text.lower())
+                self.assertIn("did not open pages", text.lower())
+                self.assertEqual(1, len(opener.opened_urls))
+
+    def test_search_fallback_does_not_force_search_for_timeless_or_text_transform(self) -> None:
+        examples = (
+            "explain why the sky is blue in two sentences",
+            "rewrite this paragraph: the quick brown fox jumps over the lazy dog",
+        )
+        for message in examples:
+            with self.subTest(message=message):
+                decision = classify_runtime_chat_route(message)
+
+                self.assertNotEqual("safe_web_search", decision.get("kind"))
+
+    def test_search_fallback_honors_do_not_search(self) -> None:
+        runtime = self._runtime()
+        opener = self._install_fake_search_client(runtime, "Kwite result")
+
+        _body, text, meta = self._chat(runtime, "do not search, what do you know about Kwite?", session_id="no-search-kwite")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertNotIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("will not search", text.lower())
+        self.assertIn("limited or outdated", text.lower())
+        self.assertEqual(0, len(opener.opened_urls))
+
+    def test_search_fallback_disabled_offers_plan_mode_setup(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+
+        _body, text, meta = self._chat(runtime, "what is dots.tts?", session_id="disabled-search-dots")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("Web search is not set up", text)
+        self.assertIn("Plan Mode confirmation", text)

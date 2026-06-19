@@ -1220,6 +1220,8 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
     working = " ".join(str(normalized or "").strip().lower().split())
     if not working:
         return False
+    if _contains_safe_web_search_suppression(working):
+        return False
     explicit_prefixes = (
         "search the web for ",
         "search web for ",
@@ -1236,11 +1238,91 @@ def _looks_like_safe_web_search_request(normalized: str) -> bool:
         return True
     if working.startswith("find ") and (" on the web" in working or " online" in working):
         return True
+    if re.search(r"\b(?:tell me about|what is|who is|who are|summarize|explain)\b", working) and re.search(
+        r"\b(?:youtube channel|youtube creator|youtube account|youtube video|twitch channel|twitter account|x account|instagram account|tiktok account|website|online)\b",
+        working,
+    ):
+        return True
     return bool(
         re.search(r"\b(search|look up|find)\b", working)
         and re.search(r"\b(web|internet|online)\b", working)
         and len(working.split()) >= 4
     )
+
+
+def _contains_safe_web_search_suppression(working: str) -> bool:
+    return any(
+        phrase in working
+        for phrase in (
+            "do not search",
+            "don't search",
+            "dont search",
+            "without searching",
+            "without web search",
+            "no web search",
+            "no internet search",
+            "don't look it up",
+            "dont look it up",
+        )
+    )
+
+
+def _looks_like_provided_text_transform(working: str) -> bool:
+    if re.search(r"\b(rewrite|reword|edit|proofread|translate|summarize|condense|shorten)\s+(this|the following|my)\b", working):
+        return True
+    return bool(re.search(r"\b(rewrite|reword|edit|proofread|translate|summarize|condense|shorten)\b", working) and ":" in working)
+
+
+def _looks_like_simple_timeless_explanation(working: str) -> bool:
+    timeless = (
+        "why the sky is blue",
+        "why is the sky blue",
+        "what is photosynthesis",
+        "what is gravity",
+        "explain gravity",
+    )
+    return any(phrase in working for phrase in timeless)
+
+
+def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
+    if _looks_like_provided_text_transform(working) or _looks_like_simple_timeless_explanation(working):
+        return False
+    if re.search(
+        r"\b(local api|web ui|runtime|current task|this task|my task|this repo|local repo|this project|my project|my system|my machine|this machine)\b",
+        working,
+    ):
+        return False
+    if re.search(r"\b(still active|active anymore|latest|currently|recent|newest|release|released|changelog|price|pricing|compatibility|compatible|recommendations?)\b", working):
+        return True
+    if re.search(r"\b(current|latest|public)\s+status\b|\bstatus\s+(?:of|for)\s+\S", working):
+        return True
+    if re.search(r"\b(docs|documentation)\s+(?:for|of)\s+\S", working) or re.search(r"\S\s+(?:docs|documentation)\b", working):
+        return True
+    if re.search(
+        r"\b(company|startup|project|library|package|tool|model|api|site|website|repo|github|channel|creator|streamer|plugin|sdk|app|service)\b",
+        working,
+    ) and re.search(r"\b(what is|who is|who are|tell me about|should i use|useful|worth|does\s+\S|is\s+\S)\b", working):
+        return True
+    if re.search(r"\b(?:what is|tell me about|is|does|can|should i use)\s+[a-z0-9][a-z0-9_.-]*\.[a-z0-9_.-]+\b", working):
+        return True
+    if re.search(r"\b(?:what is|tell me about)\s+[a-z0-9][a-z0-9_.-]*(?:tts|llm|mcp|ai|dev|js|py|rs|gguf)\b", working):
+        return True
+    return False
+
+
+def _looks_like_safe_web_search_suppressed_request(normalized: str) -> bool:
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not working or not _contains_safe_web_search_suppression(working):
+        return False
+    stripped = re.sub(
+        r"\b(?:do not search|don't search|dont search|without searching|without web search|no web search|no internet search|don't look it up|dont look it up)\b",
+        "",
+        working,
+    )
+    stripped = " ".join(stripped.split())
+    if _looks_like_safe_web_search_fallback_request(stripped):
+        return True
+    return bool(re.search(r"\b(?:what do you know about|what is|who is|tell me about)\b", stripped))
 
 
 def _looks_like_safe_web_search_status_request(normalized: str) -> bool:
@@ -2007,6 +2089,20 @@ def classify_runtime_chat_route(
             "kind": "product_specific_guard",
             "generic_allowed": False,
             "fallback_reason": "product_specific_guard",
+        }
+    if _looks_like_safe_web_search_suppressed_request(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safe_web_search_suppressed",
+            "generic_allowed": False,
+            "fallback_reason": "user_declined_search",
+        }
+    if _looks_like_safe_web_search_fallback_request(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safe_web_search",
+            "generic_allowed": False,
+            "fallback_reason": "search_fallback",
         }
 
     return {
