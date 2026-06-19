@@ -464,10 +464,53 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertEqual(1, len(opener.opened_urls))
         self.assertIn("dot.tts", opener.opened_urls[-1])
 
+    def test_messy_public_entity_inputs_use_search_not_capability_or_pack_text(self) -> None:
+        examples = (
+            ("what is dots.tts", "dots.tts result"),
+            ("dots tts any good?", "dots tts result"),
+            ("pi.dev?", "pi.dev result"),
+            ("is nex-agi adaptive thinking useful for memory?", "nex-agi result"),
+        )
+        for message, title in examples:
+            with self.subTest(message=message):
+                runtime = self._runtime()
+                opener = self._install_fake_search_client(runtime, title)
+
+                _body, text, meta = self._chat(runtime, message, session_id=f"messy-search-{title}")
+
+                self.assertEqual("action_tool", meta.get("route"))
+                self.assertIn("safe_web_search", meta.get("used_tools", []))
+                self.assertIn("metadata-only web results", text.lower())
+                self.assertIn(title, text)
+                self.assertNotIn("Linux Troubleshooting Workflow", text)
+                self.assertNotIn("voice output", text.lower())
+                self.assertEqual(1, len(opener.opened_urls))
+
+    def test_messy_search_inputs_ask_one_followup_when_too_ambiguous(self) -> None:
+        examples = (
+            "that tts thing people are talking about",
+            "what is it?",
+        )
+        for message in examples:
+            with self.subTest(message=message):
+                runtime = self._runtime()
+                opener = self._install_fake_search_client(runtime, "unused")
+
+                _body, text, meta = self._chat(runtime, message, session_id=f"ambiguous-search-{message[:8]}")
+
+                self.assertEqual("assistant_clarification", meta.get("route"))
+                self.assertNotIn("safe_web_search", meta.get("used_tools", []))
+                self.assertIn("What exact public project, model, tool, site, or topic should I search for?", text)
+                self.assertEqual(0, len(opener.opened_urls))
+                self.assertNotIn("Linux Troubleshooting Workflow", text)
+                self.assertNotIn("voice output", text.lower())
+
     def test_search_fallback_does_not_force_search_for_timeless_or_text_transform(self) -> None:
         examples = (
             "explain why the sky is blue in two sentences",
+            "what is photosynthesis?",
             "rewrite this paragraph: the quick brown fox jumps over the lazy dog",
+            "rewrite this: what is dots.tts",
         )
         for message in examples:
             with self.subTest(message=message):
@@ -486,6 +529,30 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("will not search", text.lower())
         self.assertIn("limited or outdated", text.lower())
         self.assertEqual(0, len(opener.opened_urls))
+
+    def test_do_not_search_internet_native_question_does_not_search(self) -> None:
+        runtime = self._runtime()
+        opener = self._install_fake_search_client(runtime, "dots.tts result")
+
+        _body, text, meta = self._chat(runtime, "do not search, what is dots.tts?", session_id="no-search-dots")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertNotIn("safe_web_search", meta.get("used_tools", []))
+        self.assertIn("will not search", text.lower())
+        self.assertIn("limited or outdated", text.lower())
+        self.assertEqual(0, len(opener.opened_urls))
+
+    def test_install_internet_native_name_does_not_search_or_trigger_voice_pack(self) -> None:
+        runtime = self._runtime()
+        opener = self._install_fake_search_client(runtime, "unused")
+
+        _body, text, meta = self._chat(runtime, "can you install dots.tts?", session_id="install-dots-tts")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertNotIn("safe_web_search", meta.get("used_tools", []))
+        self.assertEqual(0, len(opener.opened_urls))
+        self.assertNotIn("Linux Troubleshooting Workflow", text)
+        self.assertNotIn("voice output", text.lower())
 
     def test_search_fallback_disabled_offers_plan_mode_setup(self) -> None:
         runtime = self._runtime(search_enabled=False)

@@ -2174,6 +2174,28 @@ class Orchestrator:
         )
 
 
+    def _safe_web_search_clarification_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        _ = user_id
+        _ = text
+        message = "What exact public project, model, tool, site, or topic should I search for?"
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_tools=[],
+            payload={
+                "type": "safe_web_search_clarification",
+                "summary": message,
+                "search_used": False,
+                "safety": {
+                    "page_fetching": False,
+                    "browser_automation": False,
+                    "downloads": False,
+                    "pack_install_import": False,
+                },
+            },
+        )
+
+
     def _managed_service_status_payload(self) -> dict[str, Any]:
         adapter = self._chat_runtime_adapter
         if callable(getattr(adapter, "managed_services_status", None)):
@@ -9284,6 +9306,8 @@ class Orchestrator:
         return discovery
 
     def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "shell_install_package":
+            return None
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
@@ -10920,6 +10944,8 @@ class Orchestrator:
         )
 
     def _capability_gap_planning_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "shell_install_package":
+            return None
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
@@ -15509,6 +15535,8 @@ class Orchestrator:
             return self._safe_web_search_status_response(user_id, text)
         if kind == "safe_web_search_suppressed":
             return self._safe_web_search_suppressed_response(user_id, text)
+        if kind == "safe_web_search_clarify":
+            return self._safe_web_search_clarification_response(user_id, text)
         if kind == "safe_web_search":
             return self._safe_web_search_response(user_id, text)
         if kind == "product_specific_guard":
@@ -15545,7 +15573,11 @@ class Orchestrator:
             "model_scout_strategy",
             "model_scout_discovery",
         }
-        if kind == "shell_install_package" and self._looks_like_agent_pack_install_request(text):
+        if (
+            kind == "shell_install_package"
+            and self._looks_like_agent_pack_install_request(text)
+            and not re.search(r"\b[a-z0-9][a-z0-9_.-]*\.[a-z0-9_.-]+\b", normalize_setup_text(text))
+        ):
             capability_gap_response = self._capability_gap_planning_response(user_id, text)
             if capability_gap_response is not None:
                 return capability_gap_response
@@ -16102,8 +16134,25 @@ class Orchestrator:
             return self._safe_web_search_status_response(user_id, text)
         if search_route_kind == "safe_web_search_suppressed":
             return self._safe_web_search_suppressed_response(user_id, text)
+        if search_route_kind == "safe_web_search_clarify":
+            return self._safe_web_search_clarification_response(user_id, text)
         if search_route_kind == "safe_web_search":
             return self._safe_web_search_response(user_id, text)
+        if search_route_kind == "shell_install_package":
+            route_decision = classify_runtime_chat_route(text)
+            return self._shell_install_package_response(
+                user_id,
+                manager=str(route_decision.get("manager") or "").strip() or None,
+                package=str(route_decision.get("package") or "").strip() or None,
+                scope=str(route_decision.get("scope") or "").strip() or None,
+                dry_run=bool(route_decision.get("dry_run", False)),
+            )
+        if search_route_kind == "shell_blocked_request":
+            route_decision = classify_runtime_chat_route(text)
+            return self._shell_blocked_request_response(
+                blocked_reason=str(route_decision.get("blocked_reason") or "").strip() or "unsupported_command",
+                request_text=str(route_decision.get("request_text") or "").strip() or None,
+            )
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
             return external_pack_response
@@ -20331,6 +20380,8 @@ class Orchestrator:
                     return self._safe_web_search_status_response(user_id, runtime_text)
                 if runtime_route_kind == "safe_web_search_suppressed":
                     return self._safe_web_search_suppressed_response(user_id, runtime_text)
+                if runtime_route_kind == "safe_web_search_clarify":
+                    return self._safe_web_search_clarification_response(user_id, runtime_text)
                 if runtime_route_kind == "safe_web_search":
                     return self._safe_web_search_response(user_id, runtime_text)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)

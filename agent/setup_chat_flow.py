@@ -1305,6 +1305,13 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
         return True
     if re.search(r"\b(docs|documentation)\s+(?:for|of)\s+\S", working) or re.search(r"\S\s+(?:docs|documentation)\b", working):
         return True
+    if re.fullmatch(r"[a-z0-9][a-z0-9_.-]*\.[a-z0-9_.-]+\??", working.strip()):
+        return True
+    if re.search(r"\b[a-z0-9][a-z0-9_-]{1,40}(?:\s+|-)(?:tts|agi|llm|mcp|ai|dev)\b", working) and (
+        "?" in working
+        or re.search(r"\b(any good|useful|worth|should|model|tool|library|project|people are talking about)\b", working)
+    ):
+        return True
     if re.search(
         r"\b(company|startup|project|library|package|tool|model|api|site|website|repo|github|channel|creator|streamer|plugin|sdk|app|service)\b",
         working,
@@ -1315,6 +1322,28 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
     if re.search(r"\b(?:what is|tell me about)\s+[a-z0-9][a-z0-9_.-]*(?:tts|llm|mcp|ai|dev|js|py|rs|gguf)\b", working):
         return True
     return False
+
+
+def _looks_like_safe_web_search_clarification_request(normalized: str) -> bool:
+    working = " ".join(str(normalized or "").strip().lower().split())
+    if not working or _contains_safe_web_search_suppression(working):
+        return False
+    bare_referents = {
+        "what is it",
+        "what is it?",
+        "what's it",
+        "whats it",
+        "what is that",
+        "what is that?",
+        "what's that",
+        "whats that",
+    }
+    if working in bare_referents:
+        return True
+    return bool(
+        re.search(r"\bthat\s+(?:tts|llm|agi|ai|mcp)?\s*thing\b", working)
+        and re.search(r"\b(?:people are talking about|everyone is talking about|trending|going around|you mentioned)\b", working)
+    )
 
 
 def _looks_like_safe_web_search_suppressed_request(normalized: str) -> bool:
@@ -2035,6 +2064,34 @@ def classify_runtime_chat_route(
     shell_route = _classify_shell_route(text, normalized)
     if shell_route is not None:
         return shell_route
+    if _looks_like_safe_web_search_suppressed_request(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safe_web_search_suppressed",
+            "generic_allowed": False,
+            "fallback_reason": "user_declined_search",
+        }
+    if _looks_like_safe_web_search_clarification_request(normalized):
+        return {
+            "route": "assistant_clarification",
+            "kind": "safe_web_search_clarify",
+            "generic_allowed": False,
+            "fallback_reason": "ambiguous_search_target",
+        }
+    if _looks_like_safe_web_search_fallback_request(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safe_web_search",
+            "generic_allowed": False,
+            "fallback_reason": "search_fallback",
+        }
+    if _looks_like_provided_text_transform(normalized):
+        return {
+            "route": "generic_chat",
+            "kind": "generic_chat",
+            "generic_allowed": True,
+            "fallback_reason": "provided_text_transform",
+        }
     capability_gap = classify_capability_gap_request(normalized)
     if str(capability_gap.get("request_kind") or "").strip().lower() == "capability" and str(
         capability_gap.get("classification") or ""
@@ -2105,21 +2162,6 @@ def classify_runtime_chat_route(
             "generic_allowed": False,
             "fallback_reason": "product_specific_guard",
         }
-    if _looks_like_safe_web_search_suppressed_request(normalized):
-        return {
-            "route": "action_tool",
-            "kind": "safe_web_search_suppressed",
-            "generic_allowed": False,
-            "fallback_reason": "user_declined_search",
-        }
-    if _looks_like_safe_web_search_fallback_request(normalized):
-        return {
-            "route": "action_tool",
-            "kind": "safe_web_search",
-            "generic_allowed": False,
-            "fallback_reason": "search_fallback",
-        }
-
     return {
         "route": "generic_chat",
         "kind": "generic_chat",
