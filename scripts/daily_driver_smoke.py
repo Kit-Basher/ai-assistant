@@ -126,9 +126,19 @@ def check_search_chat(base_url: str, timeout: float, run_id: str) -> Check:
     except Exception as exc:  # noqa: BLE001
         return _fail("chat search", f"/search/status failed: {exc.__class__.__name__}", status_command)
     if not (status.get("enabled") and status.get("endpoint_configured") and status.get("available")):
+        reason = str(status.get("reason") or "unknown")
+        persistent = status.get("persistent_config") if isinstance(status.get("persistent_config"), dict) else {}
+        if reason == "search_disabled" and not status.get("endpoint_configured"):
+            state = "never_configured"
+        elif reason == "endpoint_unreachable" and status.get("endpoint_configured"):
+            state = "configured_but_stopped"
+        elif reason == "invalid_persisted_search_config" or persistent.get("error"):
+            state = "invalid_or_untrusted_config"
+        else:
+            state = "unavailable"
         return _blocked(
             "chat search",
-            f"search unavailable reason={status.get('reason')}",
+            f"search_state={state} reason={reason}",
             status_command,
             str(status.get("next_action") or "Configure a trusted SearXNG endpoint, then rerun."),
         )

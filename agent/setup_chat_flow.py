@@ -1708,11 +1708,24 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
             "fallback_reason": "action_tool",
         }
 
-    if re.search(r"^\s*(?:rm|sudo|chmod|chown|curl|wget|systemctl)\b", raw_text, re.IGNORECASE):
+    if re.search(r"^\s*(?:rm|sudo|chmod|chown|curl|wget|systemctl|podman|docker)\b", raw_text, re.IGNORECASE):
         return {
             "route": "action_tool",
             "kind": "shell_blocked_request",
             "blocked_reason": "destructive_operation_blocked",
+            "request_text": raw_text,
+            "generic_allowed": False,
+            "fallback_reason": "action_tool",
+        }
+
+    if re.search(r"\b(?:podman|docker|systemctl)\b", normalized_space) and re.search(
+        r"\b(?:run|start|restart|stop|rm|remove|exec|compose|pull|build|ps)\b",
+        normalized_space,
+    ):
+        return {
+            "route": "action_tool",
+            "kind": "shell_blocked_request",
+            "blocked_reason": "unsupported_container_or_service_command",
             "request_text": raw_text,
             "generic_allowed": False,
             "fallback_reason": "action_tool",

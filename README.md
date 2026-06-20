@@ -39,8 +39,9 @@ explicit confirmation step.
   controller actions come from deterministic runtime truth or native skill
   results, not generic prose.
 - Controller-backed: testing models, switching temporarily, making a default,
-  acquiring models, package installs, and directory creation all go through the
-  canonical controller/native-skill path.
+  acquiring models, and the narrow package/directory mutation previews all go
+  through the canonical controller/native-skill path. They remain
+  confirmation-gated and are not arbitrary shell access.
 - Approval-gated: mutating actions preview first and execute only after explicit
   confirmation.
 - Safe external pack ingestion: downloaded third-party packs are quarantined,
@@ -136,9 +137,9 @@ explicit confirmation step.
 
 ### Shell
 - Safe read-only environment inspection commands.
-- Bounded package install path.
-- Bounded directory creation path.
-- No public arbitrary shell execution surface.
+- Bounded package install preview/apply path.
+- Bounded directory creation preview/apply path.
+- No public arbitrary shell, Docker, Podman, or systemctl execution surface.
 
 ### External Packs
 - External packs are not bundled built-in abilities. Starter catalogs are

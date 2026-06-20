@@ -622,6 +622,8 @@ class AgentRuntime:
         self._pack_lifecycle_confirmations: dict[str, dict[str, Any]] = {}
         self._prerequisite_command_finder: Callable[[str], str | None] = shutil.which
         self._prerequisite_runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run
+        self._search_runtime_config_error: str | None = None
+        self._apply_persisted_search_config_if_allowed()
 
         registry_path = config.llm_registry_path
         if not registry_path:
@@ -12357,7 +12359,81 @@ class AgentRuntime:
         return self._safe_web_search_client
 
     def search_status(self) -> dict[str, Any]:
-        return self._safe_web_search().status()
+        status = self._safe_web_search().status()
+        status["persistent_config"] = {
+            "supported": True,
+            "path": "runtime_state/search_runtime_config.json",
+            "loaded": bool(getattr(self, "_search_persisted_config_loaded", False)),
+            "error": self._search_runtime_config_error,
+        }
+        if self._search_runtime_config_error and str(status.get("reason") or "") == "search_disabled":
+            status["reason"] = "invalid_persisted_search_config"
+            status["next_action"] = (
+                "Preview managed SearXNG setup again or remove the invalid persisted search_runtime_config.json after backing up state."
+            )
+        return status
+
+    def _search_runtime_config_path(self) -> Path | None:
+        explicit = str(os.getenv("AGENT_SEARCH_RUNTIME_CONFIG_PATH", "") or "").strip()
+        if explicit:
+            return Path(explicit).expanduser().resolve()
+        try:
+            return Path(self.config.db_path).expanduser().resolve().parent / "search_runtime_config.json"
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    @staticmethod
+    def _search_env_explicitly_configured() -> bool:
+        return any(name in os.environ for name in ("SEARCH_ENABLED", "SEARCH_PROVIDER", "SEARXNG_BASE_URL"))
+
+    def _apply_persisted_search_config_if_allowed(self) -> None:
+        self._search_persisted_config_loaded = False
+        if self._search_env_explicitly_configured():
+            return
+        path = self._search_runtime_config_path()
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            self._search_runtime_config_error = "persisted_search_config_unreadable"
+            return
+        if not isinstance(payload, dict):
+            self._search_runtime_config_error = "persisted_search_config_invalid"
+            return
+        enabled = bool(payload.get("search_enabled", False))
+        provider = str(payload.get("search_provider") or "searxng").strip().lower() or "searxng"
+        base_url = str(payload.get("searxng_base_url") or "").strip() or None
+        if enabled and (provider != "searxng" or not self._is_loopback_http_url(base_url)):
+            self._search_runtime_config_error = "persisted_search_config_untrusted"
+            return
+        self.config = replace(
+            self.config,
+            search_enabled=enabled,
+            search_provider=provider,
+            searxng_base_url=base_url,
+        )
+        self._search_persisted_config_loaded = True
+        self._search_runtime_config_error = None
+
+    def _persist_runtime_search_config(self) -> None:
+        path = self._search_runtime_config_path()
+        if path is None:
+            return
+        payload = {
+            "version": 1,
+            "search_enabled": bool(self.config.search_enabled),
+            "search_provider": str(self.config.search_provider or "searxng"),
+            "searxng_base_url": str(self.config.searxng_base_url or "") or None,
+            "setup_source": "managed_or_user_loopback",
+            "metadata_only": True,
+        }
+        if payload["searxng_base_url"] and not self._is_loopback_http_url(str(payload["searxng_base_url"])):
+            raise RuntimeError("refusing_to_persist_non_loopback_search_url")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        tmp_path.replace(path)
 
     def managed_services_status(self) -> dict[str, Any]:
         if self._managed_local_services is None:
@@ -12987,6 +13063,7 @@ class AgentRuntime:
 
     def _set_runtime_search_config(self, *, enabled: bool, provider: str, base_url: str | None) -> None:
         self.config = replace(self.config, search_enabled=bool(enabled), search_provider=str(provider or "searxng"), searxng_base_url=base_url)
+        self._persist_runtime_search_config()
         self._safe_web_search_client = None
         self._managed_local_services = None
 

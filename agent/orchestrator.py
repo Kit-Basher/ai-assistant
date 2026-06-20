@@ -2661,9 +2661,10 @@ class Orchestrator:
         normalized = " ".join(normalize_setup_text(text).replace("/", " ").lower().split())
         if "external pack" in normalized or "skill pack" in normalized or "imported pack" in normalized:
             return False
-        if re.search(r"\b(start|restart|bring up|turn on)\b.*\b(web search|searxng|search service|managed search)\b", normalized):
+        service_target = r"(?:search|web search|searxng|search service|managed search)"
+        if re.search(rf"\b(start|restart|bring up|turn on|repair|fix)\b.*\b{service_target}\b", normalized):
             return True
-        if re.search(r"\b(web search|searxng|search service|managed search)\b.*\b(start|restart|bring up|turn on)\b", normalized):
+        if re.search(rf"\b{service_target}\b.*\b(start|restart|bring up|turn on|repair|fix)\b", normalized):
             return True
         return bool(re.search(r"\b(can you|could you|please)?\s*(restart|start)\s+it\s+(for me|again)\b", normalized))
 
@@ -9306,7 +9307,9 @@ class Orchestrator:
         return discovery
 
     def _pack_capability_recommendation_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
-        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "shell_install_package":
+        route_kind = str(classify_runtime_chat_route(text).get("kind") or "").strip().lower()
+        route_reason = str(classify_runtime_chat_route(text).get("fallback_reason") or "").strip().lower()
+        if route_kind == "shell_install_package" or route_reason == "provided_text_transform":
             return None
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:
@@ -10944,7 +10947,10 @@ class Orchestrator:
         )
 
     def _capability_gap_planning_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
-        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "shell_install_package":
+        route_decision = classify_runtime_chat_route(text)
+        route_kind = str(route_decision.get("kind") or "").strip().lower()
+        route_reason = str(route_decision.get("fallback_reason") or "").strip().lower()
+        if route_kind == "shell_install_package" or route_reason == "provided_text_transform":
             return None
         external_pack_response = self._external_pack_knowledge_response(user_id, text)
         if external_pack_response is not None:

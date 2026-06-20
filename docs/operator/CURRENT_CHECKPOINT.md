@@ -1,8 +1,15 @@
-# Release Readiness Audit Baseline
+# Current Checkpoint Notes
 
-Date: 2026-06-15
-Checkpoint: `v0.2.0-live-usefulness-proof` at `e5dc9f8`
-Latest clean checkpoint before this pass: `e5dc9f8` Prove live search and external pack usefulness
+Current hardening note: as of 2026-06-20, the latest release track has moved
+past this original baseline through `v0.2.0-chat-reliability-harness` and the
+pre-VM hardening pass. Use `docs/operator/RELEASE_LEDGER.md`,
+`docs/operator/RELEASE_HARDENING_AUDIT.md`, and `python scripts/prove_ready.py`
+for current pre-VM readiness. The older details below remain useful as the
+live-usefulness baseline, not the final release claim.
+
+Historical baseline date: 2026-06-15
+Historical checkpoint: `v0.2.0-live-usefulness-proof` at `e5dc9f8`
+Latest clean checkpoint before that pass: `e5dc9f8` Prove live search and external pack usefulness
 
 This checkpoint captures the current operator/project baseline so future chats and helpers can resume from the same product and safety state.
 

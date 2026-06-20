@@ -1,6 +1,7 @@
 # Setup
 
-Canonical product/runtime source: [`PRODUCT_RUNTIME_SPEC.md`](/home/c/personal-agent/PRODUCT_RUNTIME_SPEC.md).
+Canonical product/runtime source: `docs/product/PROJECT_INTENT.md`.
+This setup guide is the canonical install/runtime path document.
 
 Canonical first-run command:
 
@@ -109,6 +110,7 @@ Canonical packaging/build path:
   - `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
 - canonical release gate: `python scripts/release_gate.py`
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
+- pre-VM readiness gate: `python scripts/prove_ready.py`
 - release, rollback, backup, and support-boundary guidance:
   - `docs/operator/RELEASE.md`
   - `docs/operator/OPERATIONS.md`
@@ -126,7 +128,8 @@ Canonical packaging/build path:
 5. Confirm the active copy:
    - `python -m agent split_status`
 6. If you are validating the install or preparing a release:
-   - `python scripts/release_gate.py`
+   - `python scripts/prove_ready.py`
+   - use `python scripts/release_gate.py` for the heavier packaging/release gate
 
 Manual fallback if you need to inspect the pieces individually:
 

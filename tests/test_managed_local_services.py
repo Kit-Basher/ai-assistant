@@ -1251,6 +1251,63 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertEqual("verified", row["status"])
         self.assertEqual("searxng_managed_service_setup", row["action_type"])
 
+    def test_verified_search_setup_persists_across_runtime_restart(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
+        plan = plan_payload["plan"]
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            result = runtime.apply_search_setup({"plan_id": plan["plan_id"], "confirmation_token": plan["confirmation_token"]})
+        self.assertTrue(result["ok"])
+
+        restarted = self._runtime(search_enabled=False, endpoint=None)
+
+        self.assertTrue(restarted.config.search_enabled)
+        self.assertEqual("http://127.0.0.1:8888", restarted.config.searxng_base_url)
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            status = restarted.search_status()
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["available"])
+        self.assertTrue(status["persistent_config"]["loaded"])
+
+    def test_persisted_search_config_reports_stopped_endpoint_as_repair_needed(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        runtime._set_runtime_search_config(enabled=True, provider="searxng", base_url="http://127.0.0.1:8888")  # noqa: SLF001
+
+        restarted = self._runtime(search_enabled=False, endpoint=None)
+        offline_opener = mock.Mock()
+        offline_opener.open.side_effect = OSError("offline")
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=offline_opener):
+            status = restarted.search_status()
+
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["endpoint_configured"])
+        self.assertFalse(status["available"])
+        self.assertEqual("endpoint_unreachable", status["reason"])
+        self.assertIn("Start or repair", status["next_action"])
+
+    def test_tampered_persisted_search_config_is_not_loaded(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        path = runtime._search_runtime_config_path()  # noqa: SLF001
+        self.assertIsNotNone(path)
+        assert path is not None
+        path.write_text(
+            json.dumps(
+                {
+                    "search_enabled": True,
+                    "search_provider": "searxng",
+                    "searxng_base_url": "https://search.example.test",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        restarted = self._runtime(search_enabled=False, endpoint=None)
+        status = restarted.search_status()
+
+        self.assertFalse(restarted.config.search_enabled)
+        self.assertEqual("invalid_persisted_search_config", status["reason"])
+        self.assertEqual("persisted_search_config_untrusted", status["persistent_config"]["error"])
+
     def test_search_setup_apply_consumes_confirmation(self) -> None:
         runtime = self._runtime(search_enabled=False, endpoint=None)
         plan_payload = runtime.search_setup_plan({"base_url": "http://127.0.0.1:8888"})
@@ -1404,7 +1461,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("podman")
         body, text = self._chat(runtime, "set up SearXNG")
 
-        self.assertIn("Web search is not set up yet", text)
+        self.assertTrue("Web search is not set up yet" in text or "Search is not currently working" in text)
         self.assertIn("Plan Mode confirmation:", text)
         self.assertIn("Will create: container:personal-agent-searxng.", text)
         self.assertIn("Will change: runtime_search_config, memory/local_services/searxng/settings.yml.", text)
@@ -1503,7 +1560,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             health_poll_interval_seconds=0.01,
         )
         _body, first_text = self._chat(runtime, "enable web search")
-        self.assertIn("Web search is not set up yet", first_text)
+        self.assertTrue("Web search is not set up yet" in first_text or "Search is not currently working" in first_text)
 
         with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
             body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "enable web search"}, {"role": "assistant", "content": first_text}])
@@ -1714,7 +1771,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
     def test_existing_created_container_does_not_get_silently_removed(self) -> None:
         runtime = self._runtime_with_engine("podman", existing=True)
         _body, first_text = self._chat(runtime, "set up web search")
-        self.assertIn("Web search is not set up yet", first_text)
+        self.assertTrue("Web search is not set up yet" in first_text or "Search is not currently working" in first_text)
 
         _body, second_text = self._chat(runtime, "yes", history=[{"role": "user", "content": "set up web search"}, {"role": "assistant", "content": first_text}])
 
@@ -1736,7 +1793,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         runtime = self._runtime_with_engine("podman")
         _body, text = self._chat(runtime, "search the web for local searxng setup")
 
-        self.assertIn("Web search is not set up yet", text)
+        self.assertTrue("Web search is not set up yet" in text or "Search is not currently working" in text)
         self.assertIn("in the background", text)
 
     def test_external_pack_trigger_language_cannot_trigger_execution(self) -> None:

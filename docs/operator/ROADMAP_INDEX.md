@@ -25,6 +25,9 @@ future work where to look first.
 | Persistent journal scope and limits | `docs/design/PERSISTENT_MANAGED_ACTION_JOURNAL.md` |
 | Local model provider boundaries | `docs/operator/LOCAL_MODEL_PROVIDER_SUPPORT.md` |
 | Install/operate/backup/doctor | `docs/operator/SETUP.md`, `docs/operator/OPERATIONS.md`, `docs/operator/BACKUP_RESTORE.md`, `docs/operator/doctor.md` |
+| Security boundary audit | `docs/operator/SECURITY_AUDIT.md` |
+| Release hardening audit | `docs/operator/RELEASE_HARDENING_AUDIT.md` |
+| Docs source-of-truth drift | `docs/operator/DOCS_SOURCE_OF_TRUTH_AUDIT.md` |
 
 ## Supporting Docs
 
@@ -91,9 +94,10 @@ because they overlap current docs.
 ## Current Next Work
 
 1. Keep the current track on final release proof, not broad new infrastructure.
-   The current checkpoint is `v0.2.0-live-usefulness-proof` at `e5dc9f8`.
+   The pre-VM hardening track now uses `python scripts/prove_ready.py` as the
+   compact local readiness gate before spending time on the fresh Debian VM.
    Live managed SearXNG search and starter text-pack use have been proven
-   through user-facing `/chat` and API paths.
+   through user-facing `/chat` and API paths when search is enabled.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured

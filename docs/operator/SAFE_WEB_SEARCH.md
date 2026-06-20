@@ -71,6 +71,13 @@ managed local service:
   successful SearXNG JSON probe. Managed setup waits up to 30 seconds for
   first boot, treats HTTP 200 as healthy, and retries with `GET` if `HEAD`
   does not prove readiness.
+- After verified setup, Personal Agent persists a small local
+  `search_runtime_config.json` next to the runtime database so stable restarts
+  and promotions can reuse the same loopback SearXNG endpoint. Explicit service
+  environment variables (`SEARCH_ENABLED`, `SEARCH_PROVIDER`,
+  `SEARXNG_BASE_URL`) still take precedence. If the persisted file is tampered
+  to a non-loopback or unsupported endpoint, the runtime refuses to load it and
+  `/search/status` reports `invalid_persisted_search_config`.
 - If health still fails, setup captures redacted diagnostics for the owned
   `personal-agent-searxng` container, including `ps -a` state and the last
   container logs, before rolling back only that container.
@@ -84,8 +91,9 @@ narrowly allowlisted for SearXNG; when it needs OS privilege, it prepares an
 operator-visible handoff instead of pretending the background service installed
 Podman. If no supported runtime or trusted endpoint is available and
 prerequisite setup cannot be prepared, setup is blocked and reports the next
-operator action. To keep search enabled after restarting Personal Agent, set
-the environment variables above in the service environment.
+operator action. If you want operator-managed configuration rather than the
+runtime state file, set the environment variables above in the service
+environment.
 
 ## Safety Boundaries
 
@@ -113,4 +121,4 @@ A lead can only point to a later source approval review. Source approval is stil
 
 ## Status
 
-Use `/search/status` or ask the assistant “what is your search status?” to check configuration. The status reports whether search is enabled, whether the SearXNG endpoint is configured, whether the JSON endpoint is reachable, a redacted base URL, setup source, blocked reason, and one next action. If search is disabled or missing `SEARXNG_BASE_URL`, the assistant should explain the missing requirement and offer the confirmation-gated local setup path without claiming search works.
+Use `/search/status` or ask the assistant “what is your search status?” to check configuration. The status reports whether search is enabled, whether the SearXNG endpoint is configured, whether the JSON endpoint is reachable, a redacted base URL, setup source, persisted-config state, blocked reason, and one next action. If search was never configured, `search_disabled` is expected. If managed search was configured but the endpoint is stopped, status should report `endpoint_unreachable` and offer managed repair/start. If the persisted config is invalid or untrusted, status reports `invalid_persisted_search_config` and does not enable search.

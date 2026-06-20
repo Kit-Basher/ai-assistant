@@ -41,7 +41,12 @@ Confirm:
 - check `GET /search/status` before treating internet/search as available
 - run `python scripts/chat_eval.py` when chat routing feels stale, contradictory,
   or dependent on manual daily-driver discovery
+- run `python scripts/llm_behavior_eval.py` when end-to-end assistant wording or
+  multi-turn behavior feels wrong but deterministic route classification passes
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
+- run `python scripts/prove_ready.py` for the compact pre-VM readiness gate; it
+  distinguishes release-blocking failures from optional-runtime warnings such
+  as isolated search being disabled
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:
@@ -184,6 +189,18 @@ Every release should record:
 
 Template: `docs/operator/RELEASE_NOTES_TEMPLATE.md`
 
+## Pre-VM Readiness Gate
+
+Before the expensive fresh Debian VM proof, run:
+
+- `python scripts/prove_ready.py`
+
+This command runs core compile checks, deterministic chat evals, release smoke,
+daily-driver smoke, external-pack safety smoke, core workflow proof, and
+whitespace checks. Treat `FAIL` as release-blocking. Treat isolated search
+`BLOCKED` as an expected warning only when the command says search is disabled
+or unconfigured rather than broken.
+
 ## Live Smoke Promotion Criteria
 
 Keep these as post-release operator checks until they are boring enough to
@@ -243,9 +260,9 @@ to 30 seconds for first boot, accepts HTTP 200 as healthy, and retries with
 redacted `ps -a` and `logs --tail 120`
 diagnostics for `personal-agent-searxng` before rolling back that owned
 container. It updates the running Personal Agent search configuration only
-after the SearXNG JSON endpoint verifies. To keep search enabled after restart,
-set `SEARCH_ENABLED=1`, `SEARCH_PROVIDER=searxng`, and `SEARXNG_BASE_URL` in
-the service environment.
+after the SearXNG JSON endpoint verifies, then persists a small loopback-only
+runtime search config next to the runtime database. Explicit service
+environment variables still override that persisted state when set.
 
 ## Core Workflow Proof
 

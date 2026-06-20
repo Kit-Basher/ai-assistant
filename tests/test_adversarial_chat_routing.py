@@ -251,6 +251,28 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
         self.assertEqual(["telegram_status"], response.data.get("used_tools"))
         self.assertNotIn("open Telegram", response.text.lower())
 
+    def test_provided_text_transform_does_not_trigger_pack_capability_flow(self) -> None:
+        orchestrator = self._orchestrator()
+
+        response = orchestrator.handle_message("rewrite this: what is dots.tts", "user1")
+
+        self.assertEqual("generic_chat", response.data.get("route"))
+        self.assertNotIn("pack_acquisition", response.data.get("used_tools", []))
+        self.assertNotIn("voice output", response.text.lower())
+
+    def test_plain_restart_search_uses_managed_service_path_not_generic_chat(self) -> None:
+        orchestrator = self._orchestrator()
+
+        response = orchestrator.handle_message("can you restart search for me?", "user1")
+
+        self.assertEqual("action_tool", response.data.get("route"))
+        self.assertIn("managed_local_services", response.data.get("used_tools", []))
+        self.assertFalse(response.data.get("used_llm"))
+        lowered = response.text.lower()
+        self.assertNotIn("podman run", lowered)
+        self.assertNotIn("docker run", lowered)
+        self.assertNotIn("sudo apt", lowered)
+
     def test_package_install_preview_does_not_execute(self) -> None:
         orchestrator = self._orchestrator()
 
@@ -260,3 +282,15 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
         self.assertIn("say yes to continue", response.text.lower())
         self.assertIn("no to cancel", response.text.lower())
         self.assertFalse(response.data.get("used_llm"))
+
+    def test_arbitrary_container_commands_are_blocked_not_generic_chat(self) -> None:
+        for message in ("podman run nginx", "docker run nginx", "can you run podman ps"):
+            with self.subTest(message=message):
+                orchestrator = self._orchestrator()
+
+                response = orchestrator.handle_message(message, "user1")
+
+                self.assertEqual("action_tool", response.data.get("route"))
+                self.assertIn("shell", response.data.get("used_tools", []))
+                self.assertFalse(response.data.get("used_llm"))
+                self.assertTrue("can't run" in response.text.lower() or "couldn't complete" in response.text.lower())
