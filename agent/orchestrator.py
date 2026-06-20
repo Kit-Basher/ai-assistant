@@ -1989,8 +1989,7 @@ class Orchestrator:
             "skip_epistemic_gate": True,
             "ok": bool(ok),
         }
-        if skip_post_response_hooks or str(route or "").strip().lower() == "model_status":
-            data["skip_post_response_hooks"] = True
+        data["skip_post_response_hooks"] = True
         if error_kind:
             data["error_kind"] = str(error_kind).strip()
         if next_question:
@@ -16156,8 +16155,9 @@ class Orchestrator:
         payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
         normalized_messages = self._normalize_chat_messages(context.get("messages"), text)
         explicit_memory_context_text = str(context.get("memory_context_text") or "").strip()
+        memory_disabled_for_turn = bool(context.get("memory_disabled_for_turn", False))
         selected_memory_context_text = ""
-        if not explicit_memory_context_text:
+        if not memory_disabled_for_turn and not explicit_memory_context_text:
             selected_memory_context_text = self._selective_chat_memory_context(user_id, text)
         preexisting_memory_context_text = explicit_memory_context_text or selected_memory_context_text
         preexisting_memory_context_source = (
@@ -16165,7 +16165,7 @@ class Orchestrator:
             if explicit_memory_context_text
             else ("selective" if selected_memory_context_text else None)
         )
-        used_memory = bool(preexisting_memory_context_text) or len(normalized_messages) > 1
+        used_memory = False if memory_disabled_for_turn else bool(preexisting_memory_context_text) or len(normalized_messages) > 1
         runtime_adapter_used = bool(self._chat_runtime_adapter)
         # Final SAFE MODE/frontdoor containment guard. Deterministic assistant
         # handling should still win even if a grounded request drifted this far.
@@ -16212,26 +16212,40 @@ class Orchestrator:
             return unmatched_response
         if self._looks_like_working_context_rewind_prompt(text):
             return self._assistant_memory_overview_response(user_id, query_text=text)
-        working_memory_payload = self._prepare_working_memory_for_chat(
-            user_id=user_id,
-            text=text,
-            payload=dict(payload),
-            thread_id=str(context.get("thread_id") or "").strip() or None,
-            messages=normalized_messages,
-            memory_context_text=preexisting_memory_context_text,
-            memory_context_source=preexisting_memory_context_source,
-        )
-        normalized_messages = (
-            list(working_memory_payload.get("messages"))
-            if isinstance(working_memory_payload.get("messages"), list)
-            else normalized_messages
-        )
-        memory_context_text = str(working_memory_payload.get("memory_context_text") or "").strip()
-        memory_diagnostics = (
-            dict(working_memory_payload.get("memory_diagnostics"))
-            if isinstance(working_memory_payload.get("memory_diagnostics"), dict)
-            else {}
-        )
+        if memory_disabled_for_turn:
+            memory_context_text = ""
+            memory_diagnostics = {
+                "used": False,
+                "reason": "disabled_by_user_for_turn",
+                "context_chars": 0,
+                "sources": {
+                    "payload_context": False,
+                    "selective_context": False,
+                    "working_memory": False,
+                    "client_history": False,
+                },
+            }
+        else:
+            working_memory_payload = self._prepare_working_memory_for_chat(
+                user_id=user_id,
+                text=text,
+                payload=dict(payload),
+                thread_id=str(context.get("thread_id") or "").strip() or None,
+                messages=normalized_messages,
+                memory_context_text=preexisting_memory_context_text,
+                memory_context_source=preexisting_memory_context_source,
+            )
+            normalized_messages = (
+                list(working_memory_payload.get("messages"))
+                if isinstance(working_memory_payload.get("messages"), list)
+                else normalized_messages
+            )
+            memory_context_text = str(working_memory_payload.get("memory_context_text") or "").strip()
+            memory_diagnostics = (
+                dict(working_memory_payload.get("memory_diagnostics"))
+                if isinstance(working_memory_payload.get("memory_diagnostics"), dict)
+                else {}
+            )
         if memory_diagnostics:
             used_memory = bool(memory_diagnostics.get("used", used_memory))
         payload = dict(payload)
@@ -18345,7 +18359,11 @@ class Orchestrator:
         chat_context: dict[str, Any] | None = None,
     ) -> OrchestratorResponse:
         orchestrator_started = time.monotonic()
-        response = self._handle_message_impl(text, user_id, chat_context=chat_context)
+        context = dict(chat_context) if isinstance(chat_context, dict) else {}
+        memory_disabled_for_turn, _ = memory_ingest.parse_memory_override(text)
+        if memory_disabled_for_turn:
+            context["memory_disabled_for_turn"] = True
+        response = self._handle_message_impl(text, user_id, chat_context=context)
         orchestrator_timing_ms: dict[str, int] = {
             "message_impl_ms": int(max(0.0, time.monotonic() - orchestrator_started) * 1000),
         }
@@ -18379,34 +18397,38 @@ class Orchestrator:
             if "runtime_ready_ms" in guard_timing_ms:
                 orchestrator_timing_ms["runtime_ready_ms"] = guard_timing_ms["runtime_ready_ms"]
         remember_started = time.monotonic()
-        self._remember_interpretable_result(
-            user_id=user_id,
-            user_text=text,
-            response=final_response,
-        )
+        memory_disabled_for_turn = bool(context.get("memory_disabled_for_turn", False))
+        if not memory_disabled_for_turn:
+            self._remember_interpretable_result(
+                user_id=user_id,
+                user_text=text,
+                response=final_response,
+            )
         orchestrator_timing_ms["remember_interpretable_result_ms"] = int(
             max(0.0, time.monotonic() - remember_started) * 1000
         )
         chat_memory_started = time.monotonic()
-        try:
-            self._record_chat_working_memory_turn(
-                user_id=user_id,
-                role="assistant",
-                text=final_response.text,
-                chat_context=chat_context,
-            )
-        except Exception:
-            pass
+        if not memory_disabled_for_turn:
+            try:
+                self._record_chat_working_memory_turn(
+                    user_id=user_id,
+                    role="assistant",
+                    text=final_response.text,
+                    chat_context=context,
+                )
+            except Exception:
+                pass
         orchestrator_timing_ms["chat_memory_turn_ms"] = int(max(0.0, time.monotonic() - chat_memory_started) * 1000)
         memory_action_started = time.monotonic()
-        try:
-            self._memory_runtime.record_agent_action(
-                user_id,
-                final_response.text,
-                action_kind=self._memory_action_kind_for_response(text=text, response=final_response),
-            )
-        except Exception:
-            pass
+        if not memory_disabled_for_turn:
+            try:
+                self._memory_runtime.record_agent_action(
+                    user_id,
+                    final_response.text,
+                    action_kind=self._memory_action_kind_for_response(text=text, response=final_response),
+                )
+            except Exception:
+                pass
         orchestrator_timing_ms["memory_action_ms"] = int(max(0.0, time.monotonic() - memory_action_started) * 1000)
         orchestrator_timing_ms["post_response_hooks_ms"] = int(max(0.0, time.monotonic() - post_hooks_started) * 1000)
         orchestrator_timing_ms["total_ms"] = int(max(0.0, time.monotonic() - orchestrator_started) * 1000)
@@ -18473,25 +18495,29 @@ class Orchestrator:
             requested_thread_id = str(context.get("thread_id") or "").strip()
             if requested_thread_id:
                 self._set_active_thread_id_for_user(user_id, requested_thread_id)
-            override, cleaned_text = memory_ingest.parse_memory_override(text)
+            memory_disabled_for_turn, cleaned_text = memory_ingest.parse_memory_override(text)
             cmd = parse_command(text)
             continuity_health_before = self._memory_runtime.inspect_user_state(user_id)
             if cmd and cmd.name == "nomem":
                 cmd = None
                 text = cleaned_text
-            effective_user_text = cleaned_text if override else text
+                memory_disabled_for_turn = True
+            effective_user_text = cleaned_text if memory_disabled_for_turn else text
+            if memory_disabled_for_turn:
+                context["memory_disabled_for_turn"] = True
             self._memory_runtime.clear_expired_pending_items(user_id)
             if str(effective_user_text or "").strip() and not str(effective_user_text).strip().startswith("/"):
-                self._memory_runtime.record_user_request(user_id, str(effective_user_text))
-                try:
-                    self._record_chat_working_memory_turn(
-                        user_id=user_id,
-                        role="user",
-                        text=str(effective_user_text),
-                        chat_context=context,
-                    )
-                except Exception:
-                    pass
+                if not memory_disabled_for_turn:
+                    self._memory_runtime.record_user_request(user_id, str(effective_user_text))
+                    try:
+                        self._record_chat_working_memory_turn(
+                            user_id=user_id,
+                            role="user",
+                            text=str(effective_user_text),
+                            chat_context=context,
+                        )
+                    except Exception:
+                        pass
             normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
             if not cmd and self._looks_like_context_reset_request(effective_user_text):
                 thread_id = self._active_thread_id_for_user(user_id)
@@ -18575,17 +18601,18 @@ class Orchestrator:
                             runtime_mode=self._tool_runtime_mode(),
                         )
             if cmd:
-                try:
-                    memory_ingest.ingest_event(
-                        self.db,
-                        user_id,
-                        "user",
-                        cleaned_text if override else text,
-                        [cmd.name],
-                        override=override,
-                    )
-                except (TypeError, ValueError, sqlite3.Error, OSError):
-                    pass
+                if not memory_disabled_for_turn:
+                    try:
+                        memory_ingest.ingest_event(
+                            self.db,
+                            user_id,
+                            "user",
+                            text,
+                            [cmd.name],
+                            override=False,
+                        )
+                    except (TypeError, ValueError, sqlite3.Error, OSError):
+                        pass
                 skip_memory_tool_repair = bool(
                     cmd.name == "memory"
                     and not bool(continuity_health_before.get("healthy", True))
@@ -20466,7 +20493,7 @@ class Orchestrator:
             if onboarding_response is not None:
                 return onboarding_response
 
-            runtime_text = cleaned_text if override else text
+            runtime_text = cleaned_text if memory_disabled_for_turn else text
             if not runtime_text.strip().startswith("/"):
                 runtime_route_decision = classify_runtime_chat_route(runtime_text)
                 runtime_route_kind = str(runtime_route_decision.get("kind") or "").strip().lower()
@@ -20876,7 +20903,7 @@ class Orchestrator:
             if reply_action == "accepted" and pending:
                 return self._deliver_pending_opinion(user_id, pending)
 
-            if override:
+            if memory_disabled_for_turn:
                 text = cleaned_text
             opinion_requested = opinion_gate.is_opinion_request(text)
 
@@ -21142,18 +21169,19 @@ class Orchestrator:
             decision = route_message(user_id, text, intent_ctx)
             if decision.get("type") != "greeting":
                 self._last_offer_topic.pop(user_id, None)
-            try:
-                topic_tags = self._topic_tags_for_decision(decision)
-                memory_ingest.ingest_event(
-                    self.db,
-                    user_id,
-                    "user",
-                    text,
-                    topic_tags,
-                    override=override,
-                )
-            except (TypeError, ValueError, sqlite3.Error, OSError):
-                pass
+            if not memory_disabled_for_turn:
+                try:
+                    topic_tags = self._topic_tags_for_decision(decision)
+                    memory_ingest.ingest_event(
+                        self.db,
+                        user_id,
+                        "user",
+                        text,
+                        topic_tags,
+                        override=False,
+                    )
+                except (TypeError, ValueError, sqlite3.Error, OSError):
+                    pass
 
             if decision.get("type") == "disk_changes":
                 report = self._disk_changes_report(user_id)

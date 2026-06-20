@@ -230,6 +230,7 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
             with self.subTest(message=message):
                 orchestrator = self._orchestrator()
                 thread_id = self._add_pending_clarification(orchestrator)
+                self.db.set_user_pref("show_summary", "off")
 
                 response = orchestrator.handle_message(message, "user1")
                 pending = orchestrator._memory_runtime.list_pending_items(  # noqa: SLF001
@@ -241,6 +242,7 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
                 self.assertEqual("assistant_clarification", response.data.get("route"))
                 self.assertTrue(response.data.get("runtime_payload", {}).get("stale_context_cleared"))
                 self.assertTrue(all(row.get("status") == PENDING_STATUS_ABORTED for row in pending))
+                self.assertEqual("off", self.db.get_user_pref("show_summary"))
 
     def test_telegram_status_uses_local_status_not_generic_advice(self) -> None:
         orchestrator = self._orchestrator()
@@ -294,3 +296,38 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
                 self.assertIn("shell", response.data.get("used_tools", []))
                 self.assertFalse(response.data.get("used_llm"))
                 self.assertTrue("can't run" in response.text.lower() or "couldn't complete" in response.text.lower())
+
+    def test_deterministic_status_and_preview_routes_do_not_call_llm(self) -> None:
+        cases = (
+            ("give me a runtime check", "runtime_status"),
+            ("is telegram working?", "runtime_status"),
+            ("is search working?", "action_tool"),
+            ("install htop", "action_tool"),
+            ("can you restart search for me?", "action_tool"),
+        )
+        for message, route in cases:
+            with self.subTest(message=message):
+                llm = _FakeChatLLM(enabled=True, text="LLM should not be needed")
+                runtime_truth = _FakeRuntimeTruthService()
+                safe_root = os.path.join(self.tmpdir.name, f"workspace-{len(message)}")
+                os.makedirs(safe_root, exist_ok=True)
+                runtime_truth.shell_skill = ShellSkill(
+                    allowed_roots=[safe_root],
+                    base_dir=safe_root,
+                    sensitive_roots=[os.path.join(safe_root, "private")],
+                )
+                orchestrator = Orchestrator(
+                    db=self.db,
+                    skills_path=self.skills_path,
+                    log_path=self.log_path,
+                    timezone="UTC",
+                    llm_client=llm,
+                    runtime_truth_service=runtime_truth,
+                    chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+                )
+
+                response = orchestrator.handle_message(message, "user1")
+
+                self.assertEqual(route, response.data.get("route"))
+                self.assertFalse(response.data.get("used_llm"))
+                self.assertEqual([], llm.chat_calls)

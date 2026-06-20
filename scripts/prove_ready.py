@@ -44,6 +44,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "agent/doctor.py",
     "scripts/chat_eval.py",
     "scripts/llm_behavior_eval.py",
+    "scripts/perf_smoke.py",
     "scripts/prove_ready.py",
 )
 
@@ -57,6 +58,7 @@ def _gates() -> list[Gate]:
         Gate("py_compile core files", (sys.executable, "-m", "py_compile", *CORE_PY_COMPILE), 120),
         Gate("chat_eval deterministic adversarial routing", (sys.executable, "scripts/chat_eval.py"), 180),
         Gate("llm_behavior_eval deterministic e2e behavior", (sys.executable, "scripts/llm_behavior_eval.py"), 180),
+        Gate("perf_smoke read-only latency smoke", (sys.executable, "scripts/perf_smoke.py"), 180),
         Gate("release_smoke canonical smoke suite", (sys.executable, "scripts/release_smoke.py"), 420),
         Gate(
             "direct behavior release gates",
@@ -122,6 +124,13 @@ def _classify(gate: Gate, returncode: int, output: str) -> tuple[str, str, str]:
             return "WARN", "expected-isolated-proof", "prove_core_workflows.py marks nested release gates NOT_PROVEN by design; prove_ready.py runs the direct behavior gate separately above."
         if "blocked workflows: internet/search status" in lowered:
             return "WARN", "expected-isolated-proof", "Isolated proof search BLOCKED is expected unless trusted SearXNG is configured."
+    if gate.name.startswith("perf_smoke"):
+        failed = _extract_count("FAIL", output)
+        warned = _extract_count("WARN", output)
+        if failed:
+            return "FAIL", "release-blocking", "Fix the failing read-only performance/status probe before VM proof."
+        if warned:
+            return "WARN", "runtime-state", "One or more read-only latency probes exceeded the generous warning budget; inspect perf_smoke output."
     return "PASS", "none", "No action."
 
 

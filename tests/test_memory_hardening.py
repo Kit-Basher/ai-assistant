@@ -549,6 +549,69 @@ class TestMemoryHardening(unittest.TestCase):
         self.assertTrue(bool((tables.get("memory_items") or {}).get("exists")))
         self.assertGreaterEqual(((memory_v2.get("counts") or {}).get("memory_items_count") or 0), 0)
 
+    def test_working_memory_redacts_obvious_secrets_before_persisting(self) -> None:
+        db = self._init_memory_db()
+        try:
+            runtime_memory = MemoryRuntime(db)
+            state = WorkingMemoryState()
+            append_turn(
+                state,
+                role="user",
+                text=(
+                    "remember TELEGRAM_BOT_TOKEN=123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ "
+                    "OPENAI_API_KEY=sk-testsecretvalue password is hunter2 Authorization: Bearer abcdefghijklmnop"
+                ),
+            )
+            self.assertTrue(runtime_memory.save_working_memory_state("user1", state))
+            raw = db.get_user_pref("memory_runtime:user1:working_memory_state") or ""
+        finally:
+            db.close()
+
+        self.assertNotIn("123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ", raw)
+        self.assertNotIn("sk-testsecretvalue", raw)
+        self.assertNotIn("hunter2", raw)
+        self.assertNotIn("Bearer abcdefghijklmnop", raw)
+        self.assertIn("<redacted-secret>", raw)
+
+    def test_memory_runtime_last_request_and_action_redact_obvious_secrets(self) -> None:
+        db = self._init_memory_db()
+        try:
+            runtime_memory = MemoryRuntime(db)
+            runtime_memory.record_user_request("user1", "my token is API_KEY=supersecret123")
+            runtime_memory.record_agent_action("user1", "Authorization: Bearer abcdefghijklmnop")
+            last_request = db.get_user_pref("memory_runtime:user1:last_meaningful_user_request") or ""
+            last_action = db.get_user_pref("memory_runtime:user1:last_agent_action") or ""
+        finally:
+            db.close()
+
+        self.assertNotIn("supersecret123", last_request)
+        self.assertNotIn("abcdefghijklmnop", last_action)
+        self.assertIn("<redacted-secret>", last_request)
+        self.assertIn("Bearer <redacted-token>", last_action)
+
+    def test_nomem_turn_does_not_persist_working_memory_or_last_request(self) -> None:
+        runtime = AgentRuntime(_config(self.registry_path, self.db_path))
+        ok, body = runtime.chat(
+            {
+                "messages": [{"role": "user", "content": "do not use memory is telegram working?"}],
+                "user_id": "user1",
+                "thread_id": "thread-a",
+                "trace_id": "nomem-test",
+            }
+        )
+        self.assertTrue(ok, body)
+        meta = body.get("meta") if isinstance(body.get("meta"), dict) else {}
+        memory = meta.get("memory") if isinstance(meta.get("memory"), dict) else {}
+        self.assertFalse(bool(memory.get("used")))
+
+        db = self._init_memory_db()
+        try:
+            keys = {str(row.get("key") or "") for row in db.list_user_prefs()}
+        finally:
+            db.close()
+        self.assertNotIn("memory_runtime:user1:working_memory_state", keys)
+        self.assertNotIn("memory_runtime:user1:last_meaningful_user_request", keys)
+
 
 if __name__ == "__main__":
     unittest.main()
