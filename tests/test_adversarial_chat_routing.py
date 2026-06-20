@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 
+from tests.chat_eval_harness import all_route_cases, evaluate_route_case, run_conversation_evals
 from agent.orchestrator import Orchestrator
 from agent.shell_skill import ShellSkill
 from agent.setup_chat_flow import classify_runtime_chat_route
@@ -129,6 +130,31 @@ class TestAdversarialChatRoutingClassifier(unittest.TestCase):
         for message, intent, kind in cases:
             with self.subTest(message=message):
                 self.assertRoute(message, intent=intent, kind=kind)
+
+
+class TestChatEvalHarness(unittest.TestCase):
+    def test_intent_invariant_matrix_cases_pass(self) -> None:
+        cases = all_route_cases(include_generated=False, include_fixtures=True)
+        self.assertGreaterEqual(len(cases), 45)
+        for case in cases:
+            with self.subTest(case_id=case.case_id, message=case.message):
+                result = evaluate_route_case(case)
+                self.assertTrue(result.passed, "; ".join(result.failures))
+
+    def test_generated_fuzz_cases_preserve_invariants(self) -> None:
+        cases = tuple(case for case in all_route_cases(include_generated=True, include_fixtures=False) if case.generated)
+        self.assertGreaterEqual(len(cases), 1000)
+        for case in cases:
+            with self.subTest(case_id=case.case_id, message=case.message):
+                result = evaluate_route_case(case)
+                self.assertTrue(result.passed, "; ".join(result.failures))
+
+    def test_multi_turn_conversation_simulator_invariants_pass(self) -> None:
+        results = run_conversation_evals()
+        self.assertGreaterEqual(len(results), 4)
+        for result in results:
+            with self.subTest(case_id=result.case.case_id, message=result.case.message):
+                self.assertTrue(result.passed, "; ".join(result.failures))
 
 
 class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):

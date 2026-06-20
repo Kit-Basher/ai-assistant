@@ -36,6 +36,7 @@ class TestReleaseSmokeScripts(unittest.TestCase):
         self.assertIn("tests/test_desktop_launcher.py", rendered)
         self.assertIn("tests/test_first_run_release_smoke.py", rendered)
         self.assertIn("tests/test_webui_conversation_smoke.py", rendered)
+        self.assertIn("tests/test_adversarial_chat_routing.py", rendered)
         self.assertIn(
             "tests/test_memory_hardening.py::TestMemoryHardening::test_memory_status_reports_disabled_components_and_fresh_state",
             rendered,

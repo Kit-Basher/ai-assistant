@@ -687,6 +687,8 @@ def _looks_like_runtime_status_query(normalized: str) -> bool:
         return True
     if any(phrase in normalized for phrase in _RUNTIME_STATUS_PHRASES):
         return True
+    if re.search(r"\bi said status\b", normalized):
+        return True
     if any(
         phrase in normalized_space
         for phrase in (
@@ -1276,12 +1278,14 @@ def _contains_safe_web_search_suppression(working: str) -> bool:
         for phrase in (
             "do not search",
             "don't search",
+            "don t search",
             "dont search",
             "without searching",
             "without web search",
             "no web search",
             "no internet search",
             "don't look it up",
+            "don t look it up",
             "dont look it up",
         )
     )
@@ -1334,11 +1338,7 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
         or re.search(r"\b(any good|useful|worth|should|model|tool|library|project|people are talking about)\b", working)
     ):
         return True
-    if (
-        "?" in working
-        and re.search(r"\b(?:tts|agi|llm|mcp|ai|dev)\b", working)
-        and 2 <= len(working.split()) <= 6
-    ):
+    if re.search(r"\b(?:tts|agi|llm|mcp|ai|dev)\b", working) and 2 <= len(working.split()) <= 6:
         return True
     if re.search(
         r"\b(company|startup|project|library|package|tool|model|api|site|website|repo|github|channel|creator|streamer|plugin|sdk|app|service)\b",
@@ -1415,7 +1415,7 @@ def _looks_like_safe_web_search_suppressed_request(normalized: str) -> bool:
     if not working or not _contains_safe_web_search_suppression(working):
         return False
     stripped = re.sub(
-        r"\b(?:do not search|don't search|dont search|without searching|without web search|no web search|no internet search|don't look it up|dont look it up)\b",
+        r"\b(?:do not search|don't search|don t search|dont search|without searching|without web search|no web search|no internet search|don't look it up|don t look it up|dont look it up)\b",
         "",
         working,
     )
@@ -1810,6 +1810,12 @@ def _classify_shell_route(text: str | None, normalized: str) -> dict[str, Any] |
     if install_match is None:
         install_match = re.search(
             r"^\s*install\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\s*$",
+            raw_text,
+            re.IGNORECASE,
+        )
+    if install_match is None and re.search(r"\binstall\b", normalized_space):
+        install_match = re.search(
+            r"\binstall\s+(?:-y\s+)?(?P<package>[A-Za-z0-9][A-Za-z0-9+._-]{0,127})\b",
             raw_text,
             re.IGNORECASE,
         )

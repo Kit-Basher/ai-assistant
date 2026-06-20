@@ -39,8 +39,15 @@ Confirm:
 - check `GET /state` when the assistant sounds contradictory or stale
 - check `GET /packs/state` when pack behavior seems wrong
 - check `GET /search/status` before treating internet/search as available
+- run `python scripts/chat_eval.py` when chat routing feels stale, contradictory,
+  or dependent on manual daily-driver discovery
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
+
+When a live chat route is wrong, capture it as an eval case before fixing it:
+add a small JSON file under `tests/fixtures/bad_chat_cases/` with the user
+message, expected semantic intent/route/kind, and any `must_not_contain` text.
+Then run `python scripts/chat_eval.py`. Keep fixtures redacted and minimal.
 
 Development runtimes can retain old blocked smoke-test external packs from earlier
 manual or release-smoke runs. Treat them as local dev state when `/packs/state`

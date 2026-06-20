@@ -1,0 +1,13 @@
+{
+  "case_id": "live.dot_tts_lookup",
+  "category": "fixture/live regression",
+  "message": "can you look up dot.tts im wondering if it would be a good model to use for a project",
+  "expected_semantic_intent": "web_search",
+  "expected_route": "action_tool",
+  "expected_kind": "safe_web_search",
+  "expect_search": true,
+  "must_not_contain": [
+    "Linux Troubleshooting Workflow",
+    "voice output"
+  ]
+}
