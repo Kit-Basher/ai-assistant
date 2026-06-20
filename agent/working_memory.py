@@ -33,6 +33,13 @@ _DECISION_RE = re.compile(
 _OPEN_THREAD_RE = re.compile(
     r"(?i)\b(?:todo|next step|follow up|follow-up|need to|still need|unresolved|pending|investigate|fix|implement)\b"
 )
+_TELEGRAM_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
+_OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}\b")
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{12,}")
+_ASSIGNMENT_SECRET_RE = re.compile(
+    r"(?i)\b([A-Z0-9_]*(?:TOKEN|API[_-]?KEY|SECRET|PASSWORD|PASSWD)[A-Z0-9_]*\s*[:=]\s*)([^\s,;]+)"
+)
+_PASSWORD_PHRASE_RE = re.compile(r"(?i)\b(password|passphrase)\s+(?:is|=|:)\s*([^\s,;]+)")
 _TOOL_PREFIX = "Tool result:"
 
 
@@ -47,6 +54,19 @@ def estimate_text_tokens(text: str | None) -> int:
     tokenish = len(_TOKEN_RE.findall(cleaned))
     char_estimate = math.ceil(len(cleaned) / 4)
     return max(1, tokenish, char_estimate)
+
+
+def redact_memory_text(text: str | None) -> str:
+    """Remove obvious secret material before text is persisted as memory."""
+    cleaned = str(text or "")
+    if not cleaned:
+        return ""
+    cleaned = _TELEGRAM_TOKEN_RE.sub("<redacted-telegram-token>", cleaned)
+    cleaned = _OPENAI_KEY_RE.sub("<redacted-api-key>", cleaned)
+    cleaned = _BEARER_TOKEN_RE.sub("Bearer <redacted-token>", cleaned)
+    cleaned = _ASSIGNMENT_SECRET_RE.sub(lambda m: f"{m.group(1)}<redacted-secret>", cleaned)
+    cleaned = _PASSWORD_PHRASE_RE.sub(lambda m: f"{m.group(1)} is <redacted-secret>", cleaned)
+    return cleaned
 
 
 @dataclass(frozen=True)
@@ -452,7 +472,7 @@ def append_turn(
     topic_hint: str | None = None,
     references: list[str] | None = None,
 ) -> WorkingMemoryState:
-    cleaned = str(text or "").strip()
+    cleaned = redact_memory_text(text).strip()
     if not cleaned:
         return state
     if state.hot_turns:

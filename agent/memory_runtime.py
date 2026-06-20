@@ -26,6 +26,7 @@ from agent.working_memory import (
     WorkingMemoryState,
     build_working_memory_summary,
     normalize_working_memory_state,
+    redact_memory_text,
     working_memory_state_to_dict,
 )
 
@@ -498,7 +499,7 @@ class MemoryRuntime:
 
     @_with_runtime_lock
     def record_user_request(self, user_id: str, text: str) -> None:
-        cleaned = str(text or "").strip()
+        cleaned = redact_memory_text(text).strip()
         if not cleaned:
             return
         self._persist_text_revisioned(
@@ -512,7 +513,7 @@ class MemoryRuntime:
     def record_agent_action(self, user_id: str, text: str, *, action_kind: str | None = None) -> bool:
         if is_meta_action(action_kind):
             return False
-        cleaned = " ".join(str(text or "").split()).strip()
+        cleaned = " ".join(redact_memory_text(text).split()).strip()
         if not cleaned:
             return False
         return self._persist_text_revisioned(

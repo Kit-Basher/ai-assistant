@@ -26,6 +26,7 @@ future work where to look first.
 | Local model provider boundaries | `docs/operator/LOCAL_MODEL_PROVIDER_SUPPORT.md` |
 | Install/operate/backup/doctor | `docs/operator/SETUP.md`, `docs/operator/OPERATIONS.md`, `docs/operator/BACKUP_RESTORE.md`, `docs/operator/doctor.md` |
 | Security boundary audit | `docs/operator/SECURITY_AUDIT.md` |
+| Memory architecture/safety audit | `docs/operator/MEMORY_AUDIT.md` |
 | Release hardening audit | `docs/operator/RELEASE_HARDENING_AUDIT.md` |
 | Docs source-of-truth drift | `docs/operator/DOCS_SOURCE_OF_TRUTH_AUDIT.md` |
 

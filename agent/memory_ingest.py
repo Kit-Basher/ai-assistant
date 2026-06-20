@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any, Tuple
 
 
@@ -74,7 +75,29 @@ def ingest_event(
 
 def parse_memory_override(text: str) -> Tuple[bool, str]:
     """
-    Returns (override, cleaned_text).
-    Minimal behavior: no overrides supported.
+    Returns (memory_disabled_for_turn, cleaned_text).
+
+    This is intentionally narrow. It suppresses durable memory use for the
+    current chat turn only; it does not delete saved preferences or history.
     """
-    return False, text
+    raw = str(text or "")
+    normalized = " ".join(raw.strip().lower().split())
+    prefixes = (
+        "/nomem",
+        "do not use memory",
+        "don't use memory",
+        "dont use memory",
+        "do not use old context",
+        "don't use old context",
+        "dont use old context",
+        "ignore old context",
+        "without memory",
+    )
+    for prefix in prefixes:
+        if normalized == prefix:
+            return True, ""
+        if normalized.startswith(prefix + " "):
+            pattern = re.compile(re.escape(prefix), re.IGNORECASE)
+            cleaned = pattern.sub("", raw, count=1).strip(" ,:-")
+            return True, cleaned
+    return False, raw

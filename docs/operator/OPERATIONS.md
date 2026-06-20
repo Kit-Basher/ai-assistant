@@ -43,6 +43,8 @@ Confirm:
   or dependent on manual daily-driver discovery
 - run `python scripts/llm_behavior_eval.py` when end-to-end assistant wording or
   multi-turn behavior feels wrong but deterministic route classification passes
+- run `python scripts/perf_smoke.py` when the assistant feels slow; it is
+  read-only and reports generous latency warnings instead of flaky failures
 - run `python scripts/release_smoke.py` if you suspect a regression in the core path
 - run `python scripts/prove_ready.py` for the compact pre-VM readiness gate; it
   distinguishes release-blocking failures from optional-runtime warnings such
