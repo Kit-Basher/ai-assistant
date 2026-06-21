@@ -51,7 +51,7 @@ class RuntimeTruthService:
     def __init__(self, runtime: Any) -> None:
         self.runtime = runtime
 
-    _SNAPSHOT_CACHE_TTL_SECONDS = 2.0
+    _SNAPSHOT_CACHE_TTL_SECONDS = 10.0
 
     def _snapshot_cache(self) -> dict[str, dict[str, Any]]:
         cache = getattr(self, "_snapshot_cache_store", None)
@@ -446,6 +446,9 @@ class RuntimeTruthService:
         return build_failure_recovery("runtime_not_ready", current_state=runtime_mode, details=failure_code or None)
 
     def ready_status(self) -> dict[str, Any]:
+        return self._cached_snapshot("ready_status", self._ready_status_uncached)
+
+    def _ready_status_uncached(self) -> dict[str, Any]:
         observability = self.runtime._runtime_observability_context()
         safe_mode_target = self.runtime.safe_mode_target_status()
         telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
@@ -2575,8 +2578,8 @@ class RuntimeTruthService:
         }
 
     def setup_status(self) -> dict[str, Any]:
-        current_target = self.current_chat_target_status()
         target_truth = self.chat_target_truth()
+        current_target = target_truth
         inventory = self.model_inventory_status()
         active_provider = (
             str(
@@ -2771,6 +2774,9 @@ class RuntimeTruthService:
 
     def runtime_status(self, kind: str = "runtime_status") -> dict[str, Any]:
         normalized_kind = str(kind or "runtime_status").strip().lower() or "runtime_status"
+        return self._cached_snapshot(f"runtime_status:{normalized_kind}", lambda: self._runtime_status_uncached(normalized_kind))
+
+    def _runtime_status_uncached(self, normalized_kind: str) -> dict[str, Any]:
         if normalized_kind == "telegram_status":
             telegram = self.runtime.telegram_status()
             state = str(telegram.get("state") or "unknown").strip().lower() or "unknown"
@@ -2792,8 +2798,8 @@ class RuntimeTruthService:
             if isinstance(ready.get("runtime_status"), dict)
             else {}
         )
-        provider = str(target_truth.get("effective_provider") or current_target.get("provider") or self._default_provider_id() or "").strip().lower() or None
-        model = str(target_truth.get("effective_model") or current_target.get("model") or self._resolved_default_model() or "").strip() or None
+        provider = str(target_truth.get("effective_provider") or self._default_provider_id() or "").strip().lower() or None
+        model = str(target_truth.get("effective_model") or self._resolved_default_model() or "").strip() or None
         summary = normalize_persona_text(
             str(ready.get("message") or "").strip()
             if bool(ready.get("ready", False))

@@ -209,11 +209,19 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertEqual("127.0.0.1:8080:8080", payload["services"][0]["approved_container"]["bind"])
 
     def test_status_with_mocked_rootless_podman_presence(self) -> None:
+        timeouts: list[float] = []
+
+        def _runner(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+            _ = argv
+            timeouts.append(float(kwargs.get("timeout") or 0.0))
+            return subprocess.CompletedProcess(argv, 0, stdout="true", stderr="")
+
         detector = ManagedLocalServiceDetector(
             search_status_provider=lambda: {"enabled": False, "available": False, "endpoint_configured": False},
             command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
-            command_runner=lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 0, stdout="true", stderr=""),
+            command_runner=_runner,
             health_checker=lambda _url: False,
+            timeout_seconds=0.25,
         )
         payload = detector.status()
 
@@ -221,6 +229,19 @@ class TestManagedLocalServices(unittest.TestCase):
         self.assertTrue(payload["podman_available"])
         self.assertTrue(payload["podman_rootless"])
         self.assertEqual("podman", payload["services"][0]["preferred_engine"])
+        self.assertEqual([0.25], timeouts)
+
+    def test_status_does_not_probe_default_url_when_search_never_configured(self) -> None:
+        probes: list[str] = []
+        detector = ManagedLocalServiceDetector(
+            search_status_provider=lambda: {"enabled": False, "available": False, "endpoint_configured": False},
+            command_finder=lambda _name: None,
+            health_checker=lambda url: probes.append(url) or False,
+        )
+        payload = detector.status()
+
+        self.assertFalse(payload["services"][0]["reachable"])
+        self.assertEqual([], probes)
 
     def test_url_redaction_removes_credentials_and_token_query(self) -> None:
         redacted = redact_service_url("http://user:pass@127.0.0.1:8080/search?token=secret&q=test")
@@ -972,6 +993,32 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertFalse(payload["mutating_actions_enabled"])
         self.assertFalse(payload["docker_available"])
         self.assertEqual("searxng", payload["services"][0]["service_id"])
+
+    def test_managed_services_status_uses_short_read_only_cache(self) -> None:
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        calls = 0
+
+        def _runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            nonlocal calls
+            calls += 1
+            return subprocess.CompletedProcess(argv, 0, stdout="true", stderr="")
+
+        runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
+            search_status_provider=runtime.search_status,
+            command_finder=lambda name: "/usr/bin/podman" if name == "podman" else None,
+            command_runner=_runner,
+            health_checker=lambda _url: False,
+        )
+        runtime._managed_services_status_cache_ttl_seconds = 60.0  # noqa: SLF001
+
+        first = runtime.managed_services_status()
+        second = runtime.managed_services_status()
+        fresh = runtime.managed_services_status(force_refresh=True)
+
+        self.assertTrue(first["podman_available"])
+        self.assertTrue(second["podman_available"])
+        self.assertTrue(fresh["podman_available"])
+        self.assertEqual(2, calls)
 
     def test_search_status_disabled_has_blocked_next_action(self) -> None:
         runtime = self._runtime(search_enabled=False, endpoint=None)

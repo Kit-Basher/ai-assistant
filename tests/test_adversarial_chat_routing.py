@@ -325,9 +325,18 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
                     runtime_truth_service=runtime_truth,
                     chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
                 )
+                post_hook_calls: list[str] = []
+                orchestrator._remember_interpretable_result = lambda **_kwargs: post_hook_calls.append("remember")  # type: ignore[method-assign]  # noqa: SLF001
+                orchestrator._record_chat_working_memory_turn = lambda **_kwargs: post_hook_calls.append("working_memory")  # type: ignore[method-assign]  # noqa: SLF001
+                orchestrator._memory_runtime.record_agent_action = lambda *_args, **_kwargs: post_hook_calls.append("memory_action")  # type: ignore[method-assign]  # noqa: SLF001
+                orchestrator._memory_runtime.inspect_user_state = lambda *_args, **_kwargs: post_hook_calls.append("inspect_user_state") or {"healthy": True}  # type: ignore[method-assign]  # noqa: SLF001
+                orchestrator._memory_runtime.clear_expired_pending_items = lambda *_args, **_kwargs: post_hook_calls.append("clear_expired_pending") or 0  # type: ignore[method-assign]  # noqa: SLF001
+                orchestrator._memory_runtime.set_thread_state = lambda *_args, **_kwargs: post_hook_calls.append("set_thread_state")  # type: ignore[method-assign]  # noqa: SLF001
 
                 response = orchestrator.handle_message(message, "user1")
 
                 self.assertEqual(route, response.data.get("route"))
                 self.assertFalse(response.data.get("used_llm"))
                 self.assertEqual([], llm.chat_calls)
+                self.assertTrue(response.data.get("skip_post_response_hooks"))
+                self.assertEqual([], post_hook_calls)

@@ -2194,6 +2194,26 @@ class Orchestrator:
             },
         )
 
+    @staticmethod
+    def _looks_like_search_status_only_question(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        if any(phrase in normalized for phrase in ("set up", "setup", "start", "restart", "repair", "fix", "look up", "search for")):
+            return False
+        return "search" in normalized and any(
+            phrase in normalized
+            for phrase in (
+                "working",
+                "status",
+                "available",
+                "enabled",
+                "configured",
+                "reachable",
+                "running",
+            )
+        )
+
 
     def _managed_service_status_payload(self) -> dict[str, Any]:
         adapter = self._chat_runtime_adapter
@@ -2427,6 +2447,7 @@ class Orchestrator:
                     "mutated": False,
                 },
                 mutating=False,
+                skip_post_response_hooks=True,
             )
         text = "\n".join(
             [
@@ -2458,6 +2479,7 @@ class Orchestrator:
         status_payload: dict[str, Any],
         services_payload: dict[str, Any],
         status_check: bool = False,
+        read_only_status_check: bool = False,
     ) -> OrchestratorResponse:
         searxng = self._searxng_service_from_status(services_payload)
         if bool(status_payload.get("available")) or (searxng.get("enabled") and searxng.get("configured") and searxng.get("reachable")):
@@ -2481,6 +2503,41 @@ class Orchestrator:
                 },
             )
         engine = self._selected_managed_service_engine(services_payload, searxng)
+        if read_only_status_check:
+            base_url = str(status_payload.get("base_url") or searxng.get("url") or "http://127.0.0.1:8888").strip()
+            managed_hint = (
+                "The direct local SearXNG page will refuse connection until managed search is started again."
+                if bool(searxng.get("configured") or status_payload.get("endpoint_configured"))
+                else "Search has not been configured for this runtime yet."
+            )
+            next_step = (
+                "Say 'start search' or 'set up search' and I will show the managed-service Plan Mode preview."
+                if engine
+                else "Rootless Podman is the preferred managed-service engine; ask me to preview the Podman prerequisite setup."
+            )
+            return self._runtime_truth_response(
+                text="\n".join(
+                    [
+                        "Search is not currently working.",
+                        managed_hint,
+                        f"Configured local search page: {base_url}",
+                        next_step,
+                        "I did not fetch pages, run JavaScript, download files, import packs, or change state.",
+                    ]
+                ),
+                route="action_tool",
+                used_tools=["safe_web_search", "managed_local_services"],
+                ok=True,
+                skip_post_response_hooks=True,
+                payload={
+                    "type": "safe_web_search_status_unavailable",
+                    "service_id": "searxng",
+                    "search_status": status_payload,
+                    "services_status": services_payload,
+                    "selected_engine": engine or None,
+                    "mutated": False,
+                },
+            )
         if not engine:
             return self._managed_service_missing_engine_response(user_id, services_payload)
         adapter = self._chat_runtime_adapter
@@ -2643,6 +2700,7 @@ class Orchestrator:
                 "mutated": False,
             },
             mutating=False,
+            skip_post_response_hooks=True,
         )
 
     @staticmethod
@@ -2730,6 +2788,7 @@ class Orchestrator:
                     "stop_preview": preview_payload_from_runtime,
                     "mutated": False,
                 },
+                skip_post_response_hooks=True,
             )
         lines = [
             "I can stop and remove the Personal-Agent-managed web search service.",
@@ -2762,6 +2821,7 @@ class Orchestrator:
                 "mutated": False,
             },
             mutating=False,
+            skip_post_response_hooks=True,
         )
 
     def _safe_web_search_status_response(self, user_id: str, text: str) -> OrchestratorResponse:
@@ -2794,6 +2854,52 @@ class Orchestrator:
                     else "search_unavailable",
                 }
         ux = build_search_setup_ux(status_payload)
+        if self._looks_like_search_status_only_question(text):
+            base_url = str(status_payload.get("base_url") or "http://127.0.0.1:8888").strip()
+            if bool(status_payload.get("available")):
+                rendered_text = "\n".join(
+                    [
+                        "Assistant web search is available.",
+                        f"Direct local search page: {base_url}",
+                        "Use assistant search for metadata-only summaries; use the SearXNG page directly for links and result lists.",
+                        "Search results are untrusted metadata. I did not fetch pages, run JavaScript, download files, or import packs.",
+                    ]
+                )
+                ok = True
+                error_kind = None
+            else:
+                configured = bool(status_payload.get("endpoint_configured"))
+                managed_hint = (
+                    "The direct local SearXNG page will refuse connection until managed search is started again."
+                    if configured
+                    else "Search has not been configured for this runtime yet."
+                )
+                rendered_text = "\n".join(
+                    [
+                        "Search is not currently working.",
+                        managed_hint,
+                        f"Configured local search page: {base_url}" if configured else "No trusted SearXNG endpoint is configured.",
+                        "Say 'start search' or 'set up search' and I will show the managed-service Plan Mode preview.",
+                        "I did not fetch pages, run JavaScript, download files, import packs, or change state.",
+                    ]
+                )
+                ok = True
+                error_kind = None
+            return self._runtime_truth_response(
+                text=rendered_text,
+                route="action_tool",
+                used_tools=["safe_web_search"],
+                ok=ok,
+                error_kind=error_kind,
+                skip_post_response_hooks=True,
+                payload={
+                    "type": "safe_web_search_status",
+                    "summary": ux.message,
+                    "search_status": status_payload,
+                    "setup_ux": ux.to_dict(),
+                    "mutated": False,
+                },
+            )
         services_payload = self._managed_service_status_payload()
         if services_payload:
             return self._managed_service_setup_preview_response(
@@ -2801,6 +2907,7 @@ class Orchestrator:
                 status_payload=status_payload,
                 services_payload=services_payload,
                 status_check=True,
+                read_only_status_check=self._looks_like_search_status_only_question(text),
             )
         rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
         return self._runtime_truth_response(
@@ -13934,6 +14041,7 @@ class Orchestrator:
                         "scope": preview.get("scope"),
                     },
                 },
+                skip_post_response_hooks=True,
             )
         if not callable(getattr(truth, "shell_install_package", None)):
             return self._runtime_state_unavailable_response(
@@ -16977,11 +17085,11 @@ class Orchestrator:
         runtime_state = self._memory_runtime.get_thread_state(user_id)
         runtime_thread_id = str(runtime_state.get("thread_id") or "").strip()
         if runtime_thread_id:
-            self._set_active_thread_id_for_user(user_id, runtime_thread_id)
+            self._set_active_thread_id_for_user(user_id, runtime_thread_id, persist=False)
             return runtime_thread_id
         return self._default_thread_id(user_id)
 
-    def _set_active_thread_id_for_user(self, user_id: str, thread_id: str) -> None:
+    def _set_active_thread_id_for_user(self, user_id: str, thread_id: str, *, persist: bool = True) -> None:
         normalized = (thread_id or "").strip()
         if not normalized:
             return
@@ -16991,11 +17099,12 @@ class Orchestrator:
             "thread_created_at": now_iso,
             "thread_label": None,
         }
-        self._memory_runtime.set_thread_state(
-            user_id,
-            thread_id=normalized,
-            updated_at=int(datetime.now(timezone.utc).timestamp()),
-        )
+        if persist:
+            self._memory_runtime.set_thread_state(
+                user_id,
+                thread_id=normalized,
+                updated_at=int(datetime.now(timezone.utc).timestamp()),
+            )
 
     def _create_new_thread_id_for_user(self, user_id: str) -> str:
         base = self._default_thread_id(user_id)
@@ -18363,12 +18472,17 @@ class Orchestrator:
         memory_disabled_for_turn, _ = memory_ingest.parse_memory_override(text)
         if memory_disabled_for_turn:
             context["memory_disabled_for_turn"] = True
+        if self._should_skip_turn_memory_hooks(text):
+            context["skip_turn_memory_hooks"] = True
         response = self._handle_message_impl(text, user_id, chat_context=context)
         orchestrator_timing_ms: dict[str, int] = {
             "message_impl_ms": int(max(0.0, time.monotonic() - orchestrator_started) * 1000),
         }
         response_data = response.data if isinstance(response.data, dict) else {}
         skip_assistant_response_guard = bool(response_data.get("skip_post_response_hooks", False))
+        skip_memory_hooks = bool(context.get("skip_turn_memory_hooks", False)) or bool(
+            response_data.get("skip_memory_hooks", False)
+        )
         if bool(response_data.get("skip_epistemic_gate", False)):
             final_response = response
             orchestrator_timing_ms["epistemic_layer_ms"] = 0
@@ -18398,7 +18512,7 @@ class Orchestrator:
                 orchestrator_timing_ms["runtime_ready_ms"] = guard_timing_ms["runtime_ready_ms"]
         remember_started = time.monotonic()
         memory_disabled_for_turn = bool(context.get("memory_disabled_for_turn", False))
-        if not memory_disabled_for_turn:
+        if not memory_disabled_for_turn and not skip_memory_hooks:
             self._remember_interpretable_result(
                 user_id=user_id,
                 user_text=text,
@@ -18408,7 +18522,7 @@ class Orchestrator:
             max(0.0, time.monotonic() - remember_started) * 1000
         )
         chat_memory_started = time.monotonic()
-        if not memory_disabled_for_turn:
+        if not memory_disabled_for_turn and not skip_memory_hooks:
             try:
                 self._record_chat_working_memory_turn(
                     user_id=user_id,
@@ -18420,7 +18534,7 @@ class Orchestrator:
                 pass
         orchestrator_timing_ms["chat_memory_turn_ms"] = int(max(0.0, time.monotonic() - chat_memory_started) * 1000)
         memory_action_started = time.monotonic()
-        if not memory_disabled_for_turn:
+        if not memory_disabled_for_turn and not skip_memory_hooks:
             try:
                 self._memory_runtime.record_agent_action(
                     user_id,
@@ -18482,6 +18596,30 @@ class Orchestrator:
         kind = str(decision.get("kind") or "").strip().lower()
         return route != "generic_chat" or kind not in {"", "none", "generic_chat"}
 
+    @staticmethod
+    def _looks_like_deterministic_chat_route(text: str | None) -> bool:
+        decision = classify_runtime_chat_route(str(text or ""))
+        route = str(decision.get("route") or "").strip().lower()
+        kind = str(decision.get("kind") or "").strip().lower()
+        _ = route
+        return kind in {
+            "runtime_status",
+            "telegram_status",
+            "safe_web_search_status",
+            "safe_web_search",
+            "safe_web_search_clarify",
+            "safe_web_search_suppressed",
+            "shell_install_package",
+        }
+
+    def _should_skip_turn_memory_hooks(self, text: str | None) -> bool:
+        normalized = str(text or "")
+        return (
+            self._looks_like_deterministic_chat_route(normalized)
+            or self._looks_like_managed_service_start_restart_request(normalized)
+            or self._looks_like_managed_service_stop_request(normalized)
+        )
+
     def _handle_message_impl(
         self,
         text: str,
@@ -18492,12 +18630,16 @@ class Orchestrator:
         self._runner = Runner()
         try:
             context = dict(chat_context) if isinstance(chat_context, dict) else {}
+            initial_skip_turn_memory_hooks = bool(self._should_skip_turn_memory_hooks(text))
             requested_thread_id = str(context.get("thread_id") or "").strip()
             if requested_thread_id:
-                self._set_active_thread_id_for_user(user_id, requested_thread_id)
+                self._set_active_thread_id_for_user(
+                    user_id,
+                    requested_thread_id,
+                    persist=not initial_skip_turn_memory_hooks,
+                )
             memory_disabled_for_turn, cleaned_text = memory_ingest.parse_memory_override(text)
             cmd = parse_command(text)
-            continuity_health_before = self._memory_runtime.inspect_user_state(user_id)
             if cmd and cmd.name == "nomem":
                 cmd = None
                 text = cleaned_text
@@ -18505,9 +18647,18 @@ class Orchestrator:
             effective_user_text = cleaned_text if memory_disabled_for_turn else text
             if memory_disabled_for_turn:
                 context["memory_disabled_for_turn"] = True
-            self._memory_runtime.clear_expired_pending_items(user_id)
+            skip_turn_memory_hooks = bool(initial_skip_turn_memory_hooks or self._should_skip_turn_memory_hooks(effective_user_text))
+            if skip_turn_memory_hooks:
+                context["skip_turn_memory_hooks"] = True
+            continuity_health_before = (
+                {"healthy": True}
+                if skip_turn_memory_hooks
+                else self._memory_runtime.inspect_user_state(user_id)
+            )
+            if not skip_turn_memory_hooks:
+                self._memory_runtime.clear_expired_pending_items(user_id)
             if str(effective_user_text or "").strip() and not str(effective_user_text).strip().startswith("/"):
-                if not memory_disabled_for_turn:
+                if not memory_disabled_for_turn and not skip_turn_memory_hooks:
                     self._memory_runtime.record_user_request(user_id, str(effective_user_text))
                     try:
                         self._record_chat_working_memory_turn(
@@ -18555,6 +18706,36 @@ class Orchestrator:
                         "generic_fallback_allowed": False,
                     },
                 )
+            if (
+                not cmd
+                and skip_turn_memory_hooks
+                and str(effective_user_text or "").strip()
+                and not str(effective_user_text).strip().startswith("/")
+            ):
+                if self._looks_like_unbounded_install_request(effective_user_text):
+                    return self._unbounded_install_block_response(user_id, effective_user_text)
+                early_decision = classify_runtime_chat_route(effective_user_text)
+                early_kind = str(early_decision.get("kind") or "").strip().lower()
+                if early_kind == "safe_web_search_status":
+                    return self._safe_web_search_status_response(user_id, effective_user_text)
+                if early_kind == "safe_web_search_suppressed":
+                    return self._safe_web_search_suppressed_response(user_id, effective_user_text)
+                if early_kind == "safe_web_search_clarify":
+                    return self._safe_web_search_clarification_response(user_id, effective_user_text)
+                if early_kind == "safe_web_search":
+                    return self._safe_web_search_response(user_id, effective_user_text)
+                if early_kind == "telegram_status":
+                    return self._telegram_status_response()
+                if (
+                    early_kind == "shell_install_package"
+                    and str(early_decision.get("manager") or "").strip()
+                    and str(early_decision.get("package") or "").strip()
+                ):
+                    return self._shell_install_package_response(
+                        user_id,
+                        manager=str(early_decision.get("manager") or "").strip() or None,
+                        package=str(early_decision.get("package") or "").strip() or None,
+                    )
             seed_topic = self._working_context_seed_topic(effective_user_text)
             if seed_topic:
                 self._record_conversation_topic(user_id, seed_topic, "question")
@@ -18584,7 +18765,7 @@ class Orchestrator:
                 and cmd.name == "memory"
                 and not bool(continuity_health_before.get("healthy", True))
             )
-            if not skip_memory_thread_repair:
+            if not skip_memory_thread_repair and not skip_turn_memory_hooks:
                 self._memory_runtime.set_thread_state(
                     user_id,
                     runtime_mode=("READY" if self._llm_chat_available() else "BOOTSTRAP_REQUIRED"),

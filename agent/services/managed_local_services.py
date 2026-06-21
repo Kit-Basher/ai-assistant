@@ -1240,7 +1240,8 @@ class ManagedLocalServiceDetector:
             except Exception:
                 configured_url = ""
         expected_url = configured_url or spec.default_local_url
-        reachable = self._check_reachable(expected_url) if configured or _is_loopback_http_url(expected_url) else False
+        should_probe_reachability = (enabled or configured) and _is_loopback_http_url(expected_url)
+        reachable = self._check_reachable(expected_url) if should_probe_reachability else False
         if enabled and configured and reachable:
             next_step = "ready"
         elif not configured or not enabled:
@@ -1284,7 +1285,7 @@ class ManagedLocalServiceDetector:
                 argv,
                 capture_output=True,
                 text=True,
-                timeout=2,
+                timeout=self._timeout_seconds,
                 shell=False,
             )
         except Exception:

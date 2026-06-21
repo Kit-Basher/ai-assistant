@@ -615,9 +615,9 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         _body, text, meta = self._chat(runtime, "is search working?", session_id="search-working-disabled")
 
         self.assertEqual("action_tool", meta.get("route"))
-        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertEqual(["safe_web_search"], meta.get("used_tools", []))
         self.assertIn("Search is not currently working", text)
-        self.assertIn("Plan Mode confirmation", text)
+        self.assertIn("start search", text)
         self.assertNotIn("Assistant web search is available", text)
         self.assertNotIn("visit http://127.0.0.1:8888", text.lower())
 

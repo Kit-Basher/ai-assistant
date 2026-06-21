@@ -616,6 +616,12 @@ class AgentRuntime:
         self._runtime_events = RuntimeEventRecorder(runtime_id=self.runtime_id, max_events=100)
         self._safe_web_search_client: SafeWebSearchClient | None = None
         self._managed_local_services: ManagedLocalServiceDetector | None = None
+        self._managed_services_status_cache: dict[str, Any] | None = None
+        self._managed_services_status_cache_at = 0.0
+        self._managed_services_status_cache_ttl_seconds = 10.0
+        self._telegram_status_cache: dict[str, Any] | None = None
+        self._telegram_status_cache_at = 0.0
+        self._telegram_status_cache_ttl_seconds = 5.0
         self._managed_local_service_executor: ManagedLocalServiceExecutor | None = None
         self._search_setup_confirmations: dict[str, dict[str, Any]] = {}
         self._podman_prerequisite_confirmations: dict[str, dict[str, Any]] = {}
@@ -5545,14 +5551,21 @@ class AgentRuntime:
                 "next_action": "Run: python -m agent telegram_status",
             }
 
-    def telegram_status(self) -> dict[str, Any]:
+    def telegram_status(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._telegram_status_cache is not None
+            and now - self._telegram_status_cache_at <= self._telegram_status_cache_ttl_seconds
+        ):
+            return copy.deepcopy(self._telegram_status_cache)
         runtime_state = self._telegram_runtime_state()
         runner_status = (
             self._telegram_runner.status()
             if self._telegram_runner is not None and hasattr(self._telegram_runner, "status")
             else {}
         )
-        return {
+        payload = {
             "ok": True,
             "enabled": bool(runtime_state.get("enabled", False)),
             "configured": bool(runtime_state.get("token_configured", False)),
@@ -5578,6 +5591,9 @@ class AgentRuntime:
             "last_ts_iso": str(runner_status.get("last_ts_iso") or "") or None,
             "consecutive_failures": int(runner_status.get("consecutive_failures") or 0),
         }
+        self._telegram_status_cache = copy.deepcopy(payload)
+        self._telegram_status_cache_at = now
+        return copy.deepcopy(payload)
 
     @staticmethod
     def _ready_telegram_failure_code(telegram: Mapping[str, Any]) -> str | None:
@@ -12435,13 +12451,23 @@ class AgentRuntime:
         tmp_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
         tmp_path.replace(path)
 
-    def managed_services_status(self) -> dict[str, Any]:
+    def managed_services_status(self, *, force_refresh: bool = False) -> dict[str, Any]:
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and self._managed_services_status_cache is not None
+            and now - self._managed_services_status_cache_at <= self._managed_services_status_cache_ttl_seconds
+        ):
+            return copy.deepcopy(self._managed_services_status_cache)
         if self._managed_local_services is None:
             self._managed_local_services = ManagedLocalServiceDetector(
                 search_status_provider=self.search_status,
                 searxng_url_provider=lambda: self.config.searxng_base_url,
             )
-        return self._managed_local_services.status()
+        payload = self._managed_local_services.status()
+        self._managed_services_status_cache = copy.deepcopy(payload)
+        self._managed_services_status_cache_at = now
+        return copy.deepcopy(payload)
 
     def _managed_service_executor(self) -> ManagedLocalServiceExecutor:
         if self._managed_local_service_executor is None:
@@ -12724,6 +12750,8 @@ class AgentRuntime:
         if not verified:
             return {"ok": False, "error": "rootless_podman_not_usable" if present else "podman_not_found_after_install", "next_action": "Verify rootless Podman for this user, then retry SearXNG setup.", "mutated": True, "managed_action_journal": journal.to_dict()}
         self._managed_local_services = None
+        self._managed_services_status_cache = None
+        self._managed_services_status_cache_at = 0.0
         return {"ok": True, "mutated": True, "podman_present": True, "rootless_podman": True, "next_action": "Preview SearXNG setup again; it should select Podman.", "managed_action_journal": journal.to_dict()}
 
     @staticmethod
@@ -13066,6 +13094,8 @@ class AgentRuntime:
         self._persist_runtime_search_config()
         self._safe_web_search_client = None
         self._managed_local_services = None
+        self._managed_services_status_cache = None
+        self._managed_services_status_cache_at = 0.0
 
     @staticmethod
     def _is_loopback_http_url(url: str | None) -> bool:
@@ -24283,7 +24313,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                     try:
                         orchestrator = self.runtime.orchestrator()
                         request_thread_id = None
-                        if callable(getattr(self.runtime, "_chat_thread_id", None)):
+                        if not authoritative_runtime_route and callable(getattr(self.runtime, "_chat_thread_id", None)):
                             try:
                                 request_thread_id = self.runtime._chat_thread_id(payload, user_id=chat_user_id)
                             except Exception:
@@ -24294,7 +24324,10 @@ class APIServerHandler(BaseHTTPRequestHandler):
                                 str(input_text or ""),
                                 thread_id=request_thread_id,
                             )
-                            if callable(getattr(orchestrator, "assistant_followup_hint", None))
+                            if (
+                                not authoritative_runtime_route
+                                and callable(getattr(orchestrator, "assistant_followup_hint", None))
+                            )
                             else {}
                         )
                     except Exception:

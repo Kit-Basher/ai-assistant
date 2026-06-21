@@ -81,9 +81,15 @@ def _assistant_meta(payload: dict[str, Any]) -> dict[str, Any]:
 def _chat_detail(payload: dict[str, Any]) -> str:
     meta = _assistant_meta(payload)
     timings = meta.get("chat_timing_ms") if isinstance(meta.get("chat_timing_ms"), dict) else {}
+    orchestrator_timings = (
+        meta.get("orchestrator_timing_ms")
+        if isinstance(meta.get("orchestrator_timing_ms"), dict)
+        else {}
+    )
     return (
         f"route={meta.get('route')} used_llm={meta.get('used_llm')} "
-        f"used_tools={meta.get('used_tools')} timing_ms={timings}"
+        f"used_tools={meta.get('used_tools')} timing_ms={timings} "
+        f"orchestrator_timing_ms={orchestrator_timings}"
     )
 
 
