@@ -67,6 +67,10 @@ managed local service:
 - Docker fallback plans include `preferred_engine=podman`,
   `selected_engine=docker`, a `fallback_reason`, `rootless_expected=false` or
   unknown, and a Docker fallback warning before confirmation.
+- Podman detection checks the service `PATH` and approved absolute paths such as
+  `/usr/bin/podman`. Setup previews include `podman_found`, `podman_path`,
+  `podman_version`, rootless status, and detection source so operators can
+  distinguish “search not configured” from “Podman missing.”
 - Setup updates the running Personal Agent search configuration after a
   successful SearXNG JSON probe. Managed setup waits up to 30 seconds for
   first boot, treats HTTP 200 as healthy, and retries with `GET` if `HEAD`

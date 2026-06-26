@@ -19,7 +19,9 @@ from agent.services.managed_local_services import (
     DEFAULT_SEARXNG_SECRET_KEY,
     ManagedLocalServiceDetector,
     ManagedLocalServiceExecutor,
+    TRUSTED_CONTAINER_ENGINE_PATHS,
     redact_service_url,
+    trusted_command_path,
 )
 from tests.test_api_packs_endpoints import _HandlerForTest, _config
 from tests.test_assistant_behavior_release_gate import _MemoryHandlerForTest, _assistant_text
@@ -227,9 +229,24 @@ class TestManagedLocalServices(unittest.TestCase):
 
         self.assertFalse(payload["docker_available"])
         self.assertTrue(payload["podman_available"])
+        self.assertTrue(payload["podman_found"])
+        self.assertEqual("/usr/bin/podman", payload["podman_path"])
+        self.assertEqual("true", payload["podman_version"])
         self.assertTrue(payload["podman_rootless"])
         self.assertEqual("podman", payload["services"][0]["preferred_engine"])
-        self.assertEqual([0.25], timeouts)
+        self.assertEqual("PATH_OR_TRUSTED_ABSOLUTE_PATH", payload["detection_source"])
+        self.assertEqual([0.25, 0.25], timeouts)
+
+    def test_trusted_command_path_finds_podman_from_absolute_fallback_when_path_lookup_misses(self) -> None:
+        fake_bin = Path(self.tmpdir.name) / "podman"
+        fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_bin.chmod(0o755)
+
+        with mock.patch("agent.services.managed_local_services.shutil.which", return_value=None), mock.patch.dict(
+            TRUSTED_CONTAINER_ENGINE_PATHS,
+            {"podman": (str(fake_bin),), "docker": ()},
+        ):
+            self.assertEqual(str(fake_bin), trusted_command_path("podman"))
 
     def test_status_does_not_probe_default_url_when_search_never_configured(self) -> None:
         probes: list[str] = []
@@ -1018,7 +1035,9 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(first["podman_available"])
         self.assertTrue(second["podman_available"])
         self.assertTrue(fresh["podman_available"])
-        self.assertEqual(2, calls)
+        # Each uncached refresh probes rootless status and version; the middle
+        # call should come from the short read-only cache.
+        self.assertEqual(4, calls)
 
     def test_search_status_disabled_has_blocked_next_action(self) -> None:
         runtime = self._runtime(search_enabled=False, endpoint=None)
@@ -1068,6 +1087,9 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual("podman", plan["selected_engine"])
         self.assertEqual("podman", plan["preferred_engine"])
+        self.assertTrue(plan["podman_found"])
+        self.assertEqual("/usr/bin/podman", plan["podman_path"])
+        self.assertEqual("true", plan["podman_version"])
         self.assertTrue(plan["rootless_expected"])
         self.assertFalse(plan["requires_docker_fallback_confirmation"])
         self.assertIsNone(plan["fallback_reason"])
@@ -1520,10 +1542,14 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIn("Will delete: nothing.", text)
         self.assertIn("Rollback scope:", text)
         self.assertNotIn("using Podman", text)
+        self.assertNotIn("missing Podman", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
         self.assertEqual("127.0.0.1:8080:8080", setup.get("loopback_bind"))
         self.assertEqual("podman", setup.get("selected_engine"))
+        self.assertTrue(setup.get("podman_found"))
+        self.assertEqual("/usr/bin/podman", setup.get("podman_path"))
+        self.assertEqual("true", setup.get("podman_version"))
         self.assertEqual("podman", setup.get("preferred_engine"))
         self.assertFalse(setup.get("requires_docker_fallback_confirmation"))
         plan_mode = setup.get("plan_mode") if isinstance(setup.get("plan_mode"), dict) else {}

@@ -2623,6 +2623,9 @@ class Orchestrator:
         fallback_selected = str(plan.get("port") or "") == "8888" or ":8888:" in bind
         docker_fallback = engine == "docker" and not bool(services_payload.get("podman_rootless") or searxng.get("podman_rootless"))
         docker_warning = "Podman was not found. Docker is available, but it may use a root-level daemon."
+        podman_found = bool(services_payload.get("podman_found") or services_payload.get("podman_available") or searxng.get("podman_found") or searxng.get("podman_available"))
+        podman_path = str(services_payload.get("podman_path") or searxng.get("podman_path") or "").strip()
+        podman_version = str(services_payload.get("podman_version") or searxng.get("podman_version") or "").strip()
         if fallback_selected:
             lines = [
                 "Search is not currently working." if status_check else "Web search is not set up yet.",
@@ -2683,6 +2686,10 @@ class Orchestrator:
                 "type": "managed_local_service_setup_preview",
                 "service_id": "searxng",
                 "selected_engine": engine,
+                "podman_found": podman_found,
+                "podman_path": podman_path or None,
+                "podman_version": podman_version or None,
+                "detection_source": services_payload.get("detection_source") or searxng.get("detection_source"),
                 "action": "preview_only",
                 "approved_image": image,
                 "approved_container_name": name,

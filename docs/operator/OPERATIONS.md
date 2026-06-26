@@ -260,7 +260,11 @@ the prerequisite path. If privilege is required, apply returns an elevated
 terminal handoff for `sudo apt-get install -y podman`; the background API
 service must not run hidden sudo or store sudo passwords. Docker appears only as
 an explicit fallback plan with a warning, fallback reason, and Docker fallback
-confirmation flag. The first managed SearXNG container seeds and validates the
+confirmation flag. Podman detection uses the Personal Agent service `PATH` and
+approved absolute paths such as `/usr/bin/podman`; setup previews include
+`podman_found`, `podman_path`, `podman_version`, rootless status, and detection
+source so a missing search configuration is not mistaken for missing Podman.
+The first managed SearXNG container seeds and validates the
 approved owned `settings.yml` before mounting `/etc/searxng`; empty config
 mounts and arbitrary settings content are rejected. The seeded config enables
 JSON output for metadata-only safe search and creates or preserves a

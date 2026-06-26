@@ -44,6 +44,24 @@ SEARXNG_CONFIG_OWNERSHIP_HANDOFF_COMMANDS = (
     'sudo chown -R "$USER:$USER" ~/.local/share/personal-agent/memory/local_services/searxng',
     "chmod -R u+rwX ~/.local/share/personal-agent/memory/local_services/searxng",
 )
+TRUSTED_CONTAINER_ENGINE_PATHS = {
+    "podman": ("/usr/bin/podman", "/usr/local/bin/podman", "/bin/podman"),
+    "docker": ("/usr/bin/docker", "/usr/local/bin/docker", "/bin/docker"),
+}
+
+
+def trusted_command_path(name: str) -> str | None:
+    command = str(name or "").strip().lower()
+    if command not in TRUSTED_CONTAINER_ENGINE_PATHS:
+        return shutil.which(command)
+    found = shutil.which(command)
+    if found:
+        return found
+    for candidate in TRUSTED_CONTAINER_ENGINE_PATHS[command]:
+        path = Path(candidate)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+    return None
 
 
 @dataclass(frozen=True)
@@ -302,7 +320,7 @@ class ManagedLocalServiceExecutor:
         health_poll_interval_seconds: float = 1.0,
     ) -> None:
         self._managed_root = Path(managed_root).expanduser().resolve()
-        self._command_finder = command_finder or shutil.which
+        self._command_finder = command_finder or trusted_command_path
         self._runner = runner or subprocess.run
         self._health_checker = health_checker
         self._port_checker = port_checker or self._port_available
@@ -1182,7 +1200,7 @@ class ManagedLocalServiceDetector:
         timeout_seconds: float = 1.0,
     ) -> None:
         self._search_status_provider = search_status_provider
-        self._command_finder = command_finder or shutil.which
+        self._command_finder = command_finder or trusted_command_path
         self._command_runner = command_runner or subprocess.run
         self._health_checker = health_checker
         self._searxng_url_provider = searxng_url_provider
@@ -1207,6 +1225,14 @@ class ManagedLocalServiceDetector:
             "mutating_actions_enabled": False,
             "docker_available": docker_available,
             "podman_available": podman_available,
+            "docker_path": docker_path,
+            "podman_path": podman_path,
+            "podman_found": podman_available,
+            "docker_found": docker_available,
+            "podman_version": self._runtime_version(podman_path),
+            "docker_version": self._runtime_version(docker_path),
+            "detection_source": "PATH_OR_TRUSTED_ABSOLUTE_PATH",
+            "service_path": os.environ.get("PATH", ""),
             "podman_rootless": podman_rootless,
             "docker_rootless": docker_rootless,
             "services": [searxng],
@@ -1259,6 +1285,7 @@ class ManagedLocalServiceDetector:
             "next_step": next_step,
             "docker_available": docker_available,
             "podman_available": podman_available,
+            "podman_found": podman_available,
             "podman_rootless": podman_rootless,
             "docker_rootless": docker_rootless,
             "preferred_engine": "podman",
@@ -1302,6 +1329,24 @@ class ManagedLocalServiceDetector:
         if output in {"false", "0", "no"}:
             return False
         return None
+
+    def _runtime_version(self, command_path: str | None) -> str | None:
+        if not command_path:
+            return None
+        try:
+            result = self._command_runner(
+                [command_path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout_seconds,
+                shell=False,
+            )
+        except Exception:
+            return None
+        if int(getattr(result, "returncode", 1) or 0) != 0:
+            return None
+        value = " ".join(str(getattr(result, "stdout", "") or "").strip().split())
+        return value[:160] if value else None
 
     def _check_reachable(self, url: str) -> bool:
         if not _is_loopback_http_url(url):
