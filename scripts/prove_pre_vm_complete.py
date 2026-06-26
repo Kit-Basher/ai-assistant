@@ -44,6 +44,8 @@ def _command_checks() -> list[CommandCheck]:
     return [
         CommandCheck("prove_ready canonical gate", (sys.executable, "scripts/prove_ready.py"), 900),
         CommandCheck("backup_restore_proof bounded restore", (sys.executable, "scripts/backup_restore_proof.py"), 120),
+        CommandCheck("webui_robustness_smoke static/component smoke", (sys.executable, "scripts/webui_robustness_smoke.py"), 180),
+        CommandCheck("release_gate_matrix_smoke CI/live split", (sys.executable, "scripts/release_gate_matrix_smoke.py"), 60),
         CommandCheck("chat_eval adversarial routing", (sys.executable, "scripts/chat_eval.py"), 180),
         CommandCheck("llm_behavior_eval e2e behavior", (sys.executable, "scripts/llm_behavior_eval.py"), 180),
         CommandCheck("perf_smoke latency/status", (sys.executable, "scripts/perf_smoke.py"), 180, blocker_on_fail=False),
@@ -170,16 +172,18 @@ def _subsystems() -> list[Subsystem]:
             name="Web UI robustness",
             status="partial",
             blocker=False,
-            unknown=True,
+            unknown=False,
             evidence=(
                 "frontend build is covered by prove_ready when node_modules is present",
                 "chat autoscroll was fixed in prior work",
+                "scripts/webui_robustness_smoke.py runs frontend build, Node UI tests, and static chat robustness checks",
+                "docs/operator/WEB_UI_ROBUSTNESS.md documents send failure, busy state, refresh, cache, export/import, and manual UI checks",
             ),
             gaps=(
                 "No broad automated browser robustness suite for refresh/retry/large transcript/cache behavior.",
-                "Transcript export/import is not proven here.",
+                "Transcript import is documented as not implemented.",
             ),
-            next_action="Add Playwright/webui smoke for send failure, retry, refresh, cache-bust, and large transcript behavior.",
+            next_action="Before release, manually check refresh, hard-refresh after promotion, large transcript behavior, and export download.",
         ),
         Subsystem(
             name="Telegram runtime behavior",
@@ -240,16 +244,18 @@ def _subsystems() -> list[Subsystem]:
             name="Release/CI automation",
             status="partial",
             blocker=False,
-            unknown=True,
+            unknown=False,
             evidence=(
                 "prove_ready, release_smoke, chat_eval, llm_behavior_eval, perf_smoke, daily_driver_smoke, external_pack_safety_smoke, and prove_core_workflows exist",
                 "git diff --check is part of the gates",
+                "docs/operator/RELEASE_GATE_MATRIX.md defines CI-safe, local-runtime, and optional integration gates",
+                "scripts/release_gate_matrix_smoke.py verifies the documented split and confirms GitHub Actions avoids live local service gates",
             ),
             gaps=(
-                "CI runtime feasibility is not proven for all live/local-service checks.",
+                "Current GitHub Actions workflow is intentionally smaller than the full CI-safe matrix.",
                 "Fresh VM proof remains intentionally deferred.",
             ),
-            next_action="Split CI-safe deterministic gates from local-runtime gates, then run final VM proof.",
+            next_action="After VM proof, expand GitHub Actions with the remaining CI-safe deterministic gates.",
         ),
     ]
 
@@ -261,6 +267,8 @@ def _audit_doc_ready() -> tuple[bool, list[str]]:
         "docs/operator/SECURITY_AUDIT.md",
         "docs/operator/RELEASE_HARDENING_AUDIT.md",
         "docs/operator/DOCS_SOURCE_OF_TRUTH_AUDIT.md",
+        "docs/operator/WEB_UI_ROBUSTNESS.md",
+        "docs/operator/RELEASE_GATE_MATRIX.md",
     ]
     missing = [path for path in required if not _doc(path)]
     return not missing, missing

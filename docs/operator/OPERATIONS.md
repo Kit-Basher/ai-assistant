@@ -49,6 +49,9 @@ Confirm:
 - run `python scripts/prove_ready.py` for the compact pre-VM readiness gate; it
   distinguishes release-blocking failures from optional-runtime warnings such
   as isolated search being disabled
+- run `python scripts/prove_pre_vm_complete.py` before the expensive fresh VM
+  proof; it adds backup/restore, Web UI robustness, and CI/live gate split
+  checks
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:
@@ -196,12 +199,23 @@ Template: `docs/operator/RELEASE_NOTES_TEMPLATE.md`
 Before the expensive fresh Debian VM proof, run:
 
 - `python scripts/prove_ready.py`
+- `python scripts/prove_pre_vm_complete.py`
 
-This command runs core compile checks, deterministic chat evals, release smoke,
-daily-driver smoke, external-pack safety smoke, core workflow proof, and
-whitespace checks. Treat `FAIL` as release-blocking. Treat isolated search
-`BLOCKED` as an expected warning only when the command says search is disabled
-or unconfigured rather than broken.
+`prove_ready.py` runs core compile checks, deterministic chat evals, release
+smoke, daily-driver smoke, external-pack safety smoke, core workflow proof, and
+whitespace checks. `prove_pre_vm_complete.py` adds the bounded backup/restore
+proof, Web UI robustness smoke, CI/live gate matrix smoke, and subsystem audit
+table. Treat `FAIL` as release-blocking. Treat isolated search `BLOCKED` as an
+expected warning only when the command says search is disabled or unconfigured
+rather than broken.
+
+Gate split:
+
+- CI-safe gates are documented in `docs/operator/RELEASE_GATE_MATRIX.md` and do
+  not require local services.
+- local-runtime gates require the installed Personal Agent API/runtime.
+- optional integration gates require configured SearXNG, Telegram, local model,
+  or similar services and must report `BLOCKED` when those are absent.
 
 ## Live Smoke Promotion Criteria
 

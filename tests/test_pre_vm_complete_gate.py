@@ -16,13 +16,20 @@ class TestPreVmCompleteGate(unittest.TestCase):
         self.assertIn("dry-run restore", " ".join(backup.evidence))
         self.assertIn("version mismatch", " ".join(backup.evidence))
 
-    def test_unknown_areas_are_not_marked_complete(self) -> None:
-        subsystems = prove_pre_vm_complete._subsystems()  # noqa: SLF001
-        unknowns = [row for row in subsystems if row.unknown]
+    def test_former_unknown_areas_are_documented_partials(self) -> None:
+        subsystems = {row.name: row for row in prove_pre_vm_complete._subsystems()}  # noqa: SLF001
 
-        self.assertGreaterEqual(len(unknowns), 1)
-        self.assertTrue(any(row.name == "Web UI robustness" for row in unknowns))
-        self.assertTrue(any(row.status != "hardened" for row in unknowns))
+        webui = subsystems["Web UI robustness"]
+        self.assertEqual("partial", webui.status)
+        self.assertFalse(webui.blocker)
+        self.assertFalse(webui.unknown)
+        self.assertIn("webui_robustness_smoke.py", " ".join(webui.evidence))
+
+        release_ci = subsystems["Release/CI automation"]
+        self.assertEqual("partial", release_ci.status)
+        self.assertFalse(release_ci.blocker)
+        self.assertFalse(release_ci.unknown)
+        self.assertIn("RELEASE_GATE_MATRIX.md", " ".join(release_ci.evidence))
 
     def test_required_operator_docs_are_present(self) -> None:
         ok, missing = prove_pre_vm_complete._audit_doc_ready()  # noqa: SLF001

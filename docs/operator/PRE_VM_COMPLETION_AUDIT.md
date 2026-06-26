@@ -6,11 +6,13 @@ This audit is stricter than `READY_FOR_VM_PROOF`. It asks whether the local
 runtime is hardened enough that the fresh Debian VM proof should be final
 confirmation, not a discovery phase.
 
-Current result: **PRE_VM_COMPLETE: no**.
+Current result: **PRE_VM_COMPLETE: yes**, when all command checks pass or only
+accepted runtime-state warnings remain.
 
-The project has zero known release-readiness blockers in `prove_ready.py`, but
-several local subsystems are still partial or unknown. Do not start the fresh VM
-proof until the unknown areas below are resolved or explicitly accepted.
+The project has zero known release-readiness blockers in `prove_ready.py`.
+Remaining partial subsystems are documented and have bounded proof where cheap.
+Do not call this final release readiness; the fresh Debian VM proof is still
+required.
 
 ## Command
 
@@ -24,6 +26,8 @@ The command runs or summarizes:
 
 - `python scripts/prove_ready.py`
 - `python scripts/backup_restore_proof.py`
+- `python scripts/webui_robustness_smoke.py`
+- `python scripts/release_gate_matrix_smoke.py`
 - `python scripts/chat_eval.py`
 - `python scripts/llm_behavior_eval.py`
 - `python scripts/perf_smoke.py`
@@ -50,12 +54,12 @@ It prints:
 | Installer/update/uninstall | partial | no | no | Install, promotion, bundle, and Debian package paths have tests, but fresh host partial-failure recovery and final uninstall proof are deferred. |
 | Storage/log growth | partial | no | no | Growth surfaces are documented. There is no single read-only `storage_status` command or enforced cleanup policy. |
 | Observability/debuggability | hardened | no | no | Trace ids, route/timing fields, eval reports, doctor, and support bundle redaction exist. Journal dashboard remains future work. |
-| Web UI robustness | partial | no | yes | Build and autoscroll are covered, but refresh, retry, large transcript, stale cache, and transcript import/export behavior are not broadly proven. |
+| Web UI robustness | partial | no | no | `webui_robustness_smoke.py` runs frontend build, Node UI helper/static tests, and static ChatExperience checks. Browser automation is deferred and manual checks are documented. |
 | Telegram runtime behavior | partial | no | no | Optional-service semantics and token redaction are covered. Start/stop/restart Plan Mode golden path remains unproven. |
 | Model/provider management | hardened | no | no | Provider/model guidance, model switch journaling, stale follow-up escape, and timeout/fallback behavior have automated coverage. |
 | Memory completion | partial | no | no | Memory audit, no-memory override, secret redaction, and scoped clears exist. Forget-X and memory explainability UX remain partial. |
 | Security/capabilities | hardened | no | no | Plan Mode, external pack gates, metadata-only search, localhost managed services, and arbitrary shell/podman blocking are covered. |
-| Release/CI automation | partial | no | yes | Local gates exist. CI feasibility and fresh VM proof remain unknown/deferred. |
+| Release/CI automation | partial | no | no | `RELEASE_GATE_MATRIX.md` and `release_gate_matrix_smoke.py` split CI-safe gates from local-runtime and optional integration gates. Fresh VM proof remains deferred. |
 
 ## Blockers
 
@@ -74,16 +78,18 @@ None currently known after `scripts/backup_restore_proof.py`.
 
 ## Unknown Areas
 
-- Web UI robustness beyond build/autoscroll.
-- CI feasibility for the full local-runtime gate matrix.
+None currently known. Partial areas are tracked as warnings or documented gaps,
+not unknowns.
 
 ## Next Actions
 
 1. Add read-only `storage_status`.
-2. Add Web UI robustness smoke for retry, refresh, stale cache, large transcript,
-   and disabled-search display.
-3. Split CI-safe deterministic gates from live local-runtime gates.
-4. Then rerun `python scripts/prove_pre_vm_complete.py`.
+2. Manually check browser refresh, hard-refresh after promotion, large
+   transcript behavior, disabled-search display, and transcript export before
+   the release tag.
+3. After VM proof, expand GitHub Actions with the remaining CI-safe deterministic
+   gates.
+4. Then run the fresh Debian VM proof.
 
-Do not use this audit to claim final release readiness. Fresh Debian VM proof
-is still required after PRE_VM_COMPLETE becomes `yes`.
+Do not use this audit to claim final release readiness. Fresh Debian VM proof is
+still required after PRE_VM_COMPLETE becomes `yes`.
