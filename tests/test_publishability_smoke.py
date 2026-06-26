@@ -9,7 +9,9 @@ from pathlib import Path
 
 from agent.api_server import APIServerHandler, AgentRuntime
 from agent.config import Config
+from agent.filesystem_skill import FileSystemSkill
 from agent.model_watch_catalog import write_snapshot_atomic
+from agent.shell_skill import ShellSkill
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -213,22 +215,20 @@ class TestPublishabilitySmoke(unittest.TestCase):
         os.environ["AGENT_SECRET_STORE_PATH"] = os.path.join(self.tmpdir.name, "secrets.enc.json")
         os.environ["AGENT_PERMISSIONS_PATH"] = os.path.join(self.tmpdir.name, "permissions.json")
         os.environ["AGENT_AUDIT_LOG_PATH"] = os.path.join(self.tmpdir.name, "audit.jsonl")
-        self.repo_smoke_file = REPO_ROOT / "publishability_smoke_note.txt"
-        self.repo_smoke_dir = REPO_ROOT / "publishability-smoke-dir"
-        if self.repo_smoke_dir.exists():
-            self.repo_smoke_dir.rmdir()
-        if self.repo_smoke_file.exists():
-            self.repo_smoke_file.unlink()
+        self.smoke_workspace = Path(self.tmpdir.name) / "publishability-workspace"
+        self.smoke_workspace.mkdir(parents=True, exist_ok=True)
+        self.repo_root_smoke_file = REPO_ROOT / "publishability_smoke_note.txt"
+        self.repo_root_smoke_dir = REPO_ROOT / "publishability-smoke-dir"
+        self.repo_smoke_file = self.smoke_workspace / "publishability_smoke_note.txt"
+        self.repo_smoke_dir = self.smoke_workspace / "publishability-smoke-dir"
         self.repo_smoke_file.write_text(
             "publishability smoke token\nTODO: publishability smoke coverage\n",
             encoding="utf-8",
         )
 
     def tearDown(self) -> None:
-        if self.repo_smoke_file.exists():
-            self.repo_smoke_file.unlink()
-        if self.repo_smoke_dir.exists():
-            self.repo_smoke_dir.rmdir()
+        self.assertFalse(self.repo_root_smoke_file.exists())
+        self.assertFalse(self.repo_root_smoke_dir.exists())
         os.environ.clear()
         os.environ.update(self._env_backup)
         self.tmpdir.cleanup()
@@ -246,6 +246,18 @@ class TestPublishabilitySmoke(unittest.TestCase):
         )
         _seed_runtime(runtime)
         return runtime
+
+    def _scope_filesystem_to_smoke_workspace(self, runtime: AgentRuntime) -> None:
+        truth = runtime.runtime_truth_service()
+        allowed_roots = [str(self.smoke_workspace), str(self.home_root)]
+        truth._filesystem_skill_cache = FileSystemSkill(  # type: ignore[attr-defined]
+            allowed_roots=allowed_roots,
+            base_dir=str(self.smoke_workspace),
+        )
+        truth._shell_skill_cache = ShellSkill(  # type: ignore[attr-defined]
+            allowed_roots=allowed_roots,
+            base_dir=str(self.smoke_workspace),
+        )
 
     def _chat(
         self,
@@ -408,6 +420,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
 
     def test_publishability_filesystem_and_shell_flows(self) -> None:
         runtime = self._make_runtime(safe_mode_enabled=True)
+        self._scope_filesystem_to_smoke_workspace(runtime)
 
         listing, _ = self._chat(
             runtime,
@@ -420,8 +433,8 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertEqual(["filesystem"], listing_meta.get("used_tools"))
         self.assertFalse(bool(listing_meta.get("used_llm")))
         listing_message = str(listing.get("message") or "")
-        self.assertIn("/home/c/personal-agent contains", listing_message)
-        self.assertIn("agent/", listing_message)
+        self.assertIn(str(self.smoke_workspace), listing_message)
+        self.assertIn("publishability_smoke_note.txt", listing_message)
 
         read_text, _ = self._chat(
             runtime,
@@ -530,6 +543,7 @@ class TestPublishabilitySmoke(unittest.TestCase):
 
     def test_publishability_mutating_preview_confirm_flows(self) -> None:
         runtime = self._make_runtime(safe_mode_enabled=True)
+        self._scope_filesystem_to_smoke_workspace(runtime)
 
         # This section is model-control policy, not Capability Rescue. SAFE MODE
         # may produce a mutating preview, but confirmation must still be blocked.
@@ -616,6 +630,8 @@ class TestPublishabilitySmoke(unittest.TestCase):
         self.assertFalse(bool(mkdir_confirm_meta.get("used_llm")))
         self.assertTrue(self.repo_smoke_dir.exists())
         self.assertIn("Created directory", str(mkdir_confirm.get("message") or ""))
+        self.assertFalse(self.repo_root_smoke_file.exists())
+        self.assertFalse(self.repo_root_smoke_dir.exists())
 
         switch_back_preview, _ = self._chat(
             runtime,
