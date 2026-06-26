@@ -65,3 +65,40 @@ A restore is successful when:
 - `/state` is sane
 - `/packs/state` matches the expected pack inventory
 - `python -m agent version` reports the expected build/version
+
+## Pre-VM Proof
+
+Run:
+
+```bash
+python scripts/backup_restore_proof.py
+```
+
+This proof is intentionally bounded and does not touch live
+`~/.local/share/personal-agent`, live `~/.config/personal-agent`, or user
+services. It creates representative Personal Agent state under a temporary
+directory, creates a backup archive, validates the archive, performs a dry-run
+restore, restores only into another temporary directory, and then checks that
+expected config, state, memory DB, search config, systemd unit, and secret-store
+files are present.
+
+The proof also checks:
+
+- corrupt backup archives fail with `corrupt_backup`
+- strict version mismatch fails with `version_mismatch`
+- dry-run output redacts sensitive file details and never prints secret values
+- no service is started, stopped, enabled, or restarted
+- live runtime state is not mutated
+
+## Version Mismatch
+
+Strict restore validation refuses backups whose manifest `app_version` does not
+match the expected Personal Agent version. Operators should upgrade or downgrade
+the runtime intentionally, then rerun validation. Do not silently restore a
+version-mismatched backup into live state.
+
+## Secret Handling
+
+Backups include the encrypted/local secret-store file so same-machine restore can
+preserve provider and Telegram configuration. Proof and dry-run output must not
+print raw secret values. Treat backup archives as sensitive local artifacts.
