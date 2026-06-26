@@ -1029,6 +1029,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
         self.assertFalse(payload["available"])
         self.assertEqual("search_disabled", payload["reason"])
+        self.assertEqual("never_configured", payload["search_state"])
         self.assertIn("Preview and confirm", payload["next_action"])
         self.assertEqual("unconfigured", payload["setup_source"])
 
@@ -1040,6 +1041,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         payload = json.loads(handler.body.decode("utf-8"))
 
         self.assertTrue(payload["available"])
+        self.assertEqual("configured_running", payload["search_state"])
         self.assertEqual("http://127.0.0.1:8888", payload["base_url"])
         self.assertEqual("managed_or_user_loopback", payload["setup_source"])
 
@@ -1314,6 +1316,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
             status = restarted.search_status()
         self.assertTrue(status["enabled"])
         self.assertTrue(status["available"])
+        self.assertEqual("configured_running", status["search_state"])
         self.assertTrue(status["persistent_config"]["loaded"])
 
     def test_persisted_search_config_reports_stopped_endpoint_as_repair_needed(self) -> None:
@@ -1330,6 +1333,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(status["endpoint_configured"])
         self.assertFalse(status["available"])
         self.assertEqual("endpoint_unreachable", status["reason"])
+        self.assertEqual("configured_stopped", status["search_state"])
         self.assertIn("Start or repair", status["next_action"])
 
     def test_tampered_persisted_search_config_is_not_loaded(self) -> None:
@@ -1353,6 +1357,7 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
 
         self.assertFalse(restarted.config.search_enabled)
         self.assertEqual("invalid_persisted_search_config", status["reason"])
+        self.assertEqual("invalid_or_untrusted_config", status["search_state"])
         self.assertEqual("persisted_search_config_untrusted", status["persistent_config"]["error"])
 
     def test_search_setup_apply_consumes_confirmation(self) -> None:

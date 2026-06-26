@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 from urllib.error import URLError
 
@@ -595,6 +596,40 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
         self.assertIn("Search is not currently working", text)
         self.assertIn("Plan Mode confirmation", text)
+
+    def test_public_lookup_configured_stopped_offers_inline_start_not_full_setup(self) -> None:
+        runtime = self._runtime(search_enabled=True)
+        offline_opener = mock.Mock()
+        offline_opener.open.side_effect = OSError("offline")
+        runtime._safe_web_search_client = SafeWebSearchClient(  # noqa: SLF001
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=offline_opener,
+        )
+        self._install_managed_search_adapter(
+            runtime,
+            search_status={
+                "ok": True,
+                "enabled": True,
+                "provider": "searxng",
+                "available": False,
+                "endpoint_configured": True,
+                "base_url": "http://127.0.0.1:8888",
+                "reason": "endpoint_unreachable",
+                "search_state": "configured_stopped",
+            },
+            services_status=self._managed_services_status(enabled=True, configured=True, reachable=False),
+        )
+
+        _body, text, meta = self._chat(runtime, "look up dots.tts", session_id="configured-stopped-lookup")
+
+        self.assertEqual("action_tool", meta.get("route"))
+        self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
+        self.assertIn("Search is not currently working", text)
+        self.assertIn("direct local SearXNG page will refuse connection", text)
+        self.assertIn("I can start or repair the managed search service for you", text)
+        self.assertIn("Plan Mode confirmation", text)
+        self.assertNotIn("Web search is not set up yet", text)
+        self.assertNotIn("missing Podman", text)
 
     def test_search_status_disabled_says_not_working_and_offers_managed_start(self) -> None:
         runtime = self._runtime(search_enabled=False)

@@ -78,6 +78,14 @@ managed local service:
   `SEARXNG_BASE_URL`) still take precedence. If the persisted file is tampered
   to a non-loopback or unsupported endpoint, the runtime refuses to load it and
   `/search/status` reports `invalid_persisted_search_config`.
+- The managed SearXNG container is not silently installed or started for the
+  first time. After setup has been verified, future API restarts and promotions
+  preserve the trusted loopback search config. A PC reboot may leave the
+  managed container stopped unless the user's container runtime is configured
+  separately to auto-start it. In that case `/search/status` reports
+  `configured_stopped`, and the next public lookup offers an inline Plan Mode
+  start/repair preview instead of telling the user to set up search from
+  scratch.
 - If health still fails, setup captures redacted diagnostics for the owned
   `personal-agent-searxng` container, including `ps -a` state and the last
   container logs, before rolling back only that container.
@@ -121,4 +129,16 @@ A lead can only point to a later source approval review. Source approval is stil
 
 ## Status
 
-Use `/search/status` or ask the assistant “what is your search status?” to check configuration. The status reports whether search is enabled, whether the SearXNG endpoint is configured, whether the JSON endpoint is reachable, a redacted base URL, setup source, persisted-config state, blocked reason, and one next action. If search was never configured, `search_disabled` is expected. If managed search was configured but the endpoint is stopped, status should report `endpoint_unreachable` and offer managed repair/start. If the persisted config is invalid or untrusted, status reports `invalid_persisted_search_config` and does not enable search.
+Use `/search/status` or ask the assistant “what is your search status?” to check configuration. The status reports whether search is enabled, whether the SearXNG endpoint is configured, whether the JSON endpoint is reachable, a redacted base URL, setup source, persisted-config state, blocked reason, `search_state`, and one next action.
+
+Lifecycle states:
+
+- `never_configured`: no trusted endpoint is configured. First public lookup
+  offers local SearXNG setup and requires confirmation.
+- `configured_running`: trusted endpoint is configured and JSON search works.
+  Public lookups search immediately.
+- `configured_stopped`: trusted endpoint is configured but unreachable. Public
+  lookups offer inline managed start/repair confirmation and do not ask for a
+  full new setup ritual.
+- `invalid_or_untrusted_config`: persisted or configured endpoint failed trust
+  checks. The runtime refuses to use it and offers safe reconfiguration.

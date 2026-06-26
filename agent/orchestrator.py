@@ -2094,7 +2094,15 @@ class Orchestrator:
         message = str(body.get("message") or "").strip()
         if not ok:
             error_kind = str(body.get("error_kind") or "search_unavailable")
-            if error_kind in {"search_disabled", "endpoint_missing", "unsupported_provider", "search_unavailable"}:
+            if error_kind in {
+                "search_disabled",
+                "endpoint_missing",
+                "unsupported_provider",
+                "search_unavailable",
+                "search_error",
+                "search_timeout",
+                "bad_response",
+            }:
                 return self._safe_web_search_status_response(user_id, text)
             setup_hint = body.get("setup_hint") if isinstance(body.get("setup_hint"), dict) else None
             if setup_hint:

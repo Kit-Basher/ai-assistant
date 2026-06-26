@@ -280,6 +280,22 @@ after the SearXNG JSON endpoint verifies, then persists a small loopback-only
 runtime search config next to the runtime database. Explicit service
 environment variables still override that persisted state when set.
 
+Search lifecycle:
+
+- `never_configured`: first public lookup previews trusted local SearXNG setup;
+  no first-time install/start runs without confirmation.
+- `configured_running`: public lookup uses metadata-only search immediately.
+- `configured_stopped`: trusted search config survived restart/promotion/reboot
+  but the local SearXNG endpoint is not reachable. A public lookup should offer
+  inline managed start/repair confirmation and then continue after confirmation;
+  it must not ask the user to perform a separate manual start ritual.
+- `invalid_or_untrusted_config`: refuse use and preview safe reconfiguration.
+
+Personal Agent does not currently install a SearXNG reboot autostart unit.
+After a PC reboot, managed search may enter `configured_stopped` until the user
+confirms the inline start/repair plan or configures their container runtime to
+auto-start the approved `personal-agent-searxng` container.
+
 ## Core Workflow Proof
 
 Run this before any real acceptance claim:

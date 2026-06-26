@@ -12387,6 +12387,8 @@ class AgentRuntime:
             status["next_action"] = (
                 "Preview managed SearXNG setup again or remove the invalid persisted search_runtime_config.json after backing up state."
             )
+        if str(status.get("reason") or "") == "invalid_persisted_search_config":
+            status["search_state"] = "invalid_or_untrusted_config"
         return status
 
     def _search_runtime_config_path(self) -> Path | None:

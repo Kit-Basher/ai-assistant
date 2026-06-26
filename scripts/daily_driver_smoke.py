@@ -128,10 +128,13 @@ def check_search_chat(base_url: str, timeout: float, run_id: str) -> Check:
     if not (status.get("enabled") and status.get("endpoint_configured") and status.get("available")):
         reason = str(status.get("reason") or "unknown")
         persistent = status.get("persistent_config") if isinstance(status.get("persistent_config"), dict) else {}
-        if reason == "search_disabled" and not status.get("endpoint_configured"):
+        explicit_state = str(status.get("search_state") or "").strip()
+        if explicit_state:
+            state = explicit_state
+        elif reason == "search_disabled" and not status.get("endpoint_configured"):
             state = "never_configured"
         elif reason == "endpoint_unreachable" and status.get("endpoint_configured"):
-            state = "configured_but_stopped"
+            state = "configured_stopped"
         elif reason == "invalid_persisted_search_config" or persistent.get("error"):
             state = "invalid_or_untrusted_config"
         else:

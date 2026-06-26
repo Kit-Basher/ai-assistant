@@ -67,6 +67,25 @@ def _next_action_for_status(reason: str | None, *, endpoint_configured: bool) ->
     return "Check /search/status and configure a trusted SearXNG endpoint."
 
 
+def search_lifecycle_state(status_payload: dict[str, Any] | None) -> str:
+    payload = dict(status_payload or {})
+    reason = str(payload.get("reason") or "").strip()
+    endpoint_configured = bool(payload.get("endpoint_configured", False))
+    if reason == "invalid_persisted_search_config":
+        return "invalid_or_untrusted_config"
+    if bool(payload.get("available")) and bool(payload.get("enabled")) and endpoint_configured:
+        return "configured_running"
+    if reason == "endpoint_unreachable" and endpoint_configured:
+        return "configured_stopped"
+    if reason == "search_disabled" and not endpoint_configured:
+        return "never_configured"
+    if reason in {"unsupported_provider", "endpoint_missing"}:
+        return "invalid_or_untrusted_config"
+    if endpoint_configured:
+        return "configured_stopped"
+    return "never_configured"
+
+
 @dataclass(frozen=True)
 class SafeWebSearchConfig:
     enabled: bool = False
@@ -154,7 +173,7 @@ class SafeWebSearchClient:
             available, probe_reason = self._probe_available()
             if not available:
                 reason = probe_reason or "endpoint_unreachable"
-        return {
+        status = {
             "ok": True,
             "enabled": enabled,
             "provider": provider,
@@ -175,6 +194,8 @@ class SafeWebSearchClient:
                 "pack_install_import": False,
             },
         }
+        status["search_state"] = search_lifecycle_state(status)
+        return status
 
     def _probe_available(self) -> tuple[bool, str | None]:
         result = self.search("personal agent test", max_results=1)
