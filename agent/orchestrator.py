@@ -8091,6 +8091,8 @@ class Orchestrator:
         if not self._looks_like_vague_continuation_prompt(text):
             return None
         normalized = normalize_setup_text(text).replace("/", " ")
+        if str(classify_runtime_chat_route(text).get("kind") or "").strip().lower() == "safety_bypass_refusal":
+            return self._safety_bypass_refusal_response(user_id, text)
         setup_state = self._current_runtime_setup_state(user_id)
         if normalized in {"1", "2"}:
             if str(setup_state.get("action_type") or "").strip().lower() == "provider_repair_options":
@@ -8144,6 +8146,11 @@ class Orchestrator:
     @staticmethod
     def _looks_like_pack_review_state_prompt(text: str) -> bool:
         normalized = normalize_setup_text(text).replace("/", " ")
+        if re.search(
+            r"\b(ignore|bypass|skip|override)\s+(?:the\s+)?(?:safety|policy|approval|confirmation|plan mode|plan)\b",
+            normalized,
+        ):
+            return False
         exact_phrases = (
             "show review state",
             "show the review state",
@@ -12287,6 +12294,130 @@ class Orchestrator:
             },
         )
 
+    def _telegram_service_action_response(self, user_id: str, action: str | None) -> OrchestratorResponse:
+        action_label = str(action or "").strip().lower()
+        if action_label not in {"start", "restart", "stop"}:
+            return self._ambiguous_restart_target_response(user_id)
+        status_payload: dict[str, Any] = {}
+        truth = self._runtime_truth()
+        if truth is not None:
+            try:
+                status_payload = dict(truth.runtime_status("telegram_status"))
+            except Exception:
+                status_payload = {}
+        configured = bool(status_payload.get("configured", False))
+        running = bool(status_payload.get("service_active", False) or status_payload.get("embedded_running", False))
+        state = str(status_payload.get("state") or status_payload.get("effective_state") or "unknown").strip().lower()
+        if not configured and action_label in {"start", "restart"}:
+            message = "Telegram is not configured yet. I can help set it up, but I will not start a Telegram service without a configured token."
+            return self._runtime_truth_response(
+                text=message,
+                route="runtime_status",
+                used_tools=["telegram_status"],
+                ok=False,
+                error_kind="telegram_not_configured",
+                payload={
+                    "type": "telegram_service_action_blocked",
+                    "telegram_action": action_label,
+                    "configured": configured,
+                    "state": state,
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
+            )
+        verb = {"start": "start", "restart": "restart", "stop": "stop"}[action_label]
+        effect = {
+            "start": "start personal-agent-telegram.service if it is configured and not already running",
+            "restart": "restart personal-agent-telegram.service and keep Telegram optional",
+            "stop": "stop personal-agent-telegram.service; the web app and API stay usable",
+        }[action_label]
+        question = (
+            f"I can {verb} the optional Telegram service through a bounded Personal Agent service action. "
+            f"This may change personal-agent-telegram.service state. Current Telegram state: {state}; running: {'yes' if running else 'no'}. "
+            f"Planned action: {effect}. Rollback scope: Telegram service state only; no token will be shown or changed. "
+            "Say yes to continue, or no to cancel."
+        )
+        return self._confirmation_preview_response(
+            user_id=user_id,
+            route="action_tool",
+            question=question,
+            used_tools=["telegram_status"],
+            action={
+                "operation": "telegram_service_action",
+                "params": {"action": action_label},
+            },
+            title=f"Telegram {verb} confirmation",
+            preview_payload={
+                "type": "telegram_service_action_preview",
+                "telegram_action": action_label,
+                "configured": configured,
+                "running": running,
+                "state": state,
+                "resources_changed": ["personal-agent-telegram.service state"],
+                "rollback_scope": "Telegram service state only; tokens and assistant core runtime are not changed.",
+                "rollback_supported": False,
+            },
+            skip_post_response_hooks=True,
+        )
+
+    def _safety_bypass_refusal_response(self, user_id: str, text: str) -> OrchestratorResponse:
+        pending = self.confirmations.get(user_id)
+        has_pending = pending is not None
+        if has_pending:
+            title = str(pending.title or "the pending action").strip()
+            message = (
+                f"I cannot bypass safety or approval for {title}. "
+                "Use the current confirmation exactly as shown, or say no/cancel to stop it."
+            )
+        else:
+            message = (
+                "I cannot bypass safety, Plan Mode, or confirmation. "
+                "There is no current action to run. Tell me the exact action you want, and I will preview it before anything mutates."
+            )
+        return self._runtime_truth_response(
+            text=message,
+            route="action_tool",
+            used_tools=[],
+            used_runtime_state=False,
+            ok=True,
+            error_kind=None,
+            payload={
+                "type": "safety_bypass_refusal",
+                "has_pending_action": has_pending,
+                "request_text": text,
+                "summary": message,
+                "refused": True,
+                "refusal_reason": "safety_bypass_refused",
+            },
+            skip_post_response_hooks=True,
+        )
+
+    def _ambiguous_restart_target_response(self, user_id: str) -> OrchestratorResponse:
+        last_topic = str(self._last_offer_topic.get(user_id) or "").strip().lower()
+        if last_topic == "telegram_status":
+            return self._telegram_service_action_response(user_id, "restart")
+        if last_topic in {"search_status", "managed_search"}:
+            return self._managed_service_start_restart_preview_response(user_id, "restart search")
+        message = (
+            "What should I restart: managed search, Telegram, or something else? "
+            "Restarting a service is a mutating action, so I will show a Plan Mode preview before doing anything."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_tools=[],
+            used_runtime_state=False,
+            ok=True,
+            next_question=message,
+            payload={
+                "type": "action_clarification",
+                "kind": "ambiguous_restart_target",
+                "summary": message,
+                "next_question": message,
+            },
+            skip_post_response_hooks=True,
+        )
+
     @staticmethod
     def _governance_component_label(identifier: str | None) -> str:
         normalized = str(identifier or "").strip()
@@ -15697,13 +15828,21 @@ class Orchestrator:
         route = str(decision.get("route") or "generic_chat").strip().lower() or "generic_chat"
         kind = str(decision.get("kind") or "none").strip().lower()
         if kind == "safe_web_search_status":
+            self._last_offer_topic[user_id] = "search_status"
             return self._safe_web_search_status_response(user_id, text)
         if kind == "safe_web_search_suppressed":
             return self._safe_web_search_suppressed_response(user_id, text)
         if kind == "safe_web_search_clarify":
             return self._safe_web_search_clarification_response(user_id, text)
         if kind == "safe_web_search":
+            self._last_offer_topic[user_id] = "managed_search"
             return self._safe_web_search_response(user_id, text)
+        if kind == "telegram_service_action":
+            return self._telegram_service_action_response(user_id, str(decision.get("telegram_action") or ""))
+        if kind == "safety_bypass_refusal":
+            return self._safety_bypass_refusal_response(user_id, text)
+        if kind == "ambiguous_restart_target":
+            return self._ambiguous_restart_target_response(user_id)
         if kind == "product_specific_guard":
             adapter = self._chat_runtime_adapter
             if bool(
@@ -15815,7 +15954,14 @@ class Orchestrator:
         if kind == "provider_status":
             return self._provider_status_response(str(decision.get("provider_id") or ""))
         if kind == "telegram_status":
+            self._last_offer_topic[user_id] = "telegram_status"
             return self._telegram_status_response()
+        if kind == "telegram_service_action":
+            return self._telegram_service_action_response(user_id, str(decision.get("telegram_action") or ""))
+        if kind == "safety_bypass_refusal":
+            return self._safety_bypass_refusal_response(user_id, text)
+        if kind == "ambiguous_restart_target":
+            return self._ambiguous_restart_target_response(user_id)
         if kind == "runtime_status":
             return self._runtime_status_response(kind)
         if kind == "model_controller_policy":
@@ -16299,6 +16445,7 @@ class Orchestrator:
             return self._managed_adapter_block_response(user_id, text)
         search_route_kind = str(classify_runtime_chat_route(text).get("kind") or "").strip().lower()
         if search_route_kind == "safe_web_search_status":
+            self._last_offer_topic[user_id] = "search_status"
             return self._safe_web_search_status_response(user_id, text)
         if search_route_kind == "safe_web_search_suppressed":
             return self._safe_web_search_suppressed_response(user_id, text)
@@ -18732,14 +18879,17 @@ class Orchestrator:
                 early_decision = classify_runtime_chat_route(effective_user_text)
                 early_kind = str(early_decision.get("kind") or "").strip().lower()
                 if early_kind == "safe_web_search_status":
+                    self._last_offer_topic[user_id] = "search_status"
                     return self._safe_web_search_status_response(user_id, effective_user_text)
                 if early_kind == "safe_web_search_suppressed":
                     return self._safe_web_search_suppressed_response(user_id, effective_user_text)
                 if early_kind == "safe_web_search_clarify":
                     return self._safe_web_search_clarification_response(user_id, effective_user_text)
                 if early_kind == "safe_web_search":
+                    self._last_offer_topic[user_id] = "managed_search"
                     return self._safe_web_search_response(user_id, effective_user_text)
                 if early_kind == "telegram_status":
+                    self._last_offer_topic[user_id] = "telegram_status"
                     return self._telegram_status_response()
                 if (
                     early_kind == "shell_install_package"
@@ -20694,6 +20844,7 @@ class Orchestrator:
                 runtime_route_decision = classify_runtime_chat_route(runtime_text)
                 runtime_route_kind = str(runtime_route_decision.get("kind") or "").strip().lower()
                 if runtime_route_kind == "safe_web_search_status":
+                    self._last_offer_topic[user_id] = "search_status"
                     return self._safe_web_search_status_response(user_id, runtime_text)
                 if runtime_route_kind == "safe_web_search_suppressed":
                     return self._safe_web_search_suppressed_response(user_id, runtime_text)

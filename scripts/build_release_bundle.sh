@@ -54,6 +54,8 @@ mkdir -p "$outdir"
 outdir="$(cd "$outdir" && pwd)"
 version="$(tr -d ' \n' < "$repo_root/VERSION")"
 [ -n "$version" ] || die "VERSION file is missing or empty"
+git_commit="$(git -C "$repo_root" rev-parse --short HEAD 2>/dev/null || true)"
+build_time="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 bundle_name="personal-agent-linux-x86_64-v${version}"
 bundle_dir="$outdir/$bundle_name"
@@ -67,7 +69,7 @@ fi
 rm -rf "$bundle_dir"
 mkdir -p "$payload_dir"
 
-python3 - "$repo_root" "$bundle_dir" "$payload_dir" "$version" <<'PY'
+python3 - "$repo_root" "$bundle_dir" "$payload_dir" "$version" "$git_commit" "$build_time" <<'PY'
 from __future__ import annotations
 
 import json
@@ -80,6 +82,8 @@ repo_root = Path(sys.argv[1]).resolve()
 bundle_dir = Path(sys.argv[2]).resolve()
 payload_dir = Path(sys.argv[3]).resolve()
 version = sys.argv[4]
+git_commit = sys.argv[5].strip()
+build_time = sys.argv[6].strip()
 
 required = [
     repo_root / "agent",
@@ -134,11 +138,22 @@ shutil.copy2(repo_root / "assets" / "icons" / "personal-agent.svg", payload_dir 
 shutil.copy2(repo_root / "scripts" / "launch_webui.sh", payload_dir / "bin" / "personal-agent-webui")
 os.chmod(payload_dir / "bin" / "personal-agent-webui", 0o755)
 
+build_info = {
+    "version": version,
+    "git_commit": git_commit or None,
+    "build_time": build_time or None,
+    "bundle_name": bundle_dir.name,
+}
+(payload_dir / "agent" / "BUILD_INFO.json").write_text(json.dumps(build_info, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
 manifest = {
     "bundle_version": version,
+    "git_commit": git_commit or None,
+    "build_time": build_time or None,
     "source_repo": str(repo_root),
     "payload": [
         "agent",
+        "agent/BUILD_INFO.json",
         "memory",
         "skills",
         "telegram_adapter",

@@ -233,7 +233,21 @@ _TELEGRAM_STATUS_PHRASES = (
     "is telegram set up",
     "is telegram setup",
     "how is telegram",
+    "why is telegram not responding",
+    "why isn t telegram responding",
+    "why isnt telegram responding",
+    "telegram not responding",
+    "telegram is not responding",
+    "send me a telegram test",
+    "send a telegram test",
+    "test telegram",
 )
+_TELEGRAM_ACTION_RE = re.compile(r"\b(start|restart|stop)\s+(?:the\s+)?telegram\b|\btelegram\s+(start|restart|stop)\b")
+_SAFETY_BYPASS_RE = re.compile(
+    r"\b(ignore|bypass|skip|override)\s+(?:the\s+)?(?:safety|policy|approval|confirmation|plan mode|plan)\b"
+    r"|(?:\bjust\s+run\s+it\b|\brun\s+it\s+anyway\b|\bdo\s+it\s+anyway\b)"
+)
+_AMBIGUOUS_RESTART_RE = re.compile(r"^(?:please\s+)?restart\s+(?:it|that|this|the service|the thing)\??$")
 _PLAN_DAY_PHRASES = (
     "plan my day",
     "today plan",
@@ -2035,6 +2049,10 @@ def _semantic_intent_for_route(route_decision: dict[str, Any]) -> SemanticChatIn
         return SemanticChatIntent(intent=intent, route=route, kind=kind, confidence=0.9, evidence=evidence)
     if kind == "safe_web_search_clarify" or route == "assistant_clarification":
         return SemanticChatIntent(intent="ask_clarifying_question", route=route, kind=kind, confidence=0.85, evidence=evidence)
+    if kind == "telegram_service_action":
+        return SemanticChatIntent(intent="managed_service_action", route=route, kind=kind, confidence=0.9, evidence=evidence)
+    if kind == "safety_bypass_refusal":
+        return SemanticChatIntent(intent="refusal_or_safe_redirect", route=route, kind=kind, confidence=0.95, evidence=evidence)
     if kind in {"telegram_status", "runtime_status", "provider_status", "providers_status"} or route in {
         "runtime_status",
         "provider_status",
@@ -2171,6 +2189,30 @@ def _classify_runtime_chat_route_raw(
             "kind": "runtime_status",
             "generic_allowed": False,
             "fallback_reason": "runtime_status",
+        }
+    if _SAFETY_BYPASS_RE.search(normalized):
+        return {
+            "route": "action_tool",
+            "kind": "safety_bypass_refusal",
+            "generic_allowed": False,
+            "fallback_reason": "safety_bypass_refusal",
+        }
+    if _TELEGRAM_ACTION_RE.search(normalized):
+        action_match = _TELEGRAM_ACTION_RE.search(normalized)
+        action = str((action_match.group(1) or action_match.group(2) or "") if action_match else "").strip().lower()
+        return {
+            "route": "action_tool",
+            "kind": "telegram_service_action",
+            "telegram_action": action,
+            "generic_allowed": False,
+            "fallback_reason": "telegram_service_action",
+        }
+    if _AMBIGUOUS_RESTART_RE.search(normalized):
+        return {
+            "route": "assistant_clarification",
+            "kind": "ambiguous_restart_target",
+            "generic_allowed": False,
+            "fallback_reason": "ambiguous_restart_target",
         }
     if _looks_like_safe_web_search_status_request(normalized):
         return {

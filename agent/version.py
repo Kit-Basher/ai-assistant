@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
 from importlib import resources as importlib_resources
 from pathlib import Path
+import json
 import os
 import subprocess
 
@@ -44,6 +45,32 @@ def _read_packaged_text(name: str) -> str | None:
     except (FileNotFoundError, ModuleNotFoundError, OSError, UnicodeError):
         return None
     return None
+
+
+def _read_json_file(path: Path) -> dict[str, object] | None:
+    try:
+        if path.is_file():
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+            return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, OSError, UnicodeError):
+        return None
+    return None
+
+
+def _read_packaged_json(name: str) -> dict[str, object] | None:
+    try:
+        candidate = importlib_resources.files("agent").joinpath(name)
+        if candidate.is_file():
+            parsed = json.loads(candidate.read_text(encoding="utf-8"))
+            return parsed if isinstance(parsed, dict) else None
+    except (FileNotFoundError, json.JSONDecodeError, ModuleNotFoundError, OSError, UnicodeError):
+        return None
+    return None
+
+
+def read_packaged_build_info(*, repo_root: Path | None = None) -> dict[str, object]:
+    root = (repo_root or repo_root_path()).resolve()
+    return _read_json_file(root / "agent" / "BUILD_INFO.json") or _read_packaged_json("BUILD_INFO.json") or {}
 
 
 def read_version(*, repo_root: Path | None = None) -> tuple[str, str]:
@@ -94,6 +121,9 @@ def read_build_info(*, repo_root: Path | None = None, timeout_seconds: float | N
     root = repo_root or repo_root_path()
     version, version_source = read_version(repo_root=root)
     git_commit = read_git_commit(repo_root=root, timeout_seconds=timeout_seconds)
+    if not git_commit:
+        packaged = read_packaged_build_info(repo_root=root)
+        git_commit = str(packaged.get("git_commit") or "").strip() or None
     return BuildInfo(version=version, version_source=version_source, git_commit=git_commit)
 
 

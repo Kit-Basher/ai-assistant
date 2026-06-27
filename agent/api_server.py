@@ -85,7 +85,7 @@ from agent.skill_governance import (
     evaluate_skill_execution_request,
 )
 from agent.skill_governance_store import SkillGovernanceStore
-from agent.version import read_build_info, read_git_commit, read_version
+from agent.version import read_build_info, read_git_commit, read_packaged_build_info, read_version
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.runtime_lifecycle import RuntimeLifecyclePhase, derive_runtime_lifecycle_phase
 from agent.runtime_events import RuntimeEventRecorder
@@ -610,6 +610,7 @@ class AgentRuntime:
         self.pid = os.getpid()
         self.runtime_id = f"runtime-{self.pid}-{int(self.started_at.timestamp())}"
         build_info = read_build_info(repo_root=self._repo_root)
+        self.build_metadata = read_packaged_build_info(repo_root=self._repo_root)
         self.version = build_info.version
         self.version_source = build_info.version_source
         self.git_commit = build_info.git_commit
@@ -5453,6 +5454,8 @@ class AgentRuntime:
             "version": self.version,
             "version_source": self.version_source,
             "git_commit": self.git_commit,
+            "build_time": str(self.build_metadata.get("build_time") or "").strip() or None,
+            "bundle_name": str(self.build_metadata.get("bundle_name") or "").strip() or None,
             "started_at": self.started_at_iso,
             "pid": self.pid,
             "listening": self.listening_url,
