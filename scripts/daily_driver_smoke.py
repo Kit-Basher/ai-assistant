@@ -139,12 +139,54 @@ def check_search_chat(base_url: str, timeout: float, run_id: str) -> Check:
             state = "invalid_or_untrusted_config"
         else:
             state = "unavailable"
-        return _blocked(
-            "chat search",
-            f"search_state={state} reason={reason}",
-            status_command,
-            str(status.get("next_action") or "Configure a trusted SearXNG endpoint, then rerun."),
-        )
+        if state == "configured_stopped":
+            repair_prompt = "Search the web for the current Debian stable release and summarize the result."
+            repair_thread = "search-repair"
+            preview_command = f"POST /chat {json.dumps({'message': repair_prompt}, ensure_ascii=True)}"
+            try:
+                preview_payload = _post_chat(base_url, repair_prompt, run_id=run_id, thread_id=repair_thread, timeout=timeout)
+                preview_text = _assistant_text(preview_payload)
+                preview_tools = _used_tools(preview_payload)
+            except Exception as exc:  # noqa: BLE001
+                return _fail("chat search", f"configured_stopped repair preview failed: {_exception_detail(exc)}", preview_command)
+            preview_lower = preview_text.lower()
+            if "managed_local_service_setup_preview" not in preview_tools:
+                return _fail("chat search", f"configured_stopped did not use managed repair preview; tools={preview_tools}", preview_command)
+            if "start or repair" not in preview_lower or "say yes" not in preview_lower:
+                return _fail("chat search", "configured_stopped preview did not ask for bounded start/repair confirmation", preview_command)
+            confirm_command = f"POST /chat {json.dumps({'message': 'yes'}, ensure_ascii=True)}"
+            try:
+                confirm_payload = _post_chat(base_url, "yes", run_id=run_id, thread_id=repair_thread, timeout=timeout)
+            except Exception as exc:  # noqa: BLE001
+                return _fail("chat search", f"configured_stopped repair confirmation failed: {_exception_detail(exc)}", confirm_command)
+            confirm_text = _assistant_text(confirm_payload)
+            confirm_tools = _used_tools(confirm_payload)
+            confirm_lower = confirm_text.lower()
+            if "managed_local_service_setup" not in confirm_tools:
+                return _fail("chat search", f"configured_stopped confirmation did not run managed setup path; tools={confirm_tools}", confirm_command)
+            if "arbitrary docker commands" not in confirm_lower or "metadata-only" not in confirm_lower:
+                return _fail("chat search", "configured_stopped repair did not state managed-service/search safety boundary", confirm_command)
+            try:
+                repaired_status = _json_request("GET", f"{base_url.rstrip('/')}/search/status", timeout=timeout)
+            except Exception as exc:  # noqa: BLE001
+                return _fail("chat search", f"/search/status after repair failed: {exc.__class__.__name__}", status_command)
+            if not (repaired_status.get("enabled") and repaired_status.get("endpoint_configured") and repaired_status.get("available")):
+                return _blocked(
+                    "chat search",
+                    f"configured_stopped repair attempted but search_state={repaired_status.get('search_state')} reason={repaired_status.get('reason')}",
+                    confirm_command,
+                    str(repaired_status.get("next_action") or "Inspect managed SearXNG repair diagnostics."),
+                )
+            if "continued lookup" in confirm_lower and "safe_web_search" in confirm_tools:
+                return _pass("chat search", confirm_text.splitlines()[0][:220], confirm_command)
+            status = repaired_status
+        else:
+            return _blocked(
+                "chat search",
+                f"search_state={state} reason={reason}",
+                status_command,
+                str(status.get("next_action") or "Configure a trusted SearXNG endpoint, then rerun."),
+            )
     prompt = "Search the web for the current Debian stable release and summarize the result."
     command = f"POST /chat {json.dumps({'message': prompt}, ensure_ascii=True)}"
     try:

@@ -12524,6 +12524,35 @@ class AgentRuntime:
         services = self.managed_services_status()
         services_rows = services.get("services") if isinstance(services.get("services"), list) else []
         searxng = next((row for row in services_rows if isinstance(row, dict) and row.get("service_id") == "searxng"), {})
+        try:
+            status = self.search_status()
+        except Exception:  # noqa: BLE001 - setup planning can continue without status.
+            status = {}
+        if bool(status.get("enabled")) and bool(status.get("endpoint_configured")) and bool(status.get("available")):
+            base_url_safe = str(status.get("base_url") or self._redact_url(self.config.searxng_base_url or "")).strip()
+            return {
+                "ok": True,
+                "requires_confirmation": False,
+                "blocked": False,
+                "plan": {
+                    "service_id": "searxng",
+                    "setup_mode": "already_configured",
+                    "provider": "searxng",
+                    "selected_engine": str(services.get("preferred_engine") or searxng.get("preferred_engine") or "podman"),
+                    "base_url": base_url_safe,
+                    "search_state": str(status.get("search_state") or "configured_running"),
+                    "state_config_scope": "runtime_config",
+                    "settings_changed": [],
+                    "rollback_scope": "no mutation planned",
+                    "safety_notes": [
+                        "Search remains metadata-only.",
+                        "No page fetching, browser automation, downloads, or pack install runs from search.",
+                    ],
+                },
+                "search_status": status,
+                "services_status": services,
+                "mutated": False,
+            }
         engine_choice = self._select_searxng_setup_engine(
             services,
             searxng,

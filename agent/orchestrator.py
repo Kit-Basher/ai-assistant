@@ -2097,6 +2097,7 @@ class Orchestrator:
             if error_kind in {
                 "search_disabled",
                 "endpoint_missing",
+                "endpoint_unreachable",
                 "unsupported_provider",
                 "search_unavailable",
                 "search_error",
@@ -2488,6 +2489,7 @@ class Orchestrator:
         services_payload: dict[str, Any],
         status_check: bool = False,
         read_only_status_check: bool = False,
+        source_request: str | None = None,
     ) -> OrchestratorResponse:
         searxng = self._searxng_service_from_status(services_payload)
         if bool(status_payload.get("available")) or (searxng.get("enabled") and searxng.get("configured") and searxng.get("reachable")):
@@ -2668,6 +2670,7 @@ class Orchestrator:
             "confirmation_token": str(plan.get("confirmation_token") or ""),
             "mutation_plan": mutation_plan,
         }
+        source_request_text = str(source_request or "").strip()
         return self._confirmation_preview_response(
             user_id,
             route="action_tool",
@@ -2679,6 +2682,7 @@ class Orchestrator:
                     **apply_payload,
                     "service_id": "searxng",
                     "selected_engine": engine,
+                    "source_request": source_request_text or None,
                 },
             },
             title="SearXNG setup preview",
@@ -2710,6 +2714,7 @@ class Orchestrator:
                 "mutation_plan": mutation_plan,
                 "plan_mode": self._plan_mode_public_payload(mutation_plan),
                 "apply_payload": apply_payload,
+                "source_request": source_request_text or None,
                 "services_status": services_payload,
                 "search_status": status_payload,
                 "mutated": False,
@@ -2755,6 +2760,7 @@ class Orchestrator:
             status_payload=status_payload,
             services_payload=services_payload,
             status_check=True,
+            source_request=text,
         )
         if "managed_service_setup_preview" in response.data.get("used_tools", []):
             response.text = response.text.replace(
@@ -2923,6 +2929,7 @@ class Orchestrator:
                 services_payload=services_payload,
                 status_check=True,
                 read_only_status_check=self._looks_like_search_status_only_question(text),
+                source_request=None if self._looks_like_search_status_only_question(text) else text,
             )
         rendered_text = self._render_web_search_service_setup_ux(status_payload, services_payload)
         return self._runtime_truth_response(
@@ -3340,7 +3347,19 @@ class Orchestrator:
             if ok:
                 lines.append("A background service is running, and it is only reachable from this computer.")
                 lines.append("You can ask me to stop web search if you want to remove the managed container.")
-                lines.append("Next step: ask me to search for a topic. To keep this after restart, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL to the local URL in your service environment.")
+                lines.append("To keep this after restart, set SEARCH_ENABLED=1 and SEARXNG_BASE_URL to the local URL in your service environment.")
+                source_request = str(params.get("source_request") or "").strip()
+                if source_request and not self._looks_like_search_status_only_question(source_request):
+                    continued = self._safe_web_search_response(user_id, source_request)
+                    continued_ok = bool((continued.data or {}).get("ok", True))
+                    if continued_ok:
+                        lines.extend(["", "Continuing your lookup:", continued.text])
+                        result["continued_lookup"] = True
+                    else:
+                        lines.append("Next step: ask me to search for the topic again.")
+                        result["continued_lookup"] = False
+                else:
+                    lines.append("Next step: ask me to search for a topic.")
             else:
                 journal_payload = result.get("managed_action_journal") if isinstance(result.get("managed_action_journal"), dict) else {}
                 rollback_payload = journal_payload.get("rollback_result") if isinstance(journal_payload.get("rollback_result"), dict) else {}

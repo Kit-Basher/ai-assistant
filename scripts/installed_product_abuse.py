@@ -368,6 +368,65 @@ def check_search_abuse(base_url: str, timeout: float) -> list[Check]:
             else:
                 checks.append(_fail(f"never-configured search lacks setup offer: {prompt}", text[:300], command))
 
+    if state == "configured_stopped":
+        repair_prompt = "what is dots.tts?"
+        repair_thread = "search-configured-stopped-repair"
+        preview_command = f"POST /chat {json.dumps({'message': repair_prompt}, ensure_ascii=True)}"
+        try:
+            preview_payload = _post_chat(base_url, repair_prompt, thread_id=repair_thread, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            checks.append(_fail("configured_stopped search repair preview", f"{exc.__class__.__name__}: {exc}", preview_command))
+        else:
+            preview_text = _assistant_text(preview_payload)
+            preview_combined = f"{preview_text}\n{_flatten_text(preview_payload)}"
+            preview_tools = _used_tools(preview_payload)
+            preview_lower = preview_combined.lower()
+            if "managed_local_service_setup_preview" not in preview_tools:
+                checks.append(_fail("configured_stopped search repair preview", f"tools={preview_tools} text={preview_text[:400]}", preview_command))
+            elif "not configured" in preview_lower or "missing podman" in preview_lower or "podman prerequisite" in preview_lower:
+                checks.append(_fail("configured_stopped search repair preview", preview_text[:500], preview_command, "Do not treat persisted configured-stopped search as first-time setup or missing Podman."))
+            elif "start" not in preview_lower and "repair" not in preview_lower:
+                checks.append(_fail("configured_stopped search repair preview", preview_text[:500], preview_command, "Offer bounded start/repair for the trusted managed endpoint."))
+            elif contains_vague_handoff(preview_combined) or "podman run" in preview_lower or "docker run" in preview_lower:
+                checks.append(_fail("configured_stopped search repair preview", preview_text[:500], preview_command, "Do not give vague handoff or arbitrary container commands."))
+            else:
+                checks.append(_pass("configured_stopped search repair preview", preview_text[:300], preview_command))
+
+        confirm_command = f"POST /chat {json.dumps({'message': 'yes'}, ensure_ascii=True)}"
+        try:
+            confirm_payload = _post_chat(base_url, "yes", thread_id=repair_thread, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001
+            checks.append(_fail("configured_stopped search repair approval", f"{exc.__class__.__name__}: {exc}", confirm_command))
+        else:
+            confirm_text = _assistant_text(confirm_payload)
+            confirm_combined = f"{confirm_text}\n{_flatten_text(confirm_payload)}"
+            confirm_tools = _used_tools(confirm_payload)
+            confirm_lower = confirm_combined.lower()
+            if contains_secret(confirm_combined):
+                checks.append(_fail("configured_stopped search repair secret leakage", "response looked like it exposed a secret/token", confirm_command))
+            elif "managed_local_service_setup" not in confirm_tools:
+                checks.append(_fail("configured_stopped search repair approval", f"tools={confirm_tools} text={confirm_text[:500]}", confirm_command))
+            elif "arbitrary docker commands" not in confirm_lower or "metadata-only" not in confirm_lower:
+                checks.append(_fail("configured_stopped search repair approval", confirm_text[:500], confirm_command, "Repair result must state bounded managed-service and metadata-only boundaries."))
+            else:
+                try:
+                    repaired = _request_json("GET", base_url, "/search/status", timeout=timeout)
+                except Exception as exc:  # noqa: BLE001
+                    checks.append(_fail("configured_stopped search repair status", f"{exc.__class__.__name__}: {exc}", "GET /search/status"))
+                else:
+                    repaired_state = _search_state(repaired)
+                    if repaired_state == "configured_running":
+                        checks.append(_pass("configured_stopped search repair approval", f"search_state={repaired_state}; {confirm_text[:260]}", confirm_command))
+                    else:
+                        checks.append(
+                            _fail(
+                                "configured_stopped search repair approval",
+                                f"repair did not restore search availability; search_state={repaired_state} reason={repaired.get('reason')} text={confirm_text[:300]}",
+                                confirm_command,
+                                str(repaired.get("next_action") or "Inspect managed SearXNG repair diagnostics."),
+                            )
+                        )
+
     command = "POST /search/setup/plan"
     try:
         plan = _request_json("POST", base_url, "/search/setup/plan", payload={}, timeout=timeout)

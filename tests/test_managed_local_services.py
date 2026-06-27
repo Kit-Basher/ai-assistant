@@ -1103,6 +1103,23 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertTrue(plan["executor_pending"]["volume_mount"])
         self.assertTrue(plan["executor_pending"]["config_seeded"])
 
+    def test_search_setup_plan_is_idempotent_when_search_already_available(self) -> None:
+        runtime = self._runtime_with_engine("podman", podman_rootless=True, ports={8080: False, 8888: False})
+        runtime._set_runtime_search_config(enabled=True, provider="searxng", base_url="http://127.0.0.1:8888")  # noqa: SLF001
+        handler = _HandlerForTest(runtime, "/search/setup/plan", {})
+
+        with mock.patch("agent.search.safe_web_search.build_opener", return_value=_FakeSearchOpener({"results": []})):
+            handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+        plan = payload["plan"]
+
+        self.assertEqual(200, handler.status_code)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["requires_confirmation"])
+        self.assertFalse(payload["mutated"])
+        self.assertEqual("already_configured", plan["setup_mode"])
+        self.assertEqual("configured_running", plan["search_state"])
+
     def test_search_setup_plan_marks_docker_as_explicit_fallback(self) -> None:
         runtime = self._runtime_with_engine("docker")
         handler = _HandlerForTest(runtime, "/search/setup/plan", {"allow_docker_fallback": True})
