@@ -33,6 +33,8 @@ Commands:
 
 - `python scripts/prove_ready.py`
 - `python scripts/prove_pre_vm_complete.py`
+- `python scripts/prove_daily_driver_product.py`
+- `python scripts/installed_product_abuse.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
 - `python scripts/prove_core_workflows.py`
@@ -41,6 +43,10 @@ Commands:
 
 Runtime-state warnings are acceptable only when the command clearly labels them,
 for example search disabled because no trusted SearXNG backend is configured.
+`installed_product_abuse.py` is stricter than the ordinary smoke: it talks only
+to the installed API surface, verifies promoted runtime freshness, checks
+documented endpoint availability, and abuses search/Telegram/memory/Plan Mode
+flows like a confused web UI user.
 
 ## Optional Integration Gates
 

@@ -31,7 +31,7 @@ def main() -> int:
     checks.append(
         (
             "live-runtime gates documented",
-            _contains_all(doc_text, ("live-runtime", "daily_driver_smoke.py", "prove_ready.py", "prove_core_workflows.py")),
+            _contains_all(doc_text, ("live-runtime", "daily_driver_smoke.py", "prove_ready.py", "prove_core_workflows.py", "installed_product_abuse.py")),
             "live-runtime command group names local service gates",
         )
     )

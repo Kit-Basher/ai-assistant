@@ -12831,6 +12831,17 @@ class AgentRuntime:
                 "rootless_expected": True,
                 "requires_docker_fallback_confirmation": False,
             }
+        if podman_available and not allow_docker_fallback:
+            return {
+                "selected_engine": "",
+                "preferred_engine": "podman",
+                "reason": "Podman is installed, but rootless Podman was not confirmed.",
+                "next_action": "Retry after the rootless Podman status check finishes, enable rootless Podman for this user, or provide a trusted loopback SEARXNG_BASE_URL.",
+                "podman_available": True,
+                "podman_rootless": podman_rootless,
+                "docker_available": docker_available,
+                "docker_fallback_available": docker_available,
+            }
         if docker_available:
             if not allow_docker_fallback:
                 return {
@@ -12855,13 +12866,6 @@ class AgentRuntime:
                 "rootless_expected": bool(docker_rootless) if docker_rootless is not None else None,
                 "requires_docker_fallback_confirmation": True,
                 "engine_warning": warning,
-            }
-        if podman_available:
-            return {
-                "selected_engine": "",
-                "preferred_engine": "podman",
-                "reason": "Podman is installed, but rootless Podman was not confirmed.",
-                "next_action": "Enable rootless Podman for this user, or provide a trusted loopback SEARXNG_BASE_URL.",
             }
         return {
             "selected_engine": "",
@@ -23943,6 +23947,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             path, parts = self._path_parts()
+            if path in {
+                "/chat",
+                "/ask",
+                "/done",
+                "/search/query",
+                "/search/setup/plan",
+                "/search/setup/apply",
+                "/search/setup/prerequisite/plan",
+                "/search/setup/prerequisite/apply",
+            }:
+                self._send_method_not_allowed(method="GET", path=path, allowed_methods=["POST"])
+                return
             if path == "/ready":
                 self._send_json(200, self.runtime.ready_status())
                 return

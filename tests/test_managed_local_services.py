@@ -1121,6 +1121,34 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertIn("Podman was not found", plan["engine_warning"])
         self.assertIn("root-level daemon", plan["engine_warning"])
 
+    def test_search_setup_plan_does_not_offer_podman_install_when_podman_rootless_unknown(self) -> None:
+        def _runner(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+            binary = Path(str(argv[0])).name
+            if binary == "podman":
+                return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unknown")
+            if binary == "docker":
+                return subprocess.CompletedProcess(argv, 0, stdout="name=seccomp", stderr="")
+            return subprocess.CompletedProcess(argv, 1, stdout="", stderr="unknown")
+
+        runtime = self._runtime(search_enabled=False, endpoint=None)
+        runtime._managed_local_services = ManagedLocalServiceDetector(  # noqa: SLF001
+            search_status_provider=runtime.search_status,
+            command_finder=lambda name: f"/usr/bin/{name}" if name in {"podman", "docker"} else None,
+            command_runner=_runner,
+            health_checker=lambda _url: False,
+        )
+        handler = _HandlerForTest(runtime, "/search/setup/plan", {})
+
+        handler.do_POST()
+        payload = json.loads(handler.body.decode("utf-8"))
+
+        self.assertEqual(400, handler.status_code)
+        self.assertFalse(payload["ok"])
+        self.assertEqual("managed_service_runtime_unavailable", payload["blocked_reason"])
+        self.assertIn("Podman is installed", payload["reason"])
+        self.assertNotIn("missing Podman", json.dumps(payload))
+        self.assertNotIn("podman_prerequisite", json.dumps(payload))
+
     def test_search_setup_plan_blocks_when_no_runtime_available(self) -> None:
         runtime = self._runtime_with_engine(None)
         handler = _HandlerForTest(runtime, "/search/setup/plan", {})

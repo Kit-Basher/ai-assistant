@@ -1197,7 +1197,7 @@ class ManagedLocalServiceDetector:
         command_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         health_checker: Callable[[str], bool] | None = None,
         searxng_url_provider: Callable[[], str | None] | None = None,
-        timeout_seconds: float = 1.0,
+        timeout_seconds: float = 3.0,
     ) -> None:
         self._search_status_provider = search_status_provider
         self._command_finder = command_finder or trusted_command_path
@@ -1370,7 +1370,7 @@ def build_managed_local_services_status(
     command_finder: Callable[[str], str | None] | None = None,
     health_checker: Callable[[str], bool] | None = None,
     searxng_url_provider: Callable[[], str | None] | None = None,
-    timeout_seconds: float = 1.0,
+    timeout_seconds: float = 3.0,
 ) -> dict[str, Any]:
     started = time.monotonic()
     detector = ManagedLocalServiceDetector(
