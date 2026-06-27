@@ -2,6 +2,7 @@
 
 Canonical product/runtime source: `docs/product/PROJECT_INTENT.md`.
 This setup guide is the canonical install/runtime path document.
+Current checkpoint and proof status: `docs/operator/PROJECT_STATE.md`.
 
 Canonical first-run command:
 
@@ -111,6 +112,8 @@ Canonical packaging/build path:
 - canonical release gate: `python scripts/release_gate.py`
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
 - pre-VM readiness gate: `python scripts/prove_ready.py`
+- installed daily-driver product gate:
+  `python scripts/prove_daily_driver_product.py`
 - release, rollback, backup, and support-boundary guidance:
   - `docs/operator/RELEASE.md`
   - `docs/operator/OPERATIONS.md`
@@ -128,6 +131,8 @@ Canonical packaging/build path:
 5. Confirm the active copy:
    - `python -m agent split_status`
 6. If you are validating the install or preparing a release:
+   - `python scripts/installed_product_abuse.py`
+   - `python scripts/prove_daily_driver_product.py`
    - `python scripts/prove_ready.py`
    - use `python scripts/release_gate.py` for the heavier packaging/release gate
 
@@ -249,6 +254,7 @@ Setup is complete when onboarding state is `READY` and:
 7. `systemctl --user restart personal-agent-api-dev.service`
 8. `python -m agent status`
 9. If this upgrade is a release candidate or a risky recovery, run:
+   - `python scripts/prove_daily_driver_product.py`
    - `python scripts/release_gate.py`
 
 `python -m agent doctor --fix` is the canonical safe upgrade helper. It creates
@@ -269,6 +275,7 @@ the canonical state directory when needed.
 6. Verify:
    - `python -m agent status`
 7. If this is a release-candidate validation path, run:
+   - `python scripts/prove_daily_driver_product.py`
    - `python scripts/release_gate.py`
 
 Manual backup/export is supported by stopping the user services and copying:

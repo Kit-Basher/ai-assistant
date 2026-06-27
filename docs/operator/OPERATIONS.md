@@ -2,6 +2,8 @@
 
 This is the lightweight post-release operating guide for Personal Agent.
 If another note disagrees, trust the live state surfaces plus `python -m agent doctor`.
+For the current checkpoint summary and safe release wording, see
+`docs/operator/PROJECT_STATE.md`.
 
 Daily-driver service:
 
@@ -52,6 +54,10 @@ Confirm:
 - run `python scripts/prove_pre_vm_complete.py` before the expensive fresh VM
   proof; it adds backup/restore, Web UI robustness, and CI/live gate split
   checks
+- run `python scripts/installed_product_abuse.py` or
+  `python scripts/prove_daily_driver_product.py` when the web UI or installed
+  runtime behavior feels wrong; these gates talk to the promoted API surface and
+  catch stale bundles, route mismatches, and dead-end approval flows
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:
@@ -209,6 +215,12 @@ table. Treat `FAIL` as release-blocking. Treat isolated search `BLOCKED` as an
 expected warning only when the command says search is disabled or unconfigured
 rather than broken.
 
+`installed_product_abuse.py` is the stronger product-facing gate. It verifies
+the promoted stable runtime commit, installed API endpoints, search
+setup/recovery, Telegram optional-service UX, Plan Mode boundaries, and common
+confused-user prompts. `prove_daily_driver_product.py` wraps that installed
+product proof.
+
 Gate split:
 
 - CI-safe gates are documented in `docs/operator/RELEASE_GATE_MATRIX.md` and do
@@ -242,6 +254,16 @@ Until then, they stay separate from the mandatory gate.
 Check search with:
 
 - `GET /search/status`
+
+Lifecycle truth:
+
+- `never_configured`: first public lookup offers local SearXNG setup and
+  requires confirmation.
+- `configured_running`: public lookup searches metadata immediately.
+- `configured_stopped`: public lookup offers inline managed start/repair
+  confirmation, then continues the original lookup after successful repair.
+- `invalid_or_untrusted_config`: runtime refuses to use the endpoint and offers
+  safe reconfiguration.
 
 If search is missing, preview setup with:
 

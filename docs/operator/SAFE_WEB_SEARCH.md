@@ -1,5 +1,7 @@
 # Safe Web Search
 
+Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
+
 Native `safe_web_search` is a bounded lookup path for explicit web-search requests. It calls a configured SearXNG JSON endpoint and returns search result metadata only:
 
 - title
@@ -143,6 +145,13 @@ Lifecycle states:
   Public lookups search immediately.
 - `configured_stopped`: trusted endpoint is configured but unreachable. Public
   lookups offer inline managed start/repair confirmation and do not ask for a
-  full new setup ritual.
+  full new setup ritual. After approval, Personal Agent starts or repairs only
+  the known trusted managed endpoint, rechecks `/search/status`, and continues
+  the original lookup when search becomes available.
 - `invalid_or_untrusted_config`: persisted or configured endpoint failed trust
   checks. The runtime refuses to use it and offers safe reconfiguration.
+
+`POST /search/setup/plan` is idempotent when search is already running. In that
+case it returns `setup_mode=already_configured`, `requires_confirmation=false`,
+and `mutated=false` instead of trying to create a new container or allocate a
+port.

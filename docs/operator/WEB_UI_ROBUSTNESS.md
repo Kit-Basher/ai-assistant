@@ -1,5 +1,7 @@
 # Web UI Robustness
 
+Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
+
 The desktop web UI is a local control surface for the Personal Agent API. It is
 not the source of policy authority; Plan Mode, search safety, pack safety, and
 runtime truth remain enforced by the API.
@@ -28,6 +30,11 @@ The smoke currently proves:
 
 This is intentionally a cheap smoke. It does not replace a browser automation
 suite.
+
+The current installed daily-driver product proof exercises the web-facing API
+path but not a real browser. The fresh VM proof still needs manual browser
+checks for refresh, hard-refresh after promotion, large transcript behavior,
+and export download.
 
 ## Current Behavior
 

@@ -1,13 +1,15 @@
 # PRE-VM Completion Audit
 
-Date: 2026-06-20
+Date: 2026-06-27
+
+Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
 
 This audit is stricter than `READY_FOR_VM_PROOF`. It asks whether the local
 runtime is hardened enough that the fresh Debian VM proof should be final
 confirmation, not a discovery phase.
 
-Current result: **PRE_VM_COMPLETE: yes**, when all command checks pass or only
-accepted runtime-state warnings remain.
+Current checkpoint result: **PRE_VM_COMPLETE: yes**, `BLOCKERS=0`,
+`UNKNOWN_AREAS=0`, with accepted warnings documented by the command output.
 
 The project has zero known release-readiness blockers in `prove_ready.py`.
 Remaining partial subsystems are documented and have bounded proof where cheap.
@@ -25,6 +27,7 @@ python scripts/prove_pre_vm_complete.py
 The command runs or summarizes:
 
 - `python scripts/prove_ready.py`
+- `python scripts/prove_daily_driver_product.py`
 - `python scripts/backup_restore_proof.py`
 - `python scripts/webui_robustness_smoke.py`
 - `python scripts/release_gate_matrix_smoke.py`
@@ -73,8 +76,11 @@ None currently known after `scripts/backup_restore_proof.py`.
 - `perf_smoke.py` can warn on small runtime-state variance, especially `/ready`.
   Deterministic chat routes must remain no-LLM and should keep post-response
   memory hooks at `0ms`.
-- Daily-driver search remains `BLOCKED` until trusted SearXNG is configured in
-  the target runtime.
+- Daily-driver search is expected to pass on the current local checkpoint when
+  managed SearXNG is configured and recoverable. In isolated environments,
+  search may still report `BLOCKED` when no trusted backend exists.
+- If managed SearXNG is `configured_stopped`, the assistant should offer inline
+  Plan Mode repair and continue the original lookup after successful repair.
 
 ## Unknown Areas
 

@@ -1,5 +1,7 @@
 # Release Gate Matrix
 
+Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
+
 This file separates deterministic CI-safe checks from local-runtime and optional
 integration checks. The split prevents GitHub Actions from requiring a personal
 machine's services while keeping the local release proof strict.
@@ -13,6 +15,7 @@ local service:
 - `python scripts/release_smoke.py`
 - `python scripts/chat_eval.py`
 - `python scripts/llm_behavior_eval.py`
+- `python scripts/docs_truth_smoke.py`
 - `python scripts/external_pack_safety_smoke.py`
 - `python scripts/backup_restore_proof.py`
 - `python scripts/release_gate_matrix_smoke.py`
@@ -48,6 +51,10 @@ to the installed API surface, verifies promoted runtime freshness, checks
 documented endpoint availability, and abuses search/Telegram/memory/Plan Mode
 flows like a confused web UI user.
 
+At `v0.2.1-search-recovery-product-pass`, the installed-product gate is the
+stronger daily-driver truth gate because an earlier real UI search request found
+failures that internal/mock gates had missed.
+
 ## Optional Integration Gates
 
 These require optional services or hardware and are not CI requirements:
@@ -60,6 +67,9 @@ These require optional services or hardware and are not CI requirements:
 
 Optional gates should report `BLOCKED` when the required service is not
 configured, not `PASS`.
+
+The fresh Debian VM proof is intentionally not listed as completed here. It is
+the next expensive confirmation after local product-facing gates pass.
 
 ## GitHub Actions Direction
 

@@ -6,11 +6,17 @@ executes it.
 
 Product intent is defined in
 [`docs/product/PROJECT_INTENT.md`](docs/product/PROJECT_INTENT.md).
+Current release-proof truth is tracked in
+[`docs/operator/PROJECT_STATE.md`](docs/operator/PROJECT_STATE.md).
 
 It is exposed through the HTTP API, the browser/web UI served by the API
 server, the CLI, and the optional Telegram adapter.
 
 ## Current Product Truth
+Current checkpoint language: the project is ready for fresh VM proof, not
+finished. The installed daily-driver product gate passes on the local stable
+runtime, but fresh Debian VM proof and several lifecycle lanes remain pending.
+
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results
 when needed, and explains those results back to the user.
@@ -56,6 +62,8 @@ explicit confirmation step.
   own.
 - It will not execute foreign code or plugin packs.
 - It will not install dependencies from imported packs.
+- It will not claim full web browsing; current web search is metadata-only
+  SearXNG result metadata.
 
 ## Core Concepts
 
