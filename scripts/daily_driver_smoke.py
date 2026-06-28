@@ -9,7 +9,14 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.language_consistency import check_english_language_consistency
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
@@ -275,6 +282,13 @@ def check_normal_chat(base_url: str, timeout: float, run_id: str) -> Check:
         return _fail("normal chat", f"unexpected tool use for normal chat; tools={tools}", command)
     if "search returned" in lowered or "using linux troubleshooting workflow" in lowered:
         return _fail("normal chat", "normal chat forced search or pack language", command)
+    language = check_english_language_consistency(prompt, text)
+    if not language.ok:
+        return _fail(
+            "normal chat",
+            f"{language.reason}; cjk={language.cjk_count}/{language.checked_chars}; excerpt={language.excerpt}",
+            command,
+        )
     return _pass("normal chat", text[:220], command)
 
 
