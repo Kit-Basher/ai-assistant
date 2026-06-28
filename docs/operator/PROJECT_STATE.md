@@ -19,6 +19,13 @@ Current confirmed proof:
 - `python scripts/prove_ready.py`: `READY_FOR_VM_PROOF=yes`, `RELEASE_BLOCKERS=0`, `WARNINGS=2`
 - `git status`: clean at the checkpoint
 
+New restart/browser survival lane:
+
+- `python scripts/restart_survival_smoke.py`: automated stable API service
+  restart proof. It is not a full PC reboot proof.
+- `docs/operator/REBOOT_PROOF.md`: manual reboot and browser survival
+  checklist.
+
 Earlier readiness gates passed before the first real web UI search request
 failed. That failure proved the repo needed an installed-product gate, not only
 internal and mock-heavy tests. `installed_product_abuse.py` and
@@ -44,6 +51,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - `scripts/release_smoke.py`: deterministic release smoke for core behavior.
 - `scripts/perf_smoke.py`: read-only latency and no-LLM deterministic route
   check. Small latency warnings are not release blockers by themselves.
+- `scripts/restart_survival_smoke.py`: installed stable service stop/start
+  proof. It verifies runtime freshness, status surfaces, managed search repair,
+  metadata-only search after restart, Telegram optional wording, and stale
+  confirmation rejection across service restart.
 
 ## Proven Now
 
@@ -67,6 +78,8 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - External pack safety smoke still passes and packs remain text-only unless
   separately approved through explicit lifecycle gates.
 - Daily-driver smoke passes with installed managed search running.
+- The stable API service can survive a controlled service stop/start in the
+  automated restart smoke. Actual PC reboot remains a separate manual proof.
 
 ## Still Partial
 
@@ -77,7 +90,8 @@ These are not unknowns, but they are not finished:
 - Storage/log growth: growth surfaces are documented; a single read-only
   `storage_status` and cleanup preview flow remain future work.
 - Web UI robustness: static/component smoke exists; browser automation and
-  manual refresh/large-transcript checks remain.
+  manual refresh/large-transcript checks remain. `REBOOT_PROOF.md` carries the
+  manual UI checklist.
 - Telegram runtime behavior: optional-service semantics and status UX are
   covered; full start/stop/restart execution proof remains partial.
 - Memory completion: audits and safety checks exist; deterministic
@@ -108,8 +122,8 @@ Safe wording:
 
 ## Next Release Lanes
 
-1. Restart/reboot survival proof.
-2. UI/browser survival proof.
+1. Manual reboot proof.
+2. Automated browser/UI survival proof.
 3. Operator lifecycle: status, storage, backup, restore, update, uninstall,
    repair.
 4. Memory explain/forget/status completion.
@@ -126,6 +140,7 @@ bash scripts/promote_local_stable.sh
 python scripts/installed_product_abuse.py
 python scripts/prove_daily_driver_product.py
 python scripts/daily_driver_smoke.py --timeout 90
+python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py
 python scripts/prove_ready.py
 git status
@@ -153,4 +168,3 @@ Search is not a browser. It returns untrusted SearXNG metadata only.
 - Start/restart/stop are bounded Plan Mode actions.
 - Telegram tokens must remain redacted from status, chat, logs, docs, and
   support output.
-

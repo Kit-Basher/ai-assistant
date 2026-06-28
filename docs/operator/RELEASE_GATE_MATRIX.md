@@ -38,6 +38,7 @@ Commands:
 - `python scripts/prove_pre_vm_complete.py`
 - `python scripts/prove_daily_driver_product.py`
 - `python scripts/installed_product_abuse.py`
+- `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
 - `python scripts/prove_core_workflows.py`
@@ -55,6 +56,11 @@ At `v0.2.1-search-recovery-product-pass`, the installed-product gate is the
 stronger daily-driver truth gate because an earlier real UI search request found
 failures that internal/mock gates had missed.
 
+`restart_survival_smoke.py` is also a live-runtime gate. It intentionally stops
+and starts `personal-agent-api.service`, verifies the promoted runtime returns,
+checks managed search recovery, and confirms stale approvals do not survive the
+service restart as executable approvals. It is not a full machine reboot proof.
+
 ## Optional Integration Gates
 
 These require optional services or hardware and are not CI requirements:
@@ -64,6 +70,7 @@ These require optional services or hardware and are not CI requirements:
 - local model/Ollama live model smoke
 - local model/provider matrix on the target hardware
 - future browser/GUI automation proof for the desktop web UI
+- manual reboot proof from `docs/operator/REBOOT_PROOF.md`
 
 Optional gates should report `BLOCKED` when the required service is not
 configured, not `PASS`.

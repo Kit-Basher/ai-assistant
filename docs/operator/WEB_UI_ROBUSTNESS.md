@@ -36,6 +36,11 @@ path but not a real browser. The fresh VM proof still needs manual browser
 checks for refresh, hard-refresh after promotion, large transcript behavior,
 and export download.
 
+Restart and manual browser survival checks are tracked in
+`docs/operator/REBOOT_PROOF.md`. `scripts/restart_survival_smoke.py` proves the
+installed API service restart path; it does not replace the manual browser
+checklist or a future Playwright suite.
+
 ## Current Behavior
 
 Send failure: the UI appends an assistant error bubble beginning `I ran into a
@@ -72,6 +77,8 @@ Before final release, manually check:
 - browser refresh and hard-refresh after promotion
 - very large transcript scroll behavior
 - disabled-search display in the Basic/Optional capability surfaces
+- approval preview followed by browser refresh, confirming stale approval does
+  not execute without a current matching plan
 - transcript export download
 
 These are documented gaps, not unknown areas. A Playwright-style suite can be
