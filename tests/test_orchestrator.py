@@ -50,6 +50,23 @@ class _FakeChatLLM:
         raise AssertionError(f"intent_from_text should not be called: {text}")
 
 
+class _SequenceChatLLM:
+    def __init__(self, texts: list[str]) -> None:
+        self._texts = list(texts)
+        self.chat_calls: list[dict[str, object]] = []
+
+    def enabled(self) -> bool:
+        return True
+
+    def chat(self, messages, **kwargs):  # type: ignore[no-untyped-def]
+        self.chat_calls.append({"messages": messages, "kwargs": kwargs})
+        text = self._texts.pop(0) if self._texts else ""
+        return {"ok": True, "text": text, "provider": "ollama", "model": "llama3"}
+
+    def intent_from_text(self, text: str) -> dict[str, object] | None:
+        raise AssertionError(f"intent_from_text should not be called: {text}")
+
+
 class _RaisingChatLLM:
     def __init__(self, *, enabled: bool = True) -> None:
         self._enabled = bool(enabled)
@@ -1904,6 +1921,103 @@ class TestOrchestrator(unittest.TestCase):
         messages = call.get("messages") if isinstance(call, dict) else []
         system_text = str((messages or [{}])[0].get("content") if messages else "")
         self.assertIn("Always identify as the local Personal Agent", system_text)
+
+    def test_english_prompt_with_cjk_llm_response_retries_once(self) -> None:
+        llm = _SequenceChatLLM(
+            [
+                "The sky is blue because air scatters light. 阳光中的蓝色短波光被散射到各个方向。",
+                "The sky is blue because air scatters short blue wavelengths more than red wavelengths.",
+            ]
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("Explain why the sky is blue in two sentences.", "user1")
+
+        self.assertEqual(
+            "The sky is blue because air scatters short blue wavelengths more than red wavelengths.",
+            response.text,
+        )
+        self.assertEqual(2, len(llm.chat_calls))
+        language = response.data.get("language_consistency")
+        self.assertIsInstance(language, dict)
+        self.assertTrue(language.get("repair_attempted"))
+        self.assertTrue(language.get("repair_succeeded"))
+
+    def test_english_prompt_with_english_llm_response_passes_unchanged(self) -> None:
+        llm = _SequenceChatLLM(["The sky is blue because air scatters blue light more strongly."])
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("Explain why the sky is blue in two sentences.", "user1")
+
+        self.assertEqual("The sky is blue because air scatters blue light more strongly.", response.text)
+        self.assertEqual(1, len(llm.chat_calls))
+        self.assertNotIn("language_consistency", response.data)
+
+    def test_explicit_chinese_prompt_allows_chinese_response(self) -> None:
+        llm = _SequenceChatLLM(["天空是蓝色的，因为大气会散射短波蓝光。"])
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("Answer in Chinese: why is the sky blue?", "user1")
+
+        self.assertIn("天空", response.text)
+        self.assertEqual(1, len(llm.chat_calls))
+
+    def test_language_guard_ignores_code_and_url_snippets(self) -> None:
+        llm = _SequenceChatLLM(
+            ["Use `print('你好你好你好')` and see https://example.com/%E4%BD%A0 for the encoded URL."]
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("Explain this code and URL briefly.", "user1")
+
+        self.assertIn("print", response.text)
+        self.assertEqual(1, len(llm.chat_calls))
+
+    def test_language_guard_does_not_loop_after_failed_repair(self) -> None:
+        llm = _SequenceChatLLM(
+            [
+                "The sky is blue. 阳光中的蓝色短波光被散射到各个方向。",
+                "Still mixed. 阳光中的蓝色短波光被散射到各个方向。",
+                "This third response must not be requested.",
+            ]
+        )
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("Explain why the sky is blue in two sentences.", "user1")
+
+        self.assertIn("failed a language-consistency check", response.text)
+        self.assertEqual(2, len(llm.chat_calls))
+        self.assertEqual("language_consistency_failed", response.data.get("error_kind"))
 
     def test_generic_chat_reports_no_prior_memory_diagnostics(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="forest reply")

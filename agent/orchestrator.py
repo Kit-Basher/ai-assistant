@@ -111,6 +111,7 @@ from agent.identity import (
     normalize_identity_name,
     user_identity_label,
 )
+from agent.language_consistency import check_english_language_consistency
 from agent.llm.chat_preflight import build_chat_selection_policy_meta
 from agent.llm.inference_router import route_inference
 from agent.onboarding_flow import (
@@ -16925,6 +16926,112 @@ class Orchestrator:
                         response_common["duration_ms"] = int(response_common.get("duration_ms") or 0) + int(repair_result.get("duration_ms") or 0)
                 except Exception:
                     pass
+            language_check = check_english_language_consistency(text, llm_text)
+            if not language_check.ok:
+                response_common["language_consistency"] = {
+                    "ok": False,
+                    "reason": language_check.reason,
+                    "cjk_count": language_check.cjk_count,
+                    "checked_chars": language_check.checked_chars,
+                    "repair_attempted": True,
+                }
+                try:
+                    language_repair_messages = [
+                        {
+                            "role": "system",
+                            "content": system_prompt
+                            + "\nThe user's prompt is in English. Reply only in English. "
+                            "Do not include Chinese, Japanese, Korean, or other non-requested language text. "
+                            "Preserve code, URLs, names, and quoted terms only when needed.",
+                        },
+                        *messages,
+                    ]
+                    repair_timeout_seconds = explicit_timeout_seconds
+                    if repair_timeout_seconds is not None:
+                        repair_timeout_seconds = max(3.0, min(float(repair_timeout_seconds), 12.0))
+                    language_repair_result = route_inference(
+                        llm_client=self.llm_client,
+                        messages=language_repair_messages,
+                        user_text=str(text or "").strip(),
+                        task_hint=str(text or "").strip(),
+                        purpose=purpose,
+                        task_type=task_type_override,
+                        trace_id=f"{trace_id}-language-repair",
+                        provider_override=selected_provider,
+                        model_override=selected_model,
+                        require_tools=False,
+                        require_json=bool(payload.get("require_json")),
+                        require_vision=bool(payload.get("require_vision")),
+                        min_context_tokens=int(payload.get("min_context_tokens") or 0) or None,
+                        timeout_seconds=repair_timeout_seconds,
+                        compute_tier="low",
+                        metadata={
+                            "trace_id": trace_id,
+                            "source_surface": source_surface,
+                            "channel": channel,
+                            "response_repair": "language_consistency",
+                            "runtime_ready": bool(self._runtime_ready_for_chat()),
+                        },
+                    )
+                    repaired_text = str(language_repair_result.get("text") or "").strip()
+                    repaired_check = check_english_language_consistency(text, repaired_text)
+                    if bool(language_repair_result.get("ok")) and repaired_text and repaired_check.ok:
+                        llm_text = repaired_text
+                        selected_provider = str(language_repair_result.get("provider") or "").strip() or selected_provider
+                        selected_model = str(language_repair_result.get("model") or "").strip() or selected_model
+                        response_common["provider"] = selected_provider
+                        response_common["model"] = selected_model
+                        response_common["attempts"] = (
+                            list(response_common.get("attempts") or [])
+                            + list(language_repair_result.get("attempts") or [])
+                        )
+                        response_common["duration_ms"] = int(response_common.get("duration_ms") or 0) + int(language_repair_result.get("duration_ms") or 0)
+                        response_common["language_consistency"] = {
+                            "ok": True,
+                            "reason": repaired_check.reason,
+                            "repair_attempted": True,
+                            "repair_succeeded": True,
+                        }
+                    else:
+                        response_common["language_consistency"] = {
+                            "ok": False,
+                            "reason": repaired_check.reason if repaired_text else language_check.reason,
+                            "cjk_count": repaired_check.cjk_count if repaired_text else language_check.cjk_count,
+                            "checked_chars": repaired_check.checked_chars if repaired_text else language_check.checked_chars,
+                            "repair_attempted": True,
+                            "repair_succeeded": False,
+                        }
+                        return self._merge_response_data(
+                            OrchestratorResponse(
+                                "I started to answer, but the draft failed a language-consistency check. Please ask again, and I’ll answer in English.",
+                                {"language_consistency_repair": response_common["language_consistency"]},
+                            ),
+                            **{
+                                **response_common,
+                                "ok": False,
+                                "error_kind": "language_consistency_failed",
+                            },
+                        )
+                except Exception:
+                    response_common["language_consistency"] = {
+                        "ok": False,
+                        "reason": language_check.reason,
+                        "cjk_count": language_check.cjk_count,
+                        "checked_chars": language_check.checked_chars,
+                        "repair_attempted": True,
+                        "repair_succeeded": False,
+                    }
+                    return self._merge_response_data(
+                        OrchestratorResponse(
+                            "I started to answer, but the draft failed a language-consistency check. Please ask again, and I’ll answer in English.",
+                            {"language_consistency_repair": response_common["language_consistency"]},
+                        ),
+                        **{
+                            **response_common,
+                            "ok": False,
+                            "error_kind": "language_consistency_failed",
+                        },
+                    )
             if self._looks_like_capability_disclaimer_reply(llm_text):
                 llm_text = self._general_knowledge_degraded_text()
             elif self._looks_like_robotic_self_narration_reply(llm_text):
