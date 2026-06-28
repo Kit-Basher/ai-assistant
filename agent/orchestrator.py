@@ -18828,6 +18828,26 @@ class Orchestrator:
             effective_user_text = cleaned_text if memory_disabled_for_turn else text
             if memory_disabled_for_turn:
                 context["memory_disabled_for_turn"] = True
+                if not str(effective_user_text or "").strip():
+                    message = (
+                        "Okay — I won’t use saved memory or prior conversation context for this turn. "
+                        "Current-turn tools and current facts are still available if you ask for them. "
+                        "What do you want to do?"
+                    )
+                    return self._runtime_truth_response(
+                        text=message,
+                        route="assistant_clarification",
+                        used_runtime_state=False,
+                        used_memory=False,
+                        used_tools=[],
+                        next_question="What do you want to do?",
+                        payload={
+                            "type": "memory_opt_out",
+                            "summary": message,
+                            "memory_disabled_for_turn": True,
+                            "scope": "current_turn",
+                        },
+                    )
             skip_turn_memory_hooks = bool(initial_skip_turn_memory_hooks or self._should_skip_turn_memory_hooks(effective_user_text))
             if skip_turn_memory_hooks:
                 context["skip_turn_memory_hooks"] = True

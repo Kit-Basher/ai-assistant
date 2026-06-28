@@ -263,6 +263,32 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
                 self.assertTrue(all(row.get("status") == PENDING_STATUS_ABORTED for row in pending))
                 self.assertEqual("off", self.db.get_user_pref("show_summary"))
 
+    def test_current_turn_memory_opt_out_is_deterministic_and_precise(self) -> None:
+        for message in (
+            "do not use memory for this",
+            "don't use memory",
+            "ignore memory",
+            "do not use old context",
+            "start fresh for this",
+        ):
+            with self.subTest(message=message):
+                orchestrator = self._orchestrator()
+
+                response = orchestrator.handle_message(message, "user1")
+                lowered = response.text.lower()
+
+                self.assertEqual("assistant_clarification", response.data.get("route"))
+                self.assertFalse(response.data.get("used_llm"))
+                self.assertFalse(response.data.get("used_memory"))
+                self.assertTrue(response.data.get("skip_post_response_hooks"))
+                self.assertIn("saved memory", lowered)
+                self.assertIn("prior conversation context", lowered)
+                self.assertIn("this turn", lowered)
+                self.assertNotIn("external information", lowered)
+                self.assertNotIn("external info", lowered)
+                self.assertNotIn("search", lowered)
+                self.assertNotIn("web", lowered)
+
     def test_telegram_status_uses_local_status_not_generic_advice(self) -> None:
         orchestrator = self._orchestrator()
 

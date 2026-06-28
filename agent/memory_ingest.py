@@ -87,15 +87,19 @@ def parse_memory_override(text: str) -> Tuple[bool, str]:
         "do not use memory",
         "don't use memory",
         "dont use memory",
+        "ignore memory",
         "do not use old context",
         "don't use old context",
         "dont use old context",
         "ignore old context",
+        "start fresh for this",
         "without memory",
     )
+    standalone_suffixes = ("", " for this", " for this turn", " here")
     for prefix in prefixes:
-        if normalized == prefix:
+        if normalized in {prefix + suffix for suffix in standalone_suffixes}:
             return True, ""
+    for prefix in prefixes:
         if normalized.startswith(prefix + " "):
             pattern = re.compile(re.escape(prefix), re.IGNORECASE)
             cleaned = pattern.sub("", raw, count=1).strip(" ,:-")

@@ -1857,6 +1857,34 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(response, OrchestratorResponse)
         self.assertIn("I’m not ready to chat yet", response.text)
 
+    def test_memory_opt_out_acknowledgement_is_deterministic(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="Sure, I will avoid external information.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("do not use memory for this", "user1")
+        lowered = response.text.lower()
+
+        self.assertEqual(
+            "Okay — I won’t use saved memory or prior conversation context for this turn. "
+            "Current-turn tools and current facts are still available if you ask for them. "
+            "What do you want to do?",
+            response.text,
+        )
+        self.assertEqual("assistant_clarification", response.data.get("route"))
+        self.assertFalse(response.data.get("used_llm"))
+        self.assertEqual([], llm.chat_calls)
+        self.assertFalse(response.data.get("used_memory"))
+        self.assertNotIn("external information", lowered)
+        self.assertNotIn("external info", lowered)
+        self.assertNotIn("search", lowered)
+        self.assertNotIn("web", lowered)
+
     def test_llm_available_routes_free_text_to_llm_chat(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="hi from llm")
         orchestrator = Orchestrator(
