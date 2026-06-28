@@ -1902,6 +1902,81 @@ class TestOrchestrator(unittest.TestCase):
         self.assertNotIn("search", lowered)
         self.assertNotIn("web", lowered)
 
+    def test_operator_storage_status_is_read_only_and_deterministic(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="LLM should not answer storage.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("how much space is this using?", "user1")
+
+        self.assertEqual("operator_lifecycle", response.data.get("route"))
+        self.assertFalse(response.data.get("used_llm"))
+        self.assertEqual([], llm.chat_calls)
+        self.assertIn("read-only estimate", response.text)
+        self.assertIn("Cleanup is a separate confirmation-gated action.", response.text)
+        payload = response.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        self.assertFalse(payload.get("mutated"))
+
+    def test_operator_lifecycle_mutators_require_confirmation(self) -> None:
+        cases = {
+            "back up the assistant": ("Backup assistant preview", "include local state"),
+            "restore from backup": ("Restore from backup preview", "dry-run"),
+            "update the assistant": ("Update assistant preview", "not pull code"),
+            "clean old runtime files": ("Cleanup old runtime files preview", "show exact paths"),
+            "uninstall the assistant": ("Uninstall assistant preview", "Uninstall is destructive"),
+            "make a support bundle": ("Support bundle preview", "raw tokens"),
+            "repair the assistant": ("Repair assistant preview", "check services first"),
+        }
+        for prompt, (title, expected_text) in cases.items():
+            with self.subTest(prompt=prompt):
+                llm = _FakeChatLLM(enabled=True, text="LLM should not answer operator lifecycle.")
+                orchestrator = Orchestrator(
+                    db=self.db,
+                    skills_path=self.skills_path,
+                    log_path=self.log_path,
+                    timezone="UTC",
+                    llm_client=llm,
+                )
+
+                response = orchestrator.handle_message(prompt, "user1")
+
+                self.assertEqual("operator_lifecycle", response.data.get("route"))
+                self.assertFalse(response.data.get("used_llm"))
+                self.assertEqual([], llm.chat_calls)
+                self.assertIn(title, response.data.get("next_question", "") or response.text)
+                self.assertIn(expected_text, response.text)
+                self.assertIn("Say yes to continue, or no to cancel.", response.text)
+                payload = response.data.get("runtime_payload")
+                self.assertIsInstance(payload, dict)
+                self.assertTrue(payload.get("requires_confirmation"))
+                self.assertFalse(payload.get("mutated"))
+
+    def test_operator_lifecycle_confirmation_does_not_execute_preview_only_action(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not answer operator lifecycle."),
+        )
+
+        preview = orchestrator.handle_message("uninstall the assistant", "user1")
+        confirmed = orchestrator.handle_message("yes", "user1")
+
+        self.assertIn("Uninstall is destructive", preview.text)
+        self.assertEqual("operator_lifecycle", confirmed.data.get("route"))
+        self.assertEqual("operator_lifecycle_executor_not_enabled", confirmed.data.get("error_kind"))
+        self.assertIn("I did not change files", confirmed.text)
+        payload = confirmed.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        self.assertFalse(payload.get("mutated"))
+
     def test_llm_available_routes_free_text_to_llm_chat(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="hi from llm")
         orchestrator = Orchestrator(

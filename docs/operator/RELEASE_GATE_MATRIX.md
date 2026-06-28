@@ -38,6 +38,7 @@ Commands:
 - `python scripts/prove_pre_vm_complete.py`
 - `python scripts/prove_daily_driver_product.py`
 - `python scripts/installed_product_abuse.py`
+- `python scripts/operator_lifecycle_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -60,6 +61,12 @@ failures that internal/mock gates had missed.
 and starts `personal-agent-api.service`, verifies the promoted runtime returns,
 checks managed search recovery, and confirms stale approvals do not survive the
 service restart as executable approvals. It is not a full machine reboot proof.
+
+`operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
+proves health, broken-status, storage, repair, backup, restore, update,
+cleanup, uninstall, and support-bundle prompts route through the real `/chat`
+API and remain preview/confirmation-gated. It does not prove destructive
+execution for uninstall, cleanup, restore, or update.
 
 ## Optional Integration Gates
 

@@ -5,14 +5,16 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-search-recovery-product-pass`
-- Commit: `c7e2e2d`
+- Tag: `v0.2.1-language-response-guard`
+- Commit: `ef90140`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
 Current confirmed proof:
 
 - `python scripts/installed_product_abuse.py`: `PASS=42 WARN=0 FAIL=0`
+- `python scripts/operator_lifecycle_smoke.py`: installed operator lifecycle
+  preview lane passes
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -55,6 +57,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   proof. It verifies runtime freshness, status surfaces, managed search repair,
   metadata-only search after restart, Telegram optional wording, and stale
   confirmation rejection across service restart.
+- `scripts/operator_lifecycle_smoke.py`: installed-runtime proof for health,
+  broken-status, storage, repair, backup, restore, update, cleanup, uninstall,
+  and support-bundle user-facing lifecycle prompts. It proves safe previews and
+  cancellation, not full destructive execution.
 
 ## Proven Now
 
@@ -80,15 +86,20 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - Daily-driver smoke passes with installed managed search running.
 - The stable API service can survive a controlled service stop/start in the
   automated restart smoke. Actual PC reboot remains a separate manual proof.
+- Operator lifecycle prompts now route deterministically through the installed
+  `/chat` API. Read-only health/storage prompts answer directly; repair,
+  backup, restore, update, cleanup, uninstall, and support-bundle prompts show
+  confirmation-gated previews.
 
 ## Still Partial
 
 These are not unknowns, but they are not finished:
 
 - Installer/update/uninstall: install, promotion, bundle, and package paths have
-  coverage; fresh-host partial-failure recovery and uninstall proof remain.
-- Storage/log growth: growth surfaces are documented; a single read-only
-  `storage_status` and cleanup preview flow remain future work.
+  coverage; user-facing update/uninstall previews exist; full execution and
+  fresh-host partial-failure recovery remain partial.
+- Storage/log growth: read-only installed storage estimate and cleanup preview
+  exist; rotation/enforced cleanup policy remains partial.
 - Web UI robustness: static/component smoke exists; browser automation and
   manual refresh/large-transcript checks remain. `REBOOT_PROOF.md` carries the
   manual UI checklist.
@@ -124,8 +135,8 @@ Safe wording:
 
 1. Manual reboot proof.
 2. Automated browser/UI survival proof.
-3. Operator lifecycle: status, storage, backup, restore, update, uninstall,
-   repair.
+3. Operator lifecycle execution: turn the new safe previews into bounded
+   backup/restore/update/cleanup/uninstall executors.
 4. Memory explain/forget/status completion.
 5. Plan Mode v2 canonical action layer.
 6. Skill pack lifecycle hardening.
@@ -139,6 +150,7 @@ Safe wording:
 bash scripts/promote_local_stable.sh
 python scripts/installed_product_abuse.py
 python scripts/prove_daily_driver_product.py
+python scripts/operator_lifecycle_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

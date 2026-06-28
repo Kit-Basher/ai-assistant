@@ -58,6 +58,10 @@ Confirm:
   `python scripts/prove_daily_driver_product.py` when the web UI or installed
   runtime behavior feels wrong; these gates talk to the promoted API surface and
   catch stale bundles, route mismatches, and dead-end approval flows
+- run `python scripts/operator_lifecycle_smoke.py` when status, repair, backup,
+  restore, update, cleanup, uninstall, or support-bundle chat behavior feels
+  wrong; this gate verifies installed `/chat` previews without executing
+  destructive lifecycle actions
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

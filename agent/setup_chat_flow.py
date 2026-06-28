@@ -258,6 +258,65 @@ _PLAN_DAY_PHRASES = (
     "show quick wins",
     "show top 3 priorities",
 )
+_OPERATOR_HEALTH_PHRASES = (
+    "is the assistant healthy",
+    "is personal agent healthy",
+    "is the assistant ok",
+    "is personal agent ok",
+    "what is broken",
+    "what's broken",
+    "whats broken",
+    "what is broken right now",
+)
+_OPERATOR_STORAGE_PHRASES = (
+    "how much space is this using",
+    "how much disk space is this using",
+    "how much space does personal agent use",
+    "how much disk space does personal agent use",
+    "storage usage",
+    "personal agent storage usage",
+)
+_OPERATOR_REPAIR_PHRASES = (
+    "repair the assistant",
+    "repair personal agent",
+    "fix the assistant",
+    "fix personal agent",
+)
+_OPERATOR_BACKUP_PHRASES = (
+    "back up the assistant",
+    "backup the assistant",
+    "back up personal agent",
+    "backup personal agent",
+)
+_OPERATOR_RESTORE_PHRASES = (
+    "restore from backup",
+    "restore personal agent from backup",
+    "restore the assistant from backup",
+)
+_OPERATOR_UPDATE_PHRASES = (
+    "update the assistant",
+    "update personal agent",
+    "upgrade the assistant",
+    "upgrade personal agent",
+)
+_OPERATOR_CLEANUP_PHRASES = (
+    "clean old runtime files",
+    "cleanup old runtime files",
+    "clean up old runtime files",
+    "clean personal agent old files",
+    "clean old personal agent files",
+)
+_OPERATOR_UNINSTALL_PHRASES = (
+    "uninstall the assistant",
+    "uninstall personal agent",
+    "remove personal agent",
+)
+_OPERATOR_SUPPORT_BUNDLE_PHRASES = (
+    "make a support bundle",
+    "create a support bundle",
+    "generate a support bundle",
+    "support bundle",
+)
 _CURRENT_MODEL_PHRASES = (
     "what model are you using",
     "which model are you using",
@@ -1000,6 +1059,13 @@ def _classify_agent_memory_route(normalized: str) -> dict[str, Any] | None:
 
 
 def _classify_operational_route(text: str | None, normalized: str) -> dict[str, Any] | None:
+    if any(phrase in normalized for phrase in _OPERATOR_HEALTH_PHRASES):
+        return {
+            "route": "operational_status",
+            "kind": "operational_doctor",
+            "generic_allowed": False,
+            "fallback_reason": "operational_status",
+        }
     if any(phrase in normalized for phrase in _OPERATIONAL_DOCTOR_PHRASES):
         return {
             "route": "operational_status",
@@ -1030,6 +1096,28 @@ def _classify_operational_route(text: str | None, normalized: str) -> dict[str, 
             "generic_allowed": False,
             "fallback_reason": "operational_status",
         }
+    return None
+
+
+def _classify_operator_lifecycle_route(normalized: str) -> dict[str, Any] | None:
+    checks: tuple[tuple[tuple[str, ...], str], ...] = (
+        (_OPERATOR_STORAGE_PHRASES, "operator_storage_status"),
+        (_OPERATOR_REPAIR_PHRASES, "operator_repair_preview"),
+        (_OPERATOR_BACKUP_PHRASES, "operator_backup_preview"),
+        (_OPERATOR_RESTORE_PHRASES, "operator_restore_preview"),
+        (_OPERATOR_UPDATE_PHRASES, "operator_update_preview"),
+        (_OPERATOR_CLEANUP_PHRASES, "operator_cleanup_preview"),
+        (_OPERATOR_UNINSTALL_PHRASES, "operator_uninstall_preview"),
+        (_OPERATOR_SUPPORT_BUNDLE_PHRASES, "operator_support_bundle_preview"),
+    )
+    for phrases, kind in checks:
+        if any(phrase in normalized for phrase in phrases):
+            return {
+                "route": "operator_lifecycle",
+                "kind": kind,
+                "generic_allowed": False,
+                "fallback_reason": "operator_lifecycle",
+            }
     return None
 
 
@@ -2061,6 +2149,9 @@ def _semantic_intent_for_route(route_decision: dict[str, Any]) -> SemanticChatIn
         "model_policy_status",
     }:
         return SemanticChatIntent(intent="status_check", route=route, kind=kind, confidence=0.9, evidence=evidence)
+    if route == "operator_lifecycle":
+        intent = "status_check" if kind == "operator_storage_status" else "managed_service_action"
+        return SemanticChatIntent(intent=intent, route=route, kind=kind, confidence=0.9, evidence=evidence)
     if kind in {"shell_install_package", "shell_create_directory", "shell_safe_command", "shell_blocked_request"}:
         intent = "package_or_system_mutation_preview" if kind in {"shell_install_package", "shell_create_directory"} else "status_check"
         if kind == "shell_blocked_request":
@@ -2338,6 +2429,9 @@ def _classify_runtime_chat_route_raw(
     agent_memory_route = _classify_agent_memory_route(normalized)
     if agent_memory_route is not None:
         return agent_memory_route
+    operator_lifecycle_route = _classify_operator_lifecycle_route(normalized)
+    if operator_lifecycle_route is not None:
+        return operator_lifecycle_route
     filesystem_route = _classify_filesystem_route(text, normalized)
     if filesystem_route is not None:
         return filesystem_route

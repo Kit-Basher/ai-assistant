@@ -3679,6 +3679,27 @@ class Orchestrator:
                 dry_run=bool(params.get("dry_run", False)),
                 confirmed=True,
             )
+        if operation.startswith("operator_lifecycle_"):
+            action_label = str(params.get("action_label") or operation.replace("operator_lifecycle_", "")).strip() or "operator action"
+            message = (
+                f"{action_label} was confirmed, but this lane is preview-only right now. "
+                "I did not change files, restore backups, update packages, uninstall services, or delete state. "
+                "Use the documented operator command after reviewing the preview."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="operator_lifecycle",
+                used_tools=["operator_lifecycle"],
+                ok=False,
+                error_kind="operator_lifecycle_executor_not_enabled",
+                payload={
+                    "type": "operator_lifecycle_confirmation_result",
+                    "operation": operation,
+                    "mutated": False,
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
+            )
         if operation == "shell_create_directory":
             return self._shell_create_directory_response(
                 user_id,
@@ -14648,6 +14669,196 @@ class Orchestrator:
         )
 
     @staticmethod
+    def _operator_lifecycle_size(path: Path, *, max_entries: int = 5000) -> tuple[int, int, bool]:
+        try:
+            resolved = path.expanduser()
+            if not resolved.exists():
+                return 0, 0, False
+            if resolved.is_file():
+                return int(resolved.stat().st_size), 1, False
+            total = 0
+            count = 0
+            truncated = False
+            for root, dirs, files in os.walk(resolved):
+                entries = [Path(root) / name for name in files]
+                for entry in entries:
+                    try:
+                        total += int(entry.stat().st_size)
+                        count += 1
+                    except OSError:
+                        continue
+                    if count >= max_entries:
+                        truncated = True
+                        dirs[:] = []
+                        break
+                if truncated:
+                    break
+            return total, count, truncated
+        except OSError:
+            return 0, 0, False
+
+    @staticmethod
+    def _operator_lifecycle_size_label(size_bytes: int) -> str:
+        value = float(max(0, int(size_bytes)))
+        units = ("B", "KiB", "MiB", "GiB", "TiB")
+        unit = units[0]
+        for unit in units:
+            if value < 1024.0 or unit == units[-1]:
+                break
+            value /= 1024.0
+        if unit == "B":
+            return f"{int(value)} B"
+        return f"{value:.1f} {unit}"
+
+    def _operator_storage_status_response(self) -> OrchestratorResponse:
+        home = Path.home()
+        targets = [
+            ("runtime/state", home / ".local/share/personal-agent"),
+            ("config", home / ".config/personal-agent"),
+            ("systemd user units", home / ".config/systemd/user"),
+            ("repo checkout", Path.cwd()),
+        ]
+        rows: list[dict[str, Any]] = []
+        total = 0
+        for label, path in targets:
+            size, count, truncated = self._operator_lifecycle_size(path)
+            total += size
+            rows.append(
+                {
+                    "label": label,
+                    "path_label": str(path).replace(str(home), "~", 1),
+                    "size_bytes": size,
+                    "size": self._operator_lifecycle_size_label(size),
+                    "file_count": count,
+                    "truncated": truncated,
+                }
+            )
+        lines = [
+            f"Personal Agent is using about {self._operator_lifecycle_size_label(total)} across the main local paths I checked.",
+            "This is a read-only estimate; I did not delete or change anything.",
+        ]
+        for row in rows:
+            suffix = " (scan capped)" if row["truncated"] else ""
+            lines.append(f"- {row['label']}: {row['size']} at {row['path_label']}{suffix}")
+        lines.append("Cleanup is a separate confirmation-gated action.")
+        return self._runtime_truth_response(
+            text="\n".join(lines),
+            route="operator_lifecycle",
+            used_runtime_state=False,
+            used_tools=["storage_status"],
+            payload={
+                "type": "operator_storage_status",
+                "summary": lines[0],
+                "rows": rows,
+                "total_size_bytes": total,
+                "mutated": False,
+            },
+            skip_post_response_hooks=True,
+        )
+
+    def _operator_lifecycle_response(self, user_id: str, kind: str) -> OrchestratorResponse:
+        normalized_kind = str(kind or "").strip().lower()
+        if normalized_kind == "operator_storage_status":
+            return self._operator_storage_status_response()
+        specs: dict[str, dict[str, Any]] = {
+            "operator_repair_preview": {
+                "title": "Repair assistant preview",
+                "action_label": "Repair assistant",
+                "resources": ["personal-agent-api.service", "managed SearXNG status", "optional Telegram status", "runtime config"],
+                "rollback": "restart/status repair only; no data deletion",
+                "message": "I can preview a bounded repair plan for Personal Agent. I will check services first and require confirmation before restarting anything.",
+            },
+            "operator_backup_preview": {
+                "title": "Backup assistant preview",
+                "action_label": "Back up assistant",
+                "resources": ["memory/state database", "preferences", "pack registry", "runtime search config", "redacted secret references"],
+                "rollback": "backup creation is additive; delete only the newly created backup archive if verification fails",
+                "message": "I can preview a Personal Agent backup. It would include local state, memory, preferences, pack metadata, and runtime config; secrets must remain encrypted or redacted.",
+            },
+            "operator_restore_preview": {
+                "title": "Restore from backup preview",
+                "action_label": "Restore from backup",
+                "resources": ["target restore directory", "memory/state database", "preferences", "pack registry", "runtime config"],
+                "rollback": "dry-run by default; live restore would snapshot current state before replacing anything",
+                "message": "Restore defaults to dry-run validation. I will not overwrite live state until you provide a backup path and explicitly confirm a restore plan.",
+            },
+            "operator_update_preview": {
+                "title": "Update assistant preview",
+                "action_label": "Update assistant",
+                "resources": ["runtime release bundle", "runtime/current symlink", "personal-agent-api.service"],
+                "rollback": "keep previous runtime release and switch current back if verification fails",
+                "message": "I can preview an update plan. It will not pull code, install packages, or restart services until you confirm the exact source and plan.",
+            },
+            "operator_cleanup_preview": {
+                "title": "Cleanup old runtime files preview",
+                "action_label": "Clean old runtime files",
+                "resources": ["old runtime releases", "old support bundles", "old backup archives if selected"],
+                "rollback": "cleanup is destructive; rollback is not guaranteed after deletion",
+                "message": "I can inspect cleanup candidates first. I will show exact paths and estimated space before deleting anything.",
+            },
+            "operator_uninstall_preview": {
+                "title": "Uninstall assistant preview",
+                "action_label": "Uninstall assistant",
+                "resources": ["user services", "launcher files", "runtime files", "optional state only if separately selected"],
+                "rollback": "uninstall is destructive; create a backup before removing runtime or state",
+                "message": "Uninstall is destructive. I will only preview the plan here; it needs explicit confirmation and should be preceded by a backup.",
+            },
+            "operator_support_bundle_preview": {
+                "title": "Support bundle preview",
+                "action_label": "Make support bundle",
+                "resources": ["doctor report", "runtime status", "redacted logs/status summaries", "managed-action journal summary"],
+                "rollback": "support bundle creation is additive; remove only the new temp bundle if verification fails",
+                "message": "I can create a redacted support bundle in a temporary directory. It must not include raw tokens, API keys, or unredacted secret values.",
+            },
+        }
+        spec = specs.get(normalized_kind)
+        if spec is None:
+            return self._runtime_truth_response(
+                text="I need a specific operator action: status, backup, restore, update, cleanup, uninstall, repair, or support bundle.",
+                route="operator_lifecycle",
+                used_runtime_state=False,
+                used_tools=["operator_lifecycle"],
+                ok=False,
+                error_kind="operator_lifecycle_unknown",
+                payload={"type": "operator_lifecycle_unknown", "mutated": False},
+                skip_post_response_hooks=True,
+            )
+        resources = [str(item) for item in spec["resources"]]
+        question = (
+            f"{spec['title']}.\n"
+            f"{spec['message']}\n"
+            f"Resources that may be created/changed/deleted: {', '.join(resources)}.\n"
+            f"Rollback scope: {spec['rollback']}.\n"
+            "This is a mutating or potentially destructive operator action, so I need explicit confirmation before doing anything. Say yes to continue, or no to cancel."
+        )
+        operation = f"operator_lifecycle_{normalized_kind.removeprefix('operator_').removesuffix('_preview')}"
+        return self._confirmation_preview_response(
+            user_id=user_id,
+            route="operator_lifecycle",
+            question=question,
+            used_tools=["operator_lifecycle"],
+            action={
+                "operation": operation,
+                "params": {
+                    "kind": normalized_kind,
+                    "action_label": spec["action_label"],
+                    "resources": resources,
+                    "rollback_scope": spec["rollback"],
+                },
+            },
+            title=str(spec["title"]),
+            preview_payload={
+                "type": "operator_lifecycle_preview",
+                "kind": normalized_kind,
+                "resources": resources,
+                "rollback_scope": spec["rollback"],
+                "rollback_supported": normalized_kind not in {"operator_cleanup_preview", "operator_uninstall_preview"},
+                "mutated": False,
+            },
+            skip_post_response_hooks=True,
+        )
+
+    @staticmethod
     def _format_cost_per_1m(value: Any) -> str:
         return f"${float(value or 0.0):.2f} per 1M tokens"
 
@@ -18898,6 +19109,14 @@ class Orchestrator:
             "safe_web_search_clarify",
             "safe_web_search_suppressed",
             "shell_install_package",
+            "operator_storage_status",
+            "operator_repair_preview",
+            "operator_backup_preview",
+            "operator_restore_preview",
+            "operator_update_preview",
+            "operator_cleanup_preview",
+            "operator_uninstall_preview",
+            "operator_support_bundle_preview",
         }
 
     def _should_skip_turn_memory_hooks(self, text: str | None) -> bool:
@@ -19037,6 +19256,8 @@ class Orchestrator:
                 if early_kind == "telegram_status":
                     self._last_offer_topic[user_id] = "telegram_status"
                     return self._telegram_status_response()
+                if early_kind.startswith("operator_"):
+                    return self._operator_lifecycle_response(user_id, early_kind)
                 if (
                     early_kind == "shell_install_package"
                     and str(early_decision.get("manager") or "").strip()
@@ -20998,6 +21219,8 @@ class Orchestrator:
                     return self._safe_web_search_clarification_response(user_id, runtime_text)
                 if runtime_route_kind == "safe_web_search":
                     return self._safe_web_search_response(user_id, runtime_text)
+                if runtime_route_kind.startswith("operator_"):
+                    return self._operator_lifecycle_response(user_id, runtime_route_kind)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)
                 if managed_adapter_response is not None:
                     return managed_adapter_response
