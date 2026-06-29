@@ -39,6 +39,7 @@ Commands:
 - `python scripts/prove_daily_driver_product.py`
 - `python scripts/installed_product_abuse.py`
 - `python scripts/operator_lifecycle_smoke.py`
+- `python scripts/memory_lifecycle_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -67,6 +68,12 @@ proves health, broken-status, storage, repair, backup, restore, update,
 cleanup, uninstall, and support-bundle prompts route through the real `/chat`
 API and remain preview/confirmation-gated. It does not prove destructive
 execution for uninstall, cleanup, restore, or update.
+
+`memory_lifecycle_smoke.py` is the installed memory-lifecycle gate. It proves
+memory status/inspection, current-turn opt-out, thread/global memory controls,
+forget/delete/export/redact/dedupe previews, cancellation, and stale
+confirmation safety through the real `/chat` API. It does not prove destructive
+memory execution.
 
 ## Optional Integration Gates
 

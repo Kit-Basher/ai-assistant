@@ -15,6 +15,8 @@ Current confirmed proof:
 - `python scripts/installed_product_abuse.py`: `PASS=42 WARN=0 FAIL=0`
 - `python scripts/operator_lifecycle_smoke.py`: installed operator lifecycle
   preview lane passes
+- `python scripts/memory_lifecycle_smoke.py`: installed memory lifecycle
+  preview lane passes
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -61,6 +63,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   broken-status, storage, repair, backup, restore, update, cleanup, uninstall,
   and support-bundle user-facing lifecycle prompts. It proves safe previews and
   cancellation, not full destructive execution.
+- `scripts/memory_lifecycle_smoke.py`: installed-runtime proof for memory
+  inspection, status, current-turn opt-out, thread/global memory controls,
+  forget/delete/export/redact/dedupe previews, cancellation, and stale
+  confirmation rejection. It proves safe previews, not full destructive memory
+  execution.
 
 ## Proven Now
 
@@ -90,6 +97,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   `/chat` API. Read-only health/storage prompts answer directly; repair,
   backup, restore, update, cleanup, uninstall, and support-bundle prompts show
   confirmation-gated previews.
+- Memory lifecycle prompts now route deterministically through the installed
+  `/chat` API. Memory inspection/status and current-turn opt-out are
+  deterministic; destructive or broad controls show confirmation-gated previews.
 
 ## Still Partial
 
@@ -105,8 +115,9 @@ These are not unknowns, but they are not finished:
   manual UI checklist.
 - Telegram runtime behavior: optional-service semantics and status UX are
   covered; full start/stop/restart execution proof remains partial.
-- Memory completion: audits and safety checks exist; deterministic
-  memory-status, explain, and forget-X UX remain partial.
+- Memory completion: audits, deterministic status/inspection/current-turn
+  opt-out, and preview UX exist; full delete/export/redact/dedupe executors and
+  richer explainability remain partial.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
 - Model/provider management: deterministic guidance and switching paths are
@@ -137,7 +148,8 @@ Safe wording:
 2. Automated browser/UI survival proof.
 3. Operator lifecycle execution: turn the new safe previews into bounded
    backup/restore/update/cleanup/uninstall executors.
-4. Memory explain/forget/status completion.
+4. Memory lifecycle execution: implement bounded executors for thread/global
+   toggles, forget-topic, delete-all, export, redaction, and dedupe.
 5. Plan Mode v2 canonical action layer.
 6. Skill pack lifecycle hardening.
 7. Model/provider management and real local LLM soak.
@@ -151,6 +163,7 @@ bash scripts/promote_local_stable.sh
 python scripts/installed_product_abuse.py
 python scripts/prove_daily_driver_product.py
 python scripts/operator_lifecycle_smoke.py
+python scripts/memory_lifecycle_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

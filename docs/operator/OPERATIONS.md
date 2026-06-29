@@ -62,6 +62,9 @@ Confirm:
   restore, update, cleanup, uninstall, or support-bundle chat behavior feels
   wrong; this gate verifies installed `/chat` previews without executing
   destructive lifecycle actions
+- run `python scripts/memory_lifecycle_smoke.py` when memory status, opt-out,
+  forget/delete/export/redact/dedupe behavior feels wrong; this gate verifies
+  installed `/chat` previews without deleting or exporting real memory
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

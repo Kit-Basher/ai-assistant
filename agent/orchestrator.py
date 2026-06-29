@@ -1153,6 +1153,10 @@ class Orchestrator:
                 "is memory enabled",
                 "is your memory enabled",
                 "is agent memory enabled",
+                "show memory status",
+                "memory status",
+                "show agent memory status",
+                "show assistant memory status",
             )
         ):
             return "memory_status"
@@ -1426,9 +1430,12 @@ class Orchestrator:
                 else "Local continuity memory is enabled, but it is degraded right now."
             ]
             if has_saved_memory:
-                lines.append("I have saved context I can summarize.")
+                lines.append("Saved long-term memory has context I can summarize.")
             else:
-                lines.append("I do not have saved preferences, open loops, or project notes yet.")
+                lines.append("Saved long-term memory does not currently have preferences, open loops, or project notes to summarize.")
+            lines.append("Current thread context is separate from saved long-term memory.")
+            lines.append("Pending confirmations/actions are separate from both saved memory and thread context.")
+            lines.append("External tools, search, and current facts are not disabled by memory status.")
             lines.append("This is separate from system RAM.")
             if continuity_warning:
                 lines.insert(0, continuity_warning)
@@ -3694,6 +3701,27 @@ class Orchestrator:
                 error_kind="operator_lifecycle_executor_not_enabled",
                 payload={
                     "type": "operator_lifecycle_confirmation_result",
+                    "operation": operation,
+                    "mutated": False,
+                    "summary": message,
+                },
+                skip_post_response_hooks=True,
+            )
+        if operation.startswith("memory_lifecycle_"):
+            action_label = str(params.get("action_label") or operation.replace("memory_lifecycle_", "")).strip() or "memory action"
+            message = (
+                f"{action_label} was confirmed, but this memory lifecycle lane is preview-only right now. "
+                "I did not delete saved memory, export private data, change global memory settings, or rewrite memory records. "
+                "Use the reviewed memory lifecycle executor once it is implemented."
+            )
+            return self._runtime_truth_response(
+                text=message,
+                route="memory_lifecycle",
+                used_tools=["memory_store"],
+                ok=False,
+                error_kind="memory_lifecycle_executor_not_enabled",
+                payload={
+                    "type": "memory_lifecycle_confirmation_result",
                     "operation": operation,
                     "mutated": False,
                     "summary": message,
@@ -14602,6 +14630,144 @@ class Orchestrator:
             },
         )
 
+    def _memory_lifecycle_response(self, user_id: str, kind: str) -> OrchestratorResponse:
+        normalized_kind = str(kind or "").strip().lower()
+        specs: dict[str, dict[str, Any]] = {
+            "memory_thread_disable_preview": {
+                "title": "Disable memory for this thread preview",
+                "action_label": "Disable memory for this thread",
+                "scope": "current thread only",
+                "resources": ["thread memory-use preference", "future saved-memory retrieval for this thread"],
+                "rollback": "re-enable memory for this thread",
+                "message": "I can preview turning off saved long-term memory use for this thread. Current thread messages and tools remain available unless separately restricted.",
+                "rollback_supported": True,
+            },
+            "memory_thread_enable_preview": {
+                "title": "Enable memory for this thread preview",
+                "action_label": "Enable memory for this thread",
+                "scope": "current thread only",
+                "resources": ["thread memory-use preference", "future saved-memory retrieval for this thread"],
+                "rollback": "disable memory again for this thread",
+                "message": "I can preview allowing saved long-term memory for this thread again. This does not grant permission for mutations.",
+                "rollback_supported": True,
+            },
+            "memory_global_disable_preview": {
+                "title": "Disable memory globally preview",
+                "action_label": "Disable memory globally",
+                "scope": "all users/threads in this local runtime",
+                "resources": ["global memory-use preference", "future saved-memory retrieval"],
+                "rollback": "re-enable global memory use",
+                "message": "I can preview disabling saved long-term memory globally. This is broad and requires explicit confirmation.",
+                "rollback_supported": True,
+            },
+            "memory_global_enable_preview": {
+                "title": "Enable memory globally preview",
+                "action_label": "Enable memory globally",
+                "scope": "all users/threads in this local runtime",
+                "resources": ["global memory-use preference", "future saved-memory retrieval"],
+                "rollback": "disable global memory use again",
+                "message": "I can preview enabling saved long-term memory globally. This does not authorize any mutation by itself.",
+                "rollback_supported": True,
+            },
+            "memory_forget_topic_preview": {
+                "title": "Forget topic memory preview",
+                "action_label": "Forget topic memory",
+                "scope": "matching saved memory records only",
+                "resources": ["matching saved long-term memory", "matching working-memory summaries if supported"],
+                "rollback": "destructive delete may not be fully reversible; export first if needed",
+                "message": "I can preview forgetting saved memory about that topic. I will not delete anything until the exact matching records are shown and confirmed.",
+                "rollback_supported": False,
+            },
+            "memory_delete_all_preview": {
+                "title": "Delete all memory about me preview",
+                "action_label": "Delete all memory about me",
+                "scope": "saved user memory, preferences, anchors, and working-memory summaries for this local user",
+                "resources": ["saved long-term memory", "preferences", "thread anchors", "working-memory summaries"],
+                "rollback": "destructive delete is not guaranteed reversible; create an export/backup first",
+                "message": "Deleting all memory is destructive. I can preview exactly what would be deleted, but I will not delete saved memory without explicit confirmation.",
+                "rollback_supported": False,
+            },
+            "memory_export_preview": {
+                "title": "Export my memory preview",
+                "action_label": "Export my memory",
+                "scope": "saved memory visible to this local user",
+                "resources": ["redacted memory export file", "export manifest"],
+                "rollback": "export creation is additive; remove only the new export if verification fails",
+                "message": "I can preview a memory export. It should include saved preferences, anchors, and summaries, with secrets redacted.",
+                "rollback_supported": True,
+            },
+            "memory_redact_preview": {
+                "title": "Redact sensitive memory preview",
+                "action_label": "Redact sensitive memory",
+                "scope": "candidate saved memory records containing sensitive-looking values",
+                "resources": ["candidate memory records", "redaction audit summary"],
+                "rollback": "redaction is destructive unless a backup/export exists",
+                "message": "I can preview sensitive-looking memory records for redaction. Raw secrets must not be printed in chat.",
+                "rollback_supported": False,
+            },
+            "memory_cleanup_preview": {
+                "title": "Clean up duplicate memories preview",
+                "action_label": "Clean up duplicate memories",
+                "scope": "duplicate or near-duplicate saved memory records",
+                "resources": ["candidate duplicate memory records", "dedupe audit summary"],
+                "rollback": "dedupe is destructive unless a backup/export exists",
+                "message": "I can preview duplicate memory candidates before any cleanup. I will not rewrite or delete memory records during preview.",
+                "rollback_supported": False,
+            },
+        }
+        spec = specs.get(normalized_kind)
+        if spec is None:
+            return self._runtime_truth_response(
+                text="I need a specific memory action: status, thread enable/disable, global enable/disable, forget, delete, export, redact, or cleanup.",
+                route="memory_lifecycle",
+                used_runtime_state=False,
+                used_memory=False,
+                used_tools=["memory_store"],
+                ok=False,
+                error_kind="memory_lifecycle_unknown",
+                payload={"type": "memory_lifecycle_unknown", "mutated": False},
+                skip_post_response_hooks=True,
+            )
+        resources = [str(item) for item in spec["resources"]]
+        question = (
+            f"{spec['title']}.\n"
+            f"{spec['message']}\n"
+            "Scope distinction: saved long-term memory and prior conversation context are separate from current thread text, pending confirmations/actions, and external tools/current facts.\n"
+            f"Scope: {spec['scope']}.\n"
+            f"Resources that may be created/changed/deleted: {', '.join(resources)}.\n"
+            f"Rollback scope: {spec['rollback']}.\n"
+            "This memory lifecycle action needs explicit confirmation before doing anything. Say yes to continue, or no to cancel."
+        )
+        operation = f"memory_lifecycle_{normalized_kind.removeprefix('memory_').removesuffix('_preview')}"
+        return self._confirmation_preview_response(
+            user_id=user_id,
+            route="memory_lifecycle",
+            question=question,
+            used_tools=["memory_store"],
+            used_memory=False,
+            action={
+                "operation": operation,
+                "params": {
+                    "kind": normalized_kind,
+                    "action_label": spec["action_label"],
+                    "scope": spec["scope"],
+                    "resources": resources,
+                    "rollback_scope": spec["rollback"],
+                },
+            },
+            title=str(spec["title"]),
+            preview_payload={
+                "type": "memory_lifecycle_preview",
+                "kind": normalized_kind,
+                "scope": spec["scope"],
+                "resources": resources,
+                "rollback_scope": spec["rollback"],
+                "rollback_supported": bool(spec["rollback_supported"]),
+                "mutated": False,
+            },
+            skip_post_response_hooks=True,
+        )
+
     def _operational_status_response(self, user_id: str, text: str, kind: str) -> OrchestratorResponse:
         normalized_kind = str(kind or "").strip().lower()
         if normalized_kind == "operational_doctor":
@@ -16158,6 +16324,8 @@ class Orchestrator:
             return None
         if kind in {"operational_doctor", "operational_agent_status", "operational_observe"}:
             return self._operational_status_response(user_id, text, kind)
+        if kind.startswith("memory_"):
+            return self._memory_lifecycle_response(user_id, kind)
         if kind == "assistant_capabilities":
             return self._assistant_capabilities_response(text)
         if kind in {"pack_capability_recommendation", "capability_gap_plan"}:
@@ -19117,6 +19285,15 @@ class Orchestrator:
             "operator_cleanup_preview",
             "operator_uninstall_preview",
             "operator_support_bundle_preview",
+            "memory_thread_disable_preview",
+            "memory_thread_enable_preview",
+            "memory_global_disable_preview",
+            "memory_global_enable_preview",
+            "memory_forget_topic_preview",
+            "memory_delete_all_preview",
+            "memory_export_preview",
+            "memory_redact_preview",
+            "memory_cleanup_preview",
         }
 
     def _should_skip_turn_memory_hooks(self, text: str | None) -> bool:
@@ -19258,6 +19435,8 @@ class Orchestrator:
                     return self._telegram_status_response()
                 if early_kind.startswith("operator_"):
                     return self._operator_lifecycle_response(user_id, early_kind)
+                if early_kind.startswith("memory_"):
+                    return self._memory_lifecycle_response(user_id, early_kind)
                 if (
                     early_kind == "shell_install_package"
                     and str(early_decision.get("manager") or "").strip()
@@ -21221,6 +21400,8 @@ class Orchestrator:
                     return self._safe_web_search_response(user_id, runtime_text)
                 if runtime_route_kind.startswith("operator_"):
                     return self._operator_lifecycle_response(user_id, runtime_route_kind)
+                if runtime_route_kind.startswith("memory_"):
+                    return self._memory_lifecycle_response(user_id, runtime_route_kind)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)
                 if managed_adapter_response is not None:
                     return managed_adapter_response

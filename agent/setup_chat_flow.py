@@ -662,6 +662,50 @@ _AGENT_MEMORY_PHRASES = (
     "what do you have saved about me",
     "what is in agent memory",
     "what is in the memory database",
+    "show memory status",
+    "memory status",
+)
+_MEMORY_THREAD_DISABLE_PHRASES = (
+    "disable memory for this thread",
+    "turn off memory for this thread",
+    "stop using memory in this thread",
+)
+_MEMORY_THREAD_ENABLE_PHRASES = (
+    "enable memory for this thread",
+    "turn on memory for this thread",
+    "use memory in this thread again",
+)
+_MEMORY_GLOBAL_DISABLE_PHRASES = (
+    "disable memory globally",
+    "turn off memory globally",
+    "disable all memory",
+)
+_MEMORY_GLOBAL_ENABLE_PHRASES = (
+    "enable memory globally",
+    "turn on memory globally",
+    "enable all memory",
+)
+_MEMORY_FORGET_TOPIC_RE = re.compile(r"\bforget (?:what you remember about|everything about|all memory about) .+")
+_MEMORY_DELETE_ALL_PHRASES = (
+    "delete all memory about me",
+    "delete everything you remember about me",
+    "forget everything about me",
+)
+_MEMORY_EXPORT_PHRASES = (
+    "export my memory",
+    "export memory",
+    "download my memory",
+)
+_MEMORY_REDACT_PHRASES = (
+    "redact sensitive memory",
+    "redact my memory",
+    "remove sensitive memory",
+)
+_MEMORY_CLEANUP_PHRASES = (
+    "clean up duplicate memories",
+    "cleanup duplicate memories",
+    "dedupe memory",
+    "deduplicate memory",
 )
 _AGENT_MEMORY_WORKING_CONTEXT_PHRASES = (
     "do you remember what we were doing",
@@ -1009,6 +1053,31 @@ def _looks_like_explicit_model_controller_request(normalized: str) -> bool:
 
 def _classify_agent_memory_route(normalized: str) -> dict[str, Any] | None:
     normalized_space = normalized.replace("/", " ")
+    lifecycle_checks: tuple[tuple[tuple[str, ...], str], ...] = (
+        (_MEMORY_THREAD_DISABLE_PHRASES, "memory_thread_disable_preview"),
+        (_MEMORY_THREAD_ENABLE_PHRASES, "memory_thread_enable_preview"),
+        (_MEMORY_GLOBAL_DISABLE_PHRASES, "memory_global_disable_preview"),
+        (_MEMORY_GLOBAL_ENABLE_PHRASES, "memory_global_enable_preview"),
+        (_MEMORY_DELETE_ALL_PHRASES, "memory_delete_all_preview"),
+        (_MEMORY_EXPORT_PHRASES, "memory_export_preview"),
+        (_MEMORY_REDACT_PHRASES, "memory_redact_preview"),
+        (_MEMORY_CLEANUP_PHRASES, "memory_cleanup_preview"),
+    )
+    for phrases, kind in lifecycle_checks:
+        if any(phrase in normalized_space for phrase in phrases):
+            return {
+                "route": "memory_lifecycle",
+                "kind": kind,
+                "generic_allowed": False,
+                "fallback_reason": "memory_lifecycle",
+            }
+    if _MEMORY_FORGET_TOPIC_RE.search(normalized_space):
+        return {
+            "route": "memory_lifecycle",
+            "kind": "memory_forget_topic_preview",
+            "generic_allowed": False,
+            "fallback_reason": "memory_lifecycle",
+        }
     if any(phrase in normalized_space for phrase in _AGENT_PREFERENCES_PHRASES):
         return {
             "route": "agent_memory",
@@ -2152,6 +2221,8 @@ def _semantic_intent_for_route(route_decision: dict[str, Any]) -> SemanticChatIn
     if route == "operator_lifecycle":
         intent = "status_check" if kind == "operator_storage_status" else "managed_service_action"
         return SemanticChatIntent(intent=intent, route=route, kind=kind, confidence=0.9, evidence=evidence)
+    if route == "memory_lifecycle":
+        return SemanticChatIntent(intent="managed_service_action", route=route, kind=kind, confidence=0.9, evidence=evidence)
     if kind in {"shell_install_package", "shell_create_directory", "shell_safe_command", "shell_blocked_request"}:
         intent = "package_or_system_mutation_preview" if kind in {"shell_install_package", "shell_create_directory"} else "status_check"
         if kind == "shell_blocked_request":

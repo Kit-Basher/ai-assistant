@@ -1977,6 +1977,84 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(payload, dict)
         self.assertFalse(payload.get("mutated"))
 
+    def test_memory_status_distinguishes_scopes(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="LLM should not answer memory status.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        response = orchestrator.handle_message("show memory status", "user1")
+        lowered = response.text.lower()
+
+        self.assertEqual("agent_memory", response.data.get("route"))
+        self.assertFalse(response.data.get("used_llm"))
+        self.assertEqual([], llm.chat_calls)
+        self.assertIn("saved long-term memory", lowered)
+        self.assertIn("current thread context", lowered)
+        self.assertIn("pending confirmations/actions", lowered)
+        self.assertIn("external tools", lowered)
+
+    def test_memory_lifecycle_mutators_require_confirmation(self) -> None:
+        cases = {
+            "disable memory for this thread": ("Disable memory for this thread preview", "current thread only"),
+            "enable memory for this thread": ("Enable memory for this thread preview", "current thread only"),
+            "disable memory globally": ("Disable memory globally preview", "all users/threads"),
+            "enable memory globally": ("Enable memory globally preview", "all users/threads"),
+            "forget what you remember about cats": ("Forget topic memory preview", "matching saved memory records"),
+            "delete all memory about me": ("Delete all memory about me preview", "destructive"),
+            "export my memory": ("Export my memory preview", "secrets redacted"),
+            "redact sensitive memory": ("Redact sensitive memory preview", "Raw secrets must not be printed"),
+            "clean up duplicate memories": ("Clean up duplicate memories preview", "duplicate memory candidates"),
+        }
+        for prompt, (title, expected_text) in cases.items():
+            with self.subTest(prompt=prompt):
+                llm = _FakeChatLLM(enabled=True, text="LLM should not answer memory lifecycle.")
+                orchestrator = Orchestrator(
+                    db=self.db,
+                    skills_path=self.skills_path,
+                    log_path=self.log_path,
+                    timezone="UTC",
+                    llm_client=llm,
+                )
+
+                response = orchestrator.handle_message(prompt, "user1")
+
+                self.assertEqual("memory_lifecycle", response.data.get("route"))
+                self.assertFalse(response.data.get("used_llm"))
+                self.assertEqual([], llm.chat_calls)
+                self.assertIn(title, response.text)
+                self.assertIn(expected_text, response.text)
+                self.assertIn("Scope distinction:", response.text)
+                self.assertIn("explicit confirmation", response.text)
+                payload = response.data.get("runtime_payload")
+                self.assertIsInstance(payload, dict)
+                self.assertTrue(payload.get("requires_confirmation"))
+                self.assertFalse(payload.get("mutated"))
+
+    def test_memory_lifecycle_confirmation_does_not_execute_preview_only_action(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not answer memory lifecycle."),
+        )
+
+        preview = orchestrator.handle_message("delete all memory about me", "user1")
+        confirmed = orchestrator.handle_message("yes", "user1")
+
+        self.assertIn("Delete all memory about me preview", preview.text)
+        self.assertEqual("memory_lifecycle", confirmed.data.get("route"))
+        self.assertEqual("memory_lifecycle_executor_not_enabled", confirmed.data.get("error_kind"))
+        self.assertIn("I did not delete saved memory", confirmed.text)
+        payload = confirmed.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        self.assertFalse(payload.get("mutated"))
+
     def test_llm_available_routes_free_text_to_llm_chat(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="hi from llm")
         orchestrator = Orchestrator(
