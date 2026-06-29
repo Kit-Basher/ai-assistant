@@ -24610,6 +24610,7 @@ class APIServerHandler(BaseHTTPRequestHandler):
                 if (
                     low_confidence.is_low_confidence
                     and not self._has_explicit_user_message(payload)
+                    and not (path == "/chat" and authoritative_runtime_route)
                     and not (assistant_frontdoor_generic and str(input_text or "").strip())
                     and not (path == "/chat" and assistant_followup_kind)
                 ):
