@@ -65,6 +65,10 @@ Confirm:
 - run `python scripts/memory_lifecycle_smoke.py` when memory status, opt-out,
   forget/delete/export/redact/dedupe behavior feels wrong; this gate verifies
   installed `/chat` previews without deleting or exporting real memory
+- run `python scripts/plan_mode_v2_smoke.py` when confirmation behavior feels
+  wrong; this gate verifies canonical plans, inspect/cancel/revise, stale
+  confirmation rejection, and thread/session binding without executing
+  destructive actions
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

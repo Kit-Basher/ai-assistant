@@ -97,7 +97,7 @@ from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
 from agent.resource_insights import summarize_resource_report
 from agent.changed_report import build_changed_report_from_system_facts
-from agent.policy import evaluate_policy
+from agent.policy import build_canonical_plan, evaluate_policy
 import agent.opinion_gate as opinion_gate
 from agent.skills_loader import SkillLoader
 from agent.ask_timeframe import parse_timeframe
@@ -2968,6 +2968,206 @@ class Orchestrator:
             self._memory_runtime.set_pending_status(user_id, pending_id, status)
         return pending
 
+    @staticmethod
+    def _canonical_plan_action_type(operation: str) -> str:
+        normalized = str(operation or "").strip().lower()
+        if normalized.startswith("operator_lifecycle_"):
+            return normalized.replace("operator_lifecycle_", "operator.", 1)
+        if normalized.startswith("memory_lifecycle_"):
+            return normalized.replace("memory_lifecycle_", "memory.", 1)
+        if normalized == "shell_install_package":
+            return "package.install"
+        if normalized == "managed_local_service_setup_preview":
+            return "managed_local_service.setup"
+        if normalized == "podman_prerequisite_setup_preview":
+            return "managed_local_service.prerequisite"
+        if normalized == "external_pack_lifecycle_plan":
+            return "external_pack.lifecycle"
+        return normalized or "unknown"
+
+    @staticmethod
+    def _canonical_plan_resources(params: dict[str, Any], preview_payload: dict[str, Any] | None) -> list[str]:
+        resources = params.get("resources")
+        if isinstance(resources, list):
+            return [str(item).strip() for item in resources if str(item).strip()]
+        if isinstance(preview_payload, dict):
+            preview_resources = preview_payload.get("resources")
+            if isinstance(preview_resources, list):
+                return [str(item).strip() for item in preview_resources if str(item).strip()]
+            mutation_plan = preview_payload.get("mutation_plan")
+            if isinstance(mutation_plan, dict):
+                mutation_resources = mutation_plan.get("resources")
+                out: list[str] = []
+                if isinstance(mutation_resources, dict):
+                    for key in ("created", "changed", "deleted"):
+                        values = mutation_resources.get(key)
+                        if isinstance(values, list):
+                            out.extend(str(item).strip() for item in values if str(item).strip())
+                if out:
+                    return out
+        return []
+
+    @staticmethod
+    def _canonical_plan_risk(operation: str, title: str) -> tuple[str, str]:
+        normalized = f"{operation} {title}".lower()
+        if any(token in normalized for token in ("delete", "uninstall", "cleanup", "redact", "forget")):
+            return "destructive", "high"
+        if any(token in normalized for token in ("install", "setup", "restart", "restore", "update", "disable", "enable")):
+            return "mutating", "medium"
+        return "mutating", "low"
+
+    @staticmethod
+    def _canonical_plan_executor_status(operation: str) -> str:
+        normalized = str(operation or "").strip().lower()
+        if normalized.startswith(("memory_lifecycle_", "operator_lifecycle_")):
+            return "preview_only"
+        return "enabled"
+
+    def _build_canonical_pending_plan(
+        self,
+        *,
+        pending_id: str,
+        action: dict[str, Any],
+        title: str,
+        preview_payload: dict[str, Any] | None,
+        expires_at: int,
+    ) -> dict[str, Any]:
+        params = action.get("params") if isinstance(action.get("params"), dict) else {}
+        operation = str(action.get("operation") or "").strip().lower()
+        target = str(
+            params.get("package")
+            or params.get("action_label")
+            or params.get("service_id")
+            or params.get("pack_id")
+            or title
+            or operation
+        ).strip() or operation or "unspecified"
+        scope = str(params.get("scope") or "current user/session").strip() or "current user/session"
+        rollback_scope = str(
+            params.get("rollback_scope")
+            or (preview_payload.get("rollback_scope") if isinstance(preview_payload, dict) else "")
+            or "Only the resources listed in this plan."
+        ).strip() or "Only the resources listed in this plan."
+        rollback_supported = True
+        if isinstance(preview_payload, dict) and "rollback_supported" in preview_payload:
+            rollback_supported = bool(preview_payload.get("rollback_supported"))
+        mutation_level, risk_level = self._canonical_plan_risk(operation, title)
+        if not bool(action.get("mutating", True)):
+            mutation_level = "preflight"
+            risk_level = "low"
+        return build_canonical_plan(
+            plan_id=pending_id,
+            action_type=self._canonical_plan_action_type(operation),
+            target=target,
+            scope=scope,
+            mutation_level=mutation_level,
+            resources_affected=self._canonical_plan_resources(params, preview_payload),
+            risk_level=risk_level,
+            rollback_scope=rollback_scope,
+            rollback_supported=rollback_supported,
+            executor_status=self._canonical_plan_executor_status(operation),
+            expires_at=expires_at,
+            staleness_policy="This plan is bound to the current user/session, expires after 10 minutes, and is cleared by cancel or service restart.",
+        )
+
+    @staticmethod
+    def _render_canonical_plan_lines(plan: dict[str, Any]) -> list[str]:
+        resources = plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else []
+        resources_text = ", ".join(str(item) for item in resources if str(item).strip()) or "none listed"
+        confirmations = plan.get("confirmation_words") if isinstance(plan.get("confirmation_words"), list) else ["yes", "confirm"]
+        return [
+            "Plan Mode v2:",
+            f"Plan ID: {str(plan.get('plan_id') or '').strip()}.",
+            f"Action type: {str(plan.get('action_type') or '').strip()}.",
+            f"Target: {str(plan.get('target') or '').strip()}.",
+            f"Scope: {str(plan.get('scope') or '').strip()}.",
+            f"Mutation level: {str(plan.get('mutation_level') or '').strip()}.",
+            f"Resources affected: {resources_text}.",
+            f"Risk level: {str(plan.get('risk_level') or '').strip()}.",
+            f"Rollback scope: {str(plan.get('rollback_scope') or '').strip()}.",
+            f"Rollback supported: {'yes' if bool(plan.get('rollback_supported')) else 'no'}.",
+            f"Executor status: {str(plan.get('executor_status') or '').strip()}.",
+            f"Allowed confirmations: {', '.join(str(item) for item in confirmations if str(item).strip())}.",
+            f"Expires at: {int(plan.get('expires_at') or 0)}.",
+        ]
+
+    def _current_plan_response(self, user_id: str) -> OrchestratorResponse:
+        pending = self.confirmations.get(user_id)
+        if pending is None or not isinstance(pending.action, dict):
+            message = "There is no current Plan Mode action pending. Nothing will run until you ask for a new preview and confirm it."
+            return self._runtime_truth_response(
+                text=message,
+                route="plan_mode",
+                used_runtime_state=False,
+                used_memory=False,
+                used_tools=[],
+                payload={"type": "plan_mode_status", "has_pending_plan": False, "mutated": False},
+                skip_post_response_hooks=True,
+            )
+        plan = pending.action.get("canonical_plan") if isinstance(pending.action.get("canonical_plan"), dict) else {}
+        if not plan:
+            plan = self._build_canonical_pending_plan(
+                pending_id=str(pending.action.get("pending_id") or ""),
+                action=pending.action,
+                title=str(pending.title or pending.action.get("title") or "Pending action"),
+                preview_payload=None,
+                expires_at=int(pending.expires_at or 0),
+            )
+        lines = ["Current pending Plan Mode action:", *self._render_canonical_plan_lines(plan)]
+        lines.append("Say yes or confirm to apply this exact plan, no to cancel, or revise the plan to cancel and start over.")
+        message = "\n".join(lines)
+        return self._runtime_truth_response(
+            text=message,
+            route="plan_mode",
+            used_runtime_state=False,
+            used_memory=False,
+            used_tools=[],
+            next_question="Say yes to apply this exact plan, no to cancel, or revise the plan to start over.",
+            payload={
+                "type": "plan_mode_status",
+                "has_pending_plan": True,
+                "plan_id": str(plan.get("plan_id") or ""),
+                "plan": plan,
+                "mutated": False,
+            },
+            skip_post_response_hooks=True,
+        )
+
+    def _cancel_current_plan_response(self, user_id: str) -> OrchestratorResponse:
+        pending = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+        if pending is None:
+            message = "There is no current Plan Mode action to cancel."
+        else:
+            plan = pending.action.get("canonical_plan") if isinstance(pending.action, dict) and isinstance(pending.action.get("canonical_plan"), dict) else {}
+            plan_id = str(plan.get("plan_id") or (pending.action if isinstance(pending.action, dict) else {}).get("pending_id") or "").strip()
+            message = f"Okay — I cancelled the pending Plan Mode action{f' {plan_id}' if plan_id else ''}. Nothing ran."
+        return self._runtime_truth_response(
+            text=message,
+            route="plan_mode",
+            used_runtime_state=False,
+            used_memory=False,
+            used_tools=[],
+            payload={"type": "plan_mode_cancel", "mutated": False},
+            skip_post_response_hooks=True,
+        )
+
+    def _revise_current_plan_response(self, user_id: str) -> OrchestratorResponse:
+        pending = self._clear_pending_confirmation(user_id, status=PENDING_STATUS_ABORTED)
+        if pending is None:
+            message = "There is no current Plan Mode action to revise. Tell me the action you want and I will show a fresh preview."
+        else:
+            message = "I cancelled the previous Plan Mode action. Tell me the revised action you want, and I will show a fresh preview before anything mutates."
+        return self._runtime_truth_response(
+            text=message,
+            route="plan_mode",
+            used_runtime_state=False,
+            used_memory=False,
+            used_tools=[],
+            next_question="What revised action do you want me to preview?",
+            payload={"type": "plan_mode_revise", "mutated": False},
+            skip_post_response_hooks=True,
+        )
+
     def _confirmation_preview_response(
         self,
         user_id: str,
@@ -2987,17 +3187,29 @@ class Orchestrator:
         now_epoch = int(datetime.now(timezone.utc).timestamp())
         pending_id = f"confirm-{uuid.uuid4().hex[:10]}"
         expires_at = now_epoch + 600
+        canonical_plan = self._build_canonical_pending_plan(
+            pending_id=pending_id,
+            action={**dict(action), "mutating": bool(mutating)},
+            title=title,
+            preview_payload=preview_payload,
+            expires_at=expires_at,
+        )
+        rendered_question = str(question or "").strip()
+        if "Plan Mode v2:" not in rendered_question:
+            rendered_question = "\n".join([rendered_question, *self._render_canonical_plan_lines(canonical_plan)]).strip()
         action_payload = {
             **dict(action),
             "kind": "native_mutation",
             "pending_id": pending_id,
             "expires_at": expires_at,
             "title": title,
+            "thread_id": self._active_thread_id_for_user(user_id),
+            "canonical_plan": canonical_plan,
         }
         pending = PendingAction(
             user_id=user_id,
             action=action_payload,
-            message=question,
+            message=rendered_question,
             expires_at=expires_at,
             title=title,
         )
@@ -3008,7 +3220,7 @@ class Orchestrator:
                 "pending_id": pending_id,
                 "kind": "confirmation",
                 "origin_tool": (used_tools[0] if used_tools else str(action.get("operation") or "native_mutation")),
-                "question": question,
+                "question": rendered_question,
                 "options": ["yes", "no"],
                 "created_at": now_epoch,
                 "expires_at": expires_at,
@@ -3017,6 +3229,7 @@ class Orchestrator:
                 "context": {
                     "operation": str(action.get("operation") or "").strip() or None,
                     "title": title,
+                    "plan_id": pending_id,
                 },
             },
         )
@@ -3032,15 +3245,18 @@ class Orchestrator:
                 "cancel_command": "no",
                 "mutating": bool(mutating),
                 "action": str(action.get("operation") or "").strip() or None,
+                "plan_id": pending_id,
+                "plan": canonical_plan,
+                "canonical_plan": canonical_plan,
             }
         )
         return self._runtime_truth_response(
-            text=question,
+            text=rendered_question,
             route=route,
             used_tools=used_tools,
             used_memory=used_memory,
             used_runtime_state=used_runtime_state,
-            next_question=question,
+            next_question=rendered_question,
             payload=payload,
             skip_post_response_hooks=skip_post_response_hooks,
         )
@@ -19252,6 +19468,49 @@ class Orchestrator:
         }
 
     @staticmethod
+    def _looks_like_plan_inspect_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return normalized in {
+            "what is the current plan",
+            "what's the current plan",
+            "show the current plan",
+            "show current plan",
+            "show the pending action",
+            "show pending action",
+            "what is pending",
+            "what action is pending",
+            "inspect plan",
+            "inspect the plan",
+        }
+
+    @staticmethod
+    def _looks_like_plan_cancel_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return normalized in {
+            "cancel the plan",
+            "cancel plan",
+            "cancel pending action",
+            "cancel the pending action",
+            "drop the plan",
+            "discard the plan",
+        }
+
+    @staticmethod
+    def _looks_like_plan_revise_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return normalized in {
+            "revise the plan",
+            "revise plan",
+            "change the plan",
+            "edit the plan",
+        } or normalized.startswith(("revise the plan ", "change the plan ", "edit the plan "))
+
+    @staticmethod
+    def _looks_like_plan_confirmation_accept(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        return normalized in {"yes", "confirm", "ok", "okay", "ok do it", "do it", "proceed", "go ahead"}
+
+    @staticmethod
     def _looks_like_fresh_intent_override(text: str | None) -> bool:
         normalized = " ".join(str(text or "").strip().lower().split())
         if not normalized:
@@ -19294,6 +19553,7 @@ class Orchestrator:
             "memory_export_preview",
             "memory_redact_preview",
             "memory_cleanup_preview",
+            "ambiguous_restart_target",
         }
 
     def _should_skip_turn_memory_hooks(self, text: str | None) -> bool:
@@ -19374,6 +19634,38 @@ class Orchestrator:
                     except Exception:
                         pass
             normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
+            if not cmd and self._looks_like_plan_inspect_request(effective_user_text):
+                return self._current_plan_response(user_id)
+            if not cmd and self._looks_like_plan_cancel_request(effective_user_text):
+                return self._cancel_current_plan_response(user_id)
+            if not cmd and self._looks_like_plan_revise_request(effective_user_text):
+                return self._revise_current_plan_response(user_id)
+            if not cmd and self._looks_like_plan_confirmation_accept(effective_user_text):
+                pending_action = self.confirmations.get(user_id)
+                action_for_thread = pending_action.action if pending_action is not None and isinstance(pending_action.action, dict) else {}
+                action_thread_id = str(action_for_thread.get("thread_id") or "").strip()
+                current_thread_id = self._active_thread_id_for_user(user_id)
+                if pending_action is not None and action_thread_id and current_thread_id and action_thread_id != current_thread_id:
+                    message = (
+                        "That confirmation belongs to a different chat thread/session, so I did not run it. "
+                        "Open the original thread or ask for a fresh preview here."
+                    )
+                    return self._runtime_truth_response(
+                        text=message,
+                        route="plan_mode",
+                        used_runtime_state=False,
+                        used_memory=False,
+                        ok=False,
+                        error_kind="plan_thread_mismatch",
+                        payload={"type": "plan_mode_confirmation_rejected", "reason": "thread_mismatch", "mutated": False},
+                        skip_post_response_hooks=True,
+                    )
+            if (
+                not cmd
+                and str(classify_runtime_chat_route(effective_user_text).get("kind") or "").strip().lower()
+                == "ambiguous_restart_target"
+            ):
+                return self._ambiguous_restart_target_response(user_id)
             if not cmd and self._looks_like_context_reset_request(effective_user_text):
                 thread_id = self._active_thread_id_for_user(user_id)
                 self._clear_runtime_setup_state(user_id)
@@ -19433,6 +19725,8 @@ class Orchestrator:
                 if early_kind == "telegram_status":
                     self._last_offer_topic[user_id] = "telegram_status"
                     return self._telegram_status_response()
+                if early_kind == "ambiguous_restart_target":
+                    return self._ambiguous_restart_target_response(user_id)
                 if early_kind.startswith("operator_"):
                     return self._operator_lifecycle_response(user_id, early_kind)
                 if early_kind.startswith("memory_"):
@@ -19516,6 +19810,24 @@ class Orchestrator:
                     if not pending:
                         return OrchestratorResponse("No pending action to confirm.")
                     action = pending.action
+                    action_thread_id = str(action.get("thread_id") or "").strip()
+                    current_thread_id = self._active_thread_id_for_user(user_id)
+                    if action_thread_id and current_thread_id and action_thread_id != current_thread_id:
+                        self.confirmations.set(pending)
+                        message = (
+                            "That confirmation belongs to a different chat thread/session, so I did not run it. "
+                            "Open the original thread or ask for a fresh preview here."
+                        )
+                        return self._runtime_truth_response(
+                            text=message,
+                            route="plan_mode",
+                            used_runtime_state=False,
+                            used_memory=False,
+                            ok=False,
+                            error_kind="plan_thread_mismatch",
+                            payload={"type": "plan_mode_confirmation_rejected", "reason": "thread_mismatch", "mutated": False},
+                            skip_post_response_hooks=True,
+                        )
                     pending_id = str(action.get("pending_id") or "").strip()
                     if pending_id:
                         self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)
@@ -21760,6 +22072,26 @@ class Orchestrator:
                         now_epoch = int(datetime.now(timezone.utc).timestamp())
                         if int(pending_action.expires_at or pending_item.get("expires_at") or 0) <= now_epoch:
                             return self._expired_confirmation_response(user_id, pending=pending_action, pending_item=pending_item)
+                        action_for_thread = pending_action.action if isinstance(pending_action.action, dict) else {}
+                        action_thread_id = str(action_for_thread.get("thread_id") or "").strip()
+                        current_thread_id = self._active_thread_id_for_user(user_id)
+                        if action_thread_id and current_thread_id and action_thread_id != current_thread_id:
+                            if pending_id:
+                                self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_WAITING_FOR_USER)
+                            message = (
+                                "That confirmation belongs to a different chat thread/session, so I did not run it. "
+                                "Open the original thread or ask for a fresh preview here."
+                            )
+                            return self._runtime_truth_response(
+                                text=message,
+                                route="plan_mode",
+                                used_runtime_state=False,
+                                used_memory=False,
+                                ok=False,
+                                error_kind="plan_thread_mismatch",
+                                payload={"type": "plan_mode_confirmation_rejected", "reason": "thread_mismatch", "mutated": False},
+                                skip_post_response_hooks=True,
+                            )
                         pending_action = self.confirmations.pop(user_id)
                         if pending_id:
                             self._memory_runtime.set_pending_status(user_id, pending_id, PENDING_STATUS_DONE)

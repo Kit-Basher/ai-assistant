@@ -22,6 +22,86 @@ class OperationPolicyDecision:
     reason: str | None = None
 
 
+PLAN_MODE_SCHEMA_VERSION = "plan_mode.v2"
+
+
+@dataclass(frozen=True)
+class CanonicalPlan:
+    plan_id: str
+    action_type: str
+    target: str
+    scope: str
+    mutation_level: str
+    resources_affected: list[str]
+    risk_level: str
+    rollback_scope: str
+    rollback_supported: bool
+    executor_status: str
+    confirmation_words: list[str]
+    expires_at: int
+    staleness_policy: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "policy_layer": "plan_mode",
+            "schema_version": PLAN_MODE_SCHEMA_VERSION,
+            "plan_id": self.plan_id,
+            "action_type": self.action_type,
+            "target": self.target,
+            "scope": self.scope,
+            "mutation_level": self.mutation_level,
+            "resources_affected": list(self.resources_affected),
+            "risk_level": self.risk_level,
+            "rollback_scope": self.rollback_scope,
+            "rollback_supported": bool(self.rollback_supported),
+            "executor_status": self.executor_status,
+            "confirmation_words": list(self.confirmation_words),
+            "allowed_confirmation_words": list(self.confirmation_words),
+            "expires_at": int(self.expires_at),
+            "staleness_policy": self.staleness_policy,
+            "requires_confirmation": True,
+        }
+
+
+def build_canonical_plan(
+    *,
+    plan_id: str,
+    action_type: str,
+    target: str,
+    scope: str,
+    mutation_level: str,
+    resources_affected: list[str] | tuple[str, ...] | None,
+    risk_level: str,
+    rollback_scope: str,
+    rollback_supported: bool,
+    executor_status: str,
+    expires_at: int | float,
+    confirmation_words: list[str] | tuple[str, ...] | None = None,
+    staleness_policy: str | None = None,
+) -> dict[str, Any]:
+    clean_words = [str(item).strip().lower() for item in (confirmation_words or ("yes", "confirm")) if str(item).strip()]
+    if not clean_words:
+        clean_words = ["yes", "confirm"]
+    plan = CanonicalPlan(
+        plan_id=str(plan_id or "").strip(),
+        action_type=str(action_type or "unknown").strip().lower() or "unknown",
+        target=str(target or "unspecified").strip() or "unspecified",
+        scope=str(scope or "current user/session").strip() or "current user/session",
+        mutation_level=str(mutation_level or "mutating").strip().lower() or "mutating",
+        resources_affected=[str(item).strip() for item in (resources_affected or []) if str(item).strip()],
+        risk_level=str(risk_level or "medium").strip().lower() or "medium",
+        rollback_scope=str(rollback_scope or "Only the resources listed in this plan.").strip()
+        or "Only the resources listed in this plan.",
+        rollback_supported=bool(rollback_supported),
+        executor_status=str(executor_status or "unavailable").strip().lower() or "unavailable",
+        confirmation_words=clean_words,
+        expires_at=int(expires_at),
+        staleness_policy=str(staleness_policy or "Plan expires, is canceled, or is lost on service restart.").strip()
+        or "Plan expires, is canceled, or is lost on service restart.",
+    )
+    return plan.to_dict()
+
+
 READ_ONLY_ACTION_TYPES = {
     "read",
     "list",

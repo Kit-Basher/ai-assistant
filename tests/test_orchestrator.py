@@ -12,7 +12,7 @@ from agent.filesystem_skill import FileSystemSkill
 from agent.knowledge_cache import facts_hash
 from agent.onboarding_flow import onboarding_completed_key
 from agent.orchestrator import Orchestrator, OrchestratorResponse
-from agent.policy import build_mutator_plan
+from agent.policy import PLAN_MODE_SCHEMA_VERSION, build_canonical_plan, build_mutator_plan
 from skills.resource_governor import collector
 from agent.shell_skill import ShellSkill
 from agent.public_chat import build_no_llm_public_message
@@ -1977,6 +1977,111 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(payload, dict)
         self.assertFalse(payload.get("mutated"))
 
+    def test_canonical_plan_schema_serializes_v2_fields(self) -> None:
+        plan = build_canonical_plan(
+            plan_id="confirm-test",
+            action_type="operator.cleanup",
+            target="old runtime files",
+            scope="local runtime",
+            mutation_level="destructive",
+            resources_affected=["runtime/current", "old support bundles"],
+            risk_level="high",
+            rollback_scope="not guaranteed after deletion",
+            rollback_supported=False,
+            executor_status="preview_only",
+            expires_at=123456,
+        )
+
+        self.assertEqual("plan_mode", plan["policy_layer"])
+        self.assertEqual(PLAN_MODE_SCHEMA_VERSION, plan["schema_version"])
+        self.assertEqual("confirm-test", plan["plan_id"])
+        self.assertEqual("operator.cleanup", plan["action_type"])
+        self.assertEqual("old runtime files", plan["target"])
+        self.assertEqual("local runtime", plan["scope"])
+        self.assertEqual("destructive", plan["mutation_level"])
+        self.assertEqual(["runtime/current", "old support bundles"], plan["resources_affected"])
+        self.assertEqual("high", plan["risk_level"])
+        self.assertEqual("preview_only", plan["executor_status"])
+        self.assertEqual(["yes", "confirm"], plan["confirmation_words"])
+        self.assertTrue(plan["requires_confirmation"])
+
+    def test_plan_mode_preview_exposes_canonical_plan_and_inspection(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not answer plan mode."),
+        )
+
+        preview = orchestrator.handle_message("uninstall the assistant", "user1")
+        payload = preview.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        plan = payload.get("canonical_plan")
+        self.assertIsInstance(plan, dict)
+        self.assertEqual("plan_mode.v2", plan.get("schema_version"))
+        self.assertEqual(plan.get("plan_id"), payload.get("plan_id"))
+        self.assertEqual("operator.uninstall", plan.get("action_type"))
+        self.assertEqual("destructive", plan.get("mutation_level"))
+        self.assertEqual("preview_only", plan.get("executor_status"))
+        self.assertIn("Plan Mode v2:", preview.text)
+        self.assertIn("Plan ID:", preview.text)
+
+        inspect_response = orchestrator.handle_message("show the pending action", "user1")
+        self.assertEqual("plan_mode", inspect_response.data.get("route"))
+        self.assertIn(str(plan.get("plan_id")), inspect_response.text)
+        self.assertIn("Current pending Plan Mode action", inspect_response.text)
+
+    def test_plan_mode_cancel_blocks_later_confirmation(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not answer plan mode."),
+        )
+
+        orchestrator.handle_message("clean old runtime files", "user1")
+        cancelled = orchestrator.handle_message("cancel the plan", "user1")
+        confirmed = orchestrator.handle_message("confirm", "user1")
+
+        self.assertEqual("plan_mode", cancelled.data.get("route"))
+        self.assertIn("cancelled", cancelled.text.lower())
+        self.assertIn("current action", confirmed.text.lower())
+
+    def test_plan_mode_revise_cancels_current_plan(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not answer plan mode."),
+        )
+
+        orchestrator.handle_message("back up the assistant", "user1")
+        revised = orchestrator.handle_message("revise the plan", "user1")
+        confirmed = orchestrator.handle_message("yes", "user1")
+
+        self.assertEqual("plan_mode", revised.data.get("route"))
+        self.assertIn("cancelled the previous Plan Mode action", revised.text)
+        self.assertIn("current action", confirmed.text.lower())
+
+    def test_plan_mode_rejects_confirmation_from_unrelated_thread(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not answer plan mode."),
+        )
+
+        orchestrator.handle_message("uninstall the assistant", "user1", chat_context={"thread_id": "thread-a"})
+        rejected = orchestrator.handle_message("yes", "user1", chat_context={"thread_id": "thread-b"})
+
+        self.assertEqual("plan_mode", rejected.data.get("route"))
+        self.assertEqual("plan_thread_mismatch", rejected.data.get("error_kind"))
+        self.assertIn("different chat thread/session", rejected.text)
+
     def test_memory_status_distinguishes_scopes(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="LLM should not answer memory status.")
         orchestrator = Orchestrator(
@@ -3934,10 +4039,12 @@ class TestOrchestrator(unittest.TestCase):
             response = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
 
         self.assertEqual("model_status", response.data["route"])
-        self.assertEqual(
+        self.assertTrue(response.text.startswith(
             "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
-            response.text,
-        )
+        ))
+        self.assertIn("Plan Mode v2:", response.text)
+        self.assertIn("Action type: model_set_target.", response.text)
+        self.assertIn("Allowed confirmations: yes, confirm.", response.text)
         self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen2.5:7b-instruct", "provider_id": "ollama"}), runtime_truth.calls)
         self.assertNotIn(("set_default_chat_model", "ollama:qwen2.5:7b-instruct"), runtime_truth.calls)
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
@@ -3959,10 +4066,10 @@ class TestOrchestrator(unittest.TestCase):
             first = orchestrator.handle_message("switch to qwen2.5:7b-instruct", "user1")
             second = orchestrator.handle_message("switch back", "user1")
 
-        self.assertEqual(
+        self.assertTrue(first.text.startswith(
             "Temporary chat model switch preview: I will switch chat temporarily to ollama:qwen2.5:7b-instruct. This does not change your default model. Say yes to continue, or no to cancel.",
-            first.text,
-        )
+        ))
+        self.assertIn("Plan Mode v2:", first.text)
         self.assertIn("do not have a recent trial model switch", second.text.lower())
         self.assertEqual("ollama:qwen3.5:4b", runtime_truth.current_model)
         self.assertNotIn(("set_confirmed_chat_model_target", {"model_id": "ollama:qwen3.5:4b", "provider_id": "ollama"}), runtime_truth.calls)

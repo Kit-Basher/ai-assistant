@@ -40,6 +40,7 @@ Commands:
 - `python scripts/installed_product_abuse.py`
 - `python scripts/operator_lifecycle_smoke.py`
 - `python scripts/memory_lifecycle_smoke.py`
+- `python scripts/plan_mode_v2_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -74,6 +75,12 @@ memory status/inspection, current-turn opt-out, thread/global memory controls,
 forget/delete/export/redact/dedupe previews, cancellation, and stale
 confirmation safety through the real `/chat` API. It does not prove destructive
 memory execution.
+
+`plan_mode_v2_smoke.py` is the installed Plan Mode v2 gate. It proves canonical
+plan fields, plan inspection, cancellation, preview-only executor blocking,
+stale confirmation rejection after service restart, ambiguous restart
+clarification, safety-bypass refusal, and thread/session confirmation binding
+through the real `/chat` API.
 
 ## Optional Integration Gates
 

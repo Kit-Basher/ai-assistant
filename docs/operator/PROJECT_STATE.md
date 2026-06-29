@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-language-response-guard`
-- Commit: `ef90140`
+- Tag: `v0.2.1-memory-lifecycle-preview`
+- Commit: `c939a67`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -17,6 +17,8 @@ Current confirmed proof:
   preview lane passes
 - `python scripts/memory_lifecycle_smoke.py`: installed memory lifecycle
   preview lane passes
+- `python scripts/plan_mode_v2_smoke.py`: installed Plan Mode v2 proof lane
+  passes
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -68,6 +70,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   forget/delete/export/redact/dedupe previews, cancellation, and stale
   confirmation rejection. It proves safe previews, not full destructive memory
   execution.
+- `scripts/plan_mode_v2_smoke.py`: installed-runtime proof for canonical Plan
+  objects, current-plan inspection, cancellation/revision, preview-only
+  executor blocking, stale confirmation rejection after service restart, and
+  thread/session confirmation binding.
 
 ## Proven Now
 
@@ -100,6 +106,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - Memory lifecycle prompts now route deterministically through the installed
   `/chat` API. Memory inspection/status and current-turn opt-out are
   deterministic; destructive or broad controls show confirmation-gated previews.
+- Plan Mode previews expose canonical v2 fields including plan id, action type,
+  target, scope, mutation level, affected resources, risk, rollback scope,
+  executor status, allowed confirmations, and expiry. Users can inspect, cancel,
+  revise, or confirm the current pending plan.
 
 ## Still Partial
 
@@ -118,6 +128,9 @@ These are not unknowns, but they are not finished:
 - Memory completion: audits, deterministic status/inspection/current-turn
   opt-out, and preview UX exist; full delete/export/redact/dedupe executors and
   richer explainability remain partial.
+- Plan Mode execution: canonical plan previews, inspection, cancellation,
+  thread/session binding, and stale-confirmation rejection exist; a single
+  canonical executor registry for every mutator remains future work.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
 - Model/provider management: deterministic guidance and switching paths are
@@ -150,7 +163,8 @@ Safe wording:
    backup/restore/update/cleanup/uninstall executors.
 4. Memory lifecycle execution: implement bounded executors for thread/global
    toggles, forget-topic, delete-all, export, redaction, and dedupe.
-5. Plan Mode v2 canonical action layer.
+5. Plan Mode v2 executor registry: move remaining per-flow mutators behind one
+   canonical apply/recovery interface.
 6. Skill pack lifecycle hardening.
 7. Model/provider management and real local LLM soak.
 8. Clean VM proof.
@@ -164,6 +178,7 @@ python scripts/installed_product_abuse.py
 python scripts/prove_daily_driver_product.py
 python scripts/operator_lifecycle_smoke.py
 python scripts/memory_lifecycle_smoke.py
+python scripts/plan_mode_v2_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py
