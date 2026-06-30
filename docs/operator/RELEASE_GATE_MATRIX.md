@@ -44,6 +44,7 @@ Commands:
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
 - `python scripts/backup_v1_smoke.py`
+- `python scripts/restore_validator_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
@@ -102,6 +103,12 @@ backup prompt is Plan Mode gated, confirmation executes through Executor
 Registry v1, a timestamped local backup directory is created with a manifest
 and bounded redacted summaries, obvious raw secrets are absent, rollback is
 scoped to that new directory, and restore remains dry-run/preview-only with
+`mutated=false`.
+
+`restore_validator_smoke.py` is the installed restore-validator gate. It proves
+backup discovery and validation are read-only, the latest valid backup can be
+identified, unsafe outside paths are rejected, malformed backups are explained,
+and generic restore confirmation still returns `executor_not_enabled`,
 `mutated=false`.
 
 `cleanup_preview_smoke.py` is the installed cleanup-preview gate. It proves

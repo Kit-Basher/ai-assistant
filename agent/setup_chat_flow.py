@@ -287,11 +287,18 @@ _OPERATOR_BACKUP_PHRASES = (
     "backup the assistant",
     "back up personal agent",
     "backup personal agent",
+    "show my backups",
+    "list my backups",
+    "show backups",
+    "list backups",
 )
 _OPERATOR_RESTORE_PHRASES = (
     "restore from backup",
     "restore personal agent from backup",
     "restore the assistant from backup",
+    "validate this backup",
+    "check this backup before restore",
+    "inspect backup",
 )
 _OPERATOR_UPDATE_PHRASES = (
     "update the assistant",
@@ -1174,6 +1181,20 @@ def _classify_operational_route(text: str | None, normalized: str) -> dict[str, 
 
 
 def _classify_operator_lifecycle_route(normalized: str) -> dict[str, Any] | None:
+    if any(phrase in normalized for phrase in ("show my backups", "list my backups", "show backups", "list backups")):
+        return {
+            "route": "operator_lifecycle",
+            "kind": "operator_backup_list",
+            "generic_allowed": False,
+            "fallback_reason": "operator_lifecycle",
+        }
+    if any(phrase in normalized for phrase in ("validate this backup", "check this backup before restore", "inspect backup")):
+        return {
+            "route": "operator_lifecycle",
+            "kind": "operator_restore_validate",
+            "generic_allowed": False,
+            "fallback_reason": "operator_lifecycle",
+        }
     checks: tuple[tuple[tuple[str, ...], str], ...] = (
         (_OPERATOR_STORAGE_PHRASES, "operator_storage_status"),
         (_OPERATOR_REPAIR_PHRASES, "operator_repair_preview"),

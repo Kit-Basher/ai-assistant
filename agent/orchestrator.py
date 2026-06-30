@@ -132,6 +132,7 @@ from agent.error_response_ux import compose_actionable_message, deterministic_er
 from agent.executor_registry import (
     BACKUP_MAX_FILE_BYTES,
     BACKUP_MAX_TOTAL_BYTES,
+    BACKUP_SCHEMA_VERSION,
     ExecutorRegistry,
     ExecutorSpec,
     create_additive_backup,
@@ -15202,6 +15203,306 @@ class Orchestrator:
             "live_restore": manifest.get("live_restore"),
         }
 
+    @staticmethod
+    def _backup_v1_required_files() -> set[str]:
+        return {
+            "backup_summary.json",
+            "diagnostics_summary.json",
+            "executor_registry_journal_summary.json",
+            "manifest.json",
+            "memory_anchors_summary.json",
+            "pack_metadata_summary.json",
+            "preferences_summary.json",
+            "runtime_config_summary.json",
+            "state_database_summary.json",
+            "support_bundle_style_summary.json",
+        }
+
+    @staticmethod
+    def _restore_validator_secret_markers() -> tuple[str, ...]:
+        return (
+            "bearer ",
+            "api_key=",
+            "apikey=",
+            "authorization:",
+            "password=",
+            "secret=",
+            "token=",
+            "x-api-key",
+        )
+
+    def _approved_restore_validation_path(self, raw_path: str) -> tuple[Path | None, str | None]:
+        text = str(raw_path or "").strip().strip("\"'")
+        if not text:
+            return None, "backup_path_missing"
+        try:
+            path = Path(text).expanduser().resolve()
+        except OSError:
+            return None, "backup_path_unresolvable"
+        backup_root = (Path.home() / ".local/share/personal-agent/backups").resolve()
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+        if path == backup_root or backup_root in path.parents or path == tmp_root or tmp_root in path.parents:
+            return path, None
+        return path, "backup_path_outside_approved_locations"
+
+    def _extract_restore_validation_path(self, text: str | None) -> str:
+        raw = str(text or "").strip()
+        patterns = (
+            r"(?is)\bvalidate this backup\s*:?\s+(?P<path>\S.+)$",
+            r"(?is)\bcheck this backup before restore\s*:?\s+(?P<path>\S.+)$",
+            r"(?is)\binspect backup\s*:?\s+(?P<path>\S.+)$",
+        )
+        for pattern in patterns:
+            match = re.search(pattern, raw)
+            if match is not None:
+                return str(match.group("path") or "").strip()
+        return ""
+
+    def _backup_artifact_summary(self, path: Path) -> dict[str, Any]:
+        size, count, truncated = self._operator_lifecycle_size(path, max_entries=10000)
+        ok, manifest = self._backup_manifest_summary(path)
+        return {
+            "path": self._operator_lifecycle_path_label(path),
+            "absolute_path": str(path),
+            "valid": bool(ok),
+            "schema_version": BACKUP_SCHEMA_VERSION if ok else None,
+            "created_at": manifest.get("created_at") if ok else None,
+            "runtime_commit": manifest.get("runtime_commit") if ok else None,
+            "restore_status": manifest.get("restore_status") if ok else None,
+            "live_restore": manifest.get("live_restore") if ok else None,
+            "size_bytes": size,
+            "size": self._operator_lifecycle_size_label(size),
+            "file_count": count,
+            "scan_truncated": truncated,
+            "age": self._operator_lifecycle_age_label(path),
+            "invalid_reason": None if ok else manifest.get("reason"),
+        }
+
+    def _list_backup_artifacts(self, *, limit: int = 8) -> dict[str, Any]:
+        backup_root = (Path.home() / ".local/share/personal-agent/backups").expanduser()
+        backups: list[tuple[float, Path]] = []
+        if backup_root.is_dir():
+            for child in backup_root.iterdir():
+                if child.name.startswith("personal-agent-backup-") and child.is_dir():
+                    try:
+                        stamp = float(child.stat().st_mtime)
+                    except OSError:
+                        stamp = 0.0
+                    backups.append((stamp, child))
+        backups.sort(key=lambda item: item[0], reverse=True)
+        summaries = [self._backup_artifact_summary(path) for _stamp, path in backups[: max(0, int(limit))]]
+        latest_valid_path: Path | None = None
+        for _stamp, path in backups:
+            ok, _manifest = self._backup_manifest_summary(path)
+            if ok:
+                latest_valid_path = path
+                break
+        latest_label = self._operator_lifecycle_path_label(latest_valid_path) if latest_valid_path is not None else None
+        for item in summaries:
+            item["latest_valid"] = bool(latest_label and item.get("path") == latest_label)
+        return {
+            "backup_root": self._operator_lifecycle_path_label(backup_root),
+            "backups": summaries,
+            "latest_valid_backup": latest_label,
+            "mutated": False,
+        }
+
+    def _operator_backup_list_response(self) -> OrchestratorResponse:
+        listing = self._list_backup_artifacts()
+        backups = listing.get("backups") if isinstance(listing.get("backups"), list) else []
+        lines = ["Recent Backup v1 artifacts (read-only; I did not change anything):"]
+        if not backups:
+            lines.append("No backup artifacts were found in the approved Personal Agent backup directory.")
+        for item in backups:
+            if not isinstance(item, dict):
+                continue
+            marker = " latest valid backup" if item.get("latest_valid") else ""
+            valid = "valid" if item.get("valid") else f"invalid: {item.get('invalid_reason')}"
+            lines.append(
+                f"- {item.get('path')} ({item.get('size')}, age {item.get('age')}) - {valid}{marker}."
+            )
+        if listing.get("latest_valid_backup"):
+            lines.append(f"Latest valid backup: {listing.get('latest_valid_backup')}.")
+        lines.append("Live restore is not enabled. Ask 'validate this backup: <path>' to inspect one safely.")
+        return self._runtime_truth_response(
+            text="\n".join(lines),
+            route="operator_lifecycle",
+            used_runtime_state=True,
+            used_tools=["backup_list"],
+            payload={"type": "backup_list", **listing},
+            skip_post_response_hooks=True,
+        )
+
+    def _validate_backup_artifact(self, raw_path: str) -> dict[str, Any]:
+        path, error = self._approved_restore_validation_path(raw_path)
+        if path is None:
+            return {"valid": False, "error": error or "backup_path_missing", "mutated": False}
+        label = self._operator_lifecycle_path_label(path)
+        if error is not None:
+            return {
+                "valid": False,
+                "error": error,
+                "path": label,
+                "mutated": False,
+                "warnings": ["Path is outside approved Personal Agent backup locations; no files were read."],
+            }
+        warnings: list[str] = []
+        errors: list[str] = []
+        if not path.is_dir():
+            return {"valid": False, "error": "backup_path_not_directory", "path": label, "mutated": False}
+        manifest_path = path / "manifest.json"
+        if not manifest_path.is_file():
+            return {"valid": False, "error": "manifest_missing", "path": label, "mutated": False}
+        try:
+            manifest_size = manifest_path.stat().st_size
+        except OSError:
+            manifest_size = 0
+        if manifest_size > BACKUP_MAX_FILE_BYTES:
+            errors.append("manifest.json exceeds Backup v1 per-file size cap")
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception as exc:  # noqa: BLE001 - validator reports malformed backups without mutating.
+            return {
+                "valid": False,
+                "error": "manifest_unreadable",
+                "path": label,
+                "exception": exc.__class__.__name__,
+                "mutated": False,
+            }
+        if not isinstance(manifest, dict):
+            return {"valid": False, "error": "manifest_not_object", "path": label, "mutated": False}
+        if manifest.get("backup_schema_version") != BACKUP_SCHEMA_VERSION:
+            errors.append("backup_schema_version is not backup.v1")
+        if manifest.get("restore_status") != "dry_run_only":
+            errors.append("restore_status is not dry_run_only")
+        if manifest.get("live_restore") != "restore_not_enabled":
+            errors.append("live_restore is not restore_not_enabled")
+        included = [str(item) for item in manifest.get("included_files", []) if str(item).strip()] if isinstance(manifest.get("included_files"), list) else []
+        included_set = set(included)
+        required = self._backup_v1_required_files()
+        missing = sorted(name for name in required if name not in included_set or not (path / name).is_file())
+        if missing:
+            errors.append("required summary files are missing")
+        file_sizes = manifest.get("file_sizes") if isinstance(manifest.get("file_sizes"), dict) else {}
+        total_size = 0
+        secret_hits: list[str] = []
+        for name in sorted(included_set | required):
+            if "/" in name or "\\" in name or name.startswith("."):
+                errors.append(f"unsafe included file name: {name}")
+                continue
+            file_path = path / name
+            if not file_path.is_file():
+                continue
+            try:
+                size = file_path.stat().st_size
+            except OSError:
+                errors.append(f"could not stat {name}")
+                continue
+            total_size += size
+            if size > BACKUP_MAX_FILE_BYTES:
+                errors.append(f"{name} exceeds Backup v1 per-file size cap")
+            expected_size = file_sizes.get(name)
+            if isinstance(expected_size, int) and expected_size != size:
+                warnings.append(f"{name} size differs from manifest file_sizes")
+            try:
+                text = file_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                errors.append(f"could not read {name}")
+                continue
+            lowered = text.lower()
+            if any(marker in lowered for marker in self._restore_validator_secret_markers()):
+                secret_hits.append(name)
+            try:
+                json.loads(text)
+            except json.JSONDecodeError:
+                errors.append(f"{name} is not valid JSON")
+        if total_size > BACKUP_MAX_TOTAL_BYTES:
+            errors.append("included JSON files exceed Backup v1 total size cap")
+        manifest_total = manifest.get("total_size_bytes")
+        if isinstance(manifest_total, int) and manifest_total > BACKUP_MAX_TOTAL_BYTES:
+            errors.append("manifest total_size_bytes exceeds Backup v1 total size cap")
+        excluded = [str(item).lower() for item in manifest.get("excluded_files", [])] if isinstance(manifest.get("excluded_files"), list) else []
+        required_exclusion_terms = ("raw secret", "raw logs", "arbitrary home")
+        missing_exclusion_terms = [term for term in required_exclusion_terms if not any(term in item for item in excluded)]
+        if missing_exclusion_terms:
+            errors.append("manifest excluded_files does not document raw secrets/logs/arbitrary home data exclusions")
+        if secret_hits:
+            errors.append("obvious raw secret markers found in included JSON files")
+        valid = not errors
+        return {
+            "valid": valid,
+            "error": None if valid else "backup_validation_failed",
+            "path": label,
+            "schema_version": manifest.get("backup_schema_version"),
+            "created_at": manifest.get("created_at"),
+            "runtime_commit": manifest.get("runtime_commit"),
+            "included_files": sorted(included_set),
+            "missing_files": missing,
+            "warnings": warnings,
+            "errors": errors,
+            "secret_marker_files": secret_hits,
+            "restore_status": manifest.get("restore_status"),
+            "live_restore": manifest.get("live_restore"),
+            "total_size_bytes": total_size,
+            "total_size": self._operator_lifecycle_size_label(total_size),
+            "mutated": False,
+        }
+
+    def _operator_restore_validate_response(self, text: str | None) -> OrchestratorResponse:
+        raw_path = self._extract_restore_validation_path(text)
+        if not raw_path:
+            return self._runtime_truth_response(
+                text=(
+                    "Send the backup directory path to validate it, for example: "
+                    "validate this backup: ~/.local/share/personal-agent/backups/personal-agent-backup-..."
+                    "\nLive restore is not enabled, and validation will not write or restore anything."
+                ),
+                route="operator_lifecycle",
+                used_runtime_state=True,
+                used_tools=["restore_validator"],
+                ok=False,
+                error_kind="backup_path_missing",
+                payload={"type": "restore_validator", "valid": False, "error": "backup_path_missing", "mutated": False},
+                skip_post_response_hooks=True,
+            )
+        result = self._validate_backup_artifact(raw_path)
+        valid = bool(result.get("valid"))
+        lines = [
+            f"Backup validation result: {'valid' if valid else 'invalid'}.",
+            f"Path: {result.get('path') or raw_path}.",
+        ]
+        if result.get("schema_version"):
+            lines.append(f"Schema version: {result.get('schema_version')}.")
+        if result.get("created_at"):
+            lines.append(f"Created at: {result.get('created_at')}.")
+        if result.get("runtime_commit"):
+            lines.append(f"Runtime commit: {result.get('runtime_commit')}.")
+        included = result.get("included_files") if isinstance(result.get("included_files"), list) else []
+        if included:
+            lines.append(f"Included files: {', '.join(str(item) for item in included[:12])}.")
+        missing = result.get("missing_files") if isinstance(result.get("missing_files"), list) else []
+        if missing:
+            lines.append(f"Missing files: {', '.join(str(item) for item in missing)}.")
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        if warnings:
+            lines.append(f"Safety warnings: {'; '.join(str(item) for item in warnings[:5])}.")
+        errors = result.get("errors") if isinstance(result.get("errors"), list) else []
+        if errors:
+            lines.append(f"Validation errors: {'; '.join(str(item) for item in errors[:5])}.")
+        if result.get("error") and not errors:
+            lines.append(f"Reason: {result.get('error')}.")
+        lines.append("Live restore is not enabled. I did not write files, create a restore directory, restart services, or overwrite anything.")
+        return self._runtime_truth_response(
+            text="\n".join(lines),
+            route="operator_lifecycle",
+            used_runtime_state=True,
+            used_tools=["restore_validator"],
+            ok=valid,
+            error_kind=None if valid else str(result.get("error") or "backup_validation_failed"),
+            payload={"type": "restore_validator", **result},
+            skip_post_response_hooks=True,
+        )
+
     def _operator_cleanup_preview_snapshot(self) -> dict[str, Any]:
         home = Path.home()
         state_root = (home / ".local/share/personal-agent").expanduser()
@@ -15534,10 +15835,14 @@ class Orchestrator:
             },
         }
 
-    def _operator_lifecycle_response(self, user_id: str, kind: str) -> OrchestratorResponse:
+    def _operator_lifecycle_response(self, user_id: str, kind: str, text: str | None = None) -> OrchestratorResponse:
         normalized_kind = str(kind or "").strip().lower()
         if normalized_kind == "operator_storage_status":
             return self._operator_storage_status_response()
+        if normalized_kind == "operator_backup_list":
+            return self._operator_backup_list_response()
+        if normalized_kind == "operator_restore_validate":
+            return self._operator_restore_validate_response(text)
         specs: dict[str, dict[str, Any]] = {
             "operator_repair_preview": {
                 "title": "Repair assistant preview",
@@ -19970,7 +20275,9 @@ class Orchestrator:
             "operator_storage_status",
             "operator_repair_preview",
             "operator_backup_preview",
+            "operator_backup_list",
             "operator_restore_preview",
+            "operator_restore_validate",
             "operator_update_preview",
             "operator_cleanup_preview",
             "operator_uninstall_preview",
@@ -20159,7 +20466,7 @@ class Orchestrator:
                 if early_kind == "ambiguous_restart_target":
                     return self._ambiguous_restart_target_response(user_id)
                 if early_kind.startswith("operator_"):
-                    return self._operator_lifecycle_response(user_id, early_kind)
+                    return self._operator_lifecycle_response(user_id, early_kind, effective_user_text)
                 if early_kind.startswith("memory_"):
                     return self._memory_lifecycle_response(user_id, early_kind)
                 if (
@@ -22142,7 +22449,7 @@ class Orchestrator:
                 if runtime_route_kind == "safe_web_search":
                     return self._safe_web_search_response(user_id, runtime_text)
                 if runtime_route_kind.startswith("operator_"):
-                    return self._operator_lifecycle_response(user_id, runtime_route_kind)
+                    return self._operator_lifecycle_response(user_id, runtime_route_kind, runtime_text)
                 if runtime_route_kind.startswith("memory_"):
                     return self._memory_lifecycle_response(user_id, runtime_route_kind)
                 managed_adapter_response = self._managed_adapter_path_request_response(user_id, runtime_text)

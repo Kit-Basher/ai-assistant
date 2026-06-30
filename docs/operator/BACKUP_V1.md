@@ -105,6 +105,16 @@ The prompt `restore from backup` must show a preview-only Plan Mode response.
 Confirming that preview must return `executor_not_enabled` and `mutated=false`.
 Live restore must not overwrite local state in Backup v1.
 
+Restore v1 Validator can inspect Backup v1 artifacts without restoring them:
+
+```bash
+python scripts/restore_validator_smoke.py
+```
+
+User-facing prompts such as `show my backups` and
+`validate this backup: <path>` list and validate backup artifacts read-only.
+See `docs/operator/RESTORE_VALIDATOR.md`.
+
 ## Proof
 
 Run:

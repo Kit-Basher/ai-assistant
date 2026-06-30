@@ -2032,6 +2032,78 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIsInstance(plan, dict)
         self.assertEqual("preview_only", plan.get("executor_status"))
 
+    def test_restore_validator_lists_and_validates_backup_v1_without_mutation(self) -> None:
+        fake_home = Path(self.tmpdir.name) / "home"
+        backup_root = fake_home / ".local/share/personal-agent/backups"
+        backup = backup_root / "personal-agent-backup-valid"
+        backup.mkdir(parents=True)
+        files = {
+            "backup_summary.json": {"ok": True},
+            "diagnostics_summary.json": {"ok": True},
+            "executor_registry_journal_summary.json": {"entries": []},
+            "memory_anchors_summary.json": {"mode": "summary_only_raw_memory_text_excluded"},
+            "pack_metadata_summary.json": {"raw_pack_text": "excluded"},
+            "preferences_summary.json": {"mode": "summary_only"},
+            "runtime_config_summary.json": {"version": {"git_commit": "abc123"}},
+            "state_database_summary.json": {"mode": "summary_only_raw_database_excluded"},
+            "support_bundle_style_summary.json": {"redaction": "same redaction helper as Support Bundle v2"},
+        }
+        file_sizes: dict[str, int] = {}
+        for name, payload in files.items():
+            text = json.dumps(payload, sort_keys=True) + "\n"
+            (backup / name).write_text(text, encoding="utf-8")
+            file_sizes[name] = len(text.encode("utf-8"))
+        manifest = {
+            "backup_schema_version": "backup.v1",
+            "created_at": "2026-06-30T00:00:00+00:00",
+            "runtime_commit": "abc123",
+            "runtime_instance": "stable",
+            "included_files": sorted([*files.keys(), "manifest.json"]),
+            "excluded_files": ["raw secret-store files", "raw logs and full support bundles", "arbitrary home directory files"],
+            "file_sizes": file_sizes,
+            "total_size_bytes": sum(file_sizes.values()),
+            "restore_status": "dry_run_only",
+            "live_restore": "restore_not_enabled",
+        }
+        manifest_text = json.dumps(manifest, sort_keys=True) + "\n"
+        (backup / "manifest.json").write_text(manifest_text, encoding="utf-8")
+
+        orchestrator = self._orchestrator()
+        with patch("pathlib.Path.home", return_value=fake_home):
+            listed = orchestrator.handle_message("show my backups", "user1")
+            validated = orchestrator.handle_message(f"validate this backup: {backup}", "user1")
+
+        self.assertEqual("operator_lifecycle", listed.data.get("route"))
+        self.assertIn("Latest valid backup", listed.text)
+        self.assertFalse(listed.data.get("runtime_payload", {}).get("mutated"))
+        self.assertEqual("operator_lifecycle", validated.data.get("route"))
+        self.assertIn("Backup validation result: valid.", validated.text)
+        self.assertIn("Live restore is not enabled", validated.text)
+        payload = validated.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        self.assertTrue(payload.get("valid"))
+        self.assertFalse(payload.get("mutated"))
+
+    def test_restore_validator_rejects_unsafe_path_and_missing_manifest(self) -> None:
+        fake_home = Path(self.tmpdir.name) / "home"
+        tmp_root = Path(self.tmpdir.name) / "tmp"
+        tmp_root.mkdir()
+        malformed = tmp_root / "personal-agent-backup-malformed"
+        malformed.mkdir()
+        unsafe = fake_home / "Documents" / "backup"
+        unsafe.mkdir(parents=True)
+
+        orchestrator = self._orchestrator()
+        with patch("pathlib.Path.home", return_value=fake_home), patch("tempfile.gettempdir", return_value=str(tmp_root)):
+            unsafe_response = orchestrator.handle_message(f"inspect backup {unsafe}", "user1")
+            malformed_response = orchestrator.handle_message(f"validate this backup: {malformed}", "user1")
+
+        self.assertIn("invalid", unsafe_response.text.lower())
+        self.assertIn("outside approved Personal Agent backup locations", unsafe_response.text)
+        self.assertFalse(unsafe_response.data.get("runtime_payload", {}).get("mutated"))
+        self.assertIn("manifest_missing", malformed_response.text)
+        self.assertFalse(malformed_response.data.get("runtime_payload", {}).get("mutated"))
+
     def test_operator_lifecycle_confirmation_does_not_execute_preview_only_action(self) -> None:
         orchestrator = Orchestrator(
             db=self.db,

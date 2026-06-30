@@ -97,6 +97,8 @@ The smoke talks to the installed `/chat` API and proves:
 - backup has an enabled executor and returns a journal id
 - Backup v1 writes a manifest and bounded redacted summary files
 - restore remains preview-only and returns `mutated=false`
+- Restore v1 Validator is read-only and does not use an executor; generic
+  restore remains preview-only through the registry
 - cleanup preview classifies candidates and remains preview-only with
   `executor_not_enabled`, `mutated=false`
 - stale confirmation after API restart does not execute

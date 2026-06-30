@@ -25,6 +25,9 @@ Current confirmed proof:
   diagnostics packaging proof
 - `python scripts/backup_v1_smoke.py`: installed Backup v1 additive backup
   proof for redacted bounded summaries; live restore remains dry-run-only
+- `python scripts/restore_validator_smoke.py`: installed Restore v1 Validator
+  proof for read-only backup listing, Backup v1 validation, unsafe path
+  rejection, malformed backup handling, and restore preview-only refusal
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   deletion remains disabled
@@ -94,6 +97,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   Plan Mode preview, Executor Registry confirmation, timestamped local backup
   directory, manifest, bounded redacted summary files, scoped rollback hint,
   and restore dry-run/no-mutation behavior.
+- `scripts/restore_validator_smoke.py`: installed-runtime proof for Restore v1
+  Validator. It lists recent backups, identifies the latest valid backup,
+  validates Backup v1 manifests and required summaries, rejects unsafe outside
+  paths, detects missing manifests, and keeps live restore disabled.
 - `scripts/cleanup_preview_smoke.py`: installed-runtime proof for cleanup
   preview. It classifies old/oversized backup artifacts, old support bundles,
   and old runtime releases, protects current runtime/latest backup/secrets, and
@@ -147,6 +154,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   and explicit exclusions for raw secret stores, logs, arbitrary home data,
   model caches, and untrusted pack/source text. Restore remains
   dry-run/preview-only and live restore is not enabled.
+- Restore v1 Validator can inspect Backup v1 artifacts read-only and explain
+  validity, missing files, warnings, and restore-disabled state without writing
+  or restoring anything.
 - Cleanup preview identifies old or oversized Personal Agent artifacts and
   estimates recoverable space without deleting anything. Cleanup remains
   preview-only.
@@ -224,6 +234,7 @@ python scripts/plan_mode_v2_smoke.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
+python scripts/restore_validator_smoke.py
 python scripts/cleanup_preview_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
