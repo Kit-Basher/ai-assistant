@@ -13,6 +13,7 @@ from scripts.release_smoke import EXTENDED_TEST_NODES, MAIN_TEST_NODES
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "agent/api_server.py",
+    "agent/executor_registry.py",
     "agent/runtime_truth_service.py",
     "agent/packs/store.py",
     "agent/packs/state_truth.py",
@@ -32,6 +33,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/split_smoke.py",
     "scripts/reference_pack_workflow_smoke.py",
     "scripts/webui_smoke.py",
+    "scripts/executor_registry_smoke.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:

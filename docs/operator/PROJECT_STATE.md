@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-memory-lifecycle-preview`
-- Commit: `c939a67`
+- Tag: `v0.2.1-plan-mode-v2-proof-clean`
+- Commit: `32810fe`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -19,6 +19,8 @@ Current confirmed proof:
   preview lane passes
 - `python scripts/plan_mode_v2_smoke.py`: installed Plan Mode v2 proof lane
   passes
+- `python scripts/executor_registry_smoke.py`: installed Executor Registry v1
+  proof lane for preview-only refusal and the safe support-bundle executor
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -74,6 +76,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   objects, current-plan inspection, cancellation/revision, preview-only
   executor blocking, stale confirmation rejection after service restart, and
   thread/session confirmation binding.
+- `scripts/executor_registry_smoke.py`: installed-runtime proof for the shared
+  executor registry result shape, preview-only refusals, support-bundle
+  execution, registry journal ids, stale confirmation rejection, and
+  thread/session binding.
 
 ## Proven Now
 
@@ -110,6 +116,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   target, scope, mutation level, affected resources, risk, rollback scope,
   executor status, allowed confirmations, and expiry. Users can inspect, cancel,
   revise, or confirm the current pending plan.
+- Executor Registry v1 sits behind Plan Mode for the first wired lifecycle
+  actions. It refuses preview-only memory/delete/uninstall/cleanup actions with
+  `mutated=false`, records a redacted journal row, and can execute the safe
+  additive support-bundle executor.
 
 ## Still Partial
 
@@ -129,8 +139,9 @@ These are not unknowns, but they are not finished:
   opt-out, and preview UX exist; full delete/export/redact/dedupe executors and
   richer explainability remain partial.
 - Plan Mode execution: canonical plan previews, inspection, cancellation,
-  thread/session binding, and stale-confirmation rejection exist; a single
-  canonical executor registry for every mutator remains future work.
+  thread/session binding, stale-confirmation rejection, and Executor Registry
+  v1 exist. Most mutators are not yet migrated to the registry; destructive
+  lifecycle and memory actions remain preview-only.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
 - Model/provider management: deterministic guidance and switching paths are
@@ -163,8 +174,8 @@ Safe wording:
    backup/restore/update/cleanup/uninstall executors.
 4. Memory lifecycle execution: implement bounded executors for thread/global
    toggles, forget-topic, delete-all, export, redaction, and dedupe.
-5. Plan Mode v2 executor registry: move remaining per-flow mutators behind one
-   canonical apply/recovery interface.
+5. Executor Registry expansion: move remaining per-flow mutators behind the
+   canonical apply/recovery interface when each bounded executor is ready.
 6. Skill pack lifecycle hardening.
 7. Model/provider management and real local LLM soak.
 8. Clean VM proof.
@@ -179,6 +190,7 @@ python scripts/prove_daily_driver_product.py
 python scripts/operator_lifecycle_smoke.py
 python scripts/memory_lifecycle_smoke.py
 python scripts/plan_mode_v2_smoke.py
+python scripts/executor_registry_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

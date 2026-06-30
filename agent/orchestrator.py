@@ -128,6 +128,7 @@ from agent.onboarding_flow import (
 )
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import compose_actionable_message, deterministic_error_message
+from agent.executor_registry import ExecutorRegistry, ExecutorSpec, create_redacted_support_bundle
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.skill_governance import (
     ALLOWED_EXECUTION_MODES,
@@ -632,6 +633,17 @@ class Orchestrator:
         self._blocked_skill_governance: dict[str, dict[str, Any]] = {}
         self._managed_action_journal_store = PersistentManagedActionJournalStore(
             Path(db.db_path).expanduser().resolve().parent / "managed_actions.db"
+        )
+        self._executor_registry = ExecutorRegistry(Path(db.db_path).expanduser().resolve().parent / "executor_registry_journal.jsonl")
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.support_bundle.v1",
+                action_type="operator.support_bundle",
+                status="enabled",
+                run=create_redacted_support_bundle,
+                rollback_available=True,
+                rollback_hint="Remove only the newly created support bundle directory.",
+            )
         )
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
         for skill in self.skills.values():
@@ -3019,6 +3031,8 @@ class Orchestrator:
     @staticmethod
     def _canonical_plan_executor_status(operation: str) -> str:
         normalized = str(operation or "").strip().lower()
+        if normalized == "operator_lifecycle_support_bundle":
+            return "enabled"
         if normalized.startswith(("memory_lifecycle_", "operator_lifecycle_")):
             return "preview_only"
         return "enabled"
@@ -3904,30 +3918,52 @@ class Orchestrator:
             )
         if operation.startswith("operator_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("operator_lifecycle_", "")).strip() or "operator action"
-            message = (
-                f"{action_label} was confirmed, but this lane is preview-only right now. "
-                "I did not change files, restore backups, update packages, uninstall services, or delete state. "
-                "Use the documented operator command after reviewing the preview."
-            )
+            plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
+            result = self._executor_registry.execute_confirmed_plan(plan=plan, action=action)
+            result_payload = result.to_dict()
+            if result.ok and result.mutated:
+                message = (
+                    f"{action_label} executed through Executor Registry v1. "
+                    f"mutated=true. Journal: {result.journal_id}. {result.user_message}"
+                )
+                error_kind = None
+            else:
+                message = (
+                    f"{action_label} was confirmed, but the executor did not mutate state. "
+                    f"Reason: {result.error_code or 'executor_not_enabled'}. "
+                    "I did not change files, restore backups, update packages, uninstall services, or delete state. "
+                    f"{result.user_message or ''} "
+                    f"Journal: {result.journal_id}."
+                )
+                if result.error_code == "executor_not_enabled":
+                    message += " Use the documented operator command after reviewing the preview."
+                error_kind = "operator_lifecycle_executor_not_enabled" if result.error_code == "executor_not_enabled" else (result.error_code or "operator_lifecycle_executor_failed")
             return self._runtime_truth_response(
                 text=message,
                 route="operator_lifecycle",
                 used_tools=["operator_lifecycle"],
-                ok=False,
-                error_kind="operator_lifecycle_executor_not_enabled",
+                ok=bool(result.ok),
+                error_kind=error_kind,
                 payload={
                     "type": "operator_lifecycle_confirmation_result",
                     "operation": operation,
-                    "mutated": False,
+                    "mutated": bool(result.mutated),
                     "summary": message,
+                    "executor_result": result_payload,
+                    "journal_id": result.journal_id,
                 },
                 skip_post_response_hooks=True,
             )
         if operation.startswith("memory_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("memory_lifecycle_", "")).strip() or "memory action"
+            plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
+            result = self._executor_registry.execute_confirmed_plan(plan=plan, action=action)
+            result_payload = result.to_dict()
             message = (
                 f"{action_label} was confirmed, but this memory lifecycle lane is preview-only right now. "
                 "I did not delete saved memory, export private data, change global memory settings, or rewrite memory records. "
+                f"Reason: {result.error_code or 'executor_not_enabled'}. "
+                f"Journal: {result.journal_id}. "
                 "Use the reviewed memory lifecycle executor once it is implemented."
             )
             return self._runtime_truth_response(
@@ -3935,12 +3971,14 @@ class Orchestrator:
                 route="memory_lifecycle",
                 used_tools=["memory_store"],
                 ok=False,
-                error_kind="memory_lifecycle_executor_not_enabled",
+                error_kind="memory_lifecycle_executor_not_enabled" if result.error_code == "executor_not_enabled" else (result.error_code or "memory_lifecycle_executor_failed"),
                 payload={
                     "type": "memory_lifecycle_confirmation_result",
                     "operation": operation,
                     "mutated": False,
                     "summary": message,
+                    "executor_result": result_payload,
+                    "journal_id": result.journal_id,
                 },
                 skip_post_response_hooks=True,
             )

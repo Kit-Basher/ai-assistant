@@ -69,6 +69,10 @@ Confirm:
   wrong; this gate verifies canonical plans, inspect/cancel/revise, stale
   confirmation rejection, and thread/session binding without executing
   destructive actions
+- run `python scripts/executor_registry_smoke.py` when Plan Mode apply behavior
+  feels wrong; this gate verifies preview-only executor refusals, the safe
+  support-bundle executor, journal ids, stale confirmation rejection, and
+  thread/session binding through the installed `/chat` API
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

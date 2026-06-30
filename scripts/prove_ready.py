@@ -36,6 +36,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "agent/api_server.py",
     "agent/policy.py",
     "agent/bot.py",
+    "agent/executor_registry.py",
     "agent/orchestrator.py",
     "agent/setup_chat_flow.py",
     "agent/packs/store.py",
@@ -45,6 +46,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/chat_eval.py",
     "scripts/llm_behavior_eval.py",
     "scripts/perf_smoke.py",
+    "scripts/executor_registry_smoke.py",
     "scripts/prove_ready.py",
 )
 

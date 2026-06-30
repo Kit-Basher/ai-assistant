@@ -41,6 +41,7 @@ Commands:
 - `python scripts/operator_lifecycle_smoke.py`
 - `python scripts/memory_lifecycle_smoke.py`
 - `python scripts/plan_mode_v2_smoke.py`
+- `python scripts/executor_registry_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -81,6 +82,12 @@ plan fields, plan inspection, cancellation, preview-only executor blocking,
 stale confirmation rejection after service restart, ambiguous restart
 clarification, safety-bypass refusal, and thread/session confirmation binding
 through the real `/chat` API.
+
+`executor_registry_smoke.py` is the installed Executor Registry v1 gate. It
+proves preview-only memory delete, uninstall, and cleanup plans do not execute;
+the enabled support-bundle executor returns a journal id and creates only a
+redacted temporary artifact; stale confirmations still do not execute; and a
+different thread/session cannot apply the pending plan.
 
 ## Optional Integration Gates
 

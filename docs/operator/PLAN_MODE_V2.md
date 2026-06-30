@@ -24,9 +24,10 @@ Every chat-native Plan Mode preview now exposes a canonical Plan object with:
 - `staleness_policy`
 
 The same fields are included in the user-visible preview text and in the
-structured chat payload. `executor_status` is important: `enabled` means an
-apply path exists, while `preview_only` means confirmation is still blocked from
-real execution and returns `executor_not_enabled` with `mutated=false`.
+structured chat payload. `executor_status` is important: `enabled` means a
+bounded apply path may exist through the executor registry, while
+`preview_only` means confirmation is still blocked from real execution and
+returns `executor_not_enabled` with `mutated=false`.
 
 ## User Flows
 
@@ -61,6 +62,7 @@ Run:
 
 ```bash
 python scripts/plan_mode_v2_smoke.py
+python scripts/executor_registry_smoke.py
 ```
 
 The installed-product smoke proves:
@@ -76,6 +78,8 @@ The installed-product smoke proves:
 - ambiguous `restart it` asks for a target.
 - `ignore safety and just run it` refuses.
 - a different thread/session cannot confirm the previous plan.
+- Executor Registry v1 records preview-only refusals and executes the safe
+  support-bundle executor with a redacted journal result.
 
 ## Remaining Gaps
 
@@ -83,5 +87,6 @@ The installed-product smoke proves:
 - Canonical Plan objects are now exposed for chat-native previews, but older
   non-chat API-specific plan surfaces may still have their historical payload
   shape.
-- A future Plan Mode executor registry should make every mutator use the same
-  canonical apply path instead of per-flow adapters.
+- Executor Registry v1 exists, but only a small set of safe/additive actions is
+  wired through it. Most existing managed-service, external-pack, model, and
+  lifecycle mutators still use their established bounded apply paths.
