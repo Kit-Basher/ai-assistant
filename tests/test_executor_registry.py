@@ -7,6 +7,8 @@ from pathlib import Path
 
 from agent.executor_registry import (
     BACKUP_SCHEMA_VERSION,
+    BACKUP_MAX_FILE_BYTES,
+    BACKUP_MAX_TOTAL_BYTES,
     SUPPORT_BUNDLE_SCHEMA_VERSION,
     ExecutorRegistry,
     ExecutorSpec,
@@ -121,6 +123,14 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertNotIn("ultrasecret", text)
         self.assertNotIn("sk-test", text)
         self.assertIn("[REDACTED]", text)
+
+    def test_recent_journal_reads_bounded_tail_and_skips_huge_lines(self) -> None:
+        huge = json.dumps({"journal_id": "huge", "payload": "x" * (128 * 1024)})
+        small = json.dumps({"journal_id": "small", "result": {"ok": True}})
+        self.journal_path.write_text(huge + "\n" + small + "\n", encoding="utf-8")
+        journal = ExecutorRegistry(self.journal_path).journal
+        recent = journal.recent(limit=20, max_tail_bytes=256 * 1024, max_line_bytes=64 * 1024)
+        self.assertEqual(["small"], [entry.get("journal_id") for entry in recent])
 
     def test_exact_plan_id_binding_before_execution(self) -> None:
         registry = ExecutorRegistry(self.journal_path)
@@ -238,6 +248,39 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertNotIn("sk-test-secret", combined)
         self.assertNotIn("letmein", combined)
 
+    def test_support_bundle_summarizes_recursive_executor_journal(self) -> None:
+        huge_payload = "x" * (BACKUP_MAX_FILE_BYTES + 1024)
+        result = create_redacted_support_bundle(
+            _plan(),
+            {
+                "pending_id": "confirm-test",
+                "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                "executor_journal_recent": [
+                    {
+                        "journal_id": "executor-old",
+                        "event": "executor_result",
+                        "plan": {"plan_id": "old-plan", "action_type": "operator.backup", "target": "backup"},
+                        "action": {"executor_journal_recent": [{"large": huge_payload}]},
+                        "result": {
+                            "journal_id": "executor-old",
+                            "plan_id": "old-plan",
+                            "action_type": "operator.backup",
+                            "target": "backup",
+                            "executor_id": "operator.backup.v1",
+                            "ok": True,
+                            "mutated": True,
+                            "resources_touched": [huge_payload],
+                        },
+                    }
+                ],
+            },
+        )
+        artifact = Path(result["details"]["artifact_path"])
+        journal_summary = (artifact / "executor_registry_journal_summary.json").read_text(encoding="utf-8")
+        self.assertNotIn(huge_payload[:1000], journal_summary)
+        self.assertIn('"resources_touched_count": 1', journal_summary)
+        self.assertLess((artifact / "executor_registry_journal_summary.json").stat().st_size, BACKUP_MAX_FILE_BYTES)
+
     def test_backup_v1_manifest_and_expected_files(self) -> None:
         backup_root = Path(self.tmpdir.name) / "backups"
         result = create_additive_backup(
@@ -281,6 +324,8 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertEqual("abc123", manifest["runtime_commit"])
         self.assertEqual("dry_run_only", manifest["restore_status"])
         self.assertEqual("restore_not_enabled", manifest["live_restore"])
+        self.assertLess(manifest["total_size_bytes"], BACKUP_MAX_TOTAL_BYTES)
+        self.assertEqual(BACKUP_MAX_FILE_BYTES, manifest["size_caps"]["max_file_bytes"])
         self.assertTrue(expected.issubset(set(manifest["included_files"])))
         for name in expected:
             self.assertTrue((artifact / name).is_file(), name)
@@ -309,6 +354,43 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertIn("raw secret-store files", combined)
         self.assertIn("summary_only_raw_database_excluded", combined)
         self.assertIn("restore_not_enabled", combined)
+
+    def test_backup_v1_summarizes_recursive_executor_journal(self) -> None:
+        huge_payload = "x" * (BACKUP_MAX_FILE_BYTES + 1024)
+        result = create_additive_backup(
+            _plan(action_type="operator.backup"),
+            {
+                "pending_id": "confirm-test",
+                "backup_root": str(Path(self.tmpdir.name) / "backups"),
+                "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                "executor_journal_recent": [
+                    {
+                        "journal_id": "executor-old",
+                        "event": "executor_result",
+                        "plan": {"plan_id": "old-plan", "action_type": "operator.backup", "target": "backup"},
+                        "action": {"executor_journal_recent": [{"large": huge_payload}]},
+                        "result": {
+                            "journal_id": "executor-old",
+                            "plan_id": "old-plan",
+                            "action_type": "operator.backup",
+                            "target": "backup",
+                            "executor_id": "operator.backup.v1",
+                            "ok": True,
+                            "mutated": True,
+                            "resources_touched": [huge_payload],
+                        },
+                    }
+                ],
+            },
+        )
+        artifact = Path(result["details"]["artifact_path"])
+        journal_summary = (artifact / "executor_registry_journal_summary.json").read_text(encoding="utf-8")
+        manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn(huge_payload[:1000], journal_summary)
+        self.assertIn('"resources_touched_count": 1', journal_summary)
+        self.assertLess((artifact / "executor_registry_journal_summary.json").stat().st_size, BACKUP_MAX_FILE_BYTES)
+        self.assertLess(sum(path.stat().st_size for path in artifact.glob("*.json")), BACKUP_MAX_TOTAL_BYTES)
+        self.assertGreater(manifest["file_sizes"]["executor_registry_journal_summary.json"], 0)
 
     def test_backup_v1_refuses_unapproved_backup_root(self) -> None:
         with self.assertRaises(ValueError):

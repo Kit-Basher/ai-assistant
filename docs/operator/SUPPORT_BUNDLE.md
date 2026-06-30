@@ -6,6 +6,10 @@ the user confirms, then the executor creates a new temporary diagnostics bundle.
 
 It is not destructive and it does not repair anything.
 
+The same redaction helpers are reused by Backup v1 for bounded local backup
+summaries. Support bundles remain temporary diagnostics artifacts; Backup v1
+uses the approved local backup path and still excludes raw secrets.
+
 ## Included Files
 
 The bundle directory contains fixed, bounded JSON files:
@@ -49,6 +53,9 @@ The packager redacts or summarizes:
 
 The bundle should not include raw logs, raw secret-store contents, arbitrary home
 directory data, browser data, downloaded pages, or external pack source text.
+Executor registry journal rows are summarized to fixed metadata and resource
+counts; support bundles must not embed full prior executor actions or previous
+backup/support bundle contents.
 
 ## Rollback Scope
 
@@ -73,4 +80,3 @@ The installed-product smoke proves:
 - executor result includes `mutated=true`, `resources_touched`, `journal_id`,
   and a scoped rollback hint
 - git status remains unchanged
-

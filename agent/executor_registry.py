@@ -12,6 +12,9 @@ import uuid
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
 BACKUP_SCHEMA_VERSION = "backup.v1"
+BACKUP_MAX_TOTAL_BYTES = 2 * 1024 * 1024
+BACKUP_MAX_FILE_BYTES = 256 * 1024
+BACKUP_MAX_JOURNAL_ENTRIES = 8
 
 SECRET_KEY_HINTS = (
     "api_key",
@@ -166,12 +169,24 @@ class MutationJournal:
             handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
         return journal_id
 
-    def recent(self, limit: int = 20) -> list[dict[str, Any]]:
+    def recent(self, limit: int = 20, *, max_tail_bytes: int = 512 * 1024, max_line_bytes: int = 64 * 1024) -> list[dict[str, Any]]:
         if not self.path.exists():
             return []
-        lines = self.path.read_text(encoding="utf-8", errors="replace").splitlines()
+        try:
+            with self.path.open("rb") as handle:
+                handle.seek(0, 2)
+                size = handle.tell()
+                handle.seek(max(0, size - max_tail_bytes))
+                data = handle.read(max_tail_bytes)
+        except OSError:
+            return []
+        if size > max_tail_bytes:
+            _, _, data = data.partition(b"\n")
+        lines = data.decode("utf-8", errors="replace").splitlines()
         out: list[dict[str, Any]] = []
         for line in lines[-max(0, int(limit)) :]:
+            if len(line.encode("utf-8", errors="replace")) > max_line_bytes:
+                continue
             try:
                 parsed = json.loads(line)
             except json.JSONDecodeError:
@@ -378,6 +393,66 @@ def _status_summary(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str,
     return {key: payload.get(key) for key in keys if key in payload}
 
 
+def _bounded_backup_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 5:
+        return "[truncated:max_depth]"
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 40:
+                out["truncated_keys"] = True
+                break
+            out[str(key)] = _bounded_backup_value(item, depth=depth + 1)
+        return out
+    if isinstance(value, list):
+        return [_bounded_backup_value(item, depth=depth + 1) for item in value[:20]]
+    if isinstance(value, tuple):
+        return [_bounded_backup_value(item, depth=depth + 1) for item in value[:20]]
+    if isinstance(value, str):
+        if len(value) > 512:
+            return value[:512] + "...[truncated]"
+    return value
+
+
+def _write_backup_json(path: Path, payload: dict[str, Any]) -> int:
+    text = json.dumps(support_bundle_redact(_bounded_backup_value(payload)), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    encoded = text.encode("utf-8")
+    if len(encoded) > BACKUP_MAX_FILE_BYTES:
+        raise ValueError(f"backup_file_size_cap_exceeded:{path.name}:{len(encoded)}")
+    path.write_bytes(encoded)
+    return len(encoded)
+
+
+def _summarize_executor_journal_entries(entries: list[Any]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for entry in entries[-BACKUP_MAX_JOURNAL_ENTRIES:]:
+        if not isinstance(entry, dict):
+            continue
+        result = entry.get("result") if isinstance(entry.get("result"), dict) else {}
+        plan = entry.get("plan") if isinstance(entry.get("plan"), dict) else {}
+        resources = result.get("resources_touched") if isinstance(result.get("resources_touched"), list) else []
+        summaries.append(
+            support_bundle_redact(
+                {
+                    "journal_id": entry.get("journal_id") or result.get("journal_id"),
+                    "event": entry.get("event"),
+                    "plan_id": result.get("plan_id") or plan.get("plan_id"),
+                    "action_type": result.get("action_type") or plan.get("action_type"),
+                    "target": result.get("target") or plan.get("target"),
+                    "executor_id": result.get("executor_id"),
+                    "ok": result.get("ok"),
+                    "mutated": result.get("mutated"),
+                    "error_code": result.get("error_code"),
+                    "resources_touched_count": len(resources),
+                    "rollback_available": result.get("rollback_available"),
+                    "started_at": result.get("started_at"),
+                    "finished_at": result.get("finished_at"),
+                }
+            )
+        )
+    return summaries
+
+
 def build_support_bundle_manifest(
     *,
     root: Path,
@@ -428,6 +503,8 @@ def build_backup_manifest(
     diagnostics: dict[str, Any],
     included_files: list[str],
     excluded_files: list[str],
+    file_sizes: dict[str, int] | None = None,
+    total_size_bytes: int | None = None,
 ) -> dict[str, Any]:
     version = diagnostics.get("version") if isinstance(diagnostics.get("version"), dict) else {}
     policy = (
@@ -444,6 +521,13 @@ def build_backup_manifest(
             "runtime_instance": version.get("runtime_instance"),
             "included_files": included_files,
             "excluded_files": excluded_files,
+            "file_sizes": file_sizes or {},
+            "total_size_bytes": total_size_bytes,
+            "size_caps": {
+                "max_total_bytes": BACKUP_MAX_TOTAL_BYTES,
+                "max_file_bytes": BACKUP_MAX_FILE_BYTES,
+                "max_journal_entries": BACKUP_MAX_JOURNAL_ENTRIES,
+            },
             "redaction/encryption policy": policy,
             "redaction_encryption_policy": policy,
             "restore_status": "dry_run_only",
@@ -536,10 +620,12 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
             ),
         ),
     }
+    journal_entries = _summarize_executor_journal_entries(executor_recent)
     files["executor_registry_journal_summary.json"] = {
-        "entries": executor_recent[:20],
+        "entries": journal_entries,
         "entry_count": len(executor_recent),
-        "source": "executor_registry_journal_recent",
+        "included_entry_count": len(journal_entries),
+        "source": "executor_registry_journal_recent_summary_only",
     }
     files["diagnostics_summary.json"] = {
         "doctor": doctor or _status_summary(ready, ("ready", "runtime_mode", "state_label", "reason", "next_action")),
@@ -566,13 +652,53 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "restore_status": "dry_run_only",
         "live_restore": "restore_not_enabled",
         "contents": sorted(files.keys()),
+        "size_caps": {
+            "max_total_bytes": BACKUP_MAX_TOTAL_BYTES,
+            "max_file_bytes": BACKUP_MAX_FILE_BYTES,
+            "max_journal_entries": BACKUP_MAX_JOURNAL_ENTRIES,
+        },
     }
 
     included_files = sorted([*files.keys(), "manifest.json"])
-    manifest = build_backup_manifest(root=root, diagnostics=diagnostics, included_files=included_files, excluded_files=excluded_files)
-    _write_json(root / "manifest.json", manifest)
-    for name, payload in files.items():
-        _write_json(root / name, payload)
+    file_sizes: dict[str, int] = {}
+    try:
+        total_size = 0
+        for name, payload in files.items():
+            size = _write_backup_json(root / name, payload)
+            file_sizes[name] = size
+            total_size += size
+            if total_size > BACKUP_MAX_TOTAL_BYTES:
+                raise ValueError(f"backup_total_size_cap_exceeded:{total_size}")
+        manifest = build_backup_manifest(
+            root=root,
+            diagnostics=diagnostics,
+            included_files=included_files,
+            excluded_files=excluded_files,
+            file_sizes=file_sizes,
+            total_size_bytes=total_size,
+        )
+        manifest_text = json.dumps(support_bundle_redact(_bounded_backup_value(manifest)), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+        manifest_size = len(manifest_text.encode("utf-8"))
+        if manifest_size > BACKUP_MAX_FILE_BYTES:
+            raise ValueError(f"backup_file_size_cap_exceeded:manifest.json:{manifest_size}")
+        if total_size + manifest_size > BACKUP_MAX_TOTAL_BYTES:
+            raise ValueError(f"backup_total_size_cap_exceeded:{total_size + manifest_size}")
+        (root / "manifest.json").write_text(manifest_text, encoding="utf-8")
+        file_sizes["manifest.json"] = manifest_size
+        total_size += manifest_size
+    except Exception as exc:
+        resources = [str(path) for path in sorted(root.glob("*.json"))]
+        return {
+            "ok": False,
+            "mutated": False,
+            "executor_id": "operator.backup.v1",
+            "resources_touched": resources,
+            "rollback_available": True,
+            "rollback_hint": f"Remove only the partial backup directory created for this failed action: {root}",
+            "error_code": "backup_v1_failed_before_final_manifest",
+            "user_message": "Backup v1 did not finish. I did not write a final manifest or verify a usable backup.",
+            "details": {"artifact_path": str(root), "partial": True, "error": exc.__class__.__name__},
+        }
     resources = [str(root / name) for name in included_files]
     return {
         "ok": True,
@@ -646,9 +772,10 @@ def create_redacted_support_bundle(plan: dict[str, Any], action: dict[str, Any])
         "warnings": packs.get("warnings") if isinstance(packs.get("warnings"), list) else [],
     }
     files["executor_registry_journal_summary.json"] = {
-        "entries": executor_recent[:20],
+        "entries": _summarize_executor_journal_entries(executor_recent),
         "entry_count": len(executor_recent),
-        "source": "executor_registry_journal_recent",
+        "included_entry_count": min(len(executor_recent), BACKUP_MAX_JOURNAL_ENTRIES),
+        "source": "executor_registry_journal_recent_summary_only",
     }
     files["readiness_proof_summary.json"] = {
         "prove_ready": proof,

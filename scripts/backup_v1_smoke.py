@@ -12,6 +12,8 @@ from typing import Any
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8765"
+MAX_BACKUP_ARTIFACT_BYTES = 2 * 1024 * 1024
+MAX_BACKUP_FILE_BYTES = 256 * 1024
 
 EXPECTED_FILES = {
     "manifest.json",
@@ -116,6 +118,16 @@ def _scan_json_files(path: Path) -> str:
     return "\n".join(item.read_text(encoding="utf-8", errors="replace") for item in sorted(path.glob("*.json")))
 
 
+def _artifact_size(path: Path) -> tuple[int, dict[str, int]]:
+    sizes: dict[str, int] = {}
+    total = 0
+    for item in sorted(path.glob("*.json")):
+        size = item.stat().st_size
+        sizes[item.name] = size
+        total += size
+    return total, sizes
+
+
 def run(base_url: str, timeout: float) -> list[Check]:
     checks: list[Check] = []
     baseline_git = _git_status_short()
@@ -174,7 +186,18 @@ def run(base_url: str, timeout: float) -> list[Check]:
             if not missing_files
             else _fail("expected bounded summary files exist", f"missing_files={missing_files}", "inspect backup files")
         )
-        combined = _scan_json_files(artifact_path)
+        total_size, file_sizes = _artifact_size(artifact_path)
+        oversize_files = {name: size for name, size in file_sizes.items() if size > MAX_BACKUP_FILE_BYTES}
+        checks.append(
+            _pass("backup artifact size is bounded", f"total_bytes={total_size} file_count={len(file_sizes)}", "inspect backup file sizes")
+            if total_size <= MAX_BACKUP_ARTIFACT_BYTES and not oversize_files
+            else _fail(
+                "backup artifact size is bounded",
+                f"total_bytes={total_size} max_total={MAX_BACKUP_ARTIFACT_BYTES} oversize_files={oversize_files}",
+                "inspect backup file sizes",
+            )
+        )
+        combined = _scan_json_files(artifact_path) if total_size <= MAX_BACKUP_ARTIFACT_BYTES else ""
         forbidden_values = (
             "123456:telegram",
             "bot token",
@@ -205,6 +228,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
             [
                 _fail("manifest exists and lists expected bounded files", "artifact missing", "inspect manifest.json"),
                 _fail("expected bounded summary files exist", "artifact missing", "inspect backup files"),
+                _fail("backup artifact size is bounded", "artifact missing", "inspect backup file sizes"),
                 _fail("backup files do not contain obvious raw secrets", "artifact missing", "scan backup files"),
                 _fail("backup documents exclusions and restore dry-run", "artifact missing", "inspect backup files"),
                 _fail("rollback hint scoped to new backup path only", "artifact missing", "inspect executor result"),

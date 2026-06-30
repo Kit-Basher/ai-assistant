@@ -23,6 +23,10 @@ Agent state backup path:
 The executor result includes `mutated=true`, `resources_touched`, `journal_id`,
 and a rollback hint scoped to removing only the new backup directory.
 
+Backup v1 is summary/export based. It does not copy runtime directories,
+previous backups, virtual environments, caches, raw logs, support bundle
+directories, model artifacts, or arbitrary home directory data.
+
 ## Included Files
 
 The backup directory contains fixed, bounded JSON files:
@@ -48,6 +52,15 @@ The backup directory contains fixed, bounded JSON files:
 - `excluded_files`
 - `redaction/encryption policy`
 - `restore_status`
+- `size_caps`
+- `file_sizes`
+- `total_size_bytes`
+
+Current caps:
+
+- total backup JSON size: 2 MiB
+- per-file JSON size: 256 KiB
+- executor journal rows summarized: 8 recent entries
 
 ## Redaction And Exclusions
 
@@ -60,6 +73,18 @@ Backup v1 stores redacted summaries only. It excludes:
 - model caches/downloads and GGUF/model artifacts
 - raw external pack archives, `SKILL.md`, `AGENTS.md`, and untrusted source text
 - browser caches, downloaded pages, and search result page contents
+- `~/.local/share/personal-agent/backups` recursively
+- runtime releases and `.venv` directories
+
+The executor records only fixed summary files. Executor journal rows are reduced
+to bounded metadata such as `journal_id`, `action_type`, `executor_id`,
+`mutated`, `error_code`, timestamps, and resource counts. It must not embed
+full prior executor actions or prior backup contents.
+
+If a cap is exceeded, Backup v1 returns a failed executor result with
+`mutated=false`, does not write a final manifest, records any partial JSON files
+already created, and gives a rollback hint scoped only to that new partial
+backup directory.
 
 No encryption is applied in v1 because raw secret material is not included.
 Treat the backup directory as local-sensitive.
@@ -89,6 +114,7 @@ The installed-product smoke proves:
 - confirmation executes through Executor Registry v1
 - backup artifact and manifest exist
 - expected bounded summary files exist
+- backup artifact size stays below the documented caps
 - obvious raw secret samples are absent from backup files
 - executor journal recorded the action
 - rollback hint is scoped to the new backup path only

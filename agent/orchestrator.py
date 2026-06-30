@@ -3304,7 +3304,7 @@ class Orchestrator:
         first = "That confirmation expired, so I didn’t make any changes."
         if action_title:
             first = f"That confirmation expired for {action_title}, so I didn’t make any changes."
-        message = f"{first} Ask me to set up web search again and I’ll show the plan."
+        message = f"{first} I don’t have a current action to continue. Ask for a fresh preview and I’ll show the plan again."
         return self._runtime_truth_response(
             text=message,
             route="assistant_clarification",
@@ -3312,7 +3312,7 @@ class Orchestrator:
             used_memory=True,
             ok=False,
             error_kind="pending_confirmation_expired",
-            next_question="Ask me to set up web search again and I’ll show the plan.",
+            next_question="Ask for a fresh preview and I’ll show the plan again.",
             payload={
                 "type": "assistant_continuation_clarification",
                 "summary": message,
