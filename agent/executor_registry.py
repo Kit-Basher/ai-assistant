@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import tempfile
 from typing import Any, Callable
 import uuid
 
+
+SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
 
 SECRET_KEY_HINTS = (
     "api_key",
@@ -18,6 +21,7 @@ SECRET_KEY_HINTS = (
     "confirmation_token",
     "cookie",
     "password",
+    "private_key",
     "secret",
     "server.secret_key",
     "sudo",
@@ -44,11 +48,57 @@ def redact_executor_value(value: Any, *, key_hint: str = "") -> Any:
         return [redact_executor_value(item, key_hint=key_hint) for item in value[:100]]
     if isinstance(value, str):
         lowered = value.lower()
-        if any(hint in lowered for hint in ("bot token", "bearer ", "api_key=", "password=", "secret=", "token=")):
+        if any(
+            hint in lowered
+            for hint in (
+                "bot token",
+                "bearer ",
+                "api_key=",
+                "apikey=",
+                "authorization:",
+                "password=",
+                "secret=",
+                "token=",
+                "x-api-key",
+            )
+        ):
             return "[REDACTED]"
         if len(value) > 512:
             return value[:512] + "...[truncated]"
     return value
+
+
+def safe_path_label(path: Any) -> str:
+    raw = str(path or "").strip()
+    if not raw:
+        return ""
+    home = str(Path.home())
+    if raw == home:
+        return "~"
+    if raw.startswith(home + "/"):
+        raw = "~/" + raw[len(home) + 1 :]
+    parts = [part for part in raw.split("/") if part not in {"", "."}]
+    if len(parts) <= 4:
+        return raw
+    digest = hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"{'/'.join(parts[:2])}/.../{parts[-1]}#sha256:{digest}"
+
+
+def support_bundle_redact(value: Any, *, key_hint: str = "") -> Any:
+    redacted = redact_executor_value(value, key_hint=key_hint)
+    normalized_key = str(key_hint or "").lower()
+    if isinstance(redacted, dict):
+        safe: dict[str, Any] = {}
+        for key, item in redacted.items():
+            key_text = str(key)
+            safe[key_text] = support_bundle_redact(item, key_hint=key_text)
+        return safe
+    if isinstance(redacted, list):
+        return [support_bundle_redact(item, key_hint=key_hint) for item in redacted[:80]]
+    if isinstance(redacted, str):
+        if any(token in normalized_key for token in ("path", "file", "dir", "root", "cwd")):
+            return safe_path_label(redacted)
+    return redacted
 
 
 @dataclass(frozen=True)
@@ -319,27 +369,135 @@ class ExecutorRegistry:
         return result
 
 
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(support_bundle_redact(payload), indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def _status_summary(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: payload.get(key) for key in keys if key in payload}
+
+
+def build_support_bundle_manifest(
+    *,
+    root: Path,
+    diagnostics: dict[str, Any],
+    included_files: list[str],
+) -> dict[str, Any]:
+    version = diagnostics.get("version") if isinstance(diagnostics.get("version"), dict) else {}
+    return support_bundle_redact(
+        {
+            "bundle_schema_version": SUPPORT_BUNDLE_SCHEMA_VERSION,
+            "created_at": utc_now_iso(),
+            "runtime_commit": version.get("git_commit"),
+            "checkout_commit": diagnostics.get("checkout_commit"),
+            "runtime_instance": version.get("runtime_instance"),
+            "included_files": included_files,
+            "bundle_path": str(root),
+            "redaction_policy": (
+                "Token, API key, password, bearer, secret, confirmation-token, raw secret-file, "
+                "raw log, and broad private-path values are redacted or summarized."
+            ),
+        }
+    )
+
+
 def create_redacted_support_bundle(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
     plan_id = str(plan.get("plan_id") or action.get("pending_id") or "unknown").strip() or "unknown"
     root = Path(tempfile.mkdtemp(prefix="personal-agent-support-"))
-    summary_path = root / "support_summary.json"
-    summary = {
+    diagnostics = action.get("diagnostics") if isinstance(action.get("diagnostics"), dict) else {}
+    executor_recent = action.get("executor_journal_recent") if isinstance(action.get("executor_journal_recent"), list) else []
+    files: dict[str, dict[str, Any]] = {}
+    version = diagnostics.get("version") if isinstance(diagnostics.get("version"), dict) else {}
+    ready = diagnostics.get("ready") if isinstance(diagnostics.get("ready"), dict) else {}
+    state = diagnostics.get("state") if isinstance(diagnostics.get("state"), dict) else {}
+    search = diagnostics.get("search_status") if isinstance(diagnostics.get("search_status"), dict) else {}
+    telegram = diagnostics.get("telegram_status") if isinstance(diagnostics.get("telegram_status"), dict) else {}
+    packs = diagnostics.get("packs_state") if isinstance(diagnostics.get("packs_state"), dict) else {}
+    doctor = diagnostics.get("doctor") if isinstance(diagnostics.get("doctor"), dict) else {}
+    proof = diagnostics.get("readiness_proof") if isinstance(diagnostics.get("readiness_proof"), dict) else {}
+    docs_truth = diagnostics.get("docs_truth") if isinstance(diagnostics.get("docs_truth"), dict) else {}
+    git = diagnostics.get("git") if isinstance(diagnostics.get("git"), dict) else {}
+
+    files["doctor_summary.json"] = {
+        "source": "doctor/runtime summary",
+        "summary": doctor or _status_summary(ready, ("ready", "runtime_mode", "state_label", "reason", "next_action")),
+    }
+    files["version.json"] = version
+    files["ready.json"] = _status_summary(
+        ready,
+        ("ready", "phase", "startup_phase", "runtime_mode", "failure_code", "next_action", "state_label", "reason", "blocker", "next_step", "message"),
+    )
+    files["state_summary.json"] = _status_summary(
+        state,
+        ("ok", "ready", "runtime_mode", "state_label", "reason", "next_action", "search", "telegram", "packs", "memory"),
+    )
+    files["search_status.json"] = _status_summary(
+        search,
+        ("ok", "enabled", "provider", "endpoint_configured", "available", "reason", "next_action", "search_state", "base_url", "managed_service"),
+    )
+    files["telegram_status.json"] = _status_summary(
+        telegram,
+        (
+            "ok",
+            "enabled",
+            "configured",
+            "token_source",
+            "state",
+            "effective_state",
+            "service_installed",
+            "service_active",
+            "service_enabled",
+            "lock_present",
+            "lock_live",
+            "lock_stale",
+            "next_action",
+        ),
+    )
+    pack_counts = packs.get("counts") if isinstance(packs.get("counts"), dict) else {}
+    files["packs_state_summary.json"] = {
+        "ok": packs.get("ok", True),
+        "counts": pack_counts,
+        "state": packs.get("state"),
+        "warnings": packs.get("warnings") if isinstance(packs.get("warnings"), list) else [],
+    }
+    files["executor_registry_journal_summary.json"] = {
+        "entries": executor_recent[:20],
+        "entry_count": len(executor_recent),
+        "source": "executor_registry_journal_recent",
+    }
+    files["readiness_proof_summary.json"] = {
+        "prove_ready": proof,
+        "docs_truth": docs_truth,
+    }
+    files["git_runtime_freshness.json"] = {
+        "runtime_commit": version.get("git_commit"),
+        "checkout_commit": diagnostics.get("checkout_commit"),
+        "runtime_instance": version.get("runtime_instance"),
+        "git": git,
+    }
+    files["support_summary.json"] = {
         "created_at": utc_now_iso(),
         "plan_id": plan_id,
         "action_type": str(plan.get("action_type") or "operator.support_bundle"),
         "target": str(plan.get("target") or "support bundle"),
-        "redaction": "secrets, tokens, API keys, raw private values, and raw logs are excluded from this minimal bundle",
-        "contents": ["support_summary.json"],
+        "bundle_schema_version": SUPPORT_BUNDLE_SCHEMA_VERSION,
+        "redaction": "secrets, tokens, API keys, raw private values, raw logs, and broad private paths are redacted or summarized",
+        "contents": sorted(files.keys()),
     }
-    summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    included_files = sorted([*files.keys(), "manifest.json"])
+    manifest = build_support_bundle_manifest(root=root, diagnostics=diagnostics, included_files=included_files)
+    _write_json(root / "manifest.json", manifest)
+    for name, payload in files.items():
+        _write_json(root / name, payload)
+    resources = [str(root / name) for name in included_files]
     return {
         "ok": True,
         "mutated": True,
         "executor_id": "operator.support_bundle.v1",
-        "resources_touched": [str(summary_path)],
+        "resources_touched": resources,
         "rollback_available": True,
         "rollback_hint": f"Remove only the newly created support bundle directory: {root}",
-        "user_message": f"Support bundle created at {root}. It contains only redacted summary metadata.",
-        "details": {"artifact_path": str(root), "files": ["support_summary.json"]},
+        "user_message": f"Support bundle created at {root}. It contains redacted diagnostics only.",
+        "details": {"artifact_path": str(root), "files": included_files, "manifest_path": str(root / "manifest.json")},
     }
-

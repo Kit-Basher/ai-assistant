@@ -122,10 +122,6 @@ deadline_epoch="$((start_epoch + WAIT_SECONDS))"
 
 while :; do
     now_epoch="$(date +%s)"
-    if [ "$now_epoch" -ge "$deadline_epoch" ]; then
-        die "the local UI did not become ready within ${WAIT_SECONDS}s. Check '$SERVICE_NAME' with 'systemctl --user status $SERVICE_NAME', then open $OPEN_URL manually."
-    fi
-
     if ready_body="$(_curl_body "$ready_url")"; then
         if _webui_is_ready "$ready_body"; then
             break
@@ -137,6 +133,10 @@ while :; do
             log "Personal Agent launcher: UI frontdoor is live; opening while /ready finishes warming up."
             break
         fi
+    fi
+
+    if [ "$now_epoch" -ge "$deadline_epoch" ]; then
+        die "the local UI did not become ready within ${WAIT_SECONDS}s. Check '$SERVICE_NAME' with 'systemctl --user status $SERVICE_NAME', then open $OPEN_URL manually."
     fi
 
     sleep "$POLL_SECONDS"

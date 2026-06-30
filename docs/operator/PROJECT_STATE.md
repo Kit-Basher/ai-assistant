@@ -21,6 +21,8 @@ Current confirmed proof:
   passes
 - `python scripts/executor_registry_smoke.py`: installed Executor Registry v1
   proof lane for preview-only refusal and the safe support-bundle executor
+- `python scripts/support_bundle_v2_smoke.py`: installed Support Bundle v2
+  diagnostics packaging proof
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -80,6 +82,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   executor registry result shape, preview-only refusals, support-bundle
   execution, registry journal ids, stale confirmation rejection, and
   thread/session binding.
+- `scripts/support_bundle_v2_smoke.py`: installed-runtime proof for the useful
+  Support Bundle v2 diagnostics package: manifest, bounded summaries,
+  redaction, registry result fields, and scoped rollback hint.
 
 ## Proven Now
 
@@ -120,6 +125,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   actions. It refuses preview-only memory/delete/uninstall/cleanup actions with
   `mutated=false`, records a redacted journal row, and can execute the safe
   additive support-bundle executor.
+- Support Bundle v2 creates a temporary redacted diagnostics package with
+  doctor/version/ready/state/search/Telegram/pack/journal/git summaries. It
+  does not include raw logs, raw secrets, arbitrary home data, or destructive
+  cleanup.
 
 ## Still Partial
 
@@ -191,6 +200,7 @@ python scripts/operator_lifecycle_smoke.py
 python scripts/memory_lifecycle_smoke.py
 python scripts/plan_mode_v2_smoke.py
 python scripts/executor_registry_smoke.py
+python scripts/support_bundle_v2_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

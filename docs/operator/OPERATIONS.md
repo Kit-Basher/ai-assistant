@@ -73,6 +73,10 @@ Confirm:
   feels wrong; this gate verifies preview-only executor refusals, the safe
   support-bundle executor, journal ids, stale confirmation rejection, and
   thread/session binding through the installed `/chat` API
+- run `python scripts/support_bundle_v2_smoke.py` when diagnostics packaging
+  feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
+  manifest, bounded summary files, redaction, journal id, and scoped rollback
+  hint
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

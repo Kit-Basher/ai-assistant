@@ -53,9 +53,10 @@ Current enabled executor:
 
 - `operator.support_bundle` via `operator.support_bundle.v1`
 
-This creates a small redacted support summary in a temporary directory. It is
-additive and returns a `journal_id`. Rollback is limited to removing the newly
-created temporary support bundle directory.
+This creates a Support Bundle v2 diagnostics package in a temporary directory.
+It is additive and returns a `journal_id`. Rollback is limited to removing the
+newly created temporary support bundle directory. See
+`docs/operator/SUPPORT_BUNDLE.md`.
 
 ## Preview-Only Lanes
 
@@ -76,14 +77,15 @@ Run:
 
 ```bash
 python scripts/executor_registry_smoke.py
+python scripts/support_bundle_v2_smoke.py
 ```
 
 The smoke talks to the installed `/chat` API and proves:
 
 - preview-only memory delete, uninstall, and cleanup cannot execute
 - support bundle has an enabled executor and returns a journal id
-- support bundle creates only a redacted temporary artifact
+- support bundle creates only a redacted temporary diagnostics artifact
+- Support Bundle v2 writes a manifest and bounded summary files
 - stale confirmation after API restart does not execute
 - unrelated thread/session cannot execute the pending plan
 - obvious secret markers are not present in executor results
-
