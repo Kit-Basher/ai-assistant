@@ -3919,7 +3919,11 @@ class Orchestrator:
         if operation.startswith("operator_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("operator_lifecycle_", "")).strip() or "operator action"
             plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
-            result = self._executor_registry.execute_confirmed_plan(plan=plan, action=action)
+            registry_action = dict(action)
+            if operation == "operator_lifecycle_support_bundle":
+                registry_action["diagnostics"] = self._support_bundle_diagnostics_snapshot()
+                registry_action["executor_journal_recent"] = self._executor_registry.journal.recent(limit=20)
+            result = self._executor_registry.execute_confirmed_plan(plan=plan, action=registry_action)
             result_payload = result.to_dict()
             if result.ok and result.mutated:
                 message = (
@@ -15175,6 +15179,71 @@ class Orchestrator:
             },
             skip_post_response_hooks=True,
         )
+
+    def _support_bundle_diagnostics_snapshot(self) -> dict[str, Any]:
+        adapter = self._chat_runtime_adapter
+
+        def _call(label: str, method_name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            method = getattr(adapter, method_name, None)
+            if not callable(method):
+                return {"ok": False, "error": "method_unavailable", "method": method_name}
+            try:
+                payload = method(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 - diagnostics should degrade safely.
+                return {"ok": False, "error": exc.__class__.__name__, "method": method_name}
+            return dict(payload) if isinstance(payload, dict) else {"ok": False, "error": "non_mapping_result", "method": method_name}
+
+        version = _call("version", "version_info")
+        ready = _call("ready", "ready_status")
+        state = _call("state", "ui_state")
+        search_status = _call("search_status", "search_status")
+        telegram_status = _call("telegram_status", "telegram_status")
+        packs_state = _call("packs_state", "packs_state")
+        doctor_summary = {
+            "ready": ready.get("ready"),
+            "runtime_mode": ready.get("runtime_mode"),
+            "state_label": ready.get("state_label"),
+            "reason": ready.get("reason"),
+            "next_action": ready.get("next_action"),
+            "telegram_state": (telegram_status.get("state") if isinstance(telegram_status, dict) else None),
+            "search_state": (search_status.get("search_state") if isinstance(search_status, dict) else None),
+        }
+
+        def _git_value(*argv: str) -> str | None:
+            try:
+                result = subprocess.run(
+                    ["git", *argv],
+                    cwd=Path.cwd(),
+                    check=False,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+            except Exception:
+                return None
+            if result.returncode != 0:
+                return None
+            return str(result.stdout or "").strip() or None
+
+        checkout_commit = _git_value("rev-parse", "--short", "HEAD")
+        git_status = _git_value("status", "--short")
+        return {
+            "version": version,
+            "ready": ready,
+            "state": state,
+            "search_status": search_status,
+            "telegram_status": telegram_status,
+            "packs_state": packs_state,
+            "doctor": doctor_summary,
+            "readiness_proof": {"available": False, "reason": "not_run_during_support_bundle"},
+            "docs_truth": {"available": False, "reason": "not_run_during_support_bundle"},
+            "checkout_commit": checkout_commit,
+            "git": {
+                "checkout_commit": checkout_commit,
+                "status_clean": git_status == "",
+                "status_summary": "clean" if git_status == "" else "dirty",
+            },
+        }
 
     def _operator_lifecycle_response(self, user_id: str, kind: str) -> OrchestratorResponse:
         normalized_kind = str(kind or "").strip().lower()

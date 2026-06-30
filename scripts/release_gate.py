@@ -34,6 +34,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/reference_pack_workflow_smoke.py",
     "scripts/webui_smoke.py",
     "scripts/executor_registry_smoke.py",
+    "scripts/support_bundle_v2_smoke.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:
