@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-support-bundle-v2-clean`
-- Commit: `b4977d2`
+- Tag: `v0.2.1-backup-v1-clean`
+- Commit: `0f305fc`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -25,6 +25,9 @@ Current confirmed proof:
   diagnostics packaging proof
 - `python scripts/backup_v1_smoke.py`: installed Backup v1 additive backup
   proof for redacted bounded summaries; live restore remains dry-run-only
+- `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
+  for old/oversized backup, support bundle, and runtime-release candidates;
+  deletion remains disabled
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -91,6 +94,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   Plan Mode preview, Executor Registry confirmation, timestamped local backup
   directory, manifest, bounded redacted summary files, scoped rollback hint,
   and restore dry-run/no-mutation behavior.
+- `scripts/cleanup_preview_smoke.py`: installed-runtime proof for cleanup
+  preview. It classifies old/oversized backup artifacts, old support bundles,
+  and old runtime releases, protects current runtime/latest backup/secrets, and
+  proves confirmation remains `preview_only` with `mutated=false`.
 
 ## Proven Now
 
@@ -140,6 +147,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   and explicit exclusions for raw secret stores, logs, arbitrary home data,
   model caches, and untrusted pack/source text. Restore remains
   dry-run/preview-only and live restore is not enabled.
+- Cleanup preview identifies old or oversized Personal Agent artifacts and
+  estimates recoverable space without deleting anything. Cleanup remains
+  preview-only.
 
 ## Still Partial
 
@@ -214,6 +224,7 @@ python scripts/plan_mode_v2_smoke.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
+python scripts/cleanup_preview_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

@@ -13,6 +13,7 @@ import shlex
 import uuid
 import subprocess
 import sqlite3
+import tempfile
 from datetime import datetime, timezone, timedelta
 import time
 from zoneinfo import ZoneInfo
@@ -128,7 +129,14 @@ from agent.onboarding_flow import (
 )
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import compose_actionable_message, deterministic_error_message
-from agent.executor_registry import ExecutorRegistry, ExecutorSpec, create_additive_backup, create_redacted_support_bundle
+from agent.executor_registry import (
+    BACKUP_MAX_FILE_BYTES,
+    BACKUP_MAX_TOTAL_BYTES,
+    ExecutorRegistry,
+    ExecutorSpec,
+    create_additive_backup,
+    create_redacted_support_bundle,
+)
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.skill_governance import (
     ALLOWED_EXECUTION_MODES,
@@ -15150,6 +15158,239 @@ class Orchestrator:
             return f"{int(value)} B"
         return f"{value:.1f} {unit}"
 
+    @staticmethod
+    def _operator_lifecycle_age_label(path: Path) -> str:
+        try:
+            seconds = max(0.0, time.time() - float(path.stat().st_mtime))
+        except OSError:
+            return "unknown"
+        if seconds < 120:
+            return "less than 2 minutes"
+        minutes = int(seconds // 60)
+        if minutes < 120:
+            return f"{minutes} minutes"
+        hours = int(seconds // 3600)
+        if hours < 72:
+            return f"{hours} hours"
+        days = int(seconds // 86400)
+        return f"{days} days"
+
+    @staticmethod
+    def _operator_lifecycle_path_label(path: Path) -> str:
+        raw = str(path.expanduser())
+        home = str(Path.home())
+        if raw == home:
+            return "~"
+        if raw.startswith(home + "/"):
+            return "~/" + raw[len(home) + 1 :]
+        return raw
+
+    def _backup_manifest_summary(self, path: Path) -> tuple[bool, dict[str, Any]]:
+        manifest_path = path / "manifest.json" if path.is_dir() else path
+        if not manifest_path.is_file():
+            return False, {"reason": "manifest_missing"}
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
+        except Exception as exc:  # noqa: BLE001 - cleanup preview must be read-only and robust.
+            return False, {"reason": exc.__class__.__name__}
+        if not isinstance(manifest, dict) or str(manifest.get("backup_schema_version") or "") != "backup.v1":
+            return False, {"reason": "not_backup_v1"}
+        return True, {
+            "created_at": manifest.get("created_at"),
+            "total_size_bytes": manifest.get("total_size_bytes"),
+            "restore_status": manifest.get("restore_status"),
+            "live_restore": manifest.get("live_restore"),
+        }
+
+    def _operator_cleanup_preview_snapshot(self) -> dict[str, Any]:
+        home = Path.home()
+        state_root = (home / ".local/share/personal-agent").expanduser()
+        backup_root = state_root / "backups"
+        runtime_root = state_root / "runtime"
+        releases_root = runtime_root / "releases"
+        current_runtime = (runtime_root / "current").resolve() if (runtime_root / "current").exists() else None
+        now = time.time()
+        candidates: list[dict[str, Any]] = []
+        protected: list[dict[str, Any]] = []
+        recoverable = 0
+
+        def _entry(
+            path: Path,
+            *,
+            classification: str,
+            reason: str,
+            safe_to_delete_later: bool,
+            size_override: int | None = None,
+        ) -> dict[str, Any]:
+            size, count, truncated = self._operator_lifecycle_size(path, max_entries=10000)
+            if size_override is not None:
+                size = size_override
+            return {
+                "path": self._operator_lifecycle_path_label(path),
+                "classification": classification,
+                "size_bytes": size,
+                "size": self._operator_lifecycle_size_label(size),
+                "age": self._operator_lifecycle_age_label(path),
+                "reason": reason,
+                "safe_to_delete_later": bool(safe_to_delete_later),
+                "file_count": count,
+                "scan_truncated": truncated,
+            }
+
+        valid_backups: list[tuple[float, Path, dict[str, Any]]] = []
+        if backup_root.is_dir():
+            for child in sorted(backup_root.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                ok, manifest = self._backup_manifest_summary(child)
+                if ok:
+                    try:
+                        stamp = float(child.stat().st_mtime)
+                    except OSError:
+                        stamp = 0.0
+                    valid_backups.append((stamp, child, manifest))
+                elif child.name.startswith("personal-agent-backup-"):
+                    candidates.append(
+                        _entry(
+                            child,
+                            classification="unknown/unsafe candidate",
+                            reason=f"Backup-like artifact was not a valid Backup v1 directory: {manifest.get('reason')}",
+                            safe_to_delete_later=False,
+                        )
+                    )
+        latest_backup = max(valid_backups, default=None, key=lambda item: item[0])
+        if latest_backup is not None:
+            protected.append(
+                _entry(
+                    latest_backup[1],
+                    classification="protected latest valid backup",
+                    reason="Never suggest deleting the latest valid Backup v1 artifact.",
+                    safe_to_delete_later=False,
+                )
+            )
+        for _stamp, path, manifest in valid_backups:
+            if latest_backup is not None and path == latest_backup[1]:
+                continue
+            size, _count, _truncated = self._operator_lifecycle_size(path, max_entries=10000)
+            manifest_total = manifest.get("total_size_bytes")
+            oversized = size > max(10 * 1024 * 1024, BACKUP_MAX_TOTAL_BYTES * 2)
+            if isinstance(manifest_total, int):
+                oversized = oversized or manifest_total > BACKUP_MAX_TOTAL_BYTES
+            age_seconds = max(0.0, now - path.stat().st_mtime) if path.exists() else 0.0
+            old = age_seconds > 7 * 86400
+            if oversized:
+                entry = _entry(
+                    path,
+                    classification="oversized backup artifact",
+                    reason="Backup artifact exceeds the current Backup v1 size cap or contains legacy oversized summary data.",
+                    safe_to_delete_later=True,
+                    size_override=size,
+                )
+                candidates.append(entry)
+                recoverable += int(entry["size_bytes"])
+            elif old:
+                entry = _entry(
+                    path,
+                    classification="old backup artifact",
+                    reason="Backup artifact is older than 7 days and is not the latest valid backup.",
+                    safe_to_delete_later=True,
+                    size_override=size,
+                )
+                candidates.append(entry)
+                recoverable += int(entry["size_bytes"])
+
+        tmp_root = Path(tempfile.gettempdir())
+        for pattern in ("personal-agent-support-*", "agent-support-*"):
+            for child in sorted(tmp_root.glob(pattern)):
+                if not child.exists():
+                    continue
+                try:
+                    age_seconds = now - float(child.stat().st_mtime)
+                except OSError:
+                    continue
+                if age_seconds <= 24 * 3600:
+                    continue
+                entry = _entry(
+                    child,
+                    classification="old support bundle artifact",
+                    reason="Support bundle temp artifact is older than 24 hours.",
+                    safe_to_delete_later=True,
+                )
+                candidates.append(entry)
+                recoverable += int(entry["size_bytes"])
+
+        if current_runtime is not None:
+            protected.append(
+                _entry(
+                    current_runtime,
+                    classification="protected current runtime",
+                    reason="Never suggest deleting the active runtime/current target.",
+                    safe_to_delete_later=False,
+                )
+            )
+        if releases_root.is_dir():
+            for child in sorted(releases_root.iterdir()):
+                if not child.is_dir():
+                    continue
+                try:
+                    resolved = child.resolve()
+                except OSError:
+                    resolved = child
+                if current_runtime is not None and resolved == current_runtime:
+                    continue
+                try:
+                    age_seconds = now - float(child.stat().st_mtime)
+                except OSError:
+                    age_seconds = 0.0
+                if age_seconds > 14 * 86400:
+                    entry = _entry(
+                        child,
+                        classification="old runtime release",
+                        reason="Runtime release is older than 14 days and is not runtime/current.",
+                        safe_to_delete_later=True,
+                    )
+                    candidates.append(entry)
+                    recoverable += int(entry["size_bytes"])
+
+        protected.extend(
+            [
+                {
+                    "path": self._operator_lifecycle_path_label(state_root / "secrets.enc.json"),
+                    "classification": "protected secret store",
+                    "size_bytes": None,
+                    "size": "not scanned",
+                    "age": "not scanned",
+                    "reason": "Never suggest deleting the local secret store.",
+                    "safe_to_delete_later": False,
+                },
+                {
+                    "path": self._operator_lifecycle_path_label(home / ".config/systemd/user"),
+                    "classification": "protected active service files",
+                    "size_bytes": None,
+                    "size": "not scanned",
+                    "age": "not scanned",
+                    "reason": "Never suggest deleting active user service files in cleanup preview.",
+                    "safe_to_delete_later": False,
+                },
+            ]
+        )
+        candidates = candidates[:50]
+        return {
+            "candidates": candidates,
+            "protected": protected[:50],
+            "estimated_recoverable_bytes": recoverable,
+            "estimated_recoverable": self._operator_lifecycle_size_label(recoverable),
+            "mutated": False,
+            "rules": [
+                "read-only preview only",
+                "never delete current runtime/current target",
+                "never delete latest valid backup",
+                "never delete secret store",
+                "never delete active service files",
+                "never scan arbitrary home data",
+            ],
+        }
+
     def _operator_storage_status_response(self) -> OrchestratorResponse:
         home = Path.home()
         targets = [
@@ -15327,9 +15568,9 @@ class Orchestrator:
                 "message": "I can preview an update plan. It will not pull code, install packages, or restart services until you confirm the exact source and plan.",
             },
             "operator_cleanup_preview": {
-                "title": "Cleanup old runtime files preview",
-                "action_label": "Clean old runtime files",
-                "resources": ["old runtime releases", "old support bundles", "old backup archives if selected"],
+                "title": "Cleanup old Personal Agent files preview",
+                "action_label": "Clean old Personal Agent files",
+                "resources": ["old runtime releases", "old support bundles", "old backup artifacts if selected"],
                 "rollback": "cleanup is destructive; rollback is not guaranteed after deletion",
                 "message": "I can inspect cleanup candidates first. I will show exact paths and estimated space before deleting anything.",
             },
@@ -15361,9 +15602,43 @@ class Orchestrator:
                 skip_post_response_hooks=True,
             )
         resources = [str(item) for item in spec["resources"]]
+        cleanup_snapshot: dict[str, Any] | None = None
+        cleanup_lines: list[str] = []
+        if normalized_kind == "operator_cleanup_preview":
+            cleanup_snapshot = self._operator_cleanup_preview_snapshot()
+            candidates = cleanup_snapshot.get("candidates") if isinstance(cleanup_snapshot.get("candidates"), list) else []
+            protected = cleanup_snapshot.get("protected") if isinstance(cleanup_snapshot.get("protected"), list) else []
+            cleanup_lines.append("I did not delete anything.")
+            cleanup_lines.append(f"Estimated recoverable space from safe-to-delete-later candidates: {cleanup_snapshot.get('estimated_recoverable')}.")
+            if candidates:
+                cleanup_lines.append("Cleanup candidates:")
+                for candidate in candidates[:8]:
+                    if not isinstance(candidate, dict):
+                        continue
+                    cleanup_lines.append(
+                        "- "
+                        f"{candidate.get('classification')}: {candidate.get('path')} "
+                        f"({candidate.get('size')}, age {candidate.get('age')}) - "
+                        f"{candidate.get('reason')} "
+                        f"Safe to delete later: {'yes' if candidate.get('safe_to_delete_later') else 'no'}."
+                    )
+                if len(candidates) > 8:
+                    cleanup_lines.append(f"- {len(candidates) - 8} more candidates omitted from chat; see response payload.")
+            else:
+                cleanup_lines.append("No cleanup candidates found in the approved Personal Agent cleanup locations.")
+            if protected:
+                cleanup_lines.append("Protected paths:")
+                for item in protected[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    cleanup_lines.append(f"- {item.get('classification')}: {item.get('path')} - {item.get('reason')}")
+                if len(protected) > 5:
+                    cleanup_lines.append(f"- {len(protected) - 5} more protected entries omitted from chat; see response payload.")
         question = (
             f"{spec['title']}.\n"
             f"{spec['message']}\n"
+            + (("\n".join(cleanup_lines) + "\n") if cleanup_lines else "")
+            +
             f"Resources that may be created/changed/deleted: {', '.join(resources)}.\n"
             f"Rollback scope: {spec['rollback']}.\n"
             "This is a mutating or potentially destructive operator action, so I need explicit confirmation before doing anything. Say yes to continue, or no to cancel."
@@ -15390,6 +15665,7 @@ class Orchestrator:
                 "resources": resources,
                 "rollback_scope": spec["rollback"],
                 "rollback_supported": normalized_kind not in {"operator_cleanup_preview", "operator_uninstall_preview"},
+                "cleanup_preview": cleanup_snapshot,
                 "mutated": False,
             },
             skip_post_response_hooks=True,

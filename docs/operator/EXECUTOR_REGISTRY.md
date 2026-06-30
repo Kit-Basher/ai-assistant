@@ -97,6 +97,8 @@ The smoke talks to the installed `/chat` API and proves:
 - backup has an enabled executor and returns a journal id
 - Backup v1 writes a manifest and bounded redacted summary files
 - restore remains preview-only and returns `mutated=false`
+- cleanup preview classifies candidates and remains preview-only with
+  `executor_not_enabled`, `mutated=false`
 - stale confirmation after API restart does not execute
 - unrelated thread/session cannot execute the pending plan
 - obvious secret markers are not present in executor results

@@ -208,7 +208,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
                 name="cleanup preview",
                 prompt="clean old runtime files",
                 thread_id="cleanup",
-                must_contain=("Cleanup old runtime files preview", "show exact paths", "rollback is not guaranteed"),
+                must_contain=("Cleanup old Personal Agent files preview", "show exact paths", "I did not delete anything"),
             ),
             _check_chat(
                 base_url,

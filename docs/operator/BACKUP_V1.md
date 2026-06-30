@@ -81,6 +81,11 @@ to bounded metadata such as `journal_id`, `action_type`, `executor_id`,
 `mutated`, `error_code`, timestamps, and resource counts. It must not embed
 full prior executor actions or prior backup contents.
 
+Old or oversized backup artifacts are not deleted automatically. Use
+`clean old backup files` or `python scripts/cleanup_preview_smoke.py` to verify
+that cleanup preview identifies candidate artifacts and protects the latest
+valid backup. Cleanup deletion is not implemented in Backup v1.
+
 If a cap is exceeded, Backup v1 returns a failed executor result with
 `mutated=false`, does not write a final manifest, records any partial JSON files
 already created, and gives a rollback hint scoped only to that new partial

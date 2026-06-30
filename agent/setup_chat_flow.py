@@ -303,6 +303,11 @@ _OPERATOR_CLEANUP_PHRASES = (
     "clean old runtime files",
     "cleanup old runtime files",
     "clean up old runtime files",
+    "clean old backup files",
+    "cleanup old backup files",
+    "clean up old backup files",
+    "clean old backups",
+    "cleanup old backups",
     "clean personal agent old files",
     "clean old personal agent files",
 )

@@ -44,6 +44,7 @@ Commands:
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
 - `python scripts/backup_v1_smoke.py`
+- `python scripts/cleanup_preview_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -102,6 +103,12 @@ Registry v1, a timestamped local backup directory is created with a manifest
 and bounded redacted summaries, obvious raw secrets are absent, rollback is
 scoped to that new directory, and restore remains dry-run/preview-only with
 `mutated=false`.
+
+`cleanup_preview_smoke.py` is the installed cleanup-preview gate. It proves
+cleanup prompts remain read-only, classify old/oversized backup artifacts,
+old support bundle artifacts, and old runtime releases, protect the latest
+valid backup and active runtime, and refuse confirmation with
+`executor_not_enabled`, `mutated=false`.
 
 ## Optional Integration Gates
 

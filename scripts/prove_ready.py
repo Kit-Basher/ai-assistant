@@ -49,6 +49,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/executor_registry_smoke.py",
     "scripts/support_bundle_v2_smoke.py",
     "scripts/backup_v1_smoke.py",
+    "scripts/cleanup_preview_smoke.py",
     "scripts/prove_ready.py",
 )
 

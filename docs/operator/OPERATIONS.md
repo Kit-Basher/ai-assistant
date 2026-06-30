@@ -81,6 +81,10 @@ Confirm:
   this gate verifies the Plan Mode-gated backup executor, timestamped local
   backup artifact, bounded redacted summary files, journal id, scoped rollback
   hint, and restore dry-run/no-mutation behavior
+- run `python scripts/cleanup_preview_smoke.py` when storage cleanup behavior
+  feels wrong; this gate verifies the read-only cleanup preview, candidate
+  classification, protected paths, and preview-only executor refusal without
+  deleting anything
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

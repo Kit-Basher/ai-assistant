@@ -1928,7 +1928,7 @@ class TestOrchestrator(unittest.TestCase):
             "back up the assistant": ("Backup assistant preview", "include local state"),
             "restore from backup": ("Restore from backup preview", "dry-run"),
             "update the assistant": ("Update assistant preview", "not pull code"),
-            "clean old runtime files": ("Cleanup old runtime files preview", "show exact paths"),
+            "clean old runtime files": ("Cleanup old Personal Agent files preview", "show exact paths"),
             "uninstall the assistant": ("Uninstall assistant preview", "Uninstall is destructive"),
             "make a support bundle": ("Support bundle preview", "raw tokens"),
             "repair the assistant": ("Repair assistant preview", "check services first"),
@@ -1956,6 +1956,81 @@ class TestOrchestrator(unittest.TestCase):
                 self.assertIsInstance(payload, dict)
                 self.assertTrue(payload.get("requires_confirmation"))
                 self.assertFalse(payload.get("mutated"))
+
+    def test_operator_cleanup_preview_classifies_candidates_and_protects_current_state(self) -> None:
+        fake_home = Path(self.tmpdir.name) / "home"
+        backup_root = fake_home / ".local/share/personal-agent/backups"
+        releases_root = fake_home / ".local/share/personal-agent/runtime/releases"
+        tmp_root = Path(self.tmpdir.name) / "tmp"
+        backup_root.mkdir(parents=True)
+        releases_root.mkdir(parents=True)
+        tmp_root.mkdir(parents=True)
+
+        def _backup(name: str, *, total_size: int, payload_bytes: int = 0) -> Path:
+            root = backup_root / name
+            root.mkdir()
+            (root / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "backup_schema_version": "backup.v1",
+                        "created_at": "2026-06-30T00:00:00+00:00",
+                        "restore_status": "dry_run_only",
+                        "live_restore": "restore_not_enabled",
+                        "total_size_bytes": total_size,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            if payload_bytes:
+                (root / "large.json").write_text("x" * payload_bytes, encoding="utf-8")
+            return root
+
+        old_oversized = _backup("personal-agent-backup-old", total_size=99_000_000, payload_bytes=1024)
+        latest = _backup("personal-agent-backup-latest", total_size=100)
+        invalid = backup_root / "personal-agent-backup-invalid"
+        invalid.mkdir()
+        (invalid / "manifest.json").write_text("{}", encoding="utf-8")
+        current_release = releases_root / "0.2.0"
+        old_release = releases_root / "0.1.0"
+        current_release.mkdir()
+        old_release.mkdir()
+        current_link = fake_home / ".local/share/personal-agent/runtime/current"
+        current_link.parent.mkdir(parents=True, exist_ok=True)
+        current_link.symlink_to(current_release)
+        support = tmp_root / "personal-agent-support-old"
+        support.mkdir()
+        (support / "summary.json").write_text("{}", encoding="utf-8")
+        old_time = time.time() - 20 * 86400
+        for path in (old_oversized, old_release, support):
+            os.utime(path, (old_time, old_time))
+        os.utime(latest, (time.time(), time.time()))
+
+        orchestrator = self._orchestrator()
+        with patch("pathlib.Path.home", return_value=fake_home), patch("tempfile.gettempdir", return_value=str(tmp_root)):
+            response = orchestrator.handle_message("clean old backup files", "user1")
+
+        self.assertEqual("operator_lifecycle", response.data.get("route"))
+        self.assertIn("I did not delete anything.", response.text)
+        self.assertIn("oversized backup artifact", response.text)
+        self.assertIn("old support bundle artifact", response.text)
+        self.assertIn("old runtime release", response.text)
+        payload = response.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        cleanup = payload.get("cleanup_preview")
+        self.assertIsInstance(cleanup, dict)
+        classes = {item.get("classification") for item in cleanup.get("candidates", [])}
+        protected = {item.get("classification") for item in cleanup.get("protected", [])}
+        self.assertIn("oversized backup artifact", classes)
+        self.assertIn("unknown/unsafe candidate", classes)
+        self.assertIn("old support bundle artifact", classes)
+        self.assertIn("old runtime release", classes)
+        self.assertIn("protected latest valid backup", protected)
+        self.assertIn("protected current runtime", protected)
+        self.assertIn("protected secret store", protected)
+        self.assertFalse(payload.get("mutated"))
+        plan = payload.get("canonical_plan")
+        self.assertIsInstance(plan, dict)
+        self.assertEqual("preview_only", plan.get("executor_status"))
 
     def test_operator_lifecycle_confirmation_does_not_execute_preview_only_action(self) -> None:
         orchestrator = Orchestrator(
