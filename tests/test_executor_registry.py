@@ -6,9 +6,11 @@ import unittest
 from pathlib import Path
 
 from agent.executor_registry import (
+    BACKUP_SCHEMA_VERSION,
     SUPPORT_BUNDLE_SCHEMA_VERSION,
     ExecutorRegistry,
     ExecutorSpec,
+    create_additive_backup,
     create_redacted_support_bundle,
     support_bundle_redact,
 )
@@ -235,6 +237,85 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertNotIn("abc.def.ghi", combined)
         self.assertNotIn("sk-test-secret", combined)
         self.assertNotIn("letmein", combined)
+
+    def test_backup_v1_manifest_and_expected_files(self) -> None:
+        backup_root = Path(self.tmpdir.name) / "backups"
+        result = create_additive_backup(
+            _plan(action_type="operator.backup", target="backup assistant"),
+            {
+                "pending_id": "confirm-test",
+                "backup_root": str(backup_root),
+                "diagnostics": {
+                    "version": {"git_commit": "abc123", "runtime_instance": "stable"},
+                    "ready": {"ready": True, "runtime_mode": "READY", "state_label": "Ready"},
+                    "state": {"ok": True, "ready": True},
+                    "search_status": {"enabled": True, "available": True},
+                    "telegram_status": {"configured": True, "token": "123456:telegram-secret-token"},
+                    "packs_state": {"ok": True, "counts": {"enabled": 1}},
+                },
+                "backup_sources": {
+                    "state_database": {"path": str(Path.home() / ".local/share/personal-agent/memory.db"), "size_bytes": 123},
+                    "preferences": {"count": 2},
+                    "memory": {"summary_count": 1},
+                },
+                "executor_journal_recent": [{"api_key": "sk-secret"}],
+            },
+        )
+        artifact = Path(result["details"]["artifact_path"])
+        manifest = json.loads((artifact / "manifest.json").read_text(encoding="utf-8"))
+        expected = {
+            "manifest.json",
+            "state_database_summary.json",
+            "preferences_summary.json",
+            "memory_anchors_summary.json",
+            "pack_metadata_summary.json",
+            "runtime_config_summary.json",
+            "executor_registry_journal_summary.json",
+            "diagnostics_summary.json",
+            "support_bundle_style_summary.json",
+            "backup_summary.json",
+        }
+        self.assertTrue(result["mutated"])
+        self.assertEqual("operator.backup.v1", result["executor_id"])
+        self.assertEqual(BACKUP_SCHEMA_VERSION, manifest["backup_schema_version"])
+        self.assertEqual("abc123", manifest["runtime_commit"])
+        self.assertEqual("dry_run_only", manifest["restore_status"])
+        self.assertEqual("restore_not_enabled", manifest["live_restore"])
+        self.assertTrue(expected.issubset(set(manifest["included_files"])))
+        for name in expected:
+            self.assertTrue((artifact / name).is_file(), name)
+
+    def test_backup_v1_redacts_and_excludes_raw_secret_material(self) -> None:
+        result = create_additive_backup(
+            _plan(action_type="operator.backup"),
+            {
+                "pending_id": "confirm-test",
+                "backup_root": str(Path(self.tmpdir.name) / "backups"),
+                "diagnostics": {
+                    "telegram_status": {"token": "123456:telegram-secret-token"},
+                    "search_status": {"api_key": "sk-test-secret"},
+                    "ready": {"message": "Bearer abc.def.ghi"},
+                },
+                "backup_sources": {"state_database": {"path": str(Path.home() / ".local/share/personal-agent/secrets.enc.json")}},
+                "executor_journal_recent": [{"password": "letmein"}],
+            },
+        )
+        artifact = Path(result["details"]["artifact_path"])
+        combined = "\n".join(path.read_text(encoding="utf-8") for path in artifact.glob("*.json"))
+        self.assertNotIn("123456:telegram-secret-token", combined)
+        self.assertNotIn("abc.def.ghi", combined)
+        self.assertNotIn("sk-test-secret", combined)
+        self.assertNotIn("letmein", combined)
+        self.assertIn("raw secret-store files", combined)
+        self.assertIn("summary_only_raw_database_excluded", combined)
+        self.assertIn("restore_not_enabled", combined)
+
+    def test_backup_v1_refuses_unapproved_backup_root(self) -> None:
+        with self.assertRaises(ValueError):
+            create_additive_backup(
+                _plan(action_type="operator.backup"),
+                {"pending_id": "confirm-test", "backup_root": "/etc/personal-agent-backups"},
+            )
 
 
 if __name__ == "__main__":

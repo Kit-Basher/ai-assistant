@@ -11,6 +11,7 @@ import uuid
 
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
+BACKUP_SCHEMA_VERSION = "backup.v1"
 
 SECRET_KEY_HINTS = (
     "api_key",
@@ -399,6 +400,190 @@ def build_support_bundle_manifest(
             ),
         }
     )
+
+
+def _approved_backup_root(action: dict[str, Any]) -> Path:
+    raw = str(action.get("backup_root") or "").strip()
+    if raw:
+        root = Path(raw).expanduser().resolve()
+    else:
+        root = (Path.home() / ".local/share/personal-agent/backups").resolve()
+    home = Path.home().resolve()
+    state_root = (home / ".local/share/personal-agent").resolve()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    if root != state_root and state_root not in root.parents and root != tmp_root and tmp_root not in root.parents:
+        raise ValueError("backup_root_not_approved")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _artifact_dir(root: Path, *, prefix: str) -> Path:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return root / f"{prefix}-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def build_backup_manifest(
+    *,
+    root: Path,
+    diagnostics: dict[str, Any],
+    included_files: list[str],
+    excluded_files: list[str],
+) -> dict[str, Any]:
+    version = diagnostics.get("version") if isinstance(diagnostics.get("version"), dict) else {}
+    policy = (
+        "Backup v1 stores redacted JSON summaries only. Raw secret-store files, "
+        "tokens, API keys, passwords, raw logs, model caches, arbitrary home data, "
+        "and unreviewed pack/source contents are excluded. No encryption is applied "
+        "because raw secret material is not included; treat the backup as local-sensitive."
+    )
+    return support_bundle_redact(
+        {
+            "backup_schema_version": BACKUP_SCHEMA_VERSION,
+            "created_at": utc_now_iso(),
+            "runtime_commit": version.get("git_commit"),
+            "runtime_instance": version.get("runtime_instance"),
+            "included_files": included_files,
+            "excluded_files": excluded_files,
+            "redaction/encryption policy": policy,
+            "redaction_encryption_policy": policy,
+            "restore_status": "dry_run_only",
+            "live_restore": "restore_not_enabled",
+            "backup_path": str(root),
+        }
+    )
+
+
+def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    plan_id = str(plan.get("plan_id") or action.get("pending_id") or "unknown").strip() or "unknown"
+    backup_root = _approved_backup_root(action)
+    root = _artifact_dir(backup_root, prefix="personal-agent-backup")
+    root.mkdir(mode=0o700, parents=False, exist_ok=False)
+
+    diagnostics = action.get("diagnostics") if isinstance(action.get("diagnostics"), dict) else {}
+    executor_recent = action.get("executor_journal_recent") if isinstance(action.get("executor_journal_recent"), list) else []
+    backup_sources = action.get("backup_sources") if isinstance(action.get("backup_sources"), dict) else {}
+    version = diagnostics.get("version") if isinstance(diagnostics.get("version"), dict) else {}
+    ready = diagnostics.get("ready") if isinstance(diagnostics.get("ready"), dict) else {}
+    state = diagnostics.get("state") if isinstance(diagnostics.get("state"), dict) else {}
+    search = diagnostics.get("search_status") if isinstance(diagnostics.get("search_status"), dict) else {}
+    telegram = diagnostics.get("telegram_status") if isinstance(diagnostics.get("telegram_status"), dict) else {}
+    packs = diagnostics.get("packs_state") if isinstance(diagnostics.get("packs_state"), dict) else {}
+    doctor = diagnostics.get("doctor") if isinstance(diagnostics.get("doctor"), dict) else {}
+    git = diagnostics.get("git") if isinstance(diagnostics.get("git"), dict) else {}
+
+    excluded_files = [
+        "raw secret-store files",
+        "raw credentials such as Telegram/provider/API authentication values and passwords",
+        "raw logs and full support bundles",
+        "arbitrary home directory files",
+        "model caches/downloads and GGUF/model artifacts",
+        "raw external pack archives, SKILL.md, AGENTS.md, and untrusted source text",
+        "browser caches, downloaded pages, and search result page contents",
+        "live restore output; restore is dry-run/preview-only in Backup v1",
+    ]
+    files: dict[str, dict[str, Any]] = {}
+    files["state_database_summary.json"] = {
+        "source": "runtime state database summary",
+        "mode": "summary_only_raw_database_excluded",
+        "state_database": backup_sources.get("state_database"),
+    }
+    files["preferences_summary.json"] = {
+        "source": "preferences summary",
+        "mode": "summary_only",
+        "preferences": backup_sources.get("preferences", {"status": "not_exported_in_backup_v1"}),
+    }
+    files["memory_anchors_summary.json"] = {
+        "source": "memory/anchors summary",
+        "mode": "summary_only_raw_memory_text_excluded",
+        "memory": backup_sources.get("memory", {"status": "summary_only"}),
+    }
+    pack_counts = packs.get("counts") if isinstance(packs.get("counts"), dict) else {}
+    files["pack_metadata_summary.json"] = {
+        "source": "pack metadata summary",
+        "ok": packs.get("ok", True),
+        "counts": pack_counts,
+        "state": packs.get("state"),
+        "warnings": packs.get("warnings") if isinstance(packs.get("warnings"), list) else [],
+        "raw_pack_text": "excluded",
+    }
+    files["runtime_config_summary.json"] = {
+        "version": version,
+        "ready": _status_summary(
+            ready,
+            ("ready", "phase", "startup_phase", "runtime_mode", "failure_code", "next_action", "state_label", "reason", "blocker", "next_step"),
+        ),
+        "state": _status_summary(state, ("ok", "ready", "runtime_mode", "state_label", "reason", "next_action", "search", "telegram", "packs", "memory")),
+        "search_status": _status_summary(
+            search,
+            ("ok", "enabled", "provider", "endpoint_configured", "available", "reason", "next_action", "search_state", "base_url", "managed_service"),
+        ),
+        "telegram_status": _status_summary(
+            telegram,
+            (
+                "ok",
+                "enabled",
+                "configured",
+                "token_source",
+                "state",
+                "effective_state",
+                "service_installed",
+                "service_active",
+                "service_enabled",
+                "lock_present",
+                "lock_live",
+                "lock_stale",
+                "next_action",
+            ),
+        ),
+    }
+    files["executor_registry_journal_summary.json"] = {
+        "entries": executor_recent[:20],
+        "entry_count": len(executor_recent),
+        "source": "executor_registry_journal_recent",
+    }
+    files["diagnostics_summary.json"] = {
+        "doctor": doctor or _status_summary(ready, ("ready", "runtime_mode", "state_label", "reason", "next_action")),
+        "git_runtime_freshness": {
+            "runtime_commit": version.get("git_commit"),
+            "checkout_commit": diagnostics.get("checkout_commit"),
+            "runtime_instance": version.get("runtime_instance"),
+            "git": git,
+        },
+        "readiness_proof": diagnostics.get("readiness_proof"),
+        "docs_truth": diagnostics.get("docs_truth"),
+    }
+    files["support_bundle_style_summary.json"] = {
+        "source": "support-bundle-style redacted summaries",
+        "included": sorted(files.keys()),
+        "redaction": "same redaction helper as Support Bundle v2",
+    }
+    files["backup_summary.json"] = {
+        "created_at": utc_now_iso(),
+        "plan_id": plan_id,
+        "action_type": str(plan.get("action_type") or "operator.backup"),
+        "target": str(plan.get("target") or "backup assistant"),
+        "backup_schema_version": BACKUP_SCHEMA_VERSION,
+        "restore_status": "dry_run_only",
+        "live_restore": "restore_not_enabled",
+        "contents": sorted(files.keys()),
+    }
+
+    included_files = sorted([*files.keys(), "manifest.json"])
+    manifest = build_backup_manifest(root=root, diagnostics=diagnostics, included_files=included_files, excluded_files=excluded_files)
+    _write_json(root / "manifest.json", manifest)
+    for name, payload in files.items():
+        _write_json(root / name, payload)
+    resources = [str(root / name) for name in included_files]
+    return {
+        "ok": True,
+        "mutated": True,
+        "executor_id": "operator.backup.v1",
+        "resources_touched": resources,
+        "rollback_available": True,
+        "rollback_hint": f"Remove only the newly created backup directory: {root}",
+        "user_message": f"Backup v1 created at {root}. It contains redacted summaries only; live restore is not enabled.",
+        "details": {"artifact_path": str(root), "files": included_files, "manifest_path": str(root / "manifest.json")},
+    }
 
 
 def create_redacted_support_bundle(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:

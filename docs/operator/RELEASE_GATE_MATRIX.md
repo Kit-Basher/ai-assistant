@@ -43,6 +43,7 @@ Commands:
 - `python scripts/plan_mode_v2_smoke.py`
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
+- `python scripts/backup_v1_smoke.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -94,6 +95,13 @@ different thread/session cannot apply the pending plan.
 proves the support-bundle executor creates a bounded temporary bundle with a
 manifest, redacted status summaries, executor result fields, scoped rollback
 hint, and no obvious raw secret samples.
+
+`backup_v1_smoke.py` is the installed additive-backup gate. It proves the
+backup prompt is Plan Mode gated, confirmation executes through Executor
+Registry v1, a timestamped local backup directory is created with a manifest
+and bounded redacted summaries, obvious raw secrets are absent, rollback is
+scoped to that new directory, and restore remains dry-run/preview-only with
+`mutated=false`.
 
 ## Optional Integration Gates
 

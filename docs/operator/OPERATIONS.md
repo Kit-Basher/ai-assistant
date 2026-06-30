@@ -77,6 +77,10 @@ Confirm:
   feels wrong; this gate verifies the Plan Mode-gated support-bundle executor,
   manifest, bounded summary files, redaction, journal id, and scoped rollback
   hint
+- run `python scripts/backup_v1_smoke.py` when backup behavior feels wrong;
+  this gate verifies the Plan Mode-gated backup executor, timestamped local
+  backup artifact, bounded redacted summary files, journal id, scoped rollback
+  hint, and restore dry-run/no-mutation behavior
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:

@@ -49,14 +49,21 @@ unredacted payloads.
 
 ## Enabled Executors
 
-Current enabled executor:
+Current enabled executors:
 
 - `operator.support_bundle` via `operator.support_bundle.v1`
+- `operator.backup` via `operator.backup.v1`
 
-This creates a Support Bundle v2 diagnostics package in a temporary directory.
-It is additive and returns a `journal_id`. Rollback is limited to removing the
-newly created temporary support bundle directory. See
+`operator.support_bundle` creates a Support Bundle v2 diagnostics package in a
+temporary directory. It is additive and returns a `journal_id`. Rollback is
+limited to removing the newly created temporary support bundle directory. See
 `docs/operator/SUPPORT_BUNDLE.md`.
+
+`operator.backup` creates a Backup v1 directory under the approved Personal
+Agent local backup path. It is additive and returns a `journal_id`. Rollback is
+limited to removing the newly created backup directory. Restore remains
+dry-run/preview-only and live restore is not enabled. See
+`docs/operator/BACKUP_V1.md`.
 
 ## Preview-Only Lanes
 
@@ -78,6 +85,7 @@ Run:
 ```bash
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
+python scripts/backup_v1_smoke.py
 ```
 
 The smoke talks to the installed `/chat` API and proves:
@@ -86,6 +94,9 @@ The smoke talks to the installed `/chat` API and proves:
 - support bundle has an enabled executor and returns a journal id
 - support bundle creates only a redacted temporary diagnostics artifact
 - Support Bundle v2 writes a manifest and bounded summary files
+- backup has an enabled executor and returns a journal id
+- Backup v1 writes a manifest and bounded redacted summary files
+- restore remains preview-only and returns `mutated=false`
 - stale confirmation after API restart does not execute
 - unrelated thread/session cannot execute the pending plan
 - obvious secret markers are not present in executor results

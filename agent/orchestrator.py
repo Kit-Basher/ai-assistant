@@ -128,7 +128,7 @@ from agent.onboarding_flow import (
 )
 from agent.runtime_contract import get_effective_llm_identity, normalize_user_facing_status
 from agent.error_response_ux import compose_actionable_message, deterministic_error_message
-from agent.executor_registry import ExecutorRegistry, ExecutorSpec, create_redacted_support_bundle
+from agent.executor_registry import ExecutorRegistry, ExecutorSpec, create_additive_backup, create_redacted_support_bundle
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.skill_governance import (
     ALLOWED_EXECUTION_MODES,
@@ -643,6 +643,16 @@ class Orchestrator:
                 run=create_redacted_support_bundle,
                 rollback_available=True,
                 rollback_hint="Remove only the newly created support bundle directory.",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.backup.v1",
+                action_type="operator.backup",
+                status="enabled",
+                run=create_additive_backup,
+                rollback_available=True,
+                rollback_hint="Remove only the newly created backup directory.",
             )
         )
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
@@ -3031,7 +3041,7 @@ class Orchestrator:
     @staticmethod
     def _canonical_plan_executor_status(operation: str) -> str:
         normalized = str(operation or "").strip().lower()
-        if normalized == "operator_lifecycle_support_bundle":
+        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup"}:
             return "enabled"
         if normalized.startswith(("memory_lifecycle_", "operator_lifecycle_")):
             return "preview_only"
@@ -3923,6 +3933,12 @@ class Orchestrator:
             if operation == "operator_lifecycle_support_bundle":
                 registry_action["diagnostics"] = self._support_bundle_diagnostics_snapshot()
                 registry_action["executor_journal_recent"] = self._executor_registry.journal.recent(limit=20)
+            elif operation == "operator_lifecycle_backup":
+                state_root = Path(self.db.db_path).expanduser().resolve().parent
+                registry_action["diagnostics"] = self._support_bundle_diagnostics_snapshot()
+                registry_action["executor_journal_recent"] = self._executor_registry.journal.recent(limit=20)
+                registry_action["backup_sources"] = self._backup_v1_sources_snapshot()
+                registry_action["backup_root"] = str(state_root / "backups")
             result = self._executor_registry.execute_confirmed_plan(plan=plan, action=registry_action)
             result_payload = result.to_dict()
             if result.ok and result.mutated:
@@ -15245,6 +15261,38 @@ class Orchestrator:
             },
         }
 
+    def _backup_v1_sources_snapshot(self) -> dict[str, Any]:
+        state_root = Path(self.db.db_path).expanduser().resolve().parent
+        try:
+            db_size = Path(self.db.db_path).expanduser().resolve().stat().st_size
+        except OSError:
+            db_size = None
+        return {
+            "state_database": {
+                "path": str(Path(self.db.db_path).expanduser().resolve()),
+                "mode": "summary_only_raw_database_excluded",
+                "size_bytes": db_size,
+            },
+            "preferences": {
+                "mode": "summary_only",
+                "source": "runtime state database/preferences tables where available",
+            },
+            "memory": {
+                "mode": "summary_only_raw_memory_text_excluded",
+                "source": "memory anchors/thread state summaries where available",
+            },
+            "pack_metadata": {
+                "mode": "summary_only_raw_pack_text_excluded",
+                "source": "packs_state summary",
+            },
+            "runtime_config": {
+                "mode": "summary_only",
+                "state_root": str(state_root),
+                "search_runtime_config": str(state_root / "search_runtime_config.json"),
+                "executor_journal": str(state_root / "executor_registry_journal.jsonl"),
+            },
+        }
+
     def _operator_lifecycle_response(self, user_id: str, kind: str) -> OrchestratorResponse:
         normalized_kind = str(kind or "").strip().lower()
         if normalized_kind == "operator_storage_status":
@@ -15268,8 +15316,8 @@ class Orchestrator:
                 "title": "Restore from backup preview",
                 "action_label": "Restore from backup",
                 "resources": ["target restore directory", "memory/state database", "preferences", "pack registry", "runtime config"],
-                "rollback": "dry-run by default; live restore would snapshot current state before replacing anything",
-                "message": "Restore defaults to dry-run validation. I will not overwrite live state until you provide a backup path and explicitly confirm a restore plan.",
+                "rollback": "dry-run/preview-only in this build; live restore is not enabled and will not overwrite live state",
+                "message": "Restore is dry-run/preview-only in this build. I can validate and explain a backup, but live restore is not enabled and I will not overwrite live state.",
             },
             "operator_update_preview": {
                 "title": "Update assistant preview",

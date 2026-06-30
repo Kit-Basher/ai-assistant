@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-plan-mode-v2-proof-clean`
-- Commit: `32810fe`
+- Tag: `v0.2.1-support-bundle-v2-clean`
+- Commit: `b4977d2`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -23,6 +23,8 @@ Current confirmed proof:
   proof lane for preview-only refusal and the safe support-bundle executor
 - `python scripts/support_bundle_v2_smoke.py`: installed Support Bundle v2
   diagnostics packaging proof
+- `python scripts/backup_v1_smoke.py`: installed Backup v1 additive backup
+  proof for redacted bounded summaries; live restore remains dry-run-only
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -85,6 +87,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - `scripts/support_bundle_v2_smoke.py`: installed-runtime proof for the useful
   Support Bundle v2 diagnostics package: manifest, bounded summaries,
   redaction, registry result fields, and scoped rollback hint.
+- `scripts/backup_v1_smoke.py`: installed-runtime proof for Backup v1:
+  Plan Mode preview, Executor Registry confirmation, timestamped local backup
+  directory, manifest, bounded redacted summary files, scoped rollback hint,
+  and restore dry-run/no-mutation behavior.
 
 ## Proven Now
 
@@ -124,11 +130,16 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - Executor Registry v1 sits behind Plan Mode for the first wired lifecycle
   actions. It refuses preview-only memory/delete/uninstall/cleanup actions with
   `mutated=false`, records a redacted journal row, and can execute the safe
-  additive support-bundle executor.
+  additive support-bundle and backup executors.
 - Support Bundle v2 creates a temporary redacted diagnostics package with
   doctor/version/ready/state/search/Telegram/pack/journal/git summaries. It
   does not include raw logs, raw secrets, arbitrary home data, or destructive
   cleanup.
+- Backup v1 creates an approved local timestamped backup directory with a
+  manifest, redacted state/preferences/memory/pack/runtime/journal summaries,
+  and explicit exclusions for raw secret stores, logs, arbitrary home data,
+  model caches, and untrusted pack/source text. Restore remains
+  dry-run/preview-only and live restore is not enabled.
 
 ## Still Partial
 
@@ -179,8 +190,9 @@ Safe wording:
 
 1. Manual reboot proof.
 2. Automated browser/UI survival proof.
-3. Operator lifecycle execution: turn the new safe previews into bounded
-   backup/restore/update/cleanup/uninstall executors.
+3. Operator lifecycle execution: Backup v1 is now additive and executable;
+   restore/update/cleanup/uninstall remain preview-only until bounded
+   executors exist.
 4. Memory lifecycle execution: implement bounded executors for thread/global
    toggles, forget-topic, delete-all, export, redaction, and dedupe.
 5. Executor Registry expansion: move remaining per-flow mutators behind the
@@ -201,6 +213,7 @@ python scripts/memory_lifecycle_smoke.py
 python scripts/plan_mode_v2_smoke.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
+python scripts/backup_v1_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py
