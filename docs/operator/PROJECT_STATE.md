@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-first-run-fresh-state-clean`
-- Commit: `da6c71e`
+- Tag: `v0.2.1-daily-driver-maturity-audit-clean`
+- Commit: `7410cf9`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -39,7 +39,9 @@ Current confirmed proof:
 - `docs/operator/DAILY_DRIVER_MATURITY.md` and
   `python scripts/daily_driver_maturity_audit.py`: recurring installed-product
   maturity audit for daily-driver blockers, irritants, state growth, and
-  performance drift
+  performance drift. It includes stale diagnostic-context checks so rewrite/edit
+  prompts and ambiguous correction prompts do not replay old doctor/status
+  output.
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -126,7 +128,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - `scripts/daily_driver_maturity_audit.py`: recurring installed-product audit
   for startup/search/Telegram/memory/operator/backup/user-friction/performance
   and state-growth maturity. It reports blockers separately from irritants and
-  does not confirm enabled mutating actions.
+  does not confirm enabled mutating actions. It also checks that stale
+  status/doctor context does not hijack unrelated provided-text transforms or
+  ambiguous corrections.
 
 ## Proven Now
 

@@ -5009,6 +5009,28 @@ class Orchestrator:
         )
 
     @staticmethod
+    def _looks_like_provided_text_transform_request(text: str) -> bool:
+        route_decision = classify_runtime_chat_route(text)
+        return str(route_decision.get("fallback_reason") or "").strip().lower() == "provided_text_transform"
+
+    @staticmethod
+    def _is_diagnostic_status_context(context: dict[str, Any]) -> bool:
+        if not isinstance(context, dict) or not context:
+            return False
+        route = str(context.get("route") or "").strip().lower()
+        kind = str(context.get("kind") or "").strip().lower()
+        payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+        payload_type = str(payload.get("type") or "").strip().lower()
+        summary = str(context.get("summary") or payload.get("summary") or "").strip()
+        if route in {"operational_status", "runtime_status", "provider_status", "model_status"}:
+            return True
+        if kind in {"runtime_status", "operational_status", "provider_status", "model_status"}:
+            return True
+        if payload_type in {"runtime_status", "operational_status", "provider_status", "model_status"}:
+            return True
+        return bool(re.match(r"^(?:Doctor|Status):\s", summary))
+
+    @staticmethod
     def _looks_like_brief_capabilities_prompt(text: str) -> bool:
         normalized = " ".join(str(text or "").strip().lower().split())
         if not normalized:
@@ -8090,6 +8112,29 @@ class Orchestrator:
             },
         )
 
+    def _assistant_diagnostic_correction_clarification_response(
+        self,
+        *,
+        used_memory: bool,
+        reason: str,
+    ) -> OrchestratorResponse:
+        message = (
+            "What should I try again: the runtime/status check, a search, or a different answer? "
+            "I won’t repeat the old diagnostic unless you ask for it."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="assistant_clarification",
+            used_memory=used_memory,
+            used_runtime_state=False,
+            next_question=message,
+            payload={
+                "type": "assistant_diagnostic_correction_clarification",
+                "reason": str(reason or "ambiguous_status_correction").strip() or "ambiguous_status_correction",
+                "summary": message,
+            },
+        )
+
     def _assistant_unmatched_fallback_response(
         self,
         *,
@@ -8622,6 +8667,8 @@ class Orchestrator:
             if deterministic_response is not None:
                 return deterministic_response
             return None
+        if self._looks_like_provided_text_transform_request(text):
+            return None
         context = self._current_interpretable_result(user_id)
         if self._looks_like_confusion_prompt(text):
             used_memory = bool(self._current_runtime_setup_state(user_id))
@@ -8634,6 +8681,11 @@ class Orchestrator:
             return self._assistant_memory_overview_response(user_id, query_text=text)
         if self._looks_like_correction_prompt(text) and context:
             used_memory = bool(self._current_runtime_setup_state(user_id))
+            if self._is_diagnostic_status_context(context):
+                return self._assistant_diagnostic_correction_clarification_response(
+                    used_memory=used_memory,
+                    reason="ambiguous_status_correction",
+                )
             return self._assistant_correction_response(
                 user_id=user_id,
                 used_memory=used_memory,

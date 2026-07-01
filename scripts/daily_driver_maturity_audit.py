@@ -320,7 +320,15 @@ def run(base_url: str, timeout: float) -> list[Check]:
     ):
         payload = _post_chat(base_url, prompt, thread_id=f"friction-{abs(hash(prompt))}", timeout=timeout)
         text = _assistant_text(payload)
-        ok = _contains_any(text, want) and not _contains_any(text, ("traceback", "KeyError", "NoneType", "podman run", "docker run"))
+        stale_context_markers = ("I was following", "Doctor:", "trace doctor-") if prompt in {
+            "rewrite this: search for dots.tts",
+            "that is wrong, try again",
+        } else ()
+        ok = (
+            _contains_any(text, want)
+            and not _contains_any(text, ("traceback", "KeyError", "NoneType", "podman run", "docker run"))
+            and not _contains_any(text, stale_context_markers)
+        )
         checks.append(_pass(category, f"common prompt: {prompt}", f'POST /chat {{"message": "{prompt}"}}', text) if ok else _warn(category, f"common prompt: {prompt}", f'POST /chat {{"message": "{prompt}"}}', text, "Polish common daily-driver wording; avoid developer-log text and unrelated stale flows."))
 
     for path, budget in (("/ready", 750), ("/state", 1000), ("/search/status", 1200)):

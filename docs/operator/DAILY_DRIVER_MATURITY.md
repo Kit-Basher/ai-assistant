@@ -49,7 +49,10 @@ It does not mean finished, bug-free, production-ready, or VM-proven.
 6. Backup/restore sanity: backup listing and restore validation are read-only;
    live restore remains disabled; cleanup preview does not delete anything.
 7. User-facing friction: common questions should be short, useful, and free of
-   stale text from unrelated flows.
+   stale text from unrelated flows. Provided-text transforms such as
+   `rewrite this: ...` must not be hijacked by prior status/doctor context, and
+   ambiguous correction prompts after diagnostic output should ask what to retry
+   instead of replaying old diagnostics.
 8. Performance drift: known latency warnings are irritants, not automatic
    release blockers, unless routes fail or become unusable.
 9. State growth: runtime, backups, support bundles, and config size are
@@ -76,6 +79,7 @@ Treat these as polish/friction unless repeated use proves otherwise:
 - `/ready` or deterministic chat route latency warnings
 - wordy but correct Plan Mode previews
 - status text that is technically correct but too developer-oriented
+- repeated stale diagnostic context in unrelated rewrite/edit/correction turns
 - missing latest backup for restore-validator daily-driver coverage
 - state or backup growth that needs manual review but is not unsafe
 

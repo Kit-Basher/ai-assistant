@@ -10506,6 +10506,53 @@ Workflow:
         self.assertIn("We were working on assistant viability gate.", response.text)
         self.assertNotIn("You’re right, I should reassess that.", response.text)
 
+    def test_rewrite_request_ignores_stale_doctor_context(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="unused"),
+        )
+        orchestrator._last_interpretable_result["user1"] = {  # noqa: SLF001
+            "created_ts": int(time.time()),
+            "route": "operational_status",
+            "kind": "doctor",
+            "summary": "Doctor: OK (trace doctor-test)",
+            "payload": {"type": "operational_status", "summary": "Doctor: OK (trace doctor-test)"},
+        }
+
+        with patch(
+            "agent.orchestrator.route_inference",
+            return_value={"ok": True, "text": "Search for dots.tts.", "provider": "ollama", "model": "llama3"},
+        ):
+            response = orchestrator.handle_message("rewrite this: search for dots.tts", "user1")
+
+        self.assertIn("Search for dots.tts", response.text)
+        self.assertNotIn("Doctor:", response.text)
+        self.assertNotIn("I was following", response.text)
+
+    def test_ambiguous_correction_after_doctor_context_clarifies(self) -> None:
+        orchestrator = self._orchestrator()
+        orchestrator._last_interpretable_result["user1"] = {  # noqa: SLF001
+            "created_ts": int(time.time()),
+            "route": "operational_status",
+            "kind": "doctor",
+            "summary": "Doctor: OK (trace doctor-test)",
+            "payload": {"type": "operational_status", "summary": "Doctor: OK (trace doctor-test)"},
+        }
+
+        response = orchestrator._assistant_unmatched_input_response(  # noqa: SLF001
+            "user1",
+            "that is wrong, try again",
+        )
+
+        assert response is not None
+        self.assertEqual("assistant_clarification", response.data.get("route"))
+        self.assertIn("What should I try again", response.text)
+        self.assertNotIn("Doctor:", response.text)
+        self.assertNotIn("I should reassess", response.text)
+
     def test_context_refusal_detector_matches_generic_dead_end_replies(self) -> None:
         self.assertTrue(
             Orchestrator._looks_like_context_refusal_reply(
