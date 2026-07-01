@@ -42,6 +42,10 @@ Current confirmed proof:
   performance drift. It includes stale diagnostic-context checks so rewrite/edit
   prompts and ambiguous correction prompts do not replay old doctor/status
   output.
+- `docs/operator/TEST_SUITE_RATIONALIZATION.md`: current inventory and
+  consolidation plan for pytest modules, smoke/proof scripts, release blockers,
+  daily-driver irritant checks, historical/manual proofs, and recommended
+  command groups.
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -131,6 +135,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   does not confirm enabled mutating actions. It also checks that stale
   status/doctor context does not hijack unrelated provided-text transforms or
   ambiguous corrections.
+- `docs/operator/TEST_SUITE_RATIONALIZATION.md`: test/proof-suite map. It
+  defines the fast local dev check, behavior gate, installed daily-driver check,
+  operator safety check, full local release proof, and historical/manual proof
+  groups so future work does not create another overlapping proof lane by
+  default.
 
 ## Proven Now
 

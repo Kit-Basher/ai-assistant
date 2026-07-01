@@ -1,6 +1,8 @@
 # Daily-Driver Maturity Audit
 
 Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
+Test/proof-suite ownership and command groups live in
+`docs/operator/TEST_SUITE_RATIONALIZATION.md`.
 
 The daily-driver maturity audit is a recurring local check for whether Personal
 Agent is becoming boringly reliable in normal use. It is not a release claim and
@@ -101,6 +103,10 @@ python scripts/installed_product_abuse.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/prove_ready.py
 ```
+
+For normal development, do not run every proof lane after every small change.
+Use the fast local, behavior, installed daily-driver, operator safety, and full
+release command groups in `docs/operator/TEST_SUITE_RATIONALIZATION.md`.
 
 Track:
 

@@ -6,6 +6,9 @@ This file separates deterministic CI-safe checks from local-runtime and optional
 integration checks. The split prevents GitHub Actions from requiring a personal
 machine's services while keeping the local release proof strict.
 
+For the full inventory, overlap analysis, and recommended day-to-day command
+groups, see `docs/operator/TEST_SUITE_RATIONALIZATION.md`.
+
 ## CI-Safe Gates
 
 These can run from a clean checkout without Personal Agent already installed as a
@@ -54,6 +57,17 @@ Commands:
 - `python scripts/prove_core_workflows.py`
 - `python scripts/webui_robustness_smoke.py`
 - `python -m agent doctor`
+
+Do not treat this list as the normal edit-test loop. The default daily-driver
+product loop is:
+
+```bash
+bash scripts/promote_local_stable.sh
+python scripts/installed_product_abuse.py
+python scripts/prove_daily_driver_product.py
+python scripts/daily_driver_smoke.py --timeout 90
+python scripts/daily_driver_maturity_audit.py
+```
 
 Runtime-state warnings are acceptable only when the command clearly labels them,
 for example search disabled because no trusted SearXNG backend is configured.
