@@ -46,6 +46,10 @@ Current confirmed proof:
   consolidation plan for pytest modules, smoke/proof scripts, release blockers,
   daily-driver irritant checks, historical/manual proofs, and recommended
   command groups.
+- `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
+  pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
+  separates stale expectations, environment assumptions, duplicate gates,
+  obsolete tests, flaky/soak tests, and real possible regressions.
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -140,6 +144,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   operator safety check, full local release proof, and historical/manual proof
   groups so future work does not create another overlapping proof lane by
   default.
+- `docs/operator/PYTEST_FAILURE_TRIAGE.md`: full-pytest failure map. It explains
+  why full pytest is currently an inventory/triage run rather than the canonical
+  release blocker, and identifies the focused real-regression tests to inspect
+  first.
 
 ## Proven Now
 

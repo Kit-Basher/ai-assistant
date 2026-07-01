@@ -1,6 +1,8 @@
 # Test Suite Rationalization
 
 Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
+Current full-pytest failure classification lives in
+`docs/operator/PYTEST_FAILURE_TRIAGE.md`.
 
 This document maps the Personal Agent tests and proof scripts so the project can
 avoid adding overlapping gates by default. It is an operator classification, not
@@ -18,6 +20,9 @@ a request to delete coverage immediately.
   acquisition, and environment-sensitive search/setup paths. Treat full pytest
   as an inventory sweep until those stale expectations are triaged; it is not
   the current canonical release blocker.
+- Follow-up short-traceback triage result:
+  `108 failed, 2280 passed` in about 15 minutes. The count changed between
+  runs, confirming order/environment sensitivity in the full inventory.
 
 The suite has good safety coverage, but it has accumulated overlapping proof
 lanes. The main risk is not missing tests; it is running too many similar gates
