@@ -89,6 +89,10 @@ Confirm:
   feels wrong; this gate verifies the read-only cleanup preview, candidate
   classification, protected paths, and preview-only executor refusal without
   deleting anything
+- run `python scripts/first_run_smoke.py` when first-run or empty-state
+  behavior feels wrong; this gate starts an isolated temporary API with empty
+  HOME/XDG and agent state paths, verifies honest missing-search/Telegram/memory
+  status, and keeps Plan Mode gates intact without touching the stable runtime
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:
@@ -237,6 +241,7 @@ Before the expensive fresh Debian VM proof, run:
 
 - `python scripts/prove_ready.py`
 - `python scripts/prove_pre_vm_complete.py`
+- `python scripts/first_run_smoke.py`
 
 `prove_ready.py` runs core compile checks, deterministic chat evals, release
 smoke, daily-driver smoke, external-pack safety smoke, core workflow proof, and

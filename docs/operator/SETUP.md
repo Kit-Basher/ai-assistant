@@ -112,6 +112,7 @@ Canonical packaging/build path:
 - canonical release gate: `python scripts/release_gate.py`
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
 - pre-VM readiness gate: `python scripts/prove_ready.py`
+- isolated first-run/fresh-state proof: `python scripts/first_run_smoke.py`
 - installed daily-driver product gate:
   `python scripts/prove_daily_driver_product.py`
 - release, rollback, backup, and support-boundary guidance:
@@ -133,6 +134,7 @@ Canonical packaging/build path:
 6. If you are validating the install or preparing a release:
    - `python scripts/installed_product_abuse.py`
    - `python scripts/prove_daily_driver_product.py`
+   - `python scripts/first_run_smoke.py`
    - `python scripts/prove_ready.py`
    - use `python scripts/release_gate.py` for the heavier packaging/release gate
 

@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-backup-v1-clean`
-- Commit: `0f305fc`
+- Tag: `v0.2.1-restore-validator-clean`
+- Commit: `bed4304`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -31,6 +31,9 @@ Current confirmed proof:
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   deletion remains disabled
+- `python scripts/first_run_smoke.py`: isolated first-run/fresh-state proof
+  for a temporary API with empty HOME/XDG/state paths; this is not the fresh
+  Debian VM proof
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -105,6 +108,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   preview. It classifies old/oversized backup artifacts, old support bundles,
   and old runtime releases, protects current runtime/latest backup/secrets, and
   proves confirmation remains `preview_only` with `mutated=false`.
+- `scripts/first_run_smoke.py`: isolated first-run/fresh-state proof. It starts
+  a temporary API on a random loopback port with isolated HOME/XDG/state/config
+  paths. It does not overwrite the promoted stable runtime and it is not the
+  full clean Debian VM install proof.
 
 ## Proven Now
 
@@ -160,6 +167,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - Cleanup preview identifies old or oversized Personal Agent artifacts and
   estimates recoverable space without deleting anything. Cleanup remains
   preview-only.
+- A fresh isolated user state can start a temporary API, return coherent
+  `/ready`, `/state`, and `/version` JSON, serve the web UI entrypoint, report
+  missing Telegram as optional, report unconfigured search honestly, start with
+  empty memory wording, and keep package/support/backup/restore/cleanup prompts
+  safe.
 
 ## Still Partial
 
@@ -187,6 +199,9 @@ These are not unknowns, but they are not finished:
 - Model/provider management: deterministic guidance and switching paths are
   covered; opt-in real local LLM soak remains future work.
 - Fresh Debian VM proof: intentionally not run yet.
+- First-run/fresh-state proof: isolated state is covered by
+  `first_run_smoke.py`; full clean Debian VM install remains intentionally not
+  run yet.
 
 ## What Not To Claim
 
@@ -236,6 +251,7 @@ python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
 python scripts/restore_validator_smoke.py
 python scripts/cleanup_preview_smoke.py
+python scripts/first_run_smoke.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

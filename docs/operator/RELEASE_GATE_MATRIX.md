@@ -18,6 +18,7 @@ local service:
 - `python scripts/docs_truth_smoke.py`
 - `python scripts/external_pack_safety_smoke.py`
 - `python scripts/backup_restore_proof.py`
+- `python scripts/first_run_smoke.py`
 - `python scripts/release_gate_matrix_smoke.py`
 - `python -m pytest -q tests/test_release_gate.py tests/test_release_smoke.py`
 - `python -m pytest -q tests/test_backup_restore_proof.py tests/test_pre_vm_complete_gate.py`
@@ -116,6 +117,12 @@ cleanup prompts remain read-only, classify old/oversized backup artifacts,
 old support bundle artifacts, and old runtime releases, protect the latest
 valid backup and active runtime, and refuse confirmation with
 `executor_not_enabled`, `mutated=false`.
+
+`first_run_smoke.py` is an isolated fresh-state gate. It starts a temporary API
+on a random loopback port with isolated HOME/XDG/state/config paths and verifies
+first-run status, optional Telegram, unconfigured search, empty memory wording,
+and Plan Mode gating. It does not overwrite the promoted stable runtime and is
+not the full clean Debian VM proof.
 
 ## Optional Integration Gates
 
