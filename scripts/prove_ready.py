@@ -53,6 +53,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/restore_validator_smoke.py",
     "scripts/first_run_smoke.py",
     "scripts/vm_proof_smoke.py",
+    "scripts/daily_driver_maturity_audit.py",
     "scripts/prove_ready.py",
 )
 

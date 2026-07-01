@@ -89,6 +89,9 @@ Confirm:
   feels wrong; this gate verifies the read-only cleanup preview, candidate
   classification, protected paths, and preview-only executor refusal without
   deleting anything
+- run `python scripts/daily_driver_maturity_audit.py` periodically during real
+  use; it reports daily-driver blockers, irritants, performance drift, and
+  state growth without confirming enabled mutating actions
 - run `python scripts/first_run_smoke.py` when first-run or empty-state
   behavior feels wrong; this gate starts an isolated temporary API with empty
   HOME/XDG and agent state paths, verifies honest missing-search/Telegram/memory

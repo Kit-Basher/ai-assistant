@@ -40,6 +40,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "scripts/restore_validator_smoke.py",
     "scripts/first_run_smoke.py",
     "scripts/vm_proof_smoke.py",
+    "scripts/daily_driver_maturity_audit.py",
 )
 
 def _pytest_command(test_nodes: tuple[str, ...]) -> tuple[str, ...]:

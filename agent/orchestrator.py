@@ -20271,6 +20271,7 @@ class Orchestrator:
             "safe_web_search",
             "safe_web_search_clarify",
             "safe_web_search_suppressed",
+            "telegram_service_action",
             "shell_install_package",
             "operator_storage_status",
             "operator_repair_preview",
@@ -20463,6 +20464,11 @@ class Orchestrator:
                 if early_kind == "telegram_status":
                     self._last_offer_topic[user_id] = "telegram_status"
                     return self._telegram_status_response()
+                if early_kind == "telegram_service_action":
+                    return self._telegram_service_action_response(
+                        user_id,
+                        str(early_decision.get("telegram_action") or ""),
+                    )
                 if early_kind == "ambiguous_restart_target":
                     return self._ambiguous_restart_target_response(user_id)
                 if early_kind.startswith("operator_"):

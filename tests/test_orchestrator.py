@@ -3199,6 +3199,33 @@ class TestOrchestrator(unittest.TestCase):
             self.assertIn("personal-agent-telegram.service", response.text)
             self.assertFalse(response.data["used_llm"])
 
+    def test_telegram_stop_overrides_stale_diagnostic_context(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.telegram_configured = True
+        runtime_truth.telegram_service_active = False
+        runtime_truth.telegram_state = "inactive"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        orchestrator.handle_message("what is broken?", "user1")
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("stop Telegram", "user1")
+
+        self.assertEqual("action_tool", response.data["route"])
+        self.assertEqual(["telegram_status"], response.data["used_tools"])
+        self.assertIn("stop personal-agent-telegram.service", response.text)
+        self.assertIn("Say yes to continue, or no to cancel.", response.text)
+        self.assertNotIn("I was following", response.text)
+        self.assertFalse(response.data["used_llm"])
+
     def test_safety_bypass_prompt_does_not_trigger_pack_guidance_or_mutation(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()

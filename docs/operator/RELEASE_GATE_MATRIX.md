@@ -47,6 +47,7 @@ Commands:
 - `python scripts/backup_v1_smoke.py`
 - `python scripts/restore_validator_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
+- `python scripts/daily_driver_maturity_audit.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
@@ -117,6 +118,12 @@ cleanup prompts remain read-only, classify old/oversized backup artifacts,
 old support bundle artifacts, and old runtime releases, protect the latest
 valid backup and active runtime, and refuse confirmation with
 `executor_not_enabled`, `mutated=false`.
+
+`daily_driver_maturity_audit.py` is the recurring installed-product maturity
+gate. It checks startup honesty, search/Telegram/memory honesty, operator
+safety, backup/restore sanity, user-facing friction, performance drift, and
+state growth. It distinguishes daily-driver irritants from release-blocking
+safety failures and does not confirm enabled mutating actions.
 
 `first_run_smoke.py` is an isolated fresh-state gate. It starts a temporary API
 on a random loopback port with isolated HOME/XDG/state/config paths and verifies

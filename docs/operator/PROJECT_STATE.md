@@ -36,6 +36,10 @@ Current confirmed proof:
   Debian VM proof
 - `docs/operator/VM_PROOF.md`: documented clean-host Debian VM proof plan;
   the VM proof itself has not been run
+- `docs/operator/DAILY_DRIVER_MATURITY.md` and
+  `python scripts/daily_driver_maturity_audit.py`: recurring installed-product
+  maturity audit for daily-driver blockers, irritants, state growth, and
+  performance drift
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -119,6 +123,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   optional Telegram, unconfigured search guidance, Plan Mode previews, support
   preview, backup preview, and restore preview-only behavior. It does not run
   the installer by itself.
+- `scripts/daily_driver_maturity_audit.py`: recurring installed-product audit
+  for startup/search/Telegram/memory/operator/backup/user-friction/performance
+  and state-growth maturity. It reports blockers separately from irritants and
+  does not confirm enabled mutating actions.
 
 ## Proven Now
 
@@ -262,6 +270,7 @@ python scripts/backup_v1_smoke.py
 python scripts/restore_validator_smoke.py
 python scripts/cleanup_preview_smoke.py
 python scripts/first_run_smoke.py
+python scripts/daily_driver_maturity_audit.py
 python scripts/vm_proof_smoke.py --expected-commit da6c71e
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
