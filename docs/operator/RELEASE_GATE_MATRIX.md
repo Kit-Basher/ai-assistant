@@ -134,12 +134,15 @@ These require optional services or hardware and are not CI requirements:
 - local model/provider matrix on the target hardware
 - future browser/GUI automation proof for the desktop web UI
 - manual reboot proof from `docs/operator/REBOOT_PROOF.md`
+- fresh Debian VM install proof from `docs/operator/VM_PROOF.md`:
+  `python scripts/vm_proof_smoke.py --expected-commit <commit>` after install
 
 Optional gates should report `BLOCKED` when the required service is not
 configured, not `PASS`.
 
-The fresh Debian VM proof is intentionally not listed as completed here. It is
-the next expensive confirmation after local product-facing gates pass.
+The fresh Debian VM proof is intentionally not listed as completed here.
+`vm_proof_smoke.py` is the post-install verifier for that disposable VM; it is
+not a substitute for actually running the install on a clean host.
 
 ## GitHub Actions Direction
 

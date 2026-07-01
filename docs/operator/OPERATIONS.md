@@ -93,6 +93,9 @@ Confirm:
   behavior feels wrong; this gate starts an isolated temporary API with empty
   HOME/XDG and agent state paths, verifies honest missing-search/Telegram/memory
   status, and keeps Plan Mode gates intact without touching the stable runtime
+- use `docs/operator/VM_PROOF.md` and `python scripts/vm_proof_smoke.py` only on
+  a disposable clean VM after install; it is the clean-host lifecycle proof and
+  should not be confused with the local first-run isolated-state smoke
 - run `python -m agent split_status` when you need a quick stable-vs-dev identity check
 
 When a live chat route is wrong, capture it as an eval case before fixing it:
@@ -242,6 +245,12 @@ Before the expensive fresh Debian VM proof, run:
 - `python scripts/prove_ready.py`
 - `python scripts/prove_pre_vm_complete.py`
 - `python scripts/first_run_smoke.py`
+
+The clean-host VM proof is separate:
+
+- `docs/operator/VM_PROOF.md`
+- `python scripts/vm_proof_smoke.py --expected-commit <commit>` after installing
+  on the disposable VM
 
 `prove_ready.py` runs core compile checks, deterministic chat evals, release
 smoke, daily-driver smoke, external-pack safety smoke, core workflow proof, and

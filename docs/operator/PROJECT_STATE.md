@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-restore-validator-clean`
-- Commit: `bed4304`
+- Tag: `v0.2.1-first-run-fresh-state-clean`
+- Commit: `da6c71e`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -34,6 +34,8 @@ Current confirmed proof:
 - `python scripts/first_run_smoke.py`: isolated first-run/fresh-state proof
   for a temporary API with empty HOME/XDG/state paths; this is not the fresh
   Debian VM proof
+- `docs/operator/VM_PROOF.md`: documented clean-host Debian VM proof plan;
+  the VM proof itself has not been run
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
@@ -112,6 +114,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   a temporary API on a random loopback port with isolated HOME/XDG/state/config
   paths. It does not overwrite the promoted stable runtime and it is not the
   full clean Debian VM install proof.
+- `scripts/vm_proof_smoke.py`: post-install clean-VM API smoke. It runs against
+  `http://127.0.0.1:8765` after the VM install and verifies status surfaces,
+  optional Telegram, unconfigured search guidance, Plan Mode previews, support
+  preview, backup preview, and restore preview-only behavior. It does not run
+  the installer by itself.
 
 ## Proven Now
 
@@ -202,6 +209,9 @@ These are not unknowns, but they are not finished:
 - First-run/fresh-state proof: isolated state is covered by
   `first_run_smoke.py`; full clean Debian VM install remains intentionally not
   run yet.
+- VM proof plan: `docs/operator/VM_PROOF.md` and `scripts/vm_proof_smoke.py`
+  define the clean-host install proof, but the proof has not been executed on a
+  disposable VM yet.
 
 ## What Not To Claim
 
@@ -252,6 +262,7 @@ python scripts/backup_v1_smoke.py
 python scripts/restore_validator_smoke.py
 python scripts/cleanup_preview_smoke.py
 python scripts/first_run_smoke.py
+python scripts/vm_proof_smoke.py --expected-commit da6c71e
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/restart_survival_smoke.py
 python scripts/prove_pre_vm_complete.py

@@ -113,6 +113,7 @@ Canonical packaging/build path:
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
 - pre-VM readiness gate: `python scripts/prove_ready.py`
 - isolated first-run/fresh-state proof: `python scripts/first_run_smoke.py`
+- post-install VM proof smoke: `python scripts/vm_proof_smoke.py --expected-commit <commit>`
 - installed daily-driver product gate:
   `python scripts/prove_daily_driver_product.py`
 - release, rollback, backup, and support-boundary guidance:
@@ -137,6 +138,10 @@ Canonical packaging/build path:
    - `python scripts/first_run_smoke.py`
    - `python scripts/prove_ready.py`
    - use `python scripts/release_gate.py` for the heavier packaging/release gate
+
+For the clean-host proof, follow `docs/operator/VM_PROOF.md` on a disposable
+Debian VM and run `python scripts/vm_proof_smoke.py --expected-commit <commit>`
+after install.
 
 Manual fallback if you need to inspect the pieces individually:
 
