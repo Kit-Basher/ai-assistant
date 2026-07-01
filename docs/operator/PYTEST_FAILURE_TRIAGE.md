@@ -207,6 +207,35 @@ Representative failures:
 - `tests/test_working_memory_behavioral_replay.py::*`
 - `tests/test_working_memory_persistence_hardening.py::*`
 
+Focused inspection result:
+
+- `tests/test_adversarial_requests.py::...enable_rejects_non_boolean_enabled_value`
+  was a real API validation bug. Direct `/packs/enable` now rejects
+  non-boolean `enabled` values before returning Plan Mode confirmation.
+- `tests/test_agent_secrets_cli.py::...get_redacted_masks_secret_value` was a
+  real CLI compatibility bug. `agent.secrets get --redacted` is accepted as an
+  explicit redacted read; `--show` remains required for unredacted output.
+- `tests/test_open_loops.py::...open_loop_priority_and_views` was a real
+  routing bug. Explicit `remember that ... by ...` open-loop commands now run
+  before pack/capability-gap routing can hijack words like `inbox`.
+- `tests/test_runtime_status.py::...permission_denied_degrades`,
+  `...report_structure_and_redaction`, and
+  `...source_and_docs_do_not_reference_obsolete_single_service_topology` were
+  stale dev/stable service-name expectations. Runtime status intentionally uses
+  `runtime_service_name()` so a checkout can report the dev unit while stable
+  docs still mention `personal-agent-api.service`.
+- `tests/test_api_server.py::...health_normalization_marks_disabled_provider...`
+  and `...provider_disabled_health_stamps...` passed in focused isolation and
+  are not release regressions. Any full-suite failure here is likely state
+  leakage/order sensitivity.
+- `tests/test_working_memory_persistence_hardening.py::*` passed in focused
+  isolation and is not a current release regression.
+- `tests/test_working_memory_behavioral_replay.py::*` still reflects an older
+  mocked-inference contract and is not a release blocker. The focused pass did
+  uncover one real routing bug in this area: local repo/planning text such as
+  `repo root` and `next step` must not be mistaken for public web lookup; that
+  was fixed in the search fallback suppressions.
+
 Likely cause:
 
 - These failures may be real stale tests, but they touch validation ordering,
@@ -215,11 +244,12 @@ Likely cause:
 
 Recommended action:
 
-- Triage these first in a focused pass.
-- If current behavior is correct, update narrow expectations.
-- If current behavior is wrong, fix product behavior and add a focused
-  regression.
-- Do not add them all to `prove_ready.py` until they are clean in isolation.
+- Keep the fixed focused tests in normal maintenance checks.
+- Do not add the behavioral replay file to `prove_ready.py` until it is
+  rewritten around the current deterministic/public-chat routing contract.
+- Treat future failures in the API health normalization or working-memory
+  persistence files as order/isolation suspects unless they reproduce in
+  focused isolation.
 
 ## Does This Contradict Current Release Gates?
 
@@ -254,4 +284,3 @@ investigated, but it does not invalidate the current curated release gate.
    rely on existing pack lifecycle safety gates.
 5. Soak group pass:
    move stress/soak/concurrency tests into an explicit occasional command group.
-

@@ -25163,6 +25163,18 @@ class APIServerHandler(BaseHTTPRequestHandler):
             if path == "/packs/enable":
                 if self._reject_non_loopback_operator_surface(path=path):
                     return
+                if "enabled" in payload and not isinstance(payload.get("enabled"), bool):
+                    self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": "bad_request",
+                            "error_kind": "bad_request",
+                            "message": "enabled must be a boolean",
+                            "next_question": 'Include {"enabled": true} or {"enabled": false}.',
+                        },
+                    )
+                    return
                 self._send_json(400, mutator_confirmation_required_payload("external_pack.enable"))
                 return
             if path == "/packs/enable/plan":

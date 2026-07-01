@@ -20479,6 +20479,9 @@ class Orchestrator:
                         "stale_context_cleared": True,
                     },
                 )
+            explicit_open_loop_response = self._explicit_open_loop_memory_response(user_id, effective_user_text)
+            if explicit_open_loop_response is not None:
+                return explicit_open_loop_response
             if not cmd and ("joke" in normalized_effective_user_text or "funny" in normalized_effective_user_text):
                 return OrchestratorResponse(
                     "Why did the task queue stay calm? It already had a good backlog.",
@@ -23878,6 +23881,47 @@ class Orchestrator:
         if not match:
             return None
         return match.group(1).strip()
+
+    def _explicit_open_loop_memory_response(self, user_id: str, text: str) -> OrchestratorResponse | None:
+        if not str(text or "").strip():
+            return None
+        title, due, priority = self._parse_open_loop_add(text)
+        if title:
+            self.db.add_open_loop(title, due, priority=priority)
+            payload = build_cards_payload(
+                [
+                    {
+                        "key": "open-loop-added",
+                        "title": "Open loop added",
+                        "lines": [f"{title} (due {due or 'unspecified'}, P{priority})"],
+                        "severity": "ok",
+                    }
+                ],
+                raw_available=False,
+                summary="Stored your open loop.",
+                confidence=1.0,
+                next_questions=["Show open loops", "Mark one done"],
+            )
+            return self._cards_response(user_id, payload)
+        title_fragment = self._parse_open_loop_done(text)
+        if title_fragment:
+            count = self.db.complete_open_loop_by_title(title_fragment)
+            payload = build_cards_payload(
+                [
+                    {
+                        "key": "open-loop-done",
+                        "title": "Open loop updated",
+                        "lines": [f"Marked done: {title_fragment}" if count else "No matching open loop found."],
+                        "severity": "ok" if count else "warn",
+                    }
+                ],
+                raw_available=False,
+                summary="Updated open loop status." if count else "Could not find an open loop to mark done.",
+                confidence=1.0 if count else 0.8,
+                next_questions=["Show open loops"],
+            )
+            return self._cards_response(user_id, payload)
+        return None
 
     def _open_loops_payload(
         self,

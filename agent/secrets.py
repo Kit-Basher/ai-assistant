@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     get_parser = sub.add_parser("get", help="Get a secret value")
     get_parser.add_argument("key", help="Secret key")
     get_parser.add_argument("--show", action="store_true", help="Show full unredacted value (default is redacted)")
+    get_parser.add_argument("--redacted", action="store_true", help="Show redacted value explicitly (default)")
     return parser
 
 

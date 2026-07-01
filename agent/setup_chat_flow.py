@@ -1514,9 +1514,11 @@ def _looks_like_safe_web_search_fallback_request(working: str) -> bool:
     if _looks_like_provided_text_transform(working) or _looks_like_simple_timeless_explanation(working):
         return False
     if re.search(
-        r"\b(local api|web ui|runtime|current task|this task|my task|this repo|local repo|this project|my project|my system|my machine|this machine|controlled mode|control mode)\b",
+        r"\b(local api|web ui|runtime|current task|this task|my task|this repo|local repo|repo root|workspace root|this project|my project|my system|my machine|this machine|controlled mode|control mode)\b",
         working,
     ):
+        return False
+    if re.search(r"\b(next step|next steps|what should we do next|keep making progress)\b", working):
         return False
     if re.search(r"\bwhat is (?:using|eating) (?:resources|memory|cpu|ram)\b", working):
         return False

@@ -49,7 +49,11 @@ Current confirmed proof:
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
-  obsolete tests, flaky/soak tests, and real possible regressions.
+  obsolete tests, flaky/soak tests, and real possible regressions. The focused
+  real-regression inspection fixed pack-enable validation, explicit redacted
+  secret reads, open-loop routing, and local/planning search suppression; the
+  remaining behavioral replay candidate is classified as a non-release fixture
+  contract until it is rewritten around current deterministic routing.
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`

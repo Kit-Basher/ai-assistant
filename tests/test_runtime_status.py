@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent.config import runtime_service_name
 from agent.diagnostics import CommandResult
 from agent.runtime_status import build_runtime_status_report
 from memory.db import MemoryDB
@@ -44,14 +45,15 @@ class TestRuntimeStatusReport(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_report_structure_and_redaction(self) -> None:
+        api_service = runtime_service_name()
         runner = FakeRunner(
             {
-                ("systemctl", "--user", "show", "personal-agent-api.service", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
+                ("systemctl", "--user", "show", api_service, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
                     args=[
                         "systemctl",
                         "--user",
                         "show",
-                        "personal-agent-api.service",
+                        api_service,
                         "-p",
                         "ActiveState",
                         "-p",
@@ -106,8 +108,8 @@ class TestRuntimeStatusReport(unittest.TestCase):
                     permission_denied=False,
                     not_available=False,
                 ),
-                ("journalctl", "--user", "-u", "personal-agent-api.service", "-n", "25", "--no-pager"): CommandResult(
-                    args=["journalctl", "--user", "-u", "personal-agent-api.service", "-n", "25", "--no-pager"],
+                ("journalctl", "--user", "-u", api_service, "-n", "25", "--no-pager"): CommandResult(
+                    args=["journalctl", "--user", "-u", api_service, "-n", "25", "--no-pager"],
                     stdout="line one\nTOKEN=12345:ABCDEF1234567890123456\nOPENAI_API_KEY=sk-test\n",
                     stderr="",
                     returncode=0,
@@ -135,7 +137,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
         ]
         indices = [report.index(section) for section in order]
         self.assertEqual(indices, sorted(indices))
-        self.assertIn("personal-agent-api.service: status=active", report)
+        self.assertIn(f"{api_service}: status=active", report)
         self.assertIn("personal-agent-telegram.service: status=inactive", report)
         self.assertNotIn("12345:ABCDEF1234567890123456", report)
         self.assertNotIn("sk-test", report)
@@ -162,9 +164,10 @@ class TestRuntimeStatusReport(unittest.TestCase):
         self.assertIn("audit_log last_24h: 1", report)
 
     def test_permission_denied_degrades(self) -> None:
+        api_service = runtime_service_name()
         runner = FakeRunner(
             {
-                ("systemctl", "--user", "show", "personal-agent-api.service", "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
+                ("systemctl", "--user", "show", api_service, "-p", "ActiveState", "-p", "SubState", "-p", "UnitFileState", "-p", "MainPID", "-p", "Result", "-p", "ExecMainStatus", "-p", "ExecMainCode", "-p", "ExecMainExitTimestamp"): CommandResult(
                     args=[],
                     stdout="",
                     stderr="permission denied",
@@ -182,7 +185,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
                     permission_denied=True,
                     not_available=True,
                 ),
-                ("journalctl", "--user", "-u", "personal-agent-api.service", "-n", "25", "--no-pager"): CommandResult(
+                ("journalctl", "--user", "-u", api_service, "-n", "25", "--no-pager"): CommandResult(
                     args=[],
                     stdout="",
                     stderr="permission denied",
@@ -203,9 +206,9 @@ class TestRuntimeStatusReport(unittest.TestCase):
             }
         )
         report = build_runtime_status_report(self.db, run_command_fn=runner)
-        self.assertIn("personal-agent-api.service: status=not available (permission)", report)
+        self.assertIn(f"{api_service}: status=not available (permission)", report)
         self.assertIn("personal-agent-telegram.service: status=not available (permission)", report)
-        self.assertIn("2. Recent Logs\n- personal-agent-api.service\n  not available (permission)", report)
+        self.assertIn(f"2. Recent Logs\n- {api_service}\n  not available (permission)", report)
 
     def test_source_and_docs_do_not_reference_obsolete_single_service_topology(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
@@ -218,7 +221,7 @@ class TestRuntimeStatusReport(unittest.TestCase):
         for source in (runtime_source, manifest_source, runbook_source, readme_source):
             self.assertNotIn("journalctl -u personal-agent", source)
             self.assertNotIn("personal-agent.service", source)
-        self.assertIn("personal-agent-api.service", runtime_source)
+        self.assertIn("runtime_service_name()", runtime_source)
         self.assertIn("personal-agent-telegram.service", runtime_source)
         self.assertIn("personal-agent-api.service", manifest_source)
         self.assertIn("personal-agent-telegram.service", manifest_source)
