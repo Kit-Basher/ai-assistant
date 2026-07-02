@@ -37,8 +37,11 @@ P0/P1 gaps to address first:
    product paths. Batch 1 now covers client/status fault cases for bad
    endpoints, HTML/non-JSON, malformed JSON, timeout, unsafe setup URLs, local
    planning prompt suppression, and correction back to search.
-2. Telegram stale-lock/duplicate-poller fault injection and bounded repair
-   wording.
+2. Telegram stale-lock/duplicate-poller fault injection now has focused
+   runtime/chat coverage: dead-PID locks can be cleared, live locks are
+   preserved, duplicate poller evidence is surfaced through `/telegram/status`
+   and doctor, and chat gives optional-service wording without token exposure.
+   Full start/stop/restart execution proof remains Plan Mode/operator scoped.
 3. Stale confirmation persistence across restart/thread/session boundaries for
    more action families, not only the current smoke examples.
 4. Backup/support/executor journal boundedness over repeated runs.
@@ -157,18 +160,25 @@ Existing proof:
 - Telegram unit tests, `installed_product_abuse.py`,
   `daily_driver_maturity_audit.py`, `operator_lifecycle_smoke.py`,
   `prove_ready.py` doctor behavior.
+- Batch 2 focused fault-injection tests cover dead-PID stale locks, live lock
+  preservation, duplicate poller evidence, process-list inspection failure,
+  token redaction from runtime state, and chat wording for stale locks and
+  duplicate pollers.
 
 Weak or missing:
 
-- `partial`: duplicate poller and stale lock behavior is not strongly covered
-  by installed-product fault injection.
+- `covered`: stale/live lock and duplicate-poller status classification is
+  covered by deterministic fault-injection tests.
+- `partial`: duplicate-poller and stale-lock installed-product fault injection
+  with a real promoted service remains intentionally out of this batch.
 - `partial`: start/stop/restart execution remains preview/Plan Mode focused.
 
-Recommended fault injection:
+Covered fault injection:
 
 - fake stale Telegram lock owned by this runtime
-- fake stale Telegram lock not safely owned
+- fake live Telegram lock that must not be removed
 - duplicate poller evidence in status/log fixture
+- process-list inspection failure
 - missing token, malformed token, token configured but service inactive
 
 Self-repair expectation:
@@ -176,7 +186,8 @@ Self-repair expectation:
 - stale lock may be cleaned only with strict owner/age validation; service
   start/restart remains a mutating Plan Mode action.
 
-Priority: `P1`.
+Priority: `P0 covered for deterministic runtime/chat guarantees; P1 remains for
+real installed-service execution/repair proof`.
 
 Recommended test type: focused unit tests plus installed-product abuse cases.
 
@@ -527,25 +538,26 @@ creating another proof script.
    the installed `/chat` surface. Bad endpoint, HTML-only endpoint, malformed
    JSON, timeout, unsafe setup URL, local planning prompt suppression, and
    correction-to-search routing are covered by Batch 1.
-2. Telegram stale lock and duplicate poller matrix:
-   safe owned stale lock, unsafe lock, duplicate poller evidence, inactive
-   optional service.
-3. Secret-store corruption and redaction matrix:
+2. Secret-store corruption and redaction matrix:
    missing/corrupt store across doctor/status/support/backup/chat.
-4. Executor artifact failure matrix:
+3. Executor artifact failure matrix:
    support/backup executor fails before final manifest and after partial
    artifact creation; result includes `mutated=false` or scoped partial rollback
    hint as appropriate.
-5. Confirmation restart/thread matrix:
+4. Confirmation restart/thread matrix:
    backup/support/search/Telegram/memory previews cannot be confirmed from
    stale or unrelated contexts.
+5. Installed-service Telegram repair execution:
+   real promoted service start/restart/stop failures, systemctl unavailable,
+   and duplicate-poller evidence from a live host fixture.
 
 ## Missing Self-Repair Behavior
 
 - Search can recover configured-stopped managed SearXNG, but repair failure
   diagnostics need stronger fault-injection proof.
-- Telegram stale lock cleanup should remain conservative; safe auto-clear is
-  not proven enough to enable broadly.
+- Telegram stale lock cleanup remains conservative: dead-PID locks are safe to
+  clear during the bounded Telegram service action; live locks are preserved.
+  Real installed-service repair failure cases still need operator-level proof.
 - Secret-store corruption should offer a bounded next action and support bundle
   path without exposing secret material.
 - Backup/support partial artifacts should be clearly reported with rollback
@@ -558,14 +570,14 @@ Keep the next batch small:
 
 1. Add the remaining installed-product search repair fault cases for
    configured-stopped repair failure and port conflict wording.
-2. Add Telegram stale-lock and duplicate-poller fault-injection tests with
-   precise optional-service wording and no token exposure.
-3. Add secret-store missing/corrupt redaction tests across status, support
+2. Add secret-store missing/corrupt redaction tests across status, support
    bundle, backup, and chat.
-4. Add executor partial-artifact failure tests for support bundle and backup
+3. Add executor partial-artifact failure tests for support bundle and backup
    result/journal/rollback behavior.
-5. Add a Plan Mode stale-confirmation matrix across backup, support, search,
+4. Add a Plan Mode stale-confirmation matrix across backup, support, search,
    Telegram, and memory action families.
+5. Add live Telegram installed-service repair failure proof for systemctl
+   unavailable, restart failure, and duplicate-poller host evidence.
 
 Do not start VM proof, add broad executors, or create another umbrella proof
 script until these P0/P1 gaps are closed or explicitly deferred.

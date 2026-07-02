@@ -823,6 +823,10 @@ class _FakeRuntimeTruthService:
                 "state": state,
                 "service_active": service_active,
                 "embedded_running": embedded_running,
+                "lock_live": bool(getattr(self, "telegram_lock_live", False)),
+                "lock_stale": bool(getattr(self, "telegram_lock_stale", False)),
+                "duplicate_pollers": bool(getattr(self, "telegram_duplicate_pollers", False)),
+                "poller_count": getattr(self, "telegram_poller_count", None),
                 "summary": "Telegram is running." if configured and service_active else "Telegram is not running.",
             }
         return {
@@ -3173,6 +3177,57 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(["telegram_status"], response.data["used_tools"])
         self.assertIn("Telegram is configured, but the Telegram service is not currently running.", response.text)
         self.assertNotIn("network connectivity", response.text.lower())
+        self.assertFalse(response.data["used_llm"])
+
+    def test_telegram_status_reports_stale_lock_without_manual_token_or_shell_advice(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.telegram_configured = True
+        runtime_truth.telegram_service_active = False
+        runtime_truth.telegram_state = "stopped"
+        runtime_truth.telegram_lock_stale = True
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("why is Telegram not responding?", "user1")
+
+        self.assertEqual("runtime_status", response.data["route"])
+        self.assertIn("stale Telegram poll lock", response.text)
+        self.assertIn("bounded Plan Mode action", response.text)
+        self.assertNotIn("token=", response.text.lower())
+        self.assertFalse(response.data["used_llm"])
+
+    def test_telegram_status_reports_duplicate_pollers_without_generic_success(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.telegram_configured = True
+        runtime_truth.telegram_service_active = True
+        runtime_truth.telegram_state = "running"
+        runtime_truth.telegram_duplicate_pollers = True
+        runtime_truth.telegram_poller_count = 2
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("is telegram working?", "user1")
+
+        self.assertEqual("runtime_status", response.data["route"])
+        self.assertIn("multiple Telegram pollers", response.text)
+        self.assertIn("Telegram is optional", response.text)
+        self.assertNotIn("Telegram is configured and running.", response.text)
         self.assertFalse(response.data["used_llm"])
 
     def test_telegram_service_actions_are_confirmation_gated(self) -> None:

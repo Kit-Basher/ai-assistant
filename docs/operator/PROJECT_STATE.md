@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-daily-driver-maturity-audit-clean`
-- Commit: `7410cf9`
+- Tag: `v0.2.1-search-lifecycle-fault-injection-clean`
+- Commit: `9fbc0c2`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -53,7 +53,11 @@ Current confirmed proof:
   next five implementation items. Search Lifecycle Fault Injection Batch 1 now
   covers invalid endpoints, HTML/non-JSON responses, malformed JSON, missing
   `results`, timeouts, unsafe setup URLs, local repo/planning prompt
-  suppression, and correction back to search in focused tests.
+  suppression, and correction back to search in focused tests. Telegram
+  Reliability Batch 2 now covers stale dead-PID lock cleanup, live lock
+  preservation, duplicate poller reporting through `/telegram/status` and
+  doctor, process-list inspection failure, token redaction from status state,
+  and chat wording for stale locks/duplicate pollers.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
@@ -234,7 +238,9 @@ These are not unknowns, but they are not finished:
   manual refresh/large-transcript checks remain. `REBOOT_PROOF.md` carries the
   manual UI checklist.
 - Telegram runtime behavior: optional-service semantics and status UX are
-  covered; full start/stop/restart execution proof remains partial.
+  covered; stale-lock and duplicate-poller fault injection is covered at the
+  deterministic runtime/chat layer; full installed-service start/stop/restart
+  failure proof remains partial.
 - Memory completion: audits, deterministic status/inspection/current-turn
   opt-out, and preview UX exist; full delete/export/redact/dedupe executors and
   richer explainability remain partial.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -137,6 +138,104 @@ class TestTelegramRuntimeState(unittest.TestCase):
         self.assertTrue(bool(state["lock_stale"]))
         self.assertEqual("enabled_blocked_by_lock", state["effective_state"])
         self.assertEqual([str(lock_path)], removed)
+
+    def test_live_lock_is_not_cleared(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            write_telegram_enablement(True, home=home, env={})
+            lock_path = telegram_lock_paths("123456:abcdef", home=home, env={})[0]
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+            state = get_telegram_runtime_state(
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=self._run_stub(installed=True, active=False, enabled=True),
+            )
+            removed = clear_stale_telegram_locks(
+                "123456:abcdef",
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+            )
+            lock_still_exists = lock_path.exists()
+
+        self.assertTrue(bool(state["lock_present"]))
+        self.assertTrue(bool(state["lock_live"]))
+        self.assertFalse(bool(state["lock_stale"]))
+        self.assertEqual([], removed)
+        self.assertTrue(lock_still_exists)
+
+    def test_duplicate_pollers_are_reported_without_token_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            token = "123456:abcdef"
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", token)
+            write_telegram_enablement(True, home=home, env={})
+
+            def _runner(args, **_kwargs):  # type: ignore[no-untyped-def]
+                cmd = list(args)
+                if cmd == ["ps", "-eo", "pid,args"]:
+                    return _completed(
+                        cmd,
+                        0,
+                        f" 101 python -m agent.telegram_adapter.bot --token={token}\n"
+                        " 202 /usr/bin/python -m agent.telegram_adapter.bot\n",
+                    )
+                if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+                    return _completed(cmd, 0)
+                if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+                    return _completed(cmd, 0, "active\n")
+                if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+                    return _completed(cmd, 0, "enabled\n")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            state = get_telegram_runtime_state(
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=_runner,
+            )
+
+        self.assertTrue(bool(state["duplicate_pollers"]))
+        self.assertEqual(2, state["poller_count"])
+        self.assertEqual("enabled_duplicate_pollers", state["effective_state"])
+        self.assertIn("Stop duplicate Telegram pollers", state["next_action"])
+        self.assertNotIn(token, json.dumps(state, sort_keys=True))
+        self.assertIn("[REDACTED", json.dumps(state, sort_keys=True))
+
+    def test_poller_inspection_failure_is_non_fatal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            home = Path(tmpdir)
+            secret_path = home / ".local" / "share" / "personal-agent" / "secrets.enc.json"
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            SecretStore(path=str(secret_path)).set_secret("telegram:bot_token", "123456:abcdef")
+            write_telegram_enablement(True, home=home, env={})
+
+            def _runner(args, **_kwargs):  # type: ignore[no-untyped-def]
+                cmd = list(args)
+                if cmd == ["ps", "-eo", "pid,args"]:
+                    raise RuntimeError("ps unavailable")
+                if cmd[-2:] == ["cat", "personal-agent-telegram.service"]:
+                    return _completed(cmd, 0)
+                if cmd[-2:] == ["is-active", "personal-agent-telegram.service"]:
+                    return _completed(cmd, 0, "active\n")
+                if cmd[-2:] == ["is-enabled", "personal-agent-telegram.service"]:
+                    return _completed(cmd, 0, "enabled\n")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            state = get_telegram_runtime_state(
+                home=home,
+                env={"AGENT_SECRET_STORE_PATH": str(secret_path)},
+                run=_runner,
+            )
+
+        self.assertFalse(bool(state["poller_inspection_available"]))
+        self.assertFalse(bool(state["duplicate_pollers"]))
+        self.assertEqual("enabled_running", state["effective_state"])
 
     def test_operator_env_ignores_shell_enabled_override_and_uses_dropin(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

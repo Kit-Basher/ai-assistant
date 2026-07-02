@@ -2783,6 +2783,7 @@ class RuntimeTruthService:
             configured = bool(telegram.get("configured", False))
             return {
                 "scope": "telegram",
+                **dict(telegram),
                 "configured": configured,
                 "state": state,
                 "summary": normalize_persona_text(

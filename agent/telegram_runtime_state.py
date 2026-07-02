@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -21,6 +22,8 @@ _APPROVED_SYSTEMCTL_USER_ACTIONS = {
     ("restart", TELEGRAM_SERVICE_NAME),
     ("stop", TELEGRAM_SERVICE_NAME),
 }
+_TELEGRAM_TOKEN_RE = re.compile(r"\b\d{5,}:[A-Za-z0-9_-]{10,}\b")
+_SECRET_ARG_RE = re.compile(r"(?i)(token|password|api[_-]?key|secret)=\S+")
 
 
 def _truthy(value: Any) -> bool:
@@ -32,6 +35,11 @@ def _safe_int(value: Any) -> int | None:
         return int(str(value or "").strip())
     except (TypeError, ValueError):
         return None
+
+
+def _redact_process_evidence(value: str) -> str:
+    text = _TELEGRAM_TOKEN_RE.sub("[REDACTED_TELEGRAM_TOKEN]", str(value or ""))
+    return _SECRET_ARG_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", text)
 
 
 def telegram_control_env(env: Mapping[str, str] | None = None) -> dict[str, str]:
@@ -240,6 +248,42 @@ def clear_stale_telegram_locks(
     return removed
 
 
+def inspect_telegram_pollers(
+    *,
+    run: Callable[..., subprocess.CompletedProcess[str]] | None = None,
+    timeout_seconds: float = 0.6,
+) -> dict[str, Any]:
+    runner = run or subprocess.run
+    try:
+        proc = runner(
+            ["ps", "-eo", "pid,args"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=float(timeout_seconds),
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "count": None,
+            "duplicate": False,
+            "evidence": [],
+            "error": exc.__class__.__name__,
+        }
+    lines: list[str] = []
+    for row in str(proc.stdout or "").splitlines():
+        low = row.lower()
+        if "telegram_adapter" in low and "python" in low:
+            lines.append(_redact_process_evidence(" ".join(row.strip().split()))[:220])
+    return {
+        "available": proc.returncode == 0,
+        "count": len(lines),
+        "duplicate": len(lines) > 1,
+        "evidence": lines[:4],
+        "error": None if proc.returncode == 0 else f"returncode:{proc.returncode}",
+    }
+
+
 def _systemctl_user(
     args: list[str],
     *,
@@ -270,6 +314,7 @@ def _safe_status_snapshot(state: Mapping[str, Any]) -> dict[str, Any]:
         "token_configured": bool(state.get("token_configured", False)),
         "lock_present": bool(state.get("lock_present", False)),
         "lock_stale": bool(state.get("lock_stale", False)),
+        "duplicate_pollers": bool(state.get("duplicate_pollers", False)),
         "effective_state": str(state.get("effective_state") or "unknown"),
         "ready_state": str(state.get("ready_state") or "unknown"),
     }
@@ -343,11 +388,14 @@ def get_telegram_runtime_state(
         secret_store_path=secret_store_path,
     )
     lock_info = inspect_telegram_lock(token, env=env, home=home)
+    poller_info = inspect_telegram_pollers(run=run)
     service_installed = _service_installed(run=run)
     service_active = _service_active(run=run) if service_installed else False
     service_enabled = _service_enabled(run=run) if service_installed else False
     enabled = bool(enablement.get("enabled", False))
     token_configured = bool(token)
+
+    duplicate_pollers = bool(poller_info.get("duplicate", False))
 
     if not enabled:
         effective_state = "disabled_optional"
@@ -362,9 +410,17 @@ def get_telegram_runtime_state(
         next_action = "Run: python -m agent.secrets set telegram:bot_token"
         ready_state = "disabled_missing_token"
     elif service_active:
-        effective_state = "enabled_running"
-        next_action = "No action needed."
+        if duplicate_pollers:
+            effective_state = "enabled_duplicate_pollers"
+            next_action = "Stop duplicate Telegram pollers and keep only one running instance."
+        else:
+            effective_state = "enabled_running"
+            next_action = "No action needed."
         ready_state = "running"
+    elif duplicate_pollers:
+        effective_state = "enabled_duplicate_pollers"
+        next_action = "Stop duplicate Telegram pollers and keep only one running instance."
+        ready_state = "stopped"
     elif bool(lock_info.get("present")):
         effective_state = "enabled_blocked_by_lock"
         next_action = "Run: python -m agent telegram_enable"
@@ -388,6 +444,11 @@ def get_telegram_runtime_state(
         "lock_stale": bool(lock_info.get("stale", False)),
         "lock_path": lock_info.get("path"),
         "lock_pid": lock_info.get("pid"),
+        "poller_inspection_available": bool(poller_info.get("available", False)),
+        "poller_count": poller_info.get("count"),
+        "duplicate_pollers": duplicate_pollers,
+        "poller_evidence": list(poller_info.get("evidence") or []),
+        "poller_inspection_error": poller_info.get("error"),
         "effective_state": effective_state,
         "ready_state": ready_state,
         "next_action": next_action,
@@ -959,6 +1020,7 @@ __all__ = [
     "TELEGRAM_SERVICE_NAME",
     "clear_stale_telegram_locks",
     "get_telegram_runtime_state",
+    "inspect_telegram_pollers",
     "inspect_telegram_lock",
     "is_approved_telegram_systemctl_user_action",
     "read_telegram_enablement",

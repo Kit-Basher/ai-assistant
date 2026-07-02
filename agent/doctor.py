@@ -31,7 +31,7 @@ from agent.logging_bootstrap import configure_logging_if_needed
 from agent.secret_store import SecretStore
 from agent.startup_checks import run_startup_checks
 from agent.skills.system_health import collect_system_health
-from agent.telegram_runtime_state import get_telegram_runtime_state, telegram_control_env
+from agent.telegram_runtime_state import get_telegram_runtime_state, inspect_telegram_pollers, telegram_control_env
 from agent.config import (
     canonical_config_dir,
     canonical_log_path,
@@ -641,6 +641,16 @@ def _check_systemd_service(unit: str, check_id: str) -> DoctorCheck:
 def _check_telegram_poller_singleton() -> DoctorCheck:
     try:
         state = get_telegram_runtime_state(env=telegram_control_env())
+        if bool(state.get("duplicate_pollers", False)):
+            count = state.get("poller_count")
+            count_label = str(count) if count is not None else "multiple"
+            return DoctorCheck(
+                check_id="process.telegram_pollers",
+                status="FAIL",
+                detail_short=f"multiple telegram pollers detected ({count_label})",
+                detail_long=" | ".join(str(item) for item in list(state.get("poller_evidence") or [])[:4]),
+                next_action="Stop duplicate Telegram pollers and keep only one running instance.",
+            )
         if bool(state.get("lock_present", False)) and not bool(state.get("service_active", False)):
             if bool(state.get("lock_stale", False)):
                 return DoctorCheck(
@@ -658,21 +668,10 @@ def _check_telegram_poller_singleton() -> DoctorCheck:
                 )
     except Exception:
         pass
-    try:
-        proc = subprocess.run(
-            ["ps", "-eo", "pid,args"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=0.6,
-        )
-    except Exception:
+    pollers = inspect_telegram_pollers()
+    if not bool(pollers.get("available", False)):
         return DoctorCheck(check_id="process.telegram_pollers", status="WARN", detail_short="unable to inspect process list")
-    lines = []
-    for row in (proc.stdout or "").splitlines():
-        low = row.lower()
-        if "telegram_adapter" in low and "python" in low:
-            lines.append(row.strip())
+    lines = list(pollers.get("evidence") or [])
     if len(lines) <= 1:
         return DoctorCheck(check_id="process.telegram_pollers", status="OK", detail_short=f"telegram pollers={len(lines)}")
     return DoctorCheck(

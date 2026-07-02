@@ -12674,9 +12674,27 @@ class Orchestrator:
         state = str(status_payload.get("state") or status_payload.get("effective_state") or "unknown").strip().lower()
         service_active = bool(status_payload.get("service_active", False))
         embedded_running = bool(status_payload.get("embedded_running", False))
+        duplicate_pollers = bool(status_payload.get("duplicate_pollers", False))
+        lock_stale = bool(status_payload.get("lock_stale", False))
+        lock_live = bool(status_payload.get("lock_live", False))
         running = service_active or embedded_running or state in {"running", "enabled_running", "ready", "active"}
         if not configured:
             message = "Telegram is not configured yet. I can help set it up."
+        elif duplicate_pollers:
+            message = (
+                "Telegram is configured, but multiple Telegram pollers appear to be running. "
+                "Telegram is optional, so the web app still works. I can restart Telegram through a bounded Plan Mode action if you want."
+            )
+        elif lock_live and not running:
+            message = (
+                "Telegram is configured, but a live Telegram poll lock is held by another process. "
+                "Telegram is optional, so the web app still works. I will not remove a live lock automatically."
+            )
+        elif lock_stale and not running:
+            message = (
+                "Telegram is configured, but a stale Telegram poll lock is blocking it. "
+                "Telegram is optional, so the web app still works. I can restart Telegram through a bounded Plan Mode action if you want."
+            )
         elif running:
             message = "Telegram is configured and running."
         else:
