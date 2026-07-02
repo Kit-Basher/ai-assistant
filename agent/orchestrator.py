@@ -20498,6 +20498,29 @@ class Orchestrator:
                 return self._revise_current_plan_response(user_id)
             if not cmd and self._looks_like_plan_confirmation_accept(effective_user_text):
                 pending_action = self.confirmations.get(user_id)
+                if pending_action is None:
+                    normalized_accept = " ".join(str(effective_user_text or "").strip().lower().split())
+                    if normalized_accept in {"confirm", "go ahead", "proceed"}:
+                        message = "I don’t have a current action to continue. Tell me what you want me to do next, or ask me to check runtime status."
+                        return self._runtime_truth_response(
+                            text=message,
+                            route="assistant_clarification",
+                            used_runtime_state=False,
+                            used_memory=False,
+                            used_tools=[],
+                            next_question=message,
+                            payload={
+                                "type": "assistant_continuation_clarification",
+                                "summary": message,
+                                "has_pending_action": False,
+                                "reason": "no_resumable_work",
+                                "mutated": False,
+                            },
+                            skip_post_response_hooks=True,
+                        )
+                now_epoch = int(datetime.now(timezone.utc).timestamp())
+                if pending_action is not None and int(pending_action.expires_at or 0) <= now_epoch:
+                    return self._expired_confirmation_response(user_id, pending=pending_action)
                 action_for_thread = pending_action.action if pending_action is not None and isinstance(pending_action.action, dict) else {}
                 action_thread_id = str(action_for_thread.get("thread_id") or "").strip()
                 current_thread_id = self._active_thread_id_for_user(user_id)
@@ -20670,9 +20693,13 @@ class Orchestrator:
                 if not skip_memory_tool_repair:
                     self._memory_runtime.set_last_tool(user_id, cmd.name)
                 if cmd.name == "confirm":
-                    pending = self.confirmations.pop(user_id)
+                    pending = self.confirmations.get(user_id)
                     if not pending:
                         return OrchestratorResponse("No pending action to confirm.")
+                    now_epoch = int(datetime.now(timezone.utc).timestamp())
+                    if int(pending.expires_at or 0) <= now_epoch:
+                        return self._expired_confirmation_response(user_id, pending=pending)
+                    pending = self.confirmations.pop(user_id)
                     action = pending.action
                     action_thread_id = str(action.get("thread_id") or "").strip()
                     current_thread_id = self._active_thread_id_for_user(user_id)

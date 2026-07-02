@@ -252,12 +252,20 @@ Existing proof:
 
 - `plan_mode_v2_smoke.py`, `executor_registry_smoke.py`,
   `installed_product_abuse.py`, `test_plan_policy.py`, executor tests.
+- Batch 5 focused orchestrator matrix covers search setup/repair, Telegram
+  start/stop/restart, support bundle, backup, restore preview-only, cleanup
+  preview-only, memory delete/export/redact preview-only, package install,
+  operator update, and uninstall.
 
 Weak or missing:
 
-- `partial`: broad action-family matrix for stale confirmation after restart.
-- `partial`: plan expiry fault injection uses simulated paths more than
-  installed-product time manipulation.
+- `covered`: wrong-thread confirmations, cancel, `forget that`, expiry,
+  `/confirm` expiry, no-plan confirmations, new-plan replacement, and
+  preview-only `mutated=false` refusal are covered at the deterministic
+  orchestrator layer across the major action families.
+- `partial`: installed-product restart confirmation coverage exists for
+  representative support/package paths; broad installed-host time manipulation
+  for every family is intentionally not added.
 
 Recommended fault injection:
 
@@ -265,6 +273,9 @@ Recommended fault injection:
 - confirm in unrelated thread
 - confirm after cancel
 - tampered plan id/token/action target
+- confirm after `forget that`
+- confirm after a newer plan replaced the old one
+- ambiguous `go ahead` / `proceed` with no current plan
 
 Self-repair expectation:
 
@@ -565,15 +576,16 @@ creating another proof script.
    missing/corrupt store across doctor/status/support/backup/chat. CLI,
    status, doctor, and chat paths are covered by Batch 3; promoted-runtime
    support/backup corrupt-store fixtures remain partial.
-3. Confirmation restart/thread matrix:
-   backup/support/search/Telegram/memory previews cannot be confirmed from
-   stale or unrelated contexts.
-4. Installed-service Telegram repair execution:
+3. Installed-service Telegram repair execution:
    real promoted service start/restart/stop failures, systemctl unavailable,
    and duplicate-poller evidence from a live host fixture.
-5. Executor journal retention/rotation:
+4. Executor journal retention/rotation:
    repeated daily support/backup executions should stay bounded over time
    without relying only on read-side caps.
+5. Installed-product broad Plan Mode restart matrix:
+   optional follow-up proof that every family rejects confirmation after an API
+   restart; deterministic Batch 5 coverage already protects the core state
+   machine.
 
 ## Missing Self-Repair Behavior
 
@@ -595,14 +607,14 @@ Keep the next batch small:
 
 1. Add the remaining installed-product search repair fault cases for
    configured-stopped repair failure and port conflict wording.
-2. Add a Plan Mode stale-confirmation matrix across backup, support, search,
-   Telegram, and memory action families.
-3. Add live Telegram installed-service repair failure proof for systemctl
+2. Add live Telegram installed-service repair failure proof for systemctl
    unavailable, restart failure, and duplicate-poller host evidence.
-4. Add promoted-runtime corrupt secret-store fixture proof for support bundle
+3. Add promoted-runtime corrupt secret-store fixture proof for support bundle
    and backup summaries.
-5. Add executor journal retention/rotation policy and proof for repeated
+4. Add executor journal retention/rotation policy and proof for repeated
    support/backup execution over long-running daily use.
+5. Add optional installed-product broad Plan Mode restart proof across every
+   action family if deterministic Batch 5 coverage proves insufficient.
 
 Do not start VM proof, add broad executors, or create another umbrella proof
 script until these P0/P1 gaps are closed or explicitly deferred.

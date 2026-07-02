@@ -65,7 +65,10 @@ Current confirmed proof:
   Batch 4 now covers bounded executor journal writes, oversized journal
   compaction, support/backup partial-artifact failure returns before final
   manifests, custom partial-failure exceptions, malformed executor result
-  failure handling, and scoped rollback hints.
+  failure handling, and scoped rollback hints. Plan Mode Reliability Batch 5
+  now covers stale/cancelled/expired/wrong-thread/overwritten confirmations
+  across search, Telegram, support bundle, backup, restore, cleanup, memory,
+  package install, update, and uninstall action families.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
@@ -262,8 +265,10 @@ These are not unknowns, but they are not finished:
   richer explainability remain partial.
 - Plan Mode execution: canonical plan previews, inspection, cancellation,
   thread/session binding, stale-confirmation rejection, and Executor Registry
-  v1 exist. Most mutators are not yet migrated to the registry; destructive
-  lifecycle and memory actions remain preview-only.
+  v1 exist. Batch 5 covers stale/cancelled/expired/wrong-thread/overwritten
+  confirmations across the major action families. Most mutators are not yet
+  migrated to the registry; destructive lifecycle and memory actions remain
+  preview-only.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
 - Model/provider management: deterministic guidance and switching paths are

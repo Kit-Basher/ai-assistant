@@ -2233,6 +2233,175 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("plan_thread_mismatch", rejected.data.get("error_kind"))
         self.assertIn("different chat thread/session", rejected.text)
 
+    def test_plan_mode_confirmation_matrix_across_action_families(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM fallback"),
+        )
+
+        cases = [
+            ("search setup", "managed_local_service_setup_preview", "managed_local_service.setup", "enabled"),
+            ("Telegram start confirmation", "telegram_service_action", "telegram_service_action", "enabled"),
+            ("Support bundle", "operator_lifecycle_support_bundle", "operator.support_bundle", "enabled"),
+            ("Back up assistant", "operator_lifecycle_backup", "operator.backup", "enabled"),
+            ("Restore from backup", "operator_lifecycle_restore", "operator.restore", "preview_only"),
+            ("Cleanup old Personal Agent files", "operator_lifecycle_cleanup", "operator.cleanup", "preview_only"),
+            ("Delete all memory about me", "memory_lifecycle_delete_all", "memory.delete_all", "preview_only"),
+            ("Export my memory", "memory_lifecycle_export", "memory.export", "preview_only"),
+            ("Redact sensitive memory", "memory_lifecycle_redact", "memory.redact", "preview_only"),
+            ("Install htop", "shell_install_package", "package.install", "enabled"),
+            ("Update assistant", "operator_lifecycle_update", "operator.update", "preview_only"),
+            ("Uninstall assistant", "operator_lifecycle_uninstall", "operator.uninstall", "preview_only"),
+        ]
+
+        for index, (title, operation, action_type, executor_status) in enumerate(cases):
+            thread_id = f"matrix-{index}"
+            orchestrator._set_active_thread_id_for_user("user1", thread_id, persist=False)  # noqa: SLF001
+            preview = orchestrator._confirmation_preview_response(  # noqa: SLF001
+                "user1",
+                route="plan_mode_test",
+                question=f"{title} preview. Say yes to continue, or no to cancel.",
+                used_tools=["plan_mode_test"],
+                action={
+                    "operation": operation,
+                    "params": {
+                        "action_label": title,
+                        "package": "htop" if operation == "shell_install_package" else None,
+                        "service_id": "searxng" if operation == "managed_local_service_setup_preview" else None,
+                        "scope": "current user/session",
+                    },
+                },
+                title=title,
+                preview_payload={"rollback_scope": "Only the resources listed in this plan.", "rollback_supported": executor_status != "preview_only"},
+                skip_post_response_hooks=True,
+            )
+            payload = preview.data.get("runtime_payload")
+            self.assertIsInstance(payload, dict)
+            plan = payload.get("canonical_plan")
+            self.assertIsInstance(plan, dict)
+            self.assertEqual(action_type, plan.get("action_type"))
+            self.assertEqual(executor_status, plan.get("executor_status"))
+            self.assertTrue(payload.get("requires_confirmation"))
+
+    def test_plan_mode_wrong_thread_cancel_forget_expire_and_no_plan_confirmations(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM fallback"),
+        )
+
+        orchestrator.handle_message("make a support bundle", "user1", chat_context={"thread_id": "thread-a"})
+        wrong_thread = orchestrator.handle_message("go ahead", "user1", chat_context={"thread_id": "thread-b"})
+        self.assertEqual("plan_thread_mismatch", wrong_thread.data.get("error_kind"))
+        self.assertIn("different chat thread/session", wrong_thread.text)
+
+        cancel = orchestrator.handle_message("cancel the plan", "user1", chat_context={"thread_id": "thread-a"})
+        after_cancel = orchestrator.handle_message("confirm", "user1", chat_context={"thread_id": "thread-a"})
+        self.assertIn("cancelled", cancel.text.lower())
+        self.assertIn("current action", after_cancel.text.lower())
+
+        orchestrator.handle_message("back up the assistant", "user1", chat_context={"thread_id": "thread-a"})
+        reset = orchestrator.handle_message("forget that", "user1", chat_context={"thread_id": "thread-a"})
+        after_forget = orchestrator.handle_message("yes", "user1", chat_context={"thread_id": "thread-a"})
+        self.assertIn("cleared the pending chat step", reset.text)
+        self.assertIn("current action", after_forget.text.lower())
+
+        orchestrator.handle_message("clean old runtime files", "user1", chat_context={"thread_id": "thread-a"})
+        pending = orchestrator.confirmations.get("user1")
+        self.assertIsNotNone(pending)
+        pending.expires_at = int(time.time()) - 1  # type: ignore[union-attr]
+        expired = orchestrator.handle_message("yes", "user1", chat_context={"thread_id": "thread-a"})
+        self.assertEqual("pending_confirmation_expired", expired.data.get("error_kind"))
+        self.assertIn("expired", expired.text.lower())
+        self.assertIn("didn", expired.text.lower())
+
+        no_plan = orchestrator.handle_message("go ahead", "user1", chat_context={"thread_id": "thread-a"})
+        self.assertIn("current action", no_plan.text.lower())
+        self.assertFalse(no_plan.data.get("runtime_payload", {}).get("mutated", False))
+
+    def test_plan_mode_new_plan_replaces_old_and_normal_chat_does_not_execute_pending(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="Photosynthesis is how plants turn light into stored energy.")
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+        )
+
+        first = orchestrator.handle_message("back up the assistant", "user1", chat_context={"thread_id": "replace-thread"})
+        first_plan = first.data.get("runtime_payload", {}).get("canonical_plan", {})
+        self.assertEqual("operator.backup", first_plan.get("action_type"))
+
+        second = orchestrator.handle_message("make a support bundle", "user1", chat_context={"thread_id": "replace-thread"})
+        second_plan = second.data.get("runtime_payload", {}).get("canonical_plan", {})
+        self.assertEqual("operator.support_bundle", second_plan.get("action_type"))
+
+        normal = orchestrator.handle_message("what is photosynthesis?", "user1", chat_context={"thread_id": "replace-thread"})
+        self.assertNotIn("executed through Executor Registry", normal.text)
+        pending = orchestrator.confirmations.get("user1")
+        self.assertIsNotNone(pending)
+        self.assertEqual("operator.support_bundle", pending.action.get("canonical_plan", {}).get("action_type"))  # type: ignore[union-attr]
+
+        confirmed = orchestrator.handle_message("yes", "user1", chat_context={"thread_id": "replace-thread"})
+        payload = confirmed.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        result = payload.get("executor_result")
+        self.assertIsInstance(result, dict)
+        self.assertEqual("operator.support_bundle", result.get("action_type"))
+        self.assertTrue(result.get("mutated"))
+
+    def test_plan_mode_slash_confirm_rejects_expired_confirmation(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM fallback"),
+        )
+
+        orchestrator.handle_message("clean old runtime files", "user1", chat_context={"thread_id": "slash-confirm"})
+        pending = orchestrator.confirmations.get("user1")
+        self.assertIsNotNone(pending)
+        pending.expires_at = int(time.time()) - 1  # type: ignore[union-attr]
+
+        expired = orchestrator.handle_message("/confirm", "user1", chat_context={"thread_id": "slash-confirm"})
+        self.assertEqual("pending_confirmation_expired", expired.data.get("error_kind"))
+        self.assertIn("expired", expired.text.lower())
+
+    def test_plan_mode_preview_only_confirmations_never_mutate(self) -> None:
+        prompts = [
+            ("restore from backup", "operator.restore"),
+            ("clean old runtime files", "operator.cleanup"),
+            ("delete all memory about me", "memory.delete_all"),
+            ("export my memory", "memory.export"),
+            ("redact sensitive memory", "memory.redact"),
+            ("update the assistant", "operator.update"),
+            ("uninstall the assistant", "operator.uninstall"),
+        ]
+        for prompt, action_type in prompts:
+            with self.subTest(prompt=prompt):
+                orchestrator = Orchestrator(
+                    db=self.db,
+                    skills_path=self.skills_path,
+                    log_path=self.log_path,
+                    timezone="UTC",
+                    llm_client=_FakeChatLLM(enabled=True, text="LLM fallback"),
+                )
+                preview = orchestrator.handle_message(prompt, "user1")
+                plan = preview.data.get("runtime_payload", {}).get("canonical_plan", {})
+                self.assertEqual(action_type, plan.get("action_type"))
+                self.assertEqual("preview_only", plan.get("executor_status"))
+                confirmed = orchestrator.handle_message("yes", "user1")
+                blob = json.dumps(confirmed.data, sort_keys=True).lower()
+                self.assertIn("executor_not_enabled", blob)
+                self.assertIn('"mutated": false', blob)
+
     def test_memory_status_distinguishes_scopes(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="LLM should not answer memory status.")
         orchestrator = Orchestrator(
