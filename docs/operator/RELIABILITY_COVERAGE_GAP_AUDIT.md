@@ -565,7 +565,17 @@ Recommendation: do not delete these now. Use this audit when deciding where a
 new regression belongs. Add a generated eval case or a focused unit test before
 creating another proof script.
 
-## Fault-Injection Tests To Add First
+## Completed P0 Reliability Batches
+
+- Batch 1: Search lifecycle fault injection.
+- Batch 2: Telegram stale-lock / duplicate-poller reliability.
+- Batch 3: Secret-store corruption / redaction reliability.
+- Batch 4: Executor partial-artifact failure handling and journal boundedness.
+- Batch 5: Plan Mode stale-confirmation matrix across major action families.
+
+See `docs/operator/P0_RELIABILITY_RECAP.md` for the checkpoint summary.
+
+## Remaining P1/P2 Fault-Injection Tests
 
 1. Search configured-stopped repair failure matrix:
    owned container stopped, port conflict, and repair executor failure through
@@ -601,9 +611,9 @@ creating another proof script.
   fixtures remain future proof.
 - Full cleanup/delete/restore self-repair remains preview-only by design.
 
-## Top 5 Next Implementation Items
+## Top 5 Remaining Implementation Items
 
-Keep the next batch small:
+Keep any next batch small:
 
 1. Add the remaining installed-product search repair fault cases for
    configured-stopped repair failure and port conflict wording.

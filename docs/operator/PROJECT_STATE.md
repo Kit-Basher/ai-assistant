@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-secret-store-reliability-clean`
-- Commit: `25eec2d`
+- Tag: `v0.2.1-plan-mode-confirmation-matrix-clean`
+- Commit: `a5b0b3c`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -69,6 +69,9 @@ Current confirmed proof:
   now covers stale/cancelled/expired/wrong-thread/overwritten confirmations
   across search, Telegram, support bundle, backup, restore, cleanup, memory,
   package install, update, and uninstall action families.
+- `docs/operator/P0_RELIABILITY_RECAP.md`: concise checkpoint recap for the
+  five completed P0 reliability batches, trusted gates, remaining P1/P2 gaps,
+  and the current daily-driver irritant.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
