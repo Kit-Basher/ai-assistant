@@ -47,6 +47,35 @@ class _FakeOpener:
         return _FakeResponse(self.payload)
 
 
+class _FakeRawResponse:
+    def __init__(self, raw: bytes) -> None:
+        self._body = io.BytesIO(raw)
+
+    def read(self, size: int = -1) -> bytes:
+        return self._body.read(size)
+
+    def __enter__(self) -> "_FakeRawResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _FakeRawOpener:
+    def __init__(self, raw: bytes | None = None, *, exc: Exception | None = None) -> None:
+        self.raw = raw if raw is not None else b'{"results":[]}'
+        self.exc = exc
+        self.opened_urls: list[str] = []
+        self.timeouts: list[float] = []
+
+    def open(self, request, timeout: float = 5.0):  # noqa: ANN001
+        self.opened_urls.append(getattr(request, "full_url", str(request)))
+        self.timeouts.append(timeout)
+        if self.exc is not None:
+            raise self.exc
+        return _FakeRawResponse(self.raw)
+
+
 class TestSafeWebSearch(unittest.TestCase):
     def test_disabled_search_refuses_cleanly(self) -> None:
         client = SafeWebSearchClient(SafeWebSearchConfig(enabled=False))
@@ -112,6 +141,83 @@ class TestSafeWebSearch(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual("search_error", result.error_kind)
         self.assertIn("failed safely", result.message.lower())
+
+    def test_invalid_endpoint_url_is_rejected_without_network_call(self) -> None:
+        opener = _FakeRawOpener()
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="not-a-url"),
+            opener=opener,
+        )
+
+        result = client.search("anything")
+        status = client.status()
+
+        self.assertFalse(result.ok)
+        self.assertEqual("invalid_endpoint", result.error_kind)
+        self.assertEqual([], opener.opened_urls)
+        self.assertEqual("invalid_endpoint", status["reason"])
+        self.assertEqual("invalid_or_untrusted_config", status["search_state"])
+        self.assertIn("trusted loopback URL", status["next_action"])
+
+    def test_html_response_is_bad_response_not_available_search(self) -> None:
+        opener = _FakeRawOpener(b"<html>ok</html>")
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+
+        result = client.search("anything")
+        status = client.status()
+
+        self.assertFalse(result.ok)
+        self.assertEqual("bad_response", result.error_kind)
+        self.assertIn("malformed JSON", result.message)
+        self.assertFalse(status["available"])
+        self.assertEqual("bad_response", status["reason"])
+        self.assertEqual("invalid_or_untrusted_config", status["search_state"])
+        self.assertIn("JSON search output enabled", status["next_action"])
+
+    def test_malformed_json_response_is_bad_response(self) -> None:
+        opener = _FakeRawOpener(b'{"results": [')
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+
+        result = client.search("anything")
+
+        self.assertFalse(result.ok)
+        self.assertEqual("bad_response", result.error_kind)
+        self.assertIn("malformed JSON", result.message)
+
+    def test_json_without_results_list_is_bad_response(self) -> None:
+        opener = _FakeRawOpener(b'{"html": "ok"}')
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888"),
+            opener=opener,
+        )
+
+        result = client.search("anything")
+
+        self.assertFalse(result.ok)
+        self.assertEqual("bad_response", result.error_kind)
+        self.assertIn("results list", result.message)
+
+    def test_timeout_status_is_configured_stopped_with_repair_action(self) -> None:
+        opener = _FakeRawOpener(exc=TimeoutError("slow"))
+        client = SafeWebSearchClient(
+            SafeWebSearchConfig(enabled=True, searxng_base_url="http://127.0.0.1:8888", timeout_seconds=0.2),
+            opener=opener,
+        )
+
+        result = client.search("anything")
+        status = client.status()
+
+        self.assertFalse(result.ok)
+        self.assertEqual("search_timeout", result.error_kind)
+        self.assertEqual("endpoint_unreachable", status["reason"])
+        self.assertEqual("configured_stopped", status["search_state"])
+        self.assertIn("Start or repair", status["next_action"])
 
     def test_redacts_sensitive_query_fragments(self) -> None:
         redacted = redact_search_query("/home/c/Takeout/history.json token=abcdef1234567890abcdef123456")
@@ -531,12 +637,20 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
             "what is photosynthesis?",
             "rewrite this paragraph: the quick brown fox jumps over the lazy dog",
             "rewrite this: what is dots.tts",
+            "What is the next step for the working-memory replay effort?",
+            "Fact: the repo root is /home/c/personal-agent.",
         )
         for message in examples:
             with self.subTest(message=message):
                 decision = classify_runtime_chat_route(message)
 
                 self.assertNotEqual("safe_web_search", decision.get("kind"))
+
+    def test_correction_to_search_online_routes_back_to_search_flow(self) -> None:
+        decision = classify_runtime_chat_route("no I meant search online")
+
+        self.assertEqual("action_tool", decision.get("route"))
+        self.assertIn(decision.get("kind"), {"safe_web_search", "safe_web_search_status"})
 
     def test_search_fallback_honors_do_not_search(self) -> None:
         runtime = self._runtime()
@@ -596,6 +710,16 @@ class TestSafeWebSearchRuntime(unittest.TestCase):
         self.assertIn("managed_local_service_setup_preview", meta.get("used_tools", []))
         self.assertIn("Search is not currently working", text)
         self.assertIn("Plan Mode confirmation", text)
+
+    def test_search_setup_plan_rejects_non_loopback_endpoint(self) -> None:
+        runtime = self._runtime(search_enabled=False)
+
+        plan = runtime.search_setup_plan({"base_url": "https://search.example.test"})
+
+        self.assertFalse(plan["ok"])
+        self.assertTrue(plan["blocked"])
+        self.assertEqual("searxng_endpoint_not_loopback", plan["blocked_reason"])
+        self.assertFalse(plan["mutated"])
 
     def test_public_lookup_configured_stopped_offers_inline_start_not_full_setup(self) -> None:
         runtime = self._runtime(search_enabled=True)

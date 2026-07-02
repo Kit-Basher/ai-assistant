@@ -62,6 +62,10 @@ def _next_action_for_status(reason: str | None, *, endpoint_configured: bool) ->
         return "Set SEARCH_PROVIDER=searxng; no other search provider is supported by this runtime yet."
     if reason == "endpoint_missing" or not endpoint_configured:
         return "Set SEARXNG_BASE_URL to a trusted SearXNG endpoint, or preview local SearXNG setup."
+    if reason == "invalid_endpoint":
+        return "Preview safe SearXNG reconfiguration with a trusted loopback URL."
+    if reason == "bad_response":
+        return "Check that the configured SearXNG endpoint has JSON search output enabled, or preview safe reconfiguration."
     if reason == "endpoint_unreachable":
         return "Start or repair the configured SearXNG endpoint, then check /search/status again."
     return "Check /search/status and configure a trusted SearXNG endpoint."
@@ -79,7 +83,7 @@ def search_lifecycle_state(status_payload: dict[str, Any] | None) -> str:
         return "configured_stopped"
     if reason == "search_disabled" and not endpoint_configured:
         return "never_configured"
-    if reason in {"unsupported_provider", "endpoint_missing"}:
+    if reason in {"unsupported_provider", "endpoint_missing", "invalid_endpoint", "bad_response"}:
         return "invalid_or_untrusted_config"
     if endpoint_configured:
         return "configured_stopped"
@@ -201,7 +205,9 @@ class SafeWebSearchClient:
         result = self.search("personal agent test", max_results=1)
         if result.ok:
             return True, None
-        if result.error_kind in {"bad_response", "search_error", "search_timeout"}:
+        if result.error_kind == "bad_response":
+            return False, "bad_response"
+        if result.error_kind in {"search_error", "search_timeout"}:
             return False, "endpoint_unreachable"
         return False, result.error_kind or "endpoint_unreachable"
 
@@ -229,6 +235,14 @@ class SafeWebSearchClient:
             return self._failure(
                 "endpoint_missing",
                 "Web search is enabled, but SEARXNG_BASE_URL is not configured.",
+                query_redacted=redacted_query,
+                redactions_applied=redacted,
+            )
+        parsed_base_url = urlparse(base_url)
+        if parsed_base_url.scheme not in {"http", "https"} or not parsed_base_url.netloc:
+            return self._failure(
+                "invalid_endpoint",
+                "Web search is configured with an invalid SearXNG endpoint URL.",
                 query_redacted=redacted_query,
                 redactions_applied=redacted,
             )
@@ -265,6 +279,13 @@ class SafeWebSearchClient:
             return self._failure(
                 "bad_response",
                 "Web search returned malformed JSON.",
+                query_redacted=redacted_query,
+                redactions_applied=redacted,
+            )
+        if not isinstance(payload, dict) or not isinstance(payload.get("results"), list):
+            return self._failure(
+                "bad_response",
+                "Web search returned JSON without a results list.",
                 query_redacted=redacted_query,
                 redactions_applied=redacted,
             )

@@ -33,8 +33,10 @@ happy-path installed-product proof but limited fault injection.
 
 P0/P1 gaps to address first:
 
-1. Search fault injection for bad endpoints, provider JSON failure, port
-   conflict, and configured-stopped repair failure.
+1. Search fault injection for repair-failure and port-conflict installed
+   product paths. Batch 1 now covers client/status fault cases for bad
+   endpoints, HTML/non-JSON, malformed JSON, timeout, unsafe setup URLs, local
+   planning prompt suppression, and correction back to search.
 2. Telegram stale-lock/duplicate-poller fault injection and bounded repair
    wording.
 3. Stale confirmation persistence across restart/thread/session boundaries for
@@ -105,24 +107,30 @@ Existing proof:
   `daily_driver_smoke.py`, `installed_product_abuse.py`,
   `restart_survival_smoke.py`, `prove_daily_driver_product.py`,
   `daily_driver_maturity_audit.py`.
+- Search Lifecycle Fault Injection Batch 1 added focused coverage in
+  `test_safe_web_search.py` for invalid endpoint URLs, HTML/non-JSON responses,
+  malformed JSON, JSON without `results`, endpoint timeouts, non-loopback setup
+  rejection, local repo/planning prompt suppression, and correction back to the
+  search flow.
 
 Weak or missing:
 
 - `partial`: configured-stopped repair happy path is covered; repair failure is
   less covered.
-- `partial`: bad endpoint/provider JSON failure covered in unit tests more than
-  installed-product fault injection.
-- `weak`: port conflict is known from prior bugs but should be a deliberate
-  fault-injection case.
+- `covered`: bad endpoint and provider JSON failure are now covered in focused
+  unit fault-injection tests.
+- `partial`: port conflict has managed-service coverage, but still needs an
+  installed-product fault case that verifies final user-facing wording.
 
 Recommended fault injection:
 
-- invalid `SEARXNG_BASE_URL`
-- HTML-only endpoint with no JSON
-- endpoint timeout/refused connection
-- owned container stopped
-- port 8080/8888 occupied
-- provider returns malformed JSON
+- invalid `SEARXNG_BASE_URL` (`covered`)
+- HTML-only endpoint with no JSON (`covered`)
+- provider returns malformed JSON (`covered`)
+- endpoint timeout/refused connection (`covered` for client/status; `partial`
+  for installed-product repair failure)
+- owned container stopped (`partial`)
+- port 8080/8888 occupied (`partial`)
 
 Self-repair expectation:
 
@@ -515,8 +523,10 @@ creating another proof script.
 ## Fault-Injection Tests To Add First
 
 1. Search configured-stopped repair failure matrix:
-   bad endpoint, owned container stopped, port conflict, HTML-only endpoint,
-   malformed JSON.
+   owned container stopped, port conflict, and repair executor failure through
+   the installed `/chat` surface. Bad endpoint, HTML-only endpoint, malformed
+   JSON, timeout, unsafe setup URL, local planning prompt suppression, and
+   correction-to-search routing are covered by Batch 1.
 2. Telegram stale lock and duplicate poller matrix:
    safe owned stale lock, unsafe lock, duplicate poller evidence, inactive
    optional service.
@@ -546,9 +556,8 @@ creating another proof script.
 
 Keep the next batch small:
 
-1. Add a search fault-injection smoke or focused test matrix for
-   configured-stopped/bad-endpoint/HTML-only/malformed-JSON/port-conflict
-   behavior.
+1. Add the remaining installed-product search repair fault cases for
+   configured-stopped repair failure and port conflict wording.
 2. Add Telegram stale-lock and duplicate-poller fault-injection tests with
    precise optional-service wording and no token exposure.
 3. Add secret-store missing/corrupt redaction tests across status, support

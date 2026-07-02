@@ -72,6 +72,14 @@ def build_search_setup_ux(status_payload: dict[str, Any] | None) -> SearchSetupU
         missing = "SEARXNG_BASE_URL"
         next_step = "Set SEARXNG_BASE_URL to your SearXNG instance, for example http://127.0.0.1:8080."
         message = "Web search is enabled, but the SearXNG endpoint is missing."
+    elif reason == "invalid_endpoint":
+        missing = "valid SEARXNG_BASE_URL"
+        next_step = "Preview safe SearXNG reconfiguration with a trusted loopback URL."
+        message = "Web search is configured with an invalid SearXNG endpoint URL."
+    elif reason == "bad_response":
+        missing = "SearXNG JSON output"
+        next_step = "Check that the configured SearXNG endpoint has JSON search output enabled, or preview safe reconfiguration."
+        message = "Web search reached the endpoint, but it did not return the expected SearXNG JSON metadata."
     else:
         missing = reason or "search_runtime_unavailable"
         next_step = "Check /search/status and configure SEARCH_ENABLED=1 with a valid SEARXNG_BASE_URL."
@@ -132,7 +140,7 @@ def render_search_setup_ux(status_payload: dict[str, Any] | None) -> str:
 def setup_hint_for_search_failure(search_payload: dict[str, Any] | None) -> dict[str, Any] | None:
     payload = dict(search_payload or {})
     error_kind = str(payload.get("error_kind") or "").strip().lower()
-    if error_kind not in {"search_disabled", "endpoint_missing", "unsupported_provider"}:
+    if error_kind not in {"search_disabled", "endpoint_missing", "unsupported_provider", "invalid_endpoint", "bad_response"}:
         return None
     status_payload = {
         "enabled": bool(payload.get("enabled", False)),

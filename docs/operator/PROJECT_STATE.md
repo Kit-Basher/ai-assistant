@@ -50,7 +50,10 @@ Current confirmed proof:
   for startup/runtime, search, Telegram, memory, Plan Mode, executor registry,
   backup/restore/cleanup, packs, secrets, UI/API behavior, and response
   routing. It names the highest-risk missing fault-injection guarantees and the
-  next five implementation items.
+  next five implementation items. Search Lifecycle Fault Injection Batch 1 now
+  covers invalid endpoints, HTML/non-JSON responses, malformed JSON, missing
+  `results`, timeouts, unsafe setup URLs, local repo/planning prompt
+  suppression, and correction back to search in focused tests.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
