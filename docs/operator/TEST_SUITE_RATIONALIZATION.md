@@ -3,6 +3,8 @@
 Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
 Current full-pytest failure classification lives in
 `docs/operator/PYTEST_FAILURE_TRIAGE.md`.
+Subsystem reliability guarantees and missing fault-injection coverage live in
+`docs/operator/RELIABILITY_COVERAGE_GAP_AUDIT.md`.
 
 This document maps the Personal Agent tests and proof scripts so the project can
 avoid adding overlapping gates by default. It is an operator classification, not
@@ -27,6 +29,10 @@ a request to delete coverage immediately.
 The suite has good safety coverage, but it has accumulated overlapping proof
 lanes. The main risk is not missing tests; it is running too many similar gates
 and treating every small wording failure as a release blocker.
+
+The reliability coverage audit is the guardrail for future test additions: add
+coverage to close a named subsystem guarantee or fault-injection gap, not just
+because another phrasing failed once.
 
 ## Test Module Groups
 
@@ -251,13 +257,16 @@ Historical/manual:
    about adding child commands.
 2. Keep `installed_product_abuse.py` as the primary product-facing daily-driver
    gate.
-3. Merge new wording/friction checks into `daily_driver_maturity_audit.py`,
+3. Use `RELIABILITY_COVERAGE_GAP_AUDIT.md` to decide whether a new bug belongs
+   in a unit test, deterministic eval, installed-product smoke,
+   fault-injection smoke, or documentation-only bucket.
+4. Merge new wording/friction checks into `daily_driver_maturity_audit.py`,
    not into new proof scripts.
-4. Add generated messy-input cases to `chat_eval.py` first; add unit tests only
+5. Add generated messy-input cases to `chat_eval.py` first; add unit tests only
    for specific helper logic or safety branches.
-5. Treat focused lifecycle smokes as operator safety gates, not normal daily
+6. Treat focused lifecycle smokes as operator safety gates, not normal daily
    loops.
-6. Mark old live/hardware/provider scripts as manual until they are promoted by
+7. Mark old live/hardware/provider scripts as manual until they are promoted by
    a current release lane.
-7. Revisit `test_orchestrator.py` after VM proof: split high-value semantic
+8. Revisit `test_orchestrator.py` after VM proof: split high-value semantic
    router cases from historical phrase regressions if maintenance remains slow.

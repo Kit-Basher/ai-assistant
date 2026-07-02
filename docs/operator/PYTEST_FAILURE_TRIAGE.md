@@ -2,6 +2,8 @@
 
 Current checkpoint truth lives in `docs/operator/PROJECT_STATE.md`.
 Test-suite ownership lives in `docs/operator/TEST_SUITE_RATIONALIZATION.md`.
+Subsystem guarantee gaps live in
+`docs/operator/RELIABILITY_COVERAGE_GAP_AUDIT.md`.
 
 This triage classifies the full pytest inventory failure set. It does not make
 full pytest a release gate.
@@ -270,17 +272,21 @@ investigated, but it does not invalidate the current curated release gate.
 
 ## Recommended Next Passes
 
-1. Focused real-regression pass:
-   `test_adversarial_requests.py`, `test_agent_secrets_cli.py`,
-   `test_runtime_status.py`, and working-memory replay/persistence tests.
-2. Fixture isolation pass:
+1. Reliability gap pass:
+   close the P0/P1 fault-injection gaps in
+   `RELIABILITY_COVERAGE_GAP_AUDIT.md` before adding broad new tests.
+2. Focused real-regression follow-up:
+   keep the fixed candidate tests in the normal maintenance set and rewrite
+   `test_working_memory_behavioral_replay.py` around the current
+   deterministic/public-chat routing contract if it is kept.
+3. Fixture isolation pass:
    tests accidentally hitting live Podman/Telegram/search setup should be made
    hermetic or moved to optional live gates.
-3. Planner/transcript retirement pass:
+4. Planner/transcript retirement pass:
    classify `test_assistant_planner.py` and `test_safe_mode_transcript.py` as
    current, historical, or delete candidates.
-4. Pack acquisition route pass:
+5. Pack acquisition route pass:
    update broad pack chat tests to the current Plan Mode lifecycle contract or
    rely on existing pack lifecycle safety gates.
-5. Soak group pass:
+6. Soak group pass:
    move stress/soak/concurrency tests into an explicit occasional command group.

@@ -8,6 +8,8 @@ machine's services while keeping the local release proof strict.
 
 For the full inventory, overlap analysis, and recommended day-to-day command
 groups, see `docs/operator/TEST_SUITE_RATIONALIZATION.md`.
+For subsystem guarantees and missing fault-injection coverage, see
+`docs/operator/RELIABILITY_COVERAGE_GAP_AUDIT.md`.
 
 ## CI-Safe Gates
 

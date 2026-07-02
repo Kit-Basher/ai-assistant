@@ -46,6 +46,11 @@ Current confirmed proof:
   consolidation plan for pytest modules, smoke/proof scripts, release blockers,
   daily-driver irritant checks, historical/manual proofs, and recommended
   command groups.
+- `docs/operator/RELIABILITY_COVERAGE_GAP_AUDIT.md`: subsystem reliability map
+  for startup/runtime, search, Telegram, memory, Plan Mode, executor registry,
+  backup/restore/cleanup, packs, secrets, UI/API behavior, and response
+  routing. It names the highest-risk missing fault-injection guarantees and the
+  next five implementation items.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
