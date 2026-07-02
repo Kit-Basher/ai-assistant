@@ -4,13 +4,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent.executor_registry import (
     BACKUP_SCHEMA_VERSION,
     BACKUP_MAX_FILE_BYTES,
     BACKUP_MAX_TOTAL_BYTES,
+    EXECUTOR_JOURNAL_MAX_RECORD_BYTES,
     SUPPORT_BUNDLE_SCHEMA_VERSION,
     ExecutorRegistry,
+    ExecutorPartialFailure,
     ExecutorSpec,
     create_additive_backup,
     create_redacted_support_bundle,
@@ -161,6 +164,74 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertEqual("executor_exception_before_verified_mutation", result.error_code)
         self.assertEqual("RuntimeError", result.details.get("exception"))
 
+    def test_executor_partial_failure_records_artifact_and_rollback_scope(self) -> None:
+        registry = ExecutorRegistry(self.journal_path)
+
+        def _run(plan, action):
+            raise ExecutorPartialFailure(
+                "created partial artifact",
+                resources_touched=["/tmp/personal-agent-partial/summary.json"],
+                rollback_hint="Remove only /tmp/personal-agent-partial.",
+                details={"artifact_path": "/tmp/personal-agent-partial"},
+            )
+
+        registry.register(ExecutorSpec(executor_id="test.partial", action_type="operator.support_bundle", status="enabled", run=_run))
+        result = registry.execute_confirmed_plan(plan=_plan(), action={"pending_id": "confirm-test"})
+        self.assertFalse(result.ok)
+        self.assertFalse(result.mutated)
+        self.assertEqual("executor_partial_failure", result.error_code)
+        self.assertEqual(["/tmp/personal-agent-partial/summary.json"], result.resources_touched)
+        self.assertIn("Remove only", result.rollback_hint)
+        self.assertEqual("/tmp/personal-agent-partial", result.details.get("artifact_path"))
+
+    def test_malformed_executor_result_returns_structured_failure(self) -> None:
+        registry = ExecutorRegistry(self.journal_path)
+
+        def _run(plan, action):
+            return "not a result"
+
+        registry.register(ExecutorSpec(executor_id="test.malformed", action_type="operator.support_bundle", status="enabled", run=_run))
+        result = registry.execute_confirmed_plan(plan=_plan(), action={"pending_id": "confirm-test"})
+        self.assertFalse(result.ok)
+        self.assertFalse(result.mutated)
+        self.assertEqual("executor_exception_before_verified_mutation", result.error_code)
+        self.assertEqual("AttributeError", result.details.get("exception"))
+
+    def test_journal_append_compacts_oversized_nested_records_and_redacts(self) -> None:
+        registry = ExecutorRegistry(self.journal_path)
+        huge = "diagnostic-payload-" * 10_000
+        secret = "Bearer " + ("secret-token-" * 100)
+        journal_id = registry.journal.append(
+            {
+                "event": "executor_result",
+                "plan": {
+                    "plan_id": "confirm-huge",
+                    "action_type": "operator.backup",
+                    "target": "backup",
+                    "confirmation_token": "confirm-secret",
+                    "fields": {f"k{i}": huge for i in range(80)},
+                },
+                "action": {"pending_id": "confirm-huge", "api_key": "sk-secret", "nested": [{"token": secret, "notes": huge} for _ in range(80)]},
+                "result": {
+                    "journal_id": "executor-huge",
+                    "plan_id": "confirm-huge",
+                    "action_type": "operator.backup",
+                    "target": "backup",
+                    "executor_id": "operator.backup.v1",
+                    "ok": True,
+                    "mutated": True,
+                    "resources_touched": [huge for _ in range(80)],
+                },
+            }
+        )
+        text = self.journal_path.read_text(encoding="utf-8")
+        self.assertIn(journal_id, text)
+        self.assertLess(len(text.encode("utf-8")), EXECUTOR_JOURNAL_MAX_RECORD_BYTES)
+        self.assertIn('"compacted": true', text)
+        self.assertNotIn("confirm-secret", text)
+        self.assertNotIn("sk-secret", text)
+        self.assertNotIn("secret-token-secret-token", text)
+
     def test_support_bundle_v2_manifest_and_expected_files(self) -> None:
         action = {
             "pending_id": "confirm-test",
@@ -281,6 +352,33 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertIn('"resources_touched_count": 1', journal_summary)
         self.assertLess((artifact / "executor_registry_journal_summary.json").stat().st_size, BACKUP_MAX_FILE_BYTES)
 
+    def test_support_bundle_failure_before_manifest_records_partial_artifacts(self) -> None:
+        calls = 0
+
+        def _fail_after_first(path, payload):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise OSError("disk full")
+            path.write_text("{}", encoding="utf-8")
+            return 2
+
+        with patch("agent.executor_registry._write_support_json", side_effect=_fail_after_first):
+            result = create_redacted_support_bundle(
+                _plan(),
+                {
+                    "pending_id": "confirm-test",
+                    "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                },
+            )
+        artifact = Path(result["details"]["artifact_path"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("support_bundle_v2_failed_before_final_manifest", result["error_code"])
+        self.assertTrue(result["resources_touched"])
+        self.assertFalse((artifact / "manifest.json").exists())
+        self.assertIn("partial support bundle directory", result["rollback_hint"])
+
     def test_backup_v1_manifest_and_expected_files(self) -> None:
         backup_root = Path(self.tmpdir.name) / "backups"
         result = create_additive_backup(
@@ -391,6 +489,35 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertLess((artifact / "executor_registry_journal_summary.json").stat().st_size, BACKUP_MAX_FILE_BYTES)
         self.assertLess(sum(path.stat().st_size for path in artifact.glob("*.json")), BACKUP_MAX_TOTAL_BYTES)
         self.assertGreater(manifest["file_sizes"]["executor_registry_journal_summary.json"], 0)
+
+    def test_backup_failure_before_manifest_records_partial_artifacts(self) -> None:
+        backup_root = Path(self.tmpdir.name) / "backups"
+        calls = 0
+
+        def _fail_after_first(path, payload):
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise OSError("disk full")
+            path.write_text("{}", encoding="utf-8")
+            return 2
+
+        with patch("agent.executor_registry._write_backup_json", side_effect=_fail_after_first):
+            result = create_additive_backup(
+                _plan(action_type="operator.backup"),
+                {
+                    "pending_id": "confirm-test",
+                    "backup_root": str(backup_root),
+                    "diagnostics": {"version": {"git_commit": "abc123", "runtime_instance": "stable"}},
+                },
+            )
+        artifact = Path(result["details"]["artifact_path"])
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("backup_v1_failed_before_final_manifest", result["error_code"])
+        self.assertTrue(result["resources_touched"])
+        self.assertFalse((artifact / "manifest.json").exists())
+        self.assertIn("partial backup directory", result["rollback_hint"])
 
     def test_backup_v1_refuses_unapproved_backup_root(self) -> None:
         with self.assertRaises(ValueError):

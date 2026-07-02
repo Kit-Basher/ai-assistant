@@ -291,10 +291,16 @@ Existing proof:
 
 Weak or missing:
 
-- `partial`: journal size/rotation/boundedness over repeated runs.
-- `partial`: executor exception after partial artifact creation.
-- `weak`: recursive inclusion of journal summaries over time is documented but
-  should be stress-checked.
+- `covered`: bounded journal writes, bounded recent reads, oversized-line skip,
+  oversized-record compaction, secret redaction, and recursive-summary
+  avoidance are covered in `test_executor_registry.py`.
+- `covered`: executor exceptions after partial artifact creation can return
+  structured `executor_partial_failure` with resources touched and scoped
+  rollback hints.
+- `covered`: support bundle and backup failures before final manifest return
+  `mutated=false`, record partial JSON artifacts, and provide rollback hints
+  scoped to the new artifact directory.
+- `partial`: journal rotation/retention over many months of daily use.
 
 Recommended fault injection:
 
@@ -302,13 +308,16 @@ Recommended fault injection:
 - executor throws after partial artifact directory creation
 - oversized journal summary
 - secret-like strings in journal rows
+- malformed executor result payload
+- disabled/preview-only executor confirmation
 
 Self-repair expectation:
 
 - report partial artifact and scoped rollback hint; never delete outside owned
   artifact path automatically.
 
-Priority: `P1`.
+Priority: `P1` for retention/rotation; Batch 4 covers the P0 partial-artifact
+and bounded-summary failure semantics.
 
 Recommended test type: unit and operator safety smoke.
 
@@ -553,17 +562,18 @@ creating another proof script.
    JSON, timeout, unsafe setup URL, local planning prompt suppression, and
    correction-to-search routing are covered by Batch 1.
 2. Secret-store corruption and redaction matrix:
-   missing/corrupt store across doctor/status/support/backup/chat.
-3. Executor artifact failure matrix:
-   support/backup executor fails before final manifest and after partial
-   artifact creation; result includes `mutated=false` or scoped partial rollback
-   hint as appropriate.
-4. Confirmation restart/thread matrix:
+   missing/corrupt store across doctor/status/support/backup/chat. CLI,
+   status, doctor, and chat paths are covered by Batch 3; promoted-runtime
+   support/backup corrupt-store fixtures remain partial.
+3. Confirmation restart/thread matrix:
    backup/support/search/Telegram/memory previews cannot be confirmed from
    stale or unrelated contexts.
-5. Installed-service Telegram repair execution:
+4. Installed-service Telegram repair execution:
    real promoted service start/restart/stop failures, systemctl unavailable,
    and duplicate-poller evidence from a live host fixture.
+5. Executor journal retention/rotation:
+   repeated daily support/backup executions should stay bounded over time
+   without relying only on read-side caps.
 
 ## Missing Self-Repair Behavior
 
@@ -574,8 +584,9 @@ creating another proof script.
   Real installed-service repair failure cases still need operator-level proof.
 - Secret-store corruption should offer a bounded next action and support bundle
   path without exposing secret material.
-- Backup/support partial artifacts should be clearly reported with rollback
-  hints scoped only to the new artifact.
+- Backup/support partial artifacts are reported with rollback hints scoped only
+  to the new artifact at the registry/unit layer; installed-host failure
+  fixtures remain future proof.
 - Full cleanup/delete/restore self-repair remains preview-only by design.
 
 ## Top 5 Next Implementation Items
@@ -584,14 +595,14 @@ Keep the next batch small:
 
 1. Add the remaining installed-product search repair fault cases for
    configured-stopped repair failure and port conflict wording.
-2. Add executor partial-artifact failure tests for support bundle and backup
-   result/journal/rollback behavior.
-3. Add a Plan Mode stale-confirmation matrix across backup, support, search,
+2. Add a Plan Mode stale-confirmation matrix across backup, support, search,
    Telegram, and memory action families.
-4. Add live Telegram installed-service repair failure proof for systemctl
+3. Add live Telegram installed-service repair failure proof for systemctl
    unavailable, restart failure, and duplicate-poller host evidence.
-5. Add promoted-runtime corrupt secret-store fixture proof for support bundle
+4. Add promoted-runtime corrupt secret-store fixture proof for support bundle
    and backup summaries.
+5. Add executor journal retention/rotation policy and proof for repeated
+   support/backup execution over long-running daily use.
 
 Do not start VM proof, add broad executors, or create another umbrella proof
 script until these P0/P1 gaps are closed or explicitly deferred.

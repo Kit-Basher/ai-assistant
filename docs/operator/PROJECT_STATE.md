@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-telegram-lifecycle-fault-injection-clean`
-- Commit: `56e5321`
+- Tag: `v0.2.1-secret-store-reliability-clean`
+- Commit: `25eec2d`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -61,7 +61,11 @@ Current confirmed proof:
   Batch 3 now covers missing/corrupt/decrypt-failed store status,
   `agent.secrets get --redacted`, doctor corruption wording, `/config`,
   `/telegram/status`, deterministic raw-token chat refusal, and Telegram
-  configured-status wording when the store is corrupt.
+  configured-status wording when the store is corrupt. Executor Reliability
+  Batch 4 now covers bounded executor journal writes, oversized journal
+  compaction, support/backup partial-artifact failure returns before final
+  manifests, custom partial-failure exceptions, malformed executor result
+  failure handling, and scoped rollback hints.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
@@ -248,6 +252,11 @@ These are not unknowns, but they are not finished:
 - Secret-store behavior: missing/corrupt/decrypt-failed store status is covered
   at the deterministic CLI/status/chat layer; promoted-runtime corrupt-store
   fixture proof for support bundle and backup remains partial.
+- Executor failure behavior: bounded journal writes, recent/summary reads,
+  secret redaction, recursive-summary avoidance, malformed executor result
+  handling, and support/backup partial-artifact failures are covered at the
+  deterministic registry/unit layer. Journal rotation and broad migration of
+  remaining mutators into the registry remain partial.
 - Memory completion: audits, deterministic status/inspection/current-turn
   opt-out, and preview UX exist; full delete/export/redact/dedupe executors and
   richer explainability remain partial.

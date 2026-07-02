@@ -15,6 +15,10 @@ BACKUP_SCHEMA_VERSION = "backup.v1"
 BACKUP_MAX_TOTAL_BYTES = 2 * 1024 * 1024
 BACKUP_MAX_FILE_BYTES = 256 * 1024
 BACKUP_MAX_JOURNAL_ENTRIES = 8
+EXECUTOR_JOURNAL_MAX_RECORD_BYTES = 64 * 1024
+EXECUTOR_JOURNAL_MAX_STRING_BYTES = 1024
+SUPPORT_BUNDLE_MAX_TOTAL_BYTES = 2 * 1024 * 1024
+SUPPORT_BUNDLE_MAX_FILE_BYTES = 256 * 1024
 
 SECRET_KEY_HINTS = (
     "api_key",
@@ -147,6 +151,21 @@ class ExecutorResult:
 ExecutorFn = Callable[[dict[str, Any], dict[str, Any]], ExecutorResult | dict[str, Any]]
 
 
+class ExecutorPartialFailure(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        resources_touched: list[str] | None = None,
+        rollback_hint: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.resources_touched = list(resources_touched or [])
+        self.rollback_hint = rollback_hint
+        self.details = dict(details or {})
+
+
 @dataclass(frozen=True)
 class ExecutorSpec:
     executor_id: str
@@ -164,7 +183,7 @@ class MutationJournal:
 
     def append(self, record: dict[str, Any]) -> str:
         journal_id = str(record.get("journal_id") or f"executor-{uuid.uuid4().hex[:12]}")
-        payload = redact_executor_value({**record, "journal_id": journal_id})
+        payload = _bounded_journal_record(redact_executor_value({**record, "journal_id": journal_id}))
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, sort_keys=True, ensure_ascii=True) + "\n")
         return journal_id
@@ -354,6 +373,18 @@ class ExecutorRegistry:
                     user_message=str(raw.get("user_message") or ""),
                     details=dict(raw.get("details") if isinstance(raw.get("details"), dict) else {}),
                 )
+        except ExecutorPartialFailure as exc:
+            return _result(
+                ok=False,
+                mutated=False,
+                executor_id=spec.executor_id,
+                error_code="executor_partial_failure",
+                user_message=f"{target} did not finish. I recorded partial artifacts and did not verify a completed mutation.",
+                resources_touched=exc.resources_touched,
+                rollback_available=True,
+                rollback_hint=exc.rollback_hint or spec.rollback_hint,
+                details={"exception": exc.__class__.__name__, **exc.details},
+            )
         except Exception as exc:  # noqa: BLE001 - executor boundary must return safe failure.
             return _result(
                 ok=False,
@@ -389,6 +420,63 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(support_bundle_redact(payload), indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
+def _bounded_journal_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return "[truncated:max_depth]"
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= 40:
+                out["truncated_keys"] = True
+                break
+            out[str(key)] = _bounded_journal_value(item, depth=depth + 1)
+        return out
+    if isinstance(value, list):
+        out = [_bounded_journal_value(item, depth=depth + 1) for item in value[:40]]
+        if len(value) > 40:
+            out.append("[truncated:list]")
+        return out
+    if isinstance(value, tuple):
+        return _bounded_journal_value(list(value), depth=depth)
+    if isinstance(value, str):
+        encoded = value.encode("utf-8", errors="replace")
+        if len(encoded) > EXECUTOR_JOURNAL_MAX_STRING_BYTES:
+            return encoded[:EXECUTOR_JOURNAL_MAX_STRING_BYTES].decode("utf-8", errors="replace") + "...[truncated]"
+    return value
+
+
+def _compact_journal_record(record: dict[str, Any]) -> dict[str, Any]:
+    result = record.get("result") if isinstance(record.get("result"), dict) else {}
+    plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
+    action = record.get("action") if isinstance(record.get("action"), dict) else {}
+    resources = result.get("resources_touched") if isinstance(result.get("resources_touched"), list) else []
+    return redact_executor_value(
+        {
+            "journal_id": record.get("journal_id") or result.get("journal_id"),
+            "event": record.get("event"),
+            "compacted": True,
+            "compaction_reason": "journal_record_size_cap",
+            "plan_id": result.get("plan_id") or plan.get("plan_id") or action.get("pending_id"),
+            "action_type": result.get("action_type") or plan.get("action_type"),
+            "target": result.get("target") or plan.get("target"),
+            "executor_id": result.get("executor_id"),
+            "ok": result.get("ok"),
+            "mutated": result.get("mutated"),
+            "error_code": result.get("error_code"),
+            "resources_touched_count": len(resources),
+            "rollback_available": result.get("rollback_available"),
+        }
+    )
+
+
+def _bounded_journal_record(record: dict[str, Any]) -> dict[str, Any]:
+    bounded = _bounded_journal_value(record)
+    encoded = json.dumps(bounded, sort_keys=True, ensure_ascii=True).encode("utf-8")
+    if len(encoded) <= EXECUTOR_JOURNAL_MAX_RECORD_BYTES:
+        return bounded if isinstance(bounded, dict) else {"record": bounded}
+    return _compact_journal_record(record)
+
+
 def _status_summary(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     return {key: payload.get(key) for key in keys if key in payload}
 
@@ -419,6 +507,15 @@ def _write_backup_json(path: Path, payload: dict[str, Any]) -> int:
     encoded = text.encode("utf-8")
     if len(encoded) > BACKUP_MAX_FILE_BYTES:
         raise ValueError(f"backup_file_size_cap_exceeded:{path.name}:{len(encoded)}")
+    path.write_bytes(encoded)
+    return len(encoded)
+
+
+def _write_support_json(path: Path, payload: dict[str, Any]) -> int:
+    text = json.dumps(support_bundle_redact(_bounded_backup_value(payload)), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    encoded = text.encode("utf-8")
+    if len(encoded) > SUPPORT_BUNDLE_MAX_FILE_BYTES:
+        raise ValueError(f"support_bundle_file_size_cap_exceeded:{path.name}:{len(encoded)}")
     path.write_bytes(encoded)
     return len(encoded)
 
@@ -798,10 +895,45 @@ def create_redacted_support_bundle(plan: dict[str, Any], action: dict[str, Any])
     }
 
     included_files = sorted([*files.keys(), "manifest.json"])
-    manifest = build_support_bundle_manifest(root=root, diagnostics=diagnostics, included_files=included_files)
-    _write_json(root / "manifest.json", manifest)
-    for name, payload in files.items():
-        _write_json(root / name, payload)
+    file_sizes: dict[str, int] = {}
+    try:
+        total_size = 0
+        for name, payload in files.items():
+            size = _write_support_json(root / name, payload)
+            file_sizes[name] = size
+            total_size += size
+            if total_size > SUPPORT_BUNDLE_MAX_TOTAL_BYTES:
+                raise ValueError(f"support_bundle_total_size_cap_exceeded:{total_size}")
+        manifest = build_support_bundle_manifest(root=root, diagnostics=diagnostics, included_files=included_files)
+        manifest["file_sizes"] = file_sizes
+        manifest["total_size_bytes"] = total_size
+        manifest["size_caps"] = {
+            "max_total_bytes": SUPPORT_BUNDLE_MAX_TOTAL_BYTES,
+            "max_file_bytes": SUPPORT_BUNDLE_MAX_FILE_BYTES,
+            "max_journal_entries": BACKUP_MAX_JOURNAL_ENTRIES,
+        }
+        manifest_text = json.dumps(support_bundle_redact(_bounded_backup_value(manifest)), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+        manifest_size = len(manifest_text.encode("utf-8"))
+        if manifest_size > SUPPORT_BUNDLE_MAX_FILE_BYTES:
+            raise ValueError(f"support_bundle_file_size_cap_exceeded:manifest.json:{manifest_size}")
+        if total_size + manifest_size > SUPPORT_BUNDLE_MAX_TOTAL_BYTES:
+            raise ValueError(f"support_bundle_total_size_cap_exceeded:{total_size + manifest_size}")
+        (root / "manifest.json").write_text(manifest_text, encoding="utf-8")
+        file_sizes["manifest.json"] = manifest_size
+        total_size += manifest_size
+    except Exception as exc:
+        resources = [str(path) for path in sorted(root.glob("*.json"))]
+        return {
+            "ok": False,
+            "mutated": False,
+            "executor_id": "operator.support_bundle.v1",
+            "resources_touched": resources,
+            "rollback_available": True,
+            "rollback_hint": f"Remove only the partial support bundle directory created for this failed action: {root}",
+            "error_code": "support_bundle_v2_failed_before_final_manifest",
+            "user_message": "Support bundle creation did not finish. I did not write a final manifest or verify a usable bundle.",
+            "details": {"artifact_path": str(root), "partial": True, "error": exc.__class__.__name__},
+        }
     resources = [str(root / name) for name in included_files]
     return {
         "ok": True,
