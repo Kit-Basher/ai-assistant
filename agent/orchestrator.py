@@ -5014,6 +5014,41 @@ class Orchestrator:
         return str(route_decision.get("fallback_reason") or "").strip().lower() == "provided_text_transform"
 
     @staticmethod
+    def _deterministic_short_rewrite_response(text: str | None) -> OrchestratorResponse | None:
+        raw = str(text or "").strip()
+        match = re.match(
+            r"(?is)^\s*(?:rewrite\s+this|rephrase\s+this|make\s+this\s+clearer|polish\s+this)\s*:\s*(?P<body>.+?)\s*$",
+            raw,
+        )
+        if not match:
+            return None
+        body = " ".join(match.group("body").strip().split())
+        if not body:
+            return None
+        body = re.sub(r"(?i)^can\s+you\s+", "", body).strip()
+        body = re.sub(r"(?i)^please\s+", "", body).strip()
+        if not body:
+            return None
+        body = body[0].upper() + body[1:]
+        if body[-1] not in ".!?":
+            body += "."
+        return OrchestratorResponse(
+            body,
+            {
+                "route": "generic_chat",
+                "semantic_intent": "answer_directly",
+                "used_runtime_state": False,
+                "used_llm": False,
+                "used_memory": False,
+                "used_tools": [],
+                "ok": True,
+                "provided_text_transform": True,
+                "skip_post_response_hooks": True,
+                "skip_epistemic_gate": True,
+            },
+        )
+
+    @staticmethod
     def _is_diagnostic_status_context(context: dict[str, Any]) -> bool:
         if not isinstance(context, dict) or not context:
             return False
@@ -20567,6 +20602,9 @@ class Orchestrator:
                         "stale_context_cleared": True,
                     },
                 )
+            deterministic_rewrite = self._deterministic_short_rewrite_response(effective_user_text)
+            if deterministic_rewrite is not None:
+                return deterministic_rewrite
             explicit_open_loop_response = self._explicit_open_loop_memory_response(user_id, effective_user_text)
             if explicit_open_loop_response is not None:
                 return explicit_open_loop_response

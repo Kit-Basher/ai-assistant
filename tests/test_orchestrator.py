@@ -10736,7 +10736,7 @@ Workflow:
             skills_path=self.skills_path,
             log_path=self.log_path,
             timezone="UTC",
-            llm_client=_FakeChatLLM(enabled=True, text="unused"),
+            llm_client=_FakeChatLLM(enabled=True, text="LLM should not rewrite."),
         )
         orchestrator._last_interpretable_result["user1"] = {  # noqa: SLF001
             "created_ts": int(time.time()),
@@ -10746,15 +10746,25 @@ Workflow:
             "payload": {"type": "operational_status", "summary": "Doctor: OK (trace doctor-test)"},
         }
 
-        with patch(
-            "agent.orchestrator.route_inference",
-            return_value={"ok": True, "text": "Search for dots.tts.", "provider": "ollama", "model": "llama3"},
-        ):
-            response = orchestrator.handle_message("rewrite this: search for dots.tts", "user1")
-
-        self.assertIn("Search for dots.tts", response.text)
-        self.assertNotIn("Doctor:", response.text)
-        self.assertNotIn("I was following", response.text)
+        cases = {
+            "rewrite this: search for dots.tts": "Search for dots.tts.",
+            "rewrite this: can you search for dots.tts": "Search for dots.tts.",
+            "rephrase this: search for dots.tts": "Search for dots.tts.",
+            "make this clearer: search for dots.tts": "Search for dots.tts.",
+            "polish this: search for dots.tts": "Search for dots.tts.",
+        }
+        for prompt, expected in cases.items():
+            with self.subTest(prompt=prompt):
+                response = orchestrator.handle_message(prompt, "user1")
+                self.assertEqual(expected, response.text)
+                self.assertEqual("generic_chat", response.data.get("route"))
+                self.assertFalse(response.data.get("used_llm"))
+                self.assertFalse(response.data.get("used_tools"))
+                self.assertNotIn("runtime is ready", response.text.lower())
+                self.assertNotIn("chat is temporarily busy", response.text.lower())
+                self.assertNotIn("Doctor:", response.text)
+                self.assertNotIn("I was following", response.text)
+                self.assertNotIn("SearXNG", response.text)
 
     def test_ambiguous_correction_after_doctor_context_clarifies(self) -> None:
         orchestrator = self._orchestrator()

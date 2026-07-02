@@ -71,7 +71,7 @@ Current confirmed proof:
   package install, update, and uninstall action families.
 - `docs/operator/P0_RELIABILITY_RECAP.md`: concise checkpoint recap for the
   five completed P0 reliability batches, trusted gates, remaining P1/P2 gaps,
-  and the current daily-driver irritant.
+  and the now-fixed daily-driver rewrite irritant.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,

@@ -73,13 +73,21 @@ git status
 can still include runtime latency drift and isolated proof limits; release
 blockers are the important value.
 
-## Remaining Known Irritant
+## Daily-Driver Irritants
 
-The current daily-driver maturity audit has one known irritant:
+At the P0 recap checkpoint, the daily-driver maturity audit had one known
+irritant:
 
 - `rewrite this: search for dots.tts`
 
-This is response-quality polish. It is not a reliability blocker and does not
+The tiny response-quality polish batch after the recap fixed this path. Current
+expected response:
+
+```text
+Search for dots.tts.
+```
+
+This was response-quality polish, not a reliability blocker. It did not
 indicate unsafe mutation, search leakage, or stale confirmation execution.
 
 ## Remaining P1/P2 Gaps
@@ -97,6 +105,5 @@ indicate unsafe mutation, search leakage, or stale confirmation execution.
 
 ## Recommended Next Step
 
-Do one tiny response-quality polish batch for the `rewrite this: search for
-dots.tts` irritant, or stop here and use the system for real daily-driver
-observation. Do not start another broad reliability lane from this checkpoint.
+The tiny response-quality polish batch is complete. Stop here and use the
+system for real daily-driver observation before starting another broad lane.
