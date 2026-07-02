@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-search-lifecycle-fault-injection-clean`
-- Commit: `9fbc0c2`
+- Tag: `v0.2.1-telegram-lifecycle-fault-injection-clean`
+- Commit: `56e5321`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -57,7 +57,11 @@ Current confirmed proof:
   Reliability Batch 2 now covers stale dead-PID lock cleanup, live lock
   preservation, duplicate poller reporting through `/telegram/status` and
   doctor, process-list inspection failure, token redaction from status state,
-  and chat wording for stale locks/duplicate pollers.
+  and chat wording for stale locks/duplicate pollers. Secret-store Reliability
+  Batch 3 now covers missing/corrupt/decrypt-failed store status,
+  `agent.secrets get --redacted`, doctor corruption wording, `/config`,
+  `/telegram/status`, deterministic raw-token chat refusal, and Telegram
+  configured-status wording when the store is corrupt.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
@@ -241,6 +245,9 @@ These are not unknowns, but they are not finished:
   covered; stale-lock and duplicate-poller fault injection is covered at the
   deterministic runtime/chat layer; full installed-service start/stop/restart
   failure proof remains partial.
+- Secret-store behavior: missing/corrupt/decrypt-failed store status is covered
+  at the deterministic CLI/status/chat layer; promoted-runtime corrupt-store
+  fixture proof for support bundle and backup remains partial.
 - Memory completion: audits, deterministic status/inspection/current-turn
   opt-out, and preview UX exist; full delete/export/redact/dedupe executors and
   richer explainability remain partial.

@@ -45,7 +45,11 @@ P0/P1 gaps to address first:
 3. Stale confirmation persistence across restart/thread/session boundaries for
    more action families, not only the current smoke examples.
 4. Backup/support/executor journal boundedness over repeated runs.
-5. Secret-store missing/corrupt behavior across doctor, support bundle, backup,
+5. Secret-store Batch 3 now covers missing/corrupt/decrypt-failed store
+   classification, redacted CLI reads, doctor failure wording, `/config`,
+   `/telegram/status`, raw-token chat refusal, and corrupt-store Telegram
+   wording. Backup/support redaction already has artifact scans; broader
+   installed-service corrupt-store proof remains deferred.
    and chat status surfaces.
 
 ## Subsystem Map
@@ -400,26 +404,36 @@ Existing proof:
 
 - `test_agent_secrets_cli.py`, support bundle/backup smokes, installed abuse
   secret scans, docs truth and redaction helpers.
+- Batch 3 focused fault-injection tests cover missing/corrupt/decrypt-failed
+  store status, `agent.secrets get --redacted`, doctor corruption wording,
+  `/config`, `/telegram/status`, deterministic raw-token chat refusal, and
+  Telegram configured-status wording when the store is corrupt.
 
 Weak or missing:
 
-- `partial`: corrupt secret-store handling across all user-facing status
-  surfaces.
+- `covered`: main read/status/chat surfaces handle missing/corrupt store
+  without tracebacks or raw payload leakage.
+- `partial`: installed-product support bundle and backup corrupt-store
+  scenarios are covered by redaction scans and summary-only design, but not by
+  a dedicated corrupt-store promoted-runtime fixture.
 - `partial`: confirmation tokens/plan ids redaction policy is documented less
   clearly than API keys/Tokens.
 
-Recommended fault injection:
+Covered fault injection:
 
 - missing secret store
-- unreadable/corrupt secret store
-- token-like values in logs/journal/memory
+- corrupt/non-JSON secret store
+- decrypt/integrity mismatch
+- token-like values in CLI/chat/status payloads, with existing support/backup
+  artifact scans covering diagnostics summaries
 
 Self-repair expectation:
 
 - never print raw value; ask for reconfiguration or support bundle with
   redaction.
 
-Priority: `P0`.
+Priority: `P0 covered for deterministic status/chat/CLI guarantees; P1 remains
+for promoted-runtime backup/support corrupt-store fixture proof`.
 
 Recommended test type: unit tests plus support/backup artifact scans.
 
@@ -570,14 +584,14 @@ Keep the next batch small:
 
 1. Add the remaining installed-product search repair fault cases for
    configured-stopped repair failure and port conflict wording.
-2. Add secret-store missing/corrupt redaction tests across status, support
-   bundle, backup, and chat.
-3. Add executor partial-artifact failure tests for support bundle and backup
+2. Add executor partial-artifact failure tests for support bundle and backup
    result/journal/rollback behavior.
-4. Add a Plan Mode stale-confirmation matrix across backup, support, search,
+3. Add a Plan Mode stale-confirmation matrix across backup, support, search,
    Telegram, and memory action families.
-5. Add live Telegram installed-service repair failure proof for systemctl
+4. Add live Telegram installed-service repair failure proof for systemctl
    unavailable, restart failure, and duplicate-poller host evidence.
+5. Add promoted-runtime corrupt secret-store fixture proof for support bundle
+   and backup summaries.
 
 Do not start VM proof, add broad executors, or create another umbrella proof
 script until these P0/P1 gaps are closed or explicitly deferred.

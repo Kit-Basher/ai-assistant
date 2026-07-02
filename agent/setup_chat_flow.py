@@ -247,6 +247,10 @@ _SAFETY_BYPASS_RE = re.compile(
     r"\b(ignore|bypass|skip|override)\s+(?:the\s+)?(?:safety|policy|approval|confirmation|plan mode|plan)\b"
     r"|(?:\bjust\s+run\s+it\b|\brun\s+it\s+anyway\b|\bdo\s+it\s+anyway\b)"
 )
+_SECRET_REVEAL_RE = re.compile(
+    r"\b(show|tell|print|display|reveal|what(?:'s| is)?)\b.*\b(secret|token|api key|apikey|password|credential)\b"
+    r"|\b(telegram|openai|openrouter|provider)\b.*\b(secret|token|api key|apikey|password|credential)\b"
+)
 _AMBIGUOUS_RESTART_RE = re.compile(r"^(?:please\s+)?restart\s+(?:it|that|this|the service|the thing)\??$")
 _PLAN_DAY_PHRASES = (
     "plan my day",
@@ -2386,6 +2390,13 @@ def _classify_runtime_chat_route_raw(
             "kind": "safety_bypass_refusal",
             "generic_allowed": False,
             "fallback_reason": "safety_bypass_refusal",
+        }
+    if _SECRET_REVEAL_RE.search(normalized):
+        return {
+            "route": "runtime_status",
+            "kind": "secret_store_status",
+            "generic_allowed": False,
+            "fallback_reason": "secret_store_status",
         }
     if _TELEGRAM_ACTION_RE.search(normalized):
         action_match = _TELEGRAM_ACTION_RE.search(normalized)

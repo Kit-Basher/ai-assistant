@@ -138,6 +138,38 @@ def resolve_telegram_token_with_source(
     return None, "missing"
 
 
+def inspect_secret_store_status(
+    *,
+    env: Mapping[str, str] | None = None,
+    home: Path | None = None,
+    secret_store_path: str | None = None,
+) -> dict[str, Any]:
+    active_env = dict(env or os.environ)
+    configured_secret_store = str(secret_store_path or active_env.get("AGENT_SECRET_STORE_PATH", "") or "").strip()
+    secret_path = Path(configured_secret_store).expanduser() if configured_secret_store else _default_secret_store_path(home=home)
+    try:
+        store = SecretStore(path=str(secret_path))
+        status = store.status()
+    except Exception as exc:
+        status = {
+            "backend": "encrypted_file",
+            "path": str(secret_path),
+            "exists": None,
+            "readable": False,
+            "valid": False,
+            "error_kind": exc.__class__.__name__,
+            "state": "error",
+        }
+    return {
+        "backend": str(status.get("backend") or "encrypted_file"),
+        "exists": status.get("exists"),
+        "readable": status.get("readable"),
+        "valid": bool(status.get("valid", False)),
+        "error_kind": status.get("error_kind"),
+        "state": str(status.get("state") or "unknown"),
+    }
+
+
 def _token_hash(token: str | None) -> str:
     import hashlib
 
@@ -387,6 +419,7 @@ def get_telegram_runtime_state(
         home=home,
         secret_store_path=secret_store_path,
     )
+    secret_store_status = inspect_secret_store_status(env=env, home=home, secret_store_path=secret_store_path)
     lock_info = inspect_telegram_lock(token, env=env, home=home)
     poller_info = inspect_telegram_pollers(run=run)
     service_installed = _service_installed(run=run)
@@ -439,6 +472,9 @@ def get_telegram_runtime_state(
         "service_enabled": bool(service_enabled),
         "token_configured": token_configured,
         "token_source": token_source,
+        "secret_store_state": secret_store_status.get("state"),
+        "secret_store_valid": bool(secret_store_status.get("valid", False)),
+        "secret_store_error_kind": secret_store_status.get("error_kind"),
         "lock_present": bool(lock_info.get("present", False)),
         "lock_live": bool(lock_info.get("live", False)),
         "lock_stale": bool(lock_info.get("stale", False)),
@@ -1021,6 +1057,7 @@ __all__ = [
     "clear_stale_telegram_locks",
     "get_telegram_runtime_state",
     "inspect_telegram_pollers",
+    "inspect_secret_store_status",
     "inspect_telegram_lock",
     "is_approved_telegram_systemctl_user_action",
     "read_telegram_enablement",

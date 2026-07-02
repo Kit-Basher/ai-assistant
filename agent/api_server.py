@@ -5544,6 +5544,9 @@ class AgentRuntime:
                 "service_enabled": False,
                 "token_configured": False,
                 "token_source": "unknown",
+                "secret_store_state": "unknown",
+                "secret_store_valid": False,
+                "secret_store_error_kind": None,
                 "lock_present": False,
                 "lock_live": False,
                 "lock_stale": False,
@@ -5578,6 +5581,9 @@ class AgentRuntime:
             "enabled": bool(runtime_state.get("enabled", False)),
             "configured": bool(runtime_state.get("token_configured", False)),
             "token_source": str(runtime_state.get("token_source") or "none"),
+            "secret_store_state": str(runtime_state.get("secret_store_state") or "unknown"),
+            "secret_store_valid": bool(runtime_state.get("secret_store_valid", False)),
+            "secret_store_error_kind": runtime_state.get("secret_store_error_kind"),
             "state": str(runtime_state.get("ready_state") or "unknown"),
             "effective_state": str(runtime_state.get("effective_state") or "unknown"),
             "config_source": str(runtime_state.get("config_source") or "unknown"),
@@ -12361,11 +12367,25 @@ class AgentRuntime:
 
     def get_config(self) -> dict[str, Any]:
         defaults = self.get_defaults()
+        secret_status_getter = getattr(self.secret_store, "status", None)
+        try:
+            raw_secret_status = secret_status_getter() if callable(secret_status_getter) else {}
+        except Exception as exc:
+            raw_secret_status = {"state": "error", "valid": False, "error_kind": exc.__class__.__name__}
+        secret_status = {
+            "backend": str(raw_secret_status.get("backend") or "unknown") if isinstance(raw_secret_status, dict) else "unknown",
+            "exists": raw_secret_status.get("exists") if isinstance(raw_secret_status, dict) else None,
+            "readable": raw_secret_status.get("readable") if isinstance(raw_secret_status, dict) else None,
+            "valid": bool(raw_secret_status.get("valid", False)) if isinstance(raw_secret_status, dict) else False,
+            "state": str(raw_secret_status.get("state") or "unknown") if isinstance(raw_secret_status, dict) else "unknown",
+            "error_kind": raw_secret_status.get("error_kind") if isinstance(raw_secret_status, dict) else None,
+        }
         return {
             "routing_mode": defaults.get("routing_mode"),
             "retry_attempts": self._router.policy.retry_attempts,
             "timeout_seconds": self._router.policy.default_timeout_seconds,
             "secret_storage": self.secret_store.backend_name,
+            "secret_store": secret_status,
             "runtime_instance": self.runtime_instance,
             "search": self.search_status(),
         }

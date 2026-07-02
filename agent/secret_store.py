@@ -9,6 +9,7 @@ import os
 import platform
 from pathlib import Path
 import threading
+from typing import Any
 
 
 class SecretStore:
@@ -26,6 +27,10 @@ class SecretStore:
         if self._keyring is not None:
             return "keyring"
         return f"encrypted_file:{self._path}"
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     @staticmethod
     def _load_keyring():
@@ -152,6 +157,93 @@ class SecretStore:
         if not isinstance(raw, dict):
             raise RuntimeError("invalid secret store payload")
         _ = self._decrypt_payload(raw)
+
+    def status(self) -> dict[str, Any]:
+        if self._keyring is not None:
+            return {
+                "backend": "keyring",
+                "path": None,
+                "exists": None,
+                "readable": None,
+                "valid": True,
+                "error_kind": None,
+                "state": "keyring",
+            }
+        path = self._path
+        if not path.is_file():
+            return {
+                "backend": "encrypted_file",
+                "path": str(path),
+                "exists": False,
+                "readable": False,
+                "valid": False,
+                "error_kind": "missing",
+                "state": "missing",
+            }
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except PermissionError:
+            return {
+                "backend": "encrypted_file",
+                "path": str(path),
+                "exists": True,
+                "readable": False,
+                "valid": False,
+                "error_kind": "permission_denied",
+                "state": "unreadable",
+            }
+        except (OSError, UnicodeError):
+            return {
+                "backend": "encrypted_file",
+                "path": str(path),
+                "exists": True,
+                "readable": False,
+                "valid": False,
+                "error_kind": "read_failed",
+                "state": "unreadable",
+            }
+        except json.JSONDecodeError:
+            return {
+                "backend": "encrypted_file",
+                "path": str(path),
+                "exists": True,
+                "readable": True,
+                "valid": False,
+                "error_kind": "invalid_json",
+                "state": "corrupt",
+            }
+        if not isinstance(raw, dict):
+            return {
+                "backend": "encrypted_file",
+                "path": str(path),
+                "exists": True,
+                "readable": True,
+                "valid": False,
+                "error_kind": "invalid_payload",
+                "state": "corrupt",
+            }
+        try:
+            _ = self._decrypt_payload(raw)
+        except (ValueError, TypeError, binascii.Error, RuntimeError, UnicodeError, json.JSONDecodeError):
+            return {
+                "backend": "encrypted_file",
+                "path": str(path),
+                "exists": True,
+                "readable": True,
+                "valid": False,
+                "error_kind": "decrypt_failed",
+                "state": "corrupt",
+            }
+        return {
+            "backend": "encrypted_file",
+            "path": str(path),
+            "exists": True,
+            "readable": True,
+            "valid": True,
+            "error_kind": None,
+            "state": "ok",
+        }
 
     def get_secret(self, key: str) -> str | None:
         if self._keyring is not None:

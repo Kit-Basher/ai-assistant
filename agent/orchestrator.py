@@ -12677,8 +12677,15 @@ class Orchestrator:
         duplicate_pollers = bool(status_payload.get("duplicate_pollers", False))
         lock_stale = bool(status_payload.get("lock_stale", False))
         lock_live = bool(status_payload.get("lock_live", False))
+        secret_store_state = str(status_payload.get("secret_store_state") or "").strip().lower()
+        secret_store_error = str(status_payload.get("secret_store_error_kind") or "").strip()
         running = service_active or embedded_running or state in {"running", "enabled_running", "ready", "active"}
-        if not configured:
+        if not configured and secret_store_state in {"corrupt", "unreadable", "error"}:
+            message = (
+                f"Telegram is not configured because the local secret store is not healthy ({secret_store_error or secret_store_state}). "
+                "Telegram is optional, so the web app still works. Repair or replace the secret store, then set the Telegram token again."
+            )
+        elif not configured:
             message = "Telegram is not configured yet. I can help set it up."
         elif duplicate_pollers:
             message = (
@@ -12778,6 +12785,42 @@ class Orchestrator:
                 "resources_changed": ["personal-agent-telegram.service state"],
                 "rollback_scope": "Telegram service state only; tokens and assistant core runtime are not changed.",
                 "rollback_supported": False,
+            },
+            skip_post_response_hooks=True,
+        )
+
+    def _secret_store_status_response(self) -> OrchestratorResponse:
+        truth = self._runtime_truth()
+        status_payload: dict[str, Any] = {}
+        if truth is not None:
+            try:
+                status_payload = dict(truth.runtime_status("telegram_status"))
+            except Exception:
+                status_payload = {}
+        store_state = str(status_payload.get("secret_store_state") or "unknown").strip().lower() or "unknown"
+        store_valid = bool(status_payload.get("secret_store_valid", False))
+        error_kind = str(status_payload.get("secret_store_error_kind") or "").strip()
+        if store_state in {"missing", "unknown"} and not store_valid:
+            store_sentence = "The local secret store is missing or not readable yet."
+        elif store_state in {"corrupt", "unreadable", "error"} or error_kind:
+            store_sentence = f"The local secret store is not healthy ({error_kind or store_state})."
+        else:
+            store_sentence = "The local secret store is present."
+        message = (
+            f"{store_sentence} I will not print raw tokens, API keys, passwords, or secret values in chat. "
+            "For a redacted check, use `python -m agent.secrets get <key> --redacted`. "
+            "Showing a raw value requires the explicit operator-only `--show` flag in a terminal."
+        )
+        return self._runtime_truth_response(
+            text=message,
+            route="runtime_status",
+            used_tools=["secret_store_status"],
+            payload={
+                "type": "secret_store_status",
+                "secret_store_state": store_state,
+                "secret_store_valid": store_valid,
+                "secret_store_error_kind": error_kind or None,
+                "summary": message,
             },
             skip_post_response_hooks=True,
         )
@@ -17260,6 +17303,8 @@ class Orchestrator:
             return self._telegram_service_action_response(user_id, str(decision.get("telegram_action") or ""))
         if kind == "safety_bypass_refusal":
             return self._safety_bypass_refusal_response(user_id, text)
+        if kind == "secret_store_status":
+            return self._secret_store_status_response()
         if kind == "ambiguous_restart_target":
             return self._ambiguous_restart_target_response(user_id)
         if kind == "product_specific_guard":
@@ -17377,6 +17422,8 @@ class Orchestrator:
         if kind == "telegram_status":
             self._last_offer_topic[user_id] = "telegram_status"
             return self._telegram_status_response()
+        if kind == "secret_store_status":
+            return self._secret_store_status_response()
         if kind == "telegram_service_action":
             return self._telegram_service_action_response(user_id, str(decision.get("telegram_action") or ""))
         if kind == "safety_bypass_refusal":
