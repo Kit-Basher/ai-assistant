@@ -90,6 +90,26 @@ Search for dots.tts.
 This was response-quality polish, not a reliability blocker. It did not
 indicate unsafe mutation, search leakage, or stale confirmation execution.
 
+## Real-Use Journey Gap
+
+The P0 reliability batches prove safety gates and focused fault handling; they
+do not mean every natural user journey has been exercised through the installed
+web or Telegram surfaces. The first post-P0 real-use checks found two journey
+gaps:
+
+- Telegram messages cannot be answered when the optional
+  `personal-agent-telegram.service` is stopped, even if the token is configured.
+- Casual model/provider questions mentioning Ollama must answer status, not
+  switch models.
+
+`python scripts/real_use_journey_smoke.py` is the read-only installed-product
+audit for these paths. It verifies web chat greeting, casual Ollama status
+wording, immediate `why` follow-up context, `/telegram/status`, and Telegram
+poller/service truth. Deterministic Telegram transport tests prove
+incoming text -> local `/chat` payload -> outbound reply. Full live Telegram
+send/receive remains optional/manual because it requires a real Telegram chat,
+token, and network path.
+
 ## Remaining P1/P2 Gaps
 
 - Installed-product search repair failure proof for configured-stopped repair

@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-plan-mode-confirmation-matrix-clean`
-- Commit: `a5b0b3c`
+- Tag: `v0.2.1-rewrite-routing-polish-clean`
+- Commit: `d245567`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -72,6 +72,11 @@ Current confirmed proof:
 - `docs/operator/P0_RELIABILITY_RECAP.md`: concise checkpoint recap for the
   five completed P0 reliability batches, trusted gates, remaining P1/P2 gaps,
   and the now-fixed daily-driver rewrite irritant.
+- `python scripts/real_use_journey_smoke.py`: read-only installed-product
+  journey audit for real web chat greeting, casual Ollama/model-status wording,
+  immediate `why` follow-up context, and Telegram service/poller truth. This
+  closes the gap where P0 safety gates passed but a real Telegram message could
+  still get no reply because the optional Telegram service was stopped.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,
@@ -85,6 +90,22 @@ Current confirmed proof:
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
 - `python scripts/prove_ready.py`: `READY_FOR_VM_PROOF=yes`, `RELEASE_BLOCKERS=0`, `WARNINGS=2`
 - `git status`: clean at the checkpoint
+
+Real-use journey truth:
+
+- P0 reliability gates prove safety boundaries, fault handling, and stale
+  confirmation behavior. They do not by themselves prove every natural journey
+  through the installed UI or Telegram transport.
+- Telegram inbound text handling has deterministic transport coverage:
+  incoming text is converted to the local `/chat` payload and the returned
+  assistant text is sent back to Telegram.
+- Live Telegram delivery still depends on the optional
+  `personal-agent-telegram.service` being active and polling. If the service is
+  stopped, Telegram messages will not be received; the web/API assistant remains
+  usable and `/telegram/status` should say exactly how to start Telegram.
+- A real Telegram network/chat-id send-receive proof remains an optional manual
+  operator check because it requires a live bot token, network access, and a
+  real Telegram chat.
 
 New restart/browser survival lane:
 

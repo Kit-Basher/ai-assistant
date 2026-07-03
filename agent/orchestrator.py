@@ -4844,11 +4844,44 @@ class Orchestrator:
         chat_context: dict[str, Any] | None = None,
     ) -> OrchestratorResponse | None:
         followup_kind = self._interpretation_followup_kind(text)
-        if not followup_kind:
-            return None
         context = self._current_interpretable_result(user_id)
         if not context:
             return None
+        context_route = str(context.get("route") or "").strip().lower()
+        model_status_why = (
+            not followup_kind
+            and normalize_setup_text(text).replace("/", " ") == "why"
+            and context_route == "model_status"
+        )
+        if model_status_why:
+            followup_kind = "explain"
+        if not followup_kind:
+            return None
+        if model_status_why:
+            payload = context.get("payload") if isinstance(context.get("payload"), dict) else {}
+            model_id = (
+                str(payload.get("model_id") or payload.get("configured_model") or "").strip()
+                or "the configured chat model"
+            )
+            provider_id = (
+                str(payload.get("provider") or payload.get("configured_provider") or "").strip()
+                or "the configured provider"
+            )
+            ready = bool(payload.get("ready", False))
+            readiness = "ready" if ready else "not fully ready"
+            message = (
+                f"Because the runtime model status says chat is configured to use {model_id} on {provider_id}, "
+                f"and that target is {readiness}. I did not switch models; I only checked the current chat target."
+            )
+            return self._merge_response_data(
+                OrchestratorResponse(message),
+                route="interpretation_followup",
+                used_runtime_state=False,
+                used_llm=False,
+                used_memory=True,
+                used_tools=[],
+                ok=True,
+            )
         if followup_kind == "process_state":
             response_text = resource_followup(self.db, user_id, "process_state", self.timezone, question=text)
             return self._merge_response_data(

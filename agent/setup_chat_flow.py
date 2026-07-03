@@ -791,6 +791,17 @@ def normalize_setup_text(text: str | None) -> str:
     return " ".join(tokens)
 
 
+def _contains_word(normalized_text: str, word: str) -> bool:
+    token = str(word or "").strip()
+    if not token:
+        return False
+    return re.search(rf"\b{re.escape(token)}\b", str(normalized_text or "")) is not None
+
+
+def _contains_any_word(normalized_text: str, words: tuple[str, ...]) -> bool:
+    return any(_contains_word(normalized_text, word) for word in words)
+
+
 def extract_openrouter_api_key(text: str | None) -> str | None:
     value = str(text or "").strip()
     if not value:
@@ -802,10 +813,23 @@ def extract_openrouter_api_key(text: str | None) -> str | None:
 
 
 def _looks_like_current_model_query(normalized: str) -> bool:
+    normalized_space = str(normalized or "").replace("/", " ")
     if any(phrase in normalized for phrase in _CURRENT_MODEL_PHRASES):
         return True
     if any(head in normalized for head in _CURRENT_MODEL_QUERY_HEADS) and any(
         token in normalized for token in _CURRENT_MODEL_QUERY_KEYWORDS
+    ):
+        return True
+    if "ollama" in normalized_space and any(
+        phrase in normalized_space
+        for phrase in (
+            "are you running through",
+            "are you running on",
+            "you are running through",
+            "you re running through",
+            "you are running here through",
+            "running here through",
+        )
     ):
         return True
     if "provider" in normalized and any(token in normalized for token in ("using", "current", "active")):
@@ -2162,31 +2186,31 @@ def classify_setup_intent(
     if _looks_like_model_lifecycle_query(normalized):
         return {"kind": "model_lifecycle_status"}
     explicit_controller_request = _looks_like_explicit_model_controller_request(normalized)
+    if _looks_like_current_model_query(normalized):
+        return {"kind": "describe_current_model"}
     if "ollama" in normalized and not explicit_controller_request:
         if any(phrase in normalized for phrase in _OLLAMA_SETUP_PHRASES):
             return {"kind": "configure_ollama", "make_default": False}
         if any(phrase in normalized for phrase in _OLLAMA_USE_PHRASES):
             return {"kind": "configure_ollama", "make_default": True}
-        if any(token in normalized for token in _OLLAMA_SETUP_KEYWORDS):
+        if _contains_any_word(normalized, _OLLAMA_SETUP_KEYWORDS):
             return {"kind": "configure_ollama", "make_default": False}
-        if any(token in normalized for token in _OLLAMA_SWITCH_KEYWORDS):
+        if _contains_any_word(normalized, _OLLAMA_SWITCH_KEYWORDS):
             return {"kind": "configure_ollama", "make_default": True}
     if "openrouter" in normalized and not explicit_controller_request:
         if any(phrase in normalized for phrase in _OPENROUTER_SETUP_PHRASES):
             return {"kind": "configure_openrouter", "make_default": False}
         if any(phrase in normalized for phrase in _OPENROUTER_USE_PHRASES):
             return {"kind": "configure_openrouter", "make_default": True}
-        if any(token in normalized for token in _OPENROUTER_SETUP_KEYWORDS):
+        if _contains_any_word(normalized, _OPENROUTER_SETUP_KEYWORDS):
             return {"kind": "configure_openrouter", "make_default": False}
-        if any(token in normalized for token in _OPENROUTER_SWITCH_KEYWORDS):
+        if _contains_any_word(normalized, _OPENROUTER_SWITCH_KEYWORDS):
             return {"kind": "configure_openrouter", "make_default": True}
         if any(token in normalized for token in _PROVIDER_STATUS_KEYWORDS):
             return {"kind": "provider_status", "provider_id": "openrouter"}
     for provider_id in ("ollama", "openai"):
         if provider_id in normalized and any(token in normalized for token in _PROVIDER_STATUS_KEYWORDS):
             return {"kind": "provider_status", "provider_id": provider_id}
-    if _looks_like_current_model_query(normalized):
-        return {"kind": "describe_current_model"}
     if _looks_like_model_switch_advisory_query(normalized):
         return {"kind": "model_switch_advisory"}
     if any(phrase in normalized for phrase in _FIND_OLLAMA_MODELS_PHRASES):

@@ -3156,6 +3156,88 @@ class TestOrchestrator(unittest.TestCase):
         self.assertIn("ollama:qwen3.5:4b", lowered)
         self.assertNotIn("openrouter:old-cloud-model", lowered)
 
+    def test_casual_ollama_status_question_does_not_switch_model(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_provider = "ollama"
+        runtime_truth.current_model = "ollama:qwen3.5:4b"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        prompt = (
+            "no there should be a few things running, i have my game website being served locally here "
+            "and it uses the ollama llm and you are running here through ollama correct?"
+        )
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message(prompt, "user1")
+
+        self.assertEqual("model_status", response.data["route"])
+        self.assertFalse(response.data["used_llm"])
+        self.assertIn("ollama:qwen3.5:4b", response.text.lower())
+        self.assertNotIn("switched chat", response.text.lower())
+        self.assertNotIn(
+            ("set_confirmed_chat_model_target", {"model_id": "ollama:qwen2.5:3b-instruct", "provider_id": "ollama"}),
+            runtime_truth.calls,
+        )
+        self.assertFalse(any(call[0] == "set_confirmed_chat_model_target" for call in runtime_truth.calls))
+
+    def test_are_you_running_through_ollama_is_model_status_not_switch(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_provider = "ollama"
+        runtime_truth.current_model = "ollama:qwen3.5:4b"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            response = orchestrator.handle_message("are you running through ollama?", "user1")
+
+        self.assertEqual("model_status", response.data["route"])
+        self.assertIn("ollama:qwen3.5:4b", response.text.lower())
+        self.assertFalse(any(call[0] == "set_confirmed_chat_model_target" for call in runtime_truth.calls))
+
+    def test_why_after_model_status_uses_model_context_not_stale_system_check(self) -> None:
+        llm = _FakeChatLLM(enabled=False, text="should not run")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_provider = "ollama"
+        runtime_truth.current_model = "ollama:qwen3.5:4b"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+        prompt = "you are running here through ollama correct?"
+
+        first = orchestrator.handle_message(prompt, "user1")
+        second = orchestrator.handle_message("why", "user1")
+
+        self.assertEqual("model_status", first.data["route"])
+        self.assertEqual("interpretation_followup", second.data["route"])
+        self.assertFalse(second.data["used_llm"])
+        lowered = second.text.lower()
+        self.assertIn("ollama:qwen3.5:4b", lowered)
+        self.assertIn("did not switch models", lowered)
+        self.assertNotIn("doctor:", lowered)
+        self.assertNotIn("runtime is ready", lowered)
+
     def test_safe_mode_policy_beats_remembered_preference(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()

@@ -455,7 +455,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
                         "used_tools": [],
                     },
                 ),
-            ):
+            ) as mocked_chat_proxy:
                 asyncio.run(_handle_message(update, context))
 
             rows = _read_audit_rows(audit_path)
@@ -469,6 +469,11 @@ class TestTelegramAuditLogging(unittest.TestCase):
             params_text = json.dumps(params, ensure_ascii=True)
             self.assertNotIn(chat_id, params_text)
             self.assertNotIn(user_text.lower(), params_text.lower())
+            self.assertEqual(1, mocked_chat_proxy.call_count)
+            proxy_payload = mocked_chat_proxy.call_args.args[0]
+            self.assertEqual([{"role": "user", "content": user_text}], proxy_payload.get("messages"))
+            self.assertEqual(f"telegram:{chat_id}", proxy_payload.get("user_id"))
+            self.assertEqual("telegram", proxy_payload.get("source_surface"))
             self.assertEqual([], orchestrator.calls)
 
     def test_status_command_returns_status_with_commit(self) -> None:
@@ -510,7 +515,7 @@ class TestTelegramAuditLogging(unittest.TestCase):
             self.assertIn("uptime", reply_text)
             self.assertEqual([], orchestrator.calls)
 
-    def test_hello_forwards_to_orchestrator_not_status_template(self) -> None:
+    def test_hello_replies_without_status_template(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             audit_path = f"{tmpdir}/audit.jsonl"
             audit_log = AuditLog(path=audit_path)
@@ -533,13 +538,14 @@ class TestTelegramAuditLogging(unittest.TestCase):
             with patch(
                 "telegram_adapter.bot._post_local_api_chat_json_async",
                 return_value=_chat_api_response("LLM_CHAT_REPLY"),
-            ):
+            ) as mocked_chat_proxy:
                 asyncio.run(_handle_message(update, context))
 
             self.assertTrue(update.effective_message.replies)
             reply_text = str(update.effective_message.replies[-1]["text"] or "")
-            self.assertEqual("LLM_CHAT_REPLY", reply_text)
+            self.assertIn("ready to help", reply_text.lower())
             self.assertNotIn("✅ Agent is running", reply_text)
+            self.assertEqual(0, mocked_chat_proxy.call_count)
             self.assertEqual([], orchestrator.calls)
 
     def test_text_command_path_delegates_to_bridge(self) -> None:
@@ -1056,7 +1062,7 @@ def test_api_proxy_exception_logs_traceback_and_returns_fallback(caplog):  # typ
         orchestrator = _RaisingOrchestrator()
         db = _FakeDB()
         chat_id = "9988776655"
-        update = _FakeUpdate(int(chat_id), "hello")
+        update = _FakeUpdate(int(chat_id), "show me task summary")
         context = _FakeContext(
             {
                 "orchestrator": orchestrator,
