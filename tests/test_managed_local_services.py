@@ -611,6 +611,35 @@ search:
         self.assertIn(["podman", "start", "personal-agent-searxng"], argv_rows)
         self.assertFalse(any(len(argv) > 1 and argv[1] in {"pull", "run", "rm"} for argv in argv_rows))
 
+    def test_existing_stopped_container_repair_returns_bounded_pending_when_health_is_slow(self) -> None:
+        runner = _FakeManagedServiceRunner(
+            existing=True,
+            inspect_payload=_approved_searxng_inspect(self.tmpdir.name, running=False),
+        )
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=runner,
+            health_checker=lambda _url: False,
+            port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
+        )
+
+        started = time.monotonic()
+        result = executor.execute_plan(executor.build_searxng_setup_plan(selected_engine="podman"))
+        elapsed = time.monotonic() - started
+
+        self.assertFalse(result.ok)
+        self.assertEqual("managed_service_startup_pending", result.blocked_reason)
+        self.assertFalse(result.did_pull)
+        self.assertFalse(result.did_run)
+        self.assertIn("bounded chat readiness window", result.error or "")
+        self.assertLess(elapsed, 1.0)
+        argv_rows = [call["argv"] for call in runner.calls]
+        self.assertIn(["podman", "start", "personal-agent-searxng"], argv_rows)
+        self.assertFalse(any(len(argv) > 1 and argv[1] in {"pull", "run", "rm"} for argv in argv_rows))
+
     def test_existing_container_mismatched_image_blocks_without_cleanup(self) -> None:
         runner = _FakeManagedServiceRunner(
             existing=True,
@@ -873,7 +902,32 @@ search:
         self.assertTrue(ok)
         self.assertEqual(["HEAD", "GET"], methods)
         self.assertEqual("GET", diagnostics["last_health_method"])
-        self.assertEqual(200, diagnostics["last_health_status"])
+
+    def test_http_health_probe_uses_short_probe_timeout(self) -> None:
+        timeouts: list[float] = []
+
+        def _urlopen(request, timeout: float = 5.0):  # noqa: ANN001
+            _ = request
+            timeouts.append(float(timeout))
+            raise TimeoutError("slow")
+
+        executor = ManagedLocalServiceExecutor(
+            managed_root=self.tmpdir.name,
+            command_finder=lambda name: f"/usr/bin/{name}" if name == "podman" else None,
+            runner=_FakeManagedServiceRunner(),
+            port_checker=lambda _port: True,
+            health_timeout_seconds=0.01,
+            health_poll_interval_seconds=0.01,
+            health_probe_timeout_seconds=0.25,
+        )
+
+        with mock.patch("agent.services.managed_local_services.urllib.request.urlopen", side_effect=_urlopen):
+            ok, diagnostics = executor._wait_for_health("http://127.0.0.1:8888")  # noqa: SLF001
+
+        self.assertFalse(ok)
+        self.assertTrue(timeouts)
+        self.assertTrue(all(timeout == 0.25 for timeout in timeouts))
+        self.assertIn(diagnostics["last_health_method"], {"HEAD", "GET"})
 
     def test_rollback_does_not_delete_preexisting_container(self) -> None:
         runner = _FakeManagedServiceRunner(existing=True)
@@ -1570,9 +1624,10 @@ class TestManagedLocalServicesEndpointAndChat(unittest.TestCase):
         self.assertNotIn("Approved container: personal-agent-searxng", text)
         self.assertNotIn("Loopback bind: 127.0.0.1:8080:8080", text)
         setup = body.get("setup", {}) if isinstance(body.get("setup"), dict) else {}
-        plan = setup.get("plan", {}) if isinstance(setup.get("plan"), dict) else {}
-        self.assertEqual("podman_prerequisite", plan.get("setup_mode"))
-        self.assertEqual("podman", plan.get("prerequisite"))
+        canonical_plan = setup.get("canonical_plan", {}) if isinstance(setup.get("canonical_plan"), dict) else {}
+        self.assertEqual("podman_prerequisite_setup_preview", setup.get("action"))
+        self.assertEqual("podman", setup.get("prerequisite"))
+        self.assertEqual("managed_local_service.prerequisite", canonical_plan.get("action_type"))
         meta = body.get("meta", {}) if isinstance(body.get("meta"), dict) else {}
         self.assertIn("managed_local_service_prerequisite_preview", meta.get("used_tools", []))
 

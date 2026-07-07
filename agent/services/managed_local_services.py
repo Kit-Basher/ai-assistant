@@ -316,8 +316,9 @@ class ManagedLocalServiceExecutor:
         port_checker: Callable[[int], bool] | None = None,
         secret_generator: Callable[[], str] | None = None,
         timeout_seconds: float = 60.0,
-        health_timeout_seconds: float = 30.0,
+        health_timeout_seconds: float = 12.0,
         health_poll_interval_seconds: float = 1.0,
+        health_probe_timeout_seconds: float = 1.0,
     ) -> None:
         self._managed_root = Path(managed_root).expanduser().resolve()
         self._command_finder = command_finder or trusted_command_path
@@ -326,10 +327,9 @@ class ManagedLocalServiceExecutor:
         self._port_checker = port_checker or self._port_available
         self._secret_generator = secret_generator or (lambda: secrets_lib.token_urlsafe(32))
         self._timeout_seconds = max(1.0, float(timeout_seconds or 60.0))
-        self._health_timeout_seconds = max(30.0, float(health_timeout_seconds or 30.0))
-        if health_timeout_seconds < 30.0:
-            self._health_timeout_seconds = max(0.0, float(health_timeout_seconds))
+        self._health_timeout_seconds = max(0.0, float(health_timeout_seconds or 12.0))
         self._health_poll_interval_seconds = max(0.01, float(health_poll_interval_seconds or 1.0))
+        self._health_probe_timeout_seconds = max(0.1, float(health_probe_timeout_seconds or 1.0))
 
     def build_searxng_setup_plan(self, *, selected_engine: str, host_port: int = APPROVED_SEARXNG_PORT) -> ManagedLocalServiceSetupPlan:
         engine = str(selected_engine or "").strip().lower()
@@ -850,8 +850,11 @@ class ManagedLocalServiceExecutor:
             service_id=effective_plan.service_id,
             selected_engine=effective_plan.engine,
             reachable=False,
-            blocked_reason="managed_service_existing_container_unhealthy",
-            error="The existing approved SearXNG container was restarted, but health verification failed. I did not remove it.",
+            blocked_reason="managed_service_startup_pending",
+            error=(
+                "The approved SearXNG container was started, but it was not reachable within the bounded chat readiness window. "
+                "Startup may still be continuing; check /search/status and retry the lookup when it reports configured_running."
+            ),
             plan=effective_plan,
             diagnostics={"repaired_existing_container": True, "repair_action": "start_existing_container", **health_diagnostics},
             journal=journal.to_dict(),
@@ -1099,11 +1102,10 @@ class ManagedLocalServiceExecutor:
             return True, get_info
         return False, get_info if get_info.get("error") else head_info
 
-    @staticmethod
-    def _http_health_probe(url: str, *, method: str) -> tuple[bool, dict[str, Any]]:
+    def _http_health_probe(self, url: str, *, method: str) -> tuple[bool, dict[str, Any]]:
         request = urllib.request.Request(url, method=method, headers={"User-Agent": "personal-agent-managed-service/1"})
         try:
-            with urllib.request.urlopen(request, timeout=5) as response:  # nosec B310 - fixed loopback URL after validation.
+            with urllib.request.urlopen(request, timeout=self._health_probe_timeout_seconds) as response:  # nosec B310 - fixed loopback URL after validation.
                 status = int(getattr(response, "status", 0) or 0)
                 return status == 200, {"ok": status == 200, "method": method, "status": status}
         except urllib.error.HTTPError as exc:
