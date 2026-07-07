@@ -3238,6 +3238,182 @@ class TestOrchestrator(unittest.TestCase):
         self.assertNotIn("doctor:", lowered)
         self.assertNotIn("runtime is ready", lowered)
 
+    def test_ram_system_check_is_concise_and_stores_baseline(self) -> None:
+        orchestrator = self._orchestrator()
+        payload = {
+            "source": "live",
+            "memory": {
+                "total": 64 * 1024**3,
+                "used": 12 * 1024**3,
+                "available": 50 * 1024**3,
+                "free": 20 * 1024**3,
+                "used_pct": 18.8,
+            },
+            "swap": {"total": 4 * 1024**3, "used": 3 * 1024**3},
+            "loads": {"1m": 0.4, "5m": 0.5, "15m": 0.6},
+            "rss_samples": [
+                {"pid": 11, "name": "ollama runner", "rss_bytes": 3 * 1024**3, "cpu_ticks": 100},
+                {"pid": 12, "name": "brave", "rss_bytes": 2 * 1024**3, "cpu_ticks": 50},
+                {"pid": 13, "name": "Discord", "rss_bytes": 1 * 1024**3, "cpu_ticks": 30},
+            ],
+            "cpu_samples": [{"pid": 11, "name": "ollama runner", "rss_bytes": 3 * 1024**3, "cpu_ticks": 100}],
+        }
+        payload["cause_analysis"] = {
+            "top_memory": payload["rss_samples"],
+            "top_cpu": payload["cpu_samples"],
+        }
+        orchestrator.skills["resource_governor"].functions["resource_report"].handler = lambda ctx, user_id=None: {
+            "status": "ok",
+            "text": "long raw report",
+            "payload": payload,
+            "cards_payload": {
+                "cards": [
+                    {"title": "Memory", "lines": ["Used: 12 GB"], "severity": "ok"},
+                    {"title": "Top memory processes", "lines": ["pid=11 ollama runner: 3 GB"], "severity": "ok"},
+                ],
+                "raw_available": True,
+                "summary": "Likely cause: Ollama.",
+                "confidence": 1.0,
+                "next_questions": ["Show top processes"],
+            },
+        }
+
+        with patch("agent.orchestrator.can_run_nl_skill", return_value=(True, None)), patch(
+            "agent.nl_router.select_observe_skills",
+            return_value=[{"skill": "resource_governor", "function": "resource_report"}],
+        ):
+            response = orchestrator.handle_message("can you do a quick system check and see if anything is eating ram?", "user1")
+
+        text = response.text
+        self.assertIn("RAM is not under pressure", text)
+        self.assertIn("Used: 12.0 GB / 64.0 GB", text)
+        self.assertIn("Available: 50.0 GB", text)
+        self.assertIn("Ollama", text)
+        self.assertIn("I saved this as a baseline", text)
+        self.assertNotIn("Top memory processes", text)
+        self.assertNotIn("pid=", text)
+        stored = self.db.get_preference("system_resource_baseline_v1")
+        self.assertTrue(stored)
+        baseline = json.loads(stored or "{}")
+        self.assertEqual("system_resource_baseline.v1", baseline.get("schema"))
+        self.assertIn("Ollama", baseline.get("usual_process_labels", []))
+
+    def test_detailed_ram_system_check_keeps_process_details(self) -> None:
+        orchestrator = self._orchestrator()
+        payload = {
+            "source": "live",
+            "memory": {"total": 64 * 1024**3, "used": 20 * 1024**3, "available": 40 * 1024**3, "used_pct": 31.2},
+            "swap": {"total": 4 * 1024**3, "used": 1 * 1024**3},
+            "loads": {"1m": 0.4},
+            "rss_samples": [{"pid": 22, "name": "brave", "rss_bytes": 4 * 1024**3, "cpu_ticks": 50}],
+            "cpu_samples": [{"pid": 22, "name": "brave", "rss_bytes": 4 * 1024**3, "cpu_ticks": 50}],
+        }
+        payload["cause_analysis"] = {"top_memory": payload["rss_samples"], "top_cpu": payload["cpu_samples"]}
+        orchestrator.skills["resource_governor"].functions["resource_report"].handler = lambda ctx, user_id=None: {
+            "status": "ok",
+            "text": "long raw report",
+            "payload": payload,
+            "cards_payload": {
+                "cards": [
+                    {"title": "Memory", "lines": ["Used: 20 GB"], "severity": "ok"},
+                    {"title": "Top memory processes", "lines": ["pid=22 brave: 4 GB"], "severity": "ok"},
+                ],
+                "raw_available": True,
+                "summary": "Likely cause: browser.",
+                "confidence": 1.0,
+                "next_questions": ["Show top processes"],
+            },
+        }
+
+        with patch("agent.orchestrator.can_run_nl_skill", return_value=(True, None)), patch(
+            "agent.nl_router.select_observe_skills",
+            return_value=[{"skill": "resource_governor", "function": "resource_report"}],
+        ):
+            response = orchestrator.handle_message(
+                "full detailed system check, show top memory and CPU processes",
+                "user1",
+            )
+
+        self.assertIn("Top memory processes", response.text)
+        self.assertIn("pid=22 brave", response.text)
+        self.assertTrue(self.db.get_preference("system_resource_baseline_v1"))
+
+    def test_later_ram_system_check_compares_against_baseline(self) -> None:
+        orchestrator = self._orchestrator()
+        first_payload = {
+            "source": "live",
+            "memory": {"total": 64 * 1024**3, "used": 16 * 1024**3, "available": 45 * 1024**3, "used_pct": 25.0},
+            "swap": {"total": 4 * 1024**3, "used": 1 * 1024**3},
+            "loads": {"1m": 0.4},
+            "rss_samples": [{"pid": 11, "name": "ollama", "rss_bytes": 3 * 1024**3, "cpu_ticks": 50}],
+            "cpu_samples": [{"pid": 11, "name": "ollama", "rss_bytes": 3 * 1024**3, "cpu_ticks": 50}],
+        }
+        second_payload = {
+            **first_payload,
+            "memory": {"total": 64 * 1024**3, "used": 18 * 1024**3, "available": 43 * 1024**3, "used_pct": 28.0},
+        }
+        payloads = [first_payload, second_payload]
+
+        def _resource(_ctx, user_id=None):  # type: ignore[no-untyped-def]
+            payload = payloads.pop(0)
+            payload["cause_analysis"] = {"top_memory": payload["rss_samples"], "top_cpu": payload["cpu_samples"]}
+            return {
+                "status": "ok",
+                "text": "long raw report",
+                "payload": payload,
+                "cards_payload": {"cards": [{"title": "Memory", "lines": ["ok"], "severity": "ok"}], "summary": "ok", "raw_available": True},
+            }
+
+        orchestrator.skills["resource_governor"].functions["resource_report"].handler = _resource
+        with patch("agent.orchestrator.can_run_nl_skill", return_value=(True, None)), patch(
+            "agent.nl_router.select_observe_skills",
+            return_value=[{"skill": "resource_governor", "function": "resource_report"}],
+        ):
+            orchestrator.handle_message("can you do a quick system check and see if anything is eating ram?", "user1")
+            second = orchestrator.handle_message("can you do a quick system check and see if anything is eating ram?", "user1")
+
+        self.assertIn("Compared with your usual baseline", second.text)
+        self.assertIn("looks normal", second.text)
+
+    def test_game_website_ollama_statement_updates_safe_baseline_context(self) -> None:
+        orchestrator = self._orchestrator()
+        response = orchestrator.handle_message("my game website uses Ollama and should be running", "user1")
+        self.assertIn("normal expected context", response.text)
+        self.assertIn("not logs or raw process output", response.text.lower())
+        raw = self.db.get_preference("system_resource_baseline_context_v1")
+        self.assertTrue(raw)
+        context = json.loads(raw or "{}")
+        self.assertIn("game website", context.get("expected_apps", []))
+        self.assertIn("Ollama", context.get("expected_apps", []))
+        self.assertNotIn("/", raw or "")
+
+    def test_system_baseline_does_not_store_secret_like_process_names(self) -> None:
+        orchestrator = self._orchestrator()
+        payload = {
+            "source": "live",
+            "memory": {"total": 64 * 1024**3, "used": 12 * 1024**3, "available": 50 * 1024**3, "used_pct": 18.8},
+            "swap": {"total": 0, "used": 0},
+            "loads": {"1m": 0.4},
+            "rss_samples": [{"pid": 11, "name": "helper 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef", "rss_bytes": 3 * 1024**3, "cpu_ticks": 50}],
+            "cpu_samples": [{"pid": 11, "name": "helper 123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef", "rss_bytes": 3 * 1024**3, "cpu_ticks": 50}],
+        }
+        payload["cause_analysis"] = {"top_memory": payload["rss_samples"], "top_cpu": payload["cpu_samples"]}
+        orchestrator.skills["resource_governor"].functions["resource_report"].handler = lambda ctx, user_id=None: {
+            "status": "ok",
+            "text": "long raw report",
+            "payload": payload,
+            "cards_payload": {"cards": [{"title": "Memory", "lines": ["ok"], "severity": "ok"}], "summary": "ok", "raw_available": True},
+        }
+        with patch("agent.orchestrator.can_run_nl_skill", return_value=(True, None)), patch(
+            "agent.nl_router.select_observe_skills",
+            return_value=[{"skill": "resource_governor", "function": "resource_report"}],
+        ):
+            orchestrator.handle_message("quick system check ram", "user1")
+
+        stored = self.db.get_preference("system_resource_baseline_v1") or ""
+        self.assertNotIn("ABCDEFGHIJKLMNOPQRSTUVWXYZ", stored)
+        self.assertNotIn("123456789:", stored)
+
     def test_safe_mode_policy_beats_remembered_preference(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="should not run")
         runtime_truth = _FakeRuntimeTruthService()
@@ -9823,8 +9999,9 @@ Workflow:
         with patch.object(collector, "collect_live_snapshot", return_value=live):
             response = orchestrator.handle_message("how much RAM am I using right now?", "tester")
 
-        self.assertIn("You’re using", response.text)
-        self.assertIn("21.3 GiB of RAM", response.text)
+        self.assertIn("RAM is not under pressure", response.text)
+        self.assertIn("Used: 21.3 GB / 67.4 GB", response.text)
+        self.assertIn("I saved this as a baseline", response.text)
         self.assertNotIn("Likely cause:", response.text)
         self.assertNotIn("Top CPU processes", response.text)
 
@@ -9854,7 +10031,7 @@ Workflow:
         }
 
         with patch.object(collector, "collect_live_snapshot", return_value=live):
-            response = orchestrator.handle_message("what is using my RAM?", "tester")
+            response = orchestrator.handle_message("show details: what is using my RAM?", "tester")
 
         self.assertIn("Likely cause:", response.text)
         self.assertIn("Top CPU processes", response.text)

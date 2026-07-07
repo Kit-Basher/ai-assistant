@@ -12,7 +12,10 @@ marketing copy and it is not a final release claim.
 
 Current confirmed proof:
 
-- `python scripts/installed_product_abuse.py`: `PASS=42 WARN=0 FAIL=0`
+- `python scripts/installed_product_abuse.py`: `PASS=40 WARN=0 FAIL=0`
+  when search starts `configured_running`; `PASS=42 WARN=0 FAIL=0` when search
+  starts `configured_stopped` and the repair preview plus approval branch is
+  exercised successfully.
 - `python scripts/operator_lifecycle_smoke.py`: installed operator lifecycle
   preview lane passes
 - `python scripts/memory_lifecycle_smoke.py`: installed memory lifecycle
@@ -72,11 +75,17 @@ Current confirmed proof:
 - `docs/operator/P0_RELIABILITY_RECAP.md`: concise checkpoint recap for the
   five completed P0 reliability batches, trusted gates, remaining P1/P2 gaps,
   and the now-fixed daily-driver rewrite irritant.
-- `python scripts/real_use_journey_smoke.py`: read-only installed-product
+- `python scripts/real_use_journey_smoke.py`: non-destructive installed-product
   journey audit for real web chat greeting, casual Ollama/model-status wording,
-  immediate `why` follow-up context, and Telegram service/poller truth. This
-  closes the gap where P0 safety gates passed but a real Telegram message could
-  still get no reply because the optional Telegram service was stopped.
+  immediate `why` follow-up context, concise RAM/system-check baseline behavior,
+  and Telegram service/poller truth. This closes the gap where P0 safety gates
+  passed but a real Telegram message could still get no reply because the
+  optional Telegram service was stopped.
+- `python scripts/normal_user_acceptance_smoke.py`: installed-product
+  response-quality acceptance layer for normal-user UX. It rejects verbose
+  diagnostic dumps for Telegram-style RAM checks, requires baseline
+  create/compare language, verifies explicit detailed mode remains available,
+  and checks that system baselines stay bounded and secret-free.
 - `docs/operator/PYTEST_FAILURE_TRIAGE.md`: current classification of full
   pytest inventory failures. It records the `108 failed, 2280 passed` rerun and
   separates stale expectations, environment assumptions, duplicate gates,

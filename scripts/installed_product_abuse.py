@@ -666,6 +666,24 @@ def main(argv: list[str] | None = None) -> int:
     print("")
     print("## Summary")
     print(f"PASS={passed} WARN={warned} FAIL={failed}")
+    search_state = next(
+        (
+            str(check.detail or "")
+            for check in checks
+            if check.name == "search state before abuse"
+        ),
+        "",
+    )
+    if "configured_running" in search_state:
+        print(
+            "NOTE: configured_stopped search repair preview/approval checks were not exercised "
+            "because search started configured_running; expected PASS count is 40 in this state."
+        )
+    elif "configured_stopped" in search_state:
+        print(
+            "NOTE: configured_stopped search repair preview/approval checks were exercised; "
+            "expected PASS count is 42 when repair succeeds."
+        )
     if failed:
         print("INSTALLED_PRODUCT_ABUSE: fail")
         return 1

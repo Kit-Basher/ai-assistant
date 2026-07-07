@@ -192,6 +192,29 @@ def run(base_url: str, timeout: float) -> list[Check]:
         else _fail("why follows model status context", why_text, 'POST /chat {"message": "why"} after model status', "Keep immediate model-status context ahead of stale diagnostic context.")
     )
 
+    ram_prompt = "can you do a quick system check and see if anything is eating ram?"
+    ram = _post_chat(base_url, ram_prompt, thread_id="ram-check", timeout=timeout)
+    ram_text = _assistant_text(ram)
+    ram_lower = ram_text.lower()
+    ram_lines = [line for line in ram_text.splitlines() if line.strip()]
+    ram_ok = (
+        int(ram.get("http_status") or 200) == 200
+        and len(ram_text) <= 900
+        and len(ram_lines) <= 10
+        and "ram" in ram_lower
+        and ("not under pressure" in ram_lower or "under pressure" in ram_lower)
+        and ("baseline" in ram_lower or "usual" in ram_lower)
+        and "top memory processes" not in ram_lower
+        and "top cpu processes" not in ram_lower
+        and "pid=" not in ram_lower
+        and "likely cause:" not in ram_lower
+    )
+    checks.append(
+        _pass("concise RAM check with baseline", ram_text, f'POST /chat {{"message": "{ram_prompt}"}}')
+        if ram_ok
+        else _fail("concise RAM check with baseline", ram_text, f'POST /chat {{"message": "{ram_prompt}"}}', "Keep quick system checks concise and baseline-aware by default.")
+    )
+
     telegram = _request_json("GET", base_url, "/telegram/status", timeout=timeout)
     service_detail = _telegram_service_detail(timeout)
     configured = telegram.get("configured") is True
@@ -253,13 +276,15 @@ def run(base_url: str, timeout: float) -> list[Check]:
     checks.append(
         _pass("git status unchanged", "clean" if not after else after, "git status --short")
         if before == after
-        else _fail("git status unchanged", f"before={before!r} after={after!r}", "git status --short", "Real-use smoke should be read-only.")
+        else _fail("git status unchanged", f"before={before!r} after={after!r}", "git status --short", "Real-use smoke must not change repo files.")
     )
     return checks
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run read-only real-use journey checks against the installed Personal Agent API.")
+    parser = argparse.ArgumentParser(
+        description="Run non-destructive real-use journey checks against the installed Personal Agent API."
+    )
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--timeout", type=float, default=30.0)
     args = parser.parse_args()

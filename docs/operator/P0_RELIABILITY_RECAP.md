@@ -102,13 +102,20 @@ gaps:
 - Casual model/provider questions mentioning Ollama must answer status, not
   switch models.
 
-`python scripts/real_use_journey_smoke.py` is the read-only installed-product
+`python scripts/real_use_journey_smoke.py` is the non-destructive installed-product
 audit for these paths. It verifies web chat greeting, casual Ollama status
-wording, immediate `why` follow-up context, `/telegram/status`, and Telegram
-poller/service truth. Deterministic Telegram transport tests prove
+wording, immediate `why` follow-up context, concise RAM/system-check baseline
+behavior, `/telegram/status`, and Telegram poller/service truth. Deterministic
+Telegram transport tests prove
 incoming text -> local `/chat` payload -> outbound reply. Full live Telegram
 send/receive remains optional/manual because it requires a real Telegram chat,
 token, and network path.
+
+Normal-user response quality is now tracked separately from P0 safety gates.
+`python scripts/normal_user_acceptance_smoke.py` rejects factually useful but
+too-verbose default diagnostic dumps, especially Telegram-style RAM checks. It
+requires concise status, used/available RAM, baseline create/compare language,
+safe expected-context memory, and an explicit detail mode for process tables.
 
 ## Remaining P1/P2 Gaps
 

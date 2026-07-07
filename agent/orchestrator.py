@@ -96,7 +96,7 @@ from agent.packs.store import PackStore
 from agent.actions.persistent_journal import PersistentManagedActionJournalStore
 from agent.compare_mode import compare_now_to_what_if
 from agent.report_followups import resource_followup
-from agent.resource_insights import summarize_resource_report
+from agent.resource_insights import classify_memory_pressure, summarize_resource_report
 from agent.changed_report import build_changed_report_from_system_facts
 from agent.policy import build_canonical_plan, evaluate_policy
 import agent.opinion_gate as opinion_gate
@@ -20278,6 +20278,8 @@ class Orchestrator:
             context["memory_disabled_for_turn"] = True
         if self._should_skip_turn_memory_hooks(text):
             context["skip_turn_memory_hooks"] = True
+        if not memory_disabled_for_turn and self._maybe_record_system_baseline_user_context(text):
+            context["system_baseline_context_recorded"] = True
         response = self._handle_message_impl(text, user_id, chat_context=context)
         orchestrator_timing_ms: dict[str, int] = {
             "message_impl_ms": int(max(0.0, time.monotonic() - orchestrator_started) * 1000),
@@ -20535,6 +20537,24 @@ class Orchestrator:
                             "scope": "current_turn",
                         },
                     )
+            if bool(context.get("system_baseline_context_recorded", False)):
+                message = (
+                    "Got it - I will treat your local game website and Ollama as normal expected context "
+                    "for future system checks. I stored only a short baseline note, not logs or raw process output."
+                )
+                return self._runtime_truth_response(
+                    text=message,
+                    route="agent_memory",
+                    used_runtime_state=False,
+                    used_memory=True,
+                    used_tools=[],
+                    skip_post_response_hooks=True,
+                    payload={
+                        "type": "system_baseline_context",
+                        "summary": message,
+                        "baseline_context_key": _SYSTEM_BASELINE_CONTEXT_PREF_KEY,
+                    },
+                )
             skip_turn_memory_hooks = bool(initial_skip_turn_memory_hooks or self._should_skip_turn_memory_hooks(effective_user_text))
             if skip_turn_memory_hooks:
                 context["skip_turn_memory_hooks"] = True
@@ -24509,12 +24529,217 @@ class Orchestrator:
                 )
             if correction_requested:
                 summary += " My earlier memory reading was wrong or incomplete."
-            followups = [str(item) for item in (analysis.get("followups") if isinstance(analysis, dict) else []) if str(item).strip()]
+            raw_followups = analysis.get("followups") if isinstance(analysis, dict) else []
+            if not isinstance(raw_followups, list):
+                raw_followups = []
+            followups = [str(item) for item in raw_followups if str(item).strip()]
             for item in ["Show only CPU deltas", "Show only memory deltas"]:
                 if item not in followups:
                     followups.append(item)
             return summary, followups or ["Show only CPU deltas", "Show only memory deltas"]
         return "Status snapshot ready.", ["Show details", "What changed since last snapshot?"]
+
+    def _system_baseline_context(self) -> dict[str, Any]:
+        raw = self.db.get_preference(_SYSTEM_BASELINE_CONTEXT_PREF_KEY)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _latest_system_baseline(self) -> dict[str, Any]:
+        raw = self.db.get_preference(_SYSTEM_BASELINE_PREF_KEY)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _maybe_record_system_baseline_user_context(self, text: str) -> bool:
+        normalized = normalize_setup_text(text).replace("/", " ")
+        if "ollama" not in normalized:
+            return False
+        if "you are running" in normalized or "are you running" in normalized or "correct" in normalized:
+            return False
+        if not any(phrase in normalized for phrase in ("game website", "website", "game site", "local site")):
+            return False
+        if not any(token in normalized for token in ("running", "should", "uses", "use")):
+            return False
+        context = self._system_baseline_context()
+        expected_apps = {
+            str(item).strip()
+            for item in (context.get("expected_apps") if isinstance(context.get("expected_apps"), list) else [])
+            if str(item).strip()
+        }
+        expected_apps.update({"game website", "Ollama"})
+        context.update(
+            {
+                "schema": "system_resource_baseline_context.v1",
+                "expected_apps": sorted(expected_apps),
+                "note": "User says a local game website may normally be running and use Ollama.",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        try:
+            self.db.set_preference(_SYSTEM_BASELINE_CONTEXT_PREF_KEY, json.dumps(context, ensure_ascii=True, sort_keys=True))
+        except Exception:
+            return False
+        return True
+
+    def _build_safe_system_baseline(self, payload: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
+        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        swap = payload.get("swap") if isinstance(payload.get("swap"), dict) else {}
+        top_memory = analysis.get("top_memory") if isinstance(analysis.get("top_memory"), list) else []
+        top_cpu = analysis.get("top_cpu") if isinstance(analysis.get("top_cpu"), list) else []
+        labels: list[str] = []
+        for row in list(top_memory[:5]) + list(top_cpu[:5]):
+            if not isinstance(row, dict):
+                continue
+            label = _safe_process_label(str(row.get("name") or ""))
+            if label and label not in labels:
+                labels.append(label)
+        context = self._system_baseline_context()
+        expected_apps = [
+            str(item).strip()
+            for item in (context.get("expected_apps") if isinstance(context.get("expected_apps"), list) else [])
+            if str(item).strip()
+        ][:8]
+        return {
+            "schema": "system_resource_baseline.v1",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "memory": {
+                "total": int(memory.get("total") or 0),
+                "used": int(memory.get("used") or 0),
+                "available": int(memory.get("available") or 0),
+                "used_pct": round(float(memory.get("used_pct") or 0.0), 1),
+            },
+            "swap": {
+                "total": int(swap.get("total") or 0),
+                "used": int(swap.get("used") or 0),
+            },
+            "usual_process_labels": labels[:8],
+            "expected_apps": expected_apps,
+            "summary": "Safe RAM/system baseline summary only; raw process dumps and command output are not stored.",
+        }
+
+    def _save_system_baseline(self, baseline: dict[str, Any]) -> None:
+        try:
+            encoded = json.dumps(baseline, ensure_ascii=True, sort_keys=True)
+            if len(encoded) <= 4000:
+                self.db.set_preference(_SYSTEM_BASELINE_PREF_KEY, encoded)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _system_baseline_comparison(current: dict[str, Any], previous: dict[str, Any]) -> str:
+        if not previous:
+            return "I saved this as a baseline for future comparisons."
+        current_memory = current.get("memory") if isinstance(current.get("memory"), dict) else {}
+        previous_memory = previous.get("memory") if isinstance(previous.get("memory"), dict) else {}
+        current_available = int(current_memory.get("available") or 0)
+        previous_available = int(previous_memory.get("available") or 0)
+        current_used = int(current_memory.get("used") or 0)
+        previous_used = int(previous_memory.get("used") or 0)
+        total = int(current_memory.get("total") or previous_memory.get("total") or 0)
+        available_delta = current_available - previous_available
+        used_delta = current_used - previous_used
+        material = total > 0 and (abs(available_delta) / float(total)) >= 0.10
+        if material and available_delta < 0:
+            return f"Compared with your usual baseline, RAM use is higher by about {_format_gib_value(abs(used_delta))}."
+        if material and available_delta > 0:
+            return f"Compared with your usual baseline, RAM pressure is lower by about {_format_gib_value(abs(available_delta))} available."
+        return "Compared with your usual baseline, this looks normal."
+
+    def _concise_resource_report_response(
+        self,
+        *,
+        user_id: str,
+        text: str,
+        payload: dict[str, Any],
+        analysis: dict[str, Any],
+        used_tools: list[str],
+    ) -> OrchestratorResponse:
+        memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
+        swap = payload.get("swap") if isinstance(payload.get("swap"), dict) else {}
+        total = int(memory.get("total") or 0)
+        used = int(memory.get("used") or 0)
+        available = int(memory.get("available") or 0)
+        swap_total = int(swap.get("total") or 0)
+        swap_used = int(swap.get("used") or 0)
+        pressure = bool(
+            classify_memory_pressure(total_bytes=total, available_bytes=available, swap_used_bytes=swap_used).get("is_pressure")
+        )
+        headline = "RAM is under pressure." if pressure else "You're fine - RAM is not under pressure."
+        top_labels = [
+            _safe_process_label(str(row.get("name") or ""))
+            for row in (analysis.get("top_memory") if isinstance(analysis.get("top_memory"), list) else [])[:5]
+            if isinstance(row, dict)
+        ]
+        top_labels = [label for index, label in enumerate(top_labels) if label and label not in top_labels[:index]]
+        if not top_labels:
+            top_labels = ["no single runaway process"]
+        cpu_info = analysis.get("cpu") if isinstance(analysis.get("cpu"), dict) else {}
+        load_1m = float(cpu_info.get("load_1m") or 0.0)
+        load_5m = float(cpu_info.get("load_5m") or 0.0)
+        load_15m = float(cpu_info.get("load_15m") or 0.0)
+        cpu_count = int(cpu_info.get("cpu_count") or 0)
+        load_line = ""
+        if load_1m > 0.0 or "cpu" in normalize_setup_text(text) or "slow" in normalize_setup_text(text) or "lag" in normalize_setup_text(text):
+            if cpu_count > 0:
+                load_state = "high" if load_1m >= float(cpu_count) else "normal"
+                load_line = f"CPU/load looks {load_state}: {load_1m:.2f} 1m load across {cpu_count} cores."
+            elif load_1m > 0.0:
+                load_line = f"CPU/load: {load_1m:.2f} 1m load (5m {load_5m:.2f}, 15m {load_15m:.2f})."
+            else:
+                load_line = "CPU/load: no obvious pressure in the current snapshot."
+        swap_line = ""
+        if swap_total > 0:
+            swap_ratio = (swap_used / float(swap_total)) if swap_total > 0 else 0.0
+            swap_line = (
+                f"Swap is a little high at {_format_gib_value(swap_used)} / {_format_gib_value(swap_total)}, but nothing looks like a runaway memory leak."
+                if swap_ratio >= 0.50 and not pressure
+                else f"Swap: {_format_gib_value(swap_used)} / {_format_gib_value(swap_total)}."
+            )
+        current_baseline = self._build_safe_system_baseline(payload, analysis)
+        previous_baseline = self._latest_system_baseline()
+        comparison = self._system_baseline_comparison(current_baseline, previous_baseline)
+        self._save_system_baseline(current_baseline)
+        lines = [
+            headline,
+            "",
+            f"Used: {_format_gib_value(used)} / {_format_gib_value(total)}",
+            f"Available: {_format_gib_value(available)}",
+            f"Biggest normal users: {', '.join(top_labels[:5])}.",
+        ]
+        if load_line:
+            lines.append(load_line)
+        if swap_line:
+            lines.append(swap_line)
+        lines.extend(["", comparison])
+        lines.append("Say 'show details' or 'show top processes' if you want the full process list.")
+        message = "\n".join(lines)
+        return self._runtime_truth_response(
+            text=message,
+            route="operational_status",
+            used_runtime_state=False,
+            used_tools=used_tools,
+            skip_post_response_hooks=True,
+            payload={
+                "type": "operational_status",
+                "kind": "OBSERVE_PC",
+                "summary": message,
+                "resource_baseline_saved": True,
+                "resource_baseline_compared": bool(previous_baseline),
+                "baseline_key": _SYSTEM_BASELINE_PREF_KEY,
+                "memory": current_baseline.get("memory"),
+                "swap": current_baseline.get("swap"),
+                "usual_process_labels": current_baseline.get("usual_process_labels"),
+            },
+        )
 
     def _handle_nl_observe(self, user_id: str, text: str, decision: dict[str, Any]) -> OrchestratorResponse:
         selected = decision.get("skills") or []
@@ -24522,6 +24747,8 @@ class Orchestrator:
         raw_available = False
         blocked_count = 0
         resource_question_kind = _resource_followup_kind(text)
+        resource_payload: dict[str, Any] = {}
+        resource_analysis: dict[str, Any] = {}
         summary_parts: list[str] = []
         followups: list[str] = []
         permissions_map = {
@@ -24555,6 +24782,16 @@ class Orchestrator:
                 read_only_mode=True,
             )
             data = response.data if isinstance(response.data, dict) else {}
+            if str(function_name or "") == "resource_report":
+                candidate_payload = data.get("payload") if isinstance(data.get("payload"), dict) else {}
+                if candidate_payload:
+                    resource_payload = dict(candidate_payload)
+                    candidate_analysis = candidate_payload.get("cause_analysis")
+                    resource_analysis = (
+                        dict(candidate_analysis)
+                        if isinstance(candidate_analysis, dict)
+                        else summarize_resource_report(resource_payload, text=text)
+                    )
             summary, domain_followups = self._domain_summary_and_followups(
                 str(skill_name or ""), str(function_name or ""), data, text
             )
@@ -24587,6 +24824,26 @@ class Orchestrator:
             cards = cards[:1] if cards else cards
             if not followups:
                 followups = ["Show the biggest memory users", "Show only CPU deltas"]
+
+        used_tool_names = [
+            str(item.get("function") or "").strip()
+            for item in (decision.get("skills") if isinstance(decision.get("skills"), list) else [])
+            if isinstance(item, dict) and str(item.get("function") or "").strip()
+        ]
+        if resource_payload and not _system_check_wants_details(text):
+            return self._concise_resource_report_response(
+                user_id=user_id,
+                text=text,
+                payload=resource_payload,
+                analysis=resource_analysis or summarize_resource_report(resource_payload, text=text),
+                used_tools=used_tool_names,
+            )
+        if resource_payload:
+            baseline = self._build_safe_system_baseline(
+                resource_payload,
+                resource_analysis or summarize_resource_report(resource_payload, text=text),
+            )
+            self._save_system_baseline(baseline)
 
         if blocked_count and not cards:
             if resource_question_kind:
@@ -24654,6 +24911,74 @@ def _resource_followup_kind(question: str) -> str:
     if _looks_like_simple_ram_inventory_question(lowered):
         return "ram_simple"
     return "ram_diagnostic"
+
+
+_SYSTEM_BASELINE_PREF_KEY = "system_resource_baseline_v1"
+_SYSTEM_BASELINE_CONTEXT_PREF_KEY = "system_resource_baseline_context_v1"
+
+
+def _system_check_wants_details(text: str) -> bool:
+    normalized = normalize_setup_text(text).replace("/", " ")
+    if normalized.startswith("why "):
+        return True
+    return any(
+        phrase in normalized
+        for phrase in (
+            "show details",
+            "show detail",
+            "show top processes",
+            "show top memory",
+            "show top cpu",
+            "top memory and cpu processes",
+            "top memory processes",
+            "top cpu processes",
+            "top processes",
+            "full system check",
+            "full detailed system check",
+            "detailed report",
+            "detailed system check",
+            "detail report",
+            "why do you think that",
+            "why do you think",
+            "show the biggest memory users",
+            "show only the biggest memory users",
+        )
+    )
+
+
+def _format_gib_value(num_bytes: int | float | None) -> str:
+    value = float(num_bytes or 0.0) / float(1024**3)
+    return f"{value:.1f} GB"
+
+
+def _safe_process_label(name: str) -> str:
+    raw = str(name or "")
+    if re.search(r"\b\d{8,12}:[A-Za-z0-9_-]{16,}\b", raw) or re.search(
+        r"\b(?:sk|sk-proj|xoxb|ghp)[_-][A-Za-z0-9_-]{12,}\b",
+        raw,
+        re.IGNORECASE,
+    ):
+        return "redacted process"
+    cleaned = re.sub(r"[^A-Za-z0-9._+-]+", " ", raw).strip()
+    if not cleaned:
+        return ""
+    lowered = cleaned.lower()
+    if "ollama" in lowered:
+        return "Ollama"
+    if "brave" in lowered:
+        return "Brave"
+    if "discord" in lowered:
+        return "Discord"
+    if "telegram" in lowered:
+        return "Telegram"
+    if "chrome" in lowered or "chromium" in lowered:
+        return "browser"
+    if "firefox" in lowered:
+        return "Firefox"
+    if "gnome-shell" in lowered:
+        return "GNOME Shell"
+    return cleaned.split(" ", 1)[0][:40]
+
 
 
 _SIMPLE_RAM_INVENTORY_PHRASES = (
