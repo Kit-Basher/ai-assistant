@@ -8,6 +8,8 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import subprocess
+import sys
 import tempfile
 from typing import Any, Callable
 import uuid
@@ -28,6 +30,9 @@ RESTORE_SNAPSHOT_SCHEMA_VERSION = "restore_snapshot.v1"
 RESTORE_STAGE_SCHEMA_VERSION = "restore_stage.v1"
 UPDATE_OPERATION_SCHEMA_VERSION = "update_operation.v1"
 UPDATE_CHECKPOINT_SCHEMA_VERSION = "update_checkpoint.v1"
+UNINSTALL_OPERATION_SCHEMA_VERSION = "uninstall_operation.v1"
+UNINSTALL_RECEIPT_SCHEMA_VERSION = "uninstall_receipt.v1"
+UNINSTALL_MODE_PRESERVE_DATA = "preserve_data"
 RESTORE_ALLOWED_PREFERENCE_KEYS = {
     "system_resource_baseline_v1",
     "system_resource_baseline_context_v1",
@@ -432,6 +437,10 @@ class ExecutorRegistry:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(support_bundle_redact(payload), indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def _write_json_unredacted(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -1747,6 +1756,510 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             error_code=status,
             resources=resources,
             details={"exception": exc.__class__.__name__, "rollback_commit": rollback_commit, "rollback_verified": rollback_verified},
+        )
+    finally:
+        _release_operation_lock(lock_path, operation_id)
+
+
+def _uninstall_result(
+    *,
+    ok: bool,
+    mutated: bool,
+    status: str,
+    message: str,
+    resources: list[str] | None = None,
+    rollback_available: bool = False,
+    rollback_hint: str = "",
+    error_code: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": bool(ok),
+        "mutated": bool(mutated),
+        "executor_id": "operator.uninstall.v1",
+        "resources_touched": [safe_path_label(item) for item in list(resources or [])],
+        "rollback_available": bool(rollback_available),
+        "rollback_hint": rollback_hint,
+        "error_code": error_code,
+        "user_message": message,
+        "details": {
+            "status": status,
+            "uninstall_operation_schema_version": UNINSTALL_OPERATION_SCHEMA_VERSION,
+            **(details or {}),
+        },
+    }
+
+
+def _snapshot_hash(snapshot: dict[str, Any]) -> str:
+    encoded = json.dumps(support_bundle_redact(snapshot), sort_keys=True, ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _uninstall_resource_path(resource: dict[str, Any]) -> Path:
+    return Path(str(resource.get("path") or "")).expanduser()
+
+
+def _validate_uninstall_resource(resource: dict[str, Any], *, fixture_root: Path, removable_roots: list[Path]) -> tuple[bool, str, Path | None]:
+    if not isinstance(resource, dict):
+        return False, "resource_not_object", None
+    if not bool(resource.get("owned")):
+        return False, "resource_not_owned", None
+    raw = str(resource.get("path") or "").strip()
+    if not raw or ".." in Path(raw).parts:
+        return False, "resource_path_invalid", None
+    try:
+        path = _uninstall_resource_path(resource)
+        resolved = path.resolve(strict=False)
+        lexical = path if path.is_absolute() else path.resolve(strict=False)
+    except OSError:
+        return False, "resource_path_unresolvable", None
+    def _lexically_contained(path_value: Path, root_value: Path) -> bool:
+        path_text = str(path_value)
+        root_text = str(root_value)
+        return path_text == root_text or path_text.startswith(root_text.rstrip("/") + "/")
+
+    if not _lexically_contained(lexical, fixture_root):
+        return False, "resource_outside_fixture_root", lexical
+    if not any(_lexically_contained(lexical, root) for root in removable_roots):
+        return False, "resource_outside_removable_roots", lexical
+    expected_type = str(resource.get("expected_type") or "").strip().lower()
+    if lexical.exists() or lexical.is_symlink():
+        try:
+            if lexical.is_mount():
+                return False, "resource_is_mount_point", lexical
+        except OSError:
+            return False, "resource_mount_check_failed", lexical
+        if lexical.is_symlink():
+            try:
+                target = lexical.resolve(strict=True)
+            except OSError:
+                target = lexical.resolve(strict=False)
+            if not any(_is_contained(target, root) for root in removable_roots):
+                return False, "resource_symlink_escape", lexical
+        if expected_type == "directory" and not lexical.is_dir():
+            return False, "resource_type_mismatch", lexical
+        if expected_type == "file" and not lexical.is_file():
+            return False, "resource_type_mismatch", lexical
+        if expected_type == "symlink" and not lexical.is_symlink():
+            return False, "resource_type_mismatch", lexical
+    return True, "ok", lexical
+
+
+def _create_uninstall_final_backup(
+    *,
+    backup_root: Path,
+    operation_id: str,
+    snapshot: dict[str, Any],
+    preserved_resources: list[dict[str, Any]],
+) -> Path:
+    backup_root.mkdir(parents=True, exist_ok=True)
+    root = backup_root / f"personal-agent-uninstall-backup-{operation_id}"
+    if root.exists():
+        manifest = root / "manifest.json"
+        if manifest.is_file():
+            return root
+        raise ValueError("uninstall_backup_existing_invalid")
+    root.mkdir(mode=0o700)
+    files: dict[str, dict[str, Any]] = {
+        "backup_summary.json": {
+            "backup_schema_version": BACKUP_SCHEMA_VERSION,
+            "purpose": "final_uninstall_safety_backup",
+            "restore_status": RESTORE_V1_CAPABILITY,
+        },
+        "uninstall_target_snapshot.json": snapshot,
+        "preserved_inventory.json": {"preserved_resources": preserved_resources},
+        "preferences_summary.json": {
+            "mode": "summary_only",
+            "note": "Fixture uninstall backup preserves supported state summaries only; raw secrets are excluded.",
+        },
+        "runtime_config_summary.json": {
+            "mode": "summary_only",
+            "install_metadata": snapshot.get("install_metadata") if isinstance(snapshot.get("install_metadata"), dict) else {},
+        },
+    }
+    file_sizes: dict[str, int] = {}
+    for name, payload in files.items():
+        target = root / name
+        _write_json(target, payload)
+        file_sizes[name] = target.stat().st_size
+    included_files = sorted([*files.keys(), "manifest.json"])
+    manifest = {
+        "backup_schema_version": BACKUP_SCHEMA_VERSION,
+        "created_at": utc_now_iso(),
+        "runtime_commit": snapshot.get("runtime_commit"),
+        "runtime_instance": "uninstall-fixture",
+        "included_files": included_files,
+        "excluded_files": [
+            "raw secret-store files",
+            "raw logs",
+            "arbitrary home directory files",
+            "model caches",
+            "external pack source text",
+        ],
+        "file_sizes": file_sizes,
+        "total_size_bytes": sum(file_sizes.values()),
+        "restore_status": RESTORE_V1_CAPABILITY,
+        "live_restore": RESTORE_V1_CAPABILITY,
+        "uninstall_operation_id": operation_id,
+    }
+    _write_json(root / "manifest.json", manifest)
+    return root
+
+
+def _remove_uninstall_target(path: Path) -> None:
+    if path.is_symlink() or path.is_file():
+        path.unlink(missing_ok=True)
+        return
+    if path.is_dir():
+        shutil.rmtree(path)
+        return
+    try:
+        path.unlink(missing_ok=True)
+    except FileNotFoundError:
+        pass
+
+
+def _run_uninstall_helper(operation_state: dict[str, Any]) -> dict[str, Any]:
+    operation_id = str(operation_state.get("operation_id") or "").strip()
+    snapshot = operation_state.get("target_snapshot") if isinstance(operation_state.get("target_snapshot"), dict) else {}
+    receipt_path = Path(str(operation_state.get("receipt_path") or "")).expanduser().resolve()
+    backup_path = Path(str(operation_state.get("final_backup_path") or "")).expanduser().resolve()
+    resources = snapshot.get("removable_resources") if isinstance(snapshot.get("removable_resources"), list) else []
+    preserved = snapshot.get("preserved_resources") if isinstance(snapshot.get("preserved_resources"), list) else []
+    removed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    started_at = utc_now_iso()
+    receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    initial_receipt = {
+        "uninstall_receipt_schema_version": UNINSTALL_RECEIPT_SCHEMA_VERSION,
+        "operation_id": operation_id,
+        "mode": UNINSTALL_MODE_PRESERVE_DATA,
+        "started_at": started_at,
+        "status": "running",
+        "final_backup_path": str(backup_path),
+        "removed_resources": [],
+        "skipped_resources": [],
+        "preserved_resources": preserved,
+        "reinstall_guidance": "Reinstall from the preserved Personal Agent repository, then restore supported state from the final uninstall backup.",
+    }
+    _write_json(receipt_path, initial_receipt)
+
+    force_failure_after = str(operation_state.get("force_failure_after_resource_id") or "").strip()
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        resource_id = str(resource.get("id") or resource.get("path") or "unknown")
+        path = _uninstall_resource_path(resource)
+        if not path.is_absolute():
+            path = path.resolve(strict=False)
+        if not path.exists() and not path.is_symlink():
+            skipped.append({"id": resource_id, "path": str(path), "reason": "already_absent"})
+            continue
+        try:
+            _remove_uninstall_target(path)
+            removed.append({"id": resource_id, "path": str(path), "class": resource.get("class")})
+            if force_failure_after and resource_id == force_failure_after:
+                raise RuntimeError("forced_uninstall_partial_failure")
+        except Exception as exc:  # noqa: BLE001 - receipt must stay truthful.
+            failures.append({"id": resource_id, "path": str(path), "error": exc.__class__.__name__})
+            break
+
+    preserved_checks: list[dict[str, Any]] = []
+    for resource in preserved:
+        if not isinstance(resource, dict):
+            continue
+        raw = str(resource.get("path") or "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        preserved_checks.append(
+            {
+                "id": str(resource.get("id") or raw),
+                "path": str(path),
+                "exists": path.exists() or path.is_symlink(),
+                "class": resource.get("class"),
+            }
+        )
+
+    completed = not failures
+    status = "completed_verified" if completed else "partial_uninstall"
+    receipt = {
+        **initial_receipt,
+        "finished_at": utc_now_iso(),
+        "status": status,
+        "removed_resources": removed,
+        "skipped_resources": skipped,
+        "preserved_resources": preserved_checks,
+        "final_backup_path": str(backup_path),
+        "final_backup_exists": backup_path.exists(),
+        "warnings": ["Uninstall is not automatically reversible; reinstall then restore from the final backup."],
+        "partial_failures": failures,
+        "verification": {
+            "removed_absent": all(not Path(str(item["path"])).exists() for item in removed),
+            "preserved_checked": preserved_checks,
+            "receipt_finalized": True,
+        },
+    }
+    _write_json(receipt_path, receipt)
+    return receipt
+
+
+def run_uninstall_helper_state_file(path: str | Path) -> dict[str, Any]:
+    state_path = Path(path).expanduser().resolve()
+    operation_state = _read_json(state_path)
+    if not isinstance(operation_state, dict):
+        raise ValueError("uninstall_helper_state_not_object")
+    return _run_uninstall_helper(operation_state)
+
+
+def _launch_uninstall_helper_state_file(state_path: Path) -> dict[str, Any]:
+    helper = Path(__file__).resolve().parents[1] / "scripts" / "uninstall_helper.py"
+    if not helper.is_file():
+        raise FileNotFoundError(f"uninstall_helper_missing:{helper}")
+    proc = subprocess.run(
+        [sys.executable, str(helper), "--operation-state", str(state_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=45,
+        check=False,
+    )
+    if proc.returncode not in {0, 2}:
+        raise RuntimeError(f"uninstall_helper_failed:{proc.returncode}:{(proc.stdout or '')[:1000]}")
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"uninstall_helper_bad_json:{(proc.stdout or '')[:1000]}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("uninstall_helper_non_object_json")
+    return payload
+
+
+def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    action_type = str(plan.get("action_type") or "").strip().lower()
+    if action_type != "operator.uninstall":
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked",
+            message="I blocked uninstall because the plan action type was not operator.uninstall.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_action_type_mismatch",
+        )
+    mode = str(action.get("uninstall_mode") or UNINSTALL_MODE_PRESERVE_DATA).strip().lower()
+    if mode != UNINSTALL_MODE_PRESERVE_DATA:
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_unsupported_mode",
+            message="I blocked uninstall because purge/removal of user data is not enabled in Uninstall v1.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_mode_not_supported",
+        )
+    execution_mode = str(action.get("uninstall_execution_mode") or "live_guarded").strip().lower()
+    if execution_mode != "fixture_preserve_data":
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_live_uninstall",
+            message=(
+                "Live uninstall is blocked from this chat unless the target is an approved isolated fixture. "
+                "I did not stop services, remove runtime files, delete state, or uninstall anything."
+            ),
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_live_execution_not_enabled",
+        )
+
+    operation_id = str(action.get("operation_id") or plan.get("plan_id") or f"uninstall-{uuid.uuid4().hex[:12]}").strip()
+    snapshot = action.get("target_snapshot") if isinstance(action.get("target_snapshot"), dict) else {}
+    expected_hash = str(action.get("target_snapshot_hash") or "").strip()
+    actual_hash = _snapshot_hash(snapshot)
+    if expected_hash and actual_hash != expected_hash:
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_snapshot_changed",
+            message="The uninstall target changed after preview, so I blocked execution. Ask for a fresh uninstall preview.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_target_changed_since_preview",
+            details={"expected_hash": expected_hash, "actual_hash": actual_hash},
+        )
+    if not bool(snapshot.get("fixture_marker")) or str(snapshot.get("mode") or "") != UNINSTALL_MODE_PRESERVE_DATA:
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_missing_fixture_marker",
+            message="I blocked uninstall because the target snapshot was not marked as an approved isolated fixture.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_fixture_marker_missing",
+        )
+
+    try:
+        fixture_root = Path(str(snapshot.get("fixture_root") or "")).expanduser().resolve()
+        state_root = Path(str(action.get("state_root") or snapshot.get("state_root") or "")).expanduser().resolve()
+        receipt_root = Path(str(action.get("receipt_root") or snapshot.get("receipt_root") or state_root / "uninstall_receipts")).expanduser().resolve()
+        backup_root = Path(str(action.get("backup_root") or snapshot.get("backup_root") or state_root / "backups")).expanduser().resolve()
+    except OSError as exc:
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_invalid_path",
+            message="I blocked uninstall because one of the internal paths could not be resolved.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_invalid_path",
+            details={"exception": exc.__class__.__name__},
+        )
+    if not fixture_root.exists() or not _is_contained(state_root, fixture_root) or not _is_contained(receipt_root, fixture_root) or not _is_contained(backup_root, fixture_root):
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_path_escape",
+            message="I blocked uninstall because state, receipt, or backup roots were outside the approved fixture root.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_path_escape",
+        )
+
+    removable_roots = []
+    for raw in snapshot.get("removable_roots") if isinstance(snapshot.get("removable_roots"), list) else []:
+        try:
+            root = Path(str(raw)).expanduser().resolve()
+        except OSError:
+            continue
+        if _is_contained(root, fixture_root):
+            removable_roots.append(root)
+    if not removable_roots:
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_no_removable_roots",
+            message="I blocked uninstall because no approved removable roots were listed.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_no_removable_roots",
+        )
+
+    resources = snapshot.get("removable_resources") if isinstance(snapshot.get("removable_resources"), list) else []
+    validated_paths: list[str] = []
+    for resource in resources:
+        ok, reason, resolved = _validate_uninstall_resource(resource, fixture_root=fixture_root, removable_roots=removable_roots)
+        if not ok:
+            return _uninstall_result(
+                ok=False,
+                mutated=False,
+                status="blocked_invalid_resource",
+                message=f"I blocked uninstall because a removable resource failed safety validation: {reason}.",
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code=reason,
+                details={"resource": support_bundle_redact(resource), "path": str(resolved) if resolved else None},
+            )
+        if resolved is not None:
+            validated_paths.append(str(resolved))
+
+    lock_path = state_root / "lifecycle_locks" / "uninstall.lock"
+    receipt_path = receipt_root / f"personal-agent-uninstall-{operation_id}.json"
+    lock_payload = {
+        "operation_type": "operator.uninstall",
+        "operation_id": operation_id,
+        "plan_id": plan.get("plan_id"),
+        "started_at": utc_now_iso(),
+        "stage": "starting",
+        "target_snapshot_hash": actual_hash,
+    }
+    if not _acquire_operation_lock(lock_path, lock_payload):
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_lock_conflict",
+            message="Another lifecycle operation already holds the uninstall lock. I did not start a second uninstall.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_lock_conflict",
+        )
+
+    touched = [str(lock_path), str(receipt_path)]
+    try:
+        final_backup = _create_uninstall_final_backup(
+            backup_root=backup_root,
+            operation_id=operation_id,
+            snapshot=snapshot,
+            preserved_resources=snapshot.get("preserved_resources") if isinstance(snapshot.get("preserved_resources"), list) else [],
+        )
+        manifest = final_backup / "manifest.json"
+        manifest_payload = _read_json(manifest)
+        if manifest_payload.get("backup_schema_version") != BACKUP_SCHEMA_VERSION:
+            raise ValueError("uninstall_final_backup_invalid")
+        touched.append(str(final_backup))
+        operation_state = {
+            **lock_payload,
+            "stage": "helper_running",
+            "target_snapshot": snapshot,
+            "receipt_path": str(receipt_path),
+            "final_backup_path": str(final_backup),
+            "force_failure_after_resource_id": action.get("force_failure_after_resource_id"),
+        }
+        state_dir = state_root / "uninstall_operations" / operation_id
+        _update_state_write(state_dir, "helper_running", operation_state)
+        touched.append(str(state_dir))
+        helper_state = state_dir / "helper_state.json"
+        _write_json_unredacted(helper_state, operation_state)
+        receipt = _launch_uninstall_helper_state_file(helper_state)
+        status = str(receipt.get("status") or "verification_incomplete")
+        completed = status == "completed_verified"
+        _update_state_write(state_dir, status, {**operation_state, "receipt": receipt})
+        if completed:
+            message = (
+                "Uninstall completed and verified in the isolated fixture. "
+                "The application runtime and generated service files were removed; user data was preserved."
+            )
+            error_code = None
+        else:
+            message = (
+                "Uninstall only partially completed in the isolated fixture. "
+                "User data and the final backup were preserved, and the receipt lists what remains."
+            )
+            error_code = "uninstall_partial"
+        return _uninstall_result(
+            ok=completed,
+            mutated=True,
+            status=status,
+            message=message,
+            resources=[*touched, *validated_paths],
+            rollback_available=False,
+            rollback_hint="Uninstall is not automatically reversible. Reinstall Personal Agent, then restore supported state from the final uninstall backup.",
+            error_code=error_code,
+            details={
+                "operation_id": operation_id,
+                "target_snapshot_hash": actual_hash,
+                "final_backup_path": str(final_backup),
+                "receipt_path": str(receipt_path),
+                "removed_count": len(receipt.get("removed_resources") if isinstance(receipt.get("removed_resources"), list) else []),
+                "preserved_count": len(receipt.get("preserved_resources") if isinstance(receipt.get("preserved_resources"), list) else []),
+                "receipt": receipt,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - executor boundary must stay structured.
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        if not receipt_path.exists():
+            _write_json(
+                receipt_path,
+                {
+                    "uninstall_receipt_schema_version": UNINSTALL_RECEIPT_SCHEMA_VERSION,
+                    "operation_id": operation_id,
+                    "status": "failed_before_runtime_removal",
+                    "error": exc.__class__.__name__,
+                    "finished_at": utc_now_iso(),
+                    "preserved_resources": snapshot.get("preserved_resources") if isinstance(snapshot.get("preserved_resources"), list) else [],
+                },
+            )
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="failed_before_runtime_removal",
+            message="Uninstall failed before runtime removal, so the installation was left in place and user data was preserved.",
+            resources=touched,
+            rollback_available=False,
+            rollback_hint="No rollback needed because destructive removal did not complete.",
+            error_code="uninstall_executor_exception",
+            details={"exception": exc.__class__.__name__, "receipt_path": str(receipt_path)},
         )
     finally:
         _release_operation_lock(lock_path, operation_id)

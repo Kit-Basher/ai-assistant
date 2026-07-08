@@ -52,6 +52,8 @@ Commands:
 - `python scripts/backup_v1_smoke.py`
 - `python scripts/restore_validator_smoke.py`
 - `python scripts/restore_execution_smoke.py`
+- `python scripts/update_execution_smoke.py`
+- `python scripts/uninstall_execution_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
 - `python scripts/cleanup_execution_smoke.py`
 - `python scripts/daily_driver_maturity_audit.py`
@@ -101,7 +103,7 @@ console/network diagnostics. It is a live-runtime gate, not CI-safe.
 proves health, broken-status, storage, repair, backup, restore, update,
 cleanup, uninstall, and support-bundle prompts route through the real `/chat`
 API and remain preview/confirmation-gated. It does not prove destructive
-execution for uninstall, cleanup, restore, or update.
+execution for cleanup, restore, update, or uninstall.
 
 `memory_lifecycle_smoke.py` is the installed memory-lifecycle gate. It proves
 memory status/inspection, current-turn opt-out, thread/global memory controls,
@@ -116,11 +118,12 @@ clarification, safety-bypass refusal, and thread/session confirmation binding
 through the real `/chat` API.
 
 `executor_registry_smoke.py` is the installed Executor Registry v1 gate. It
-proves preview-only memory delete and uninstall plans do not execute; cleanup
-plans are enabled but can be cancelled without mutation; the enabled
-support-bundle executor returns a journal id and creates only a redacted
-temporary artifact; stale confirmations still do not execute; and a different
-thread/session cannot apply the pending plan.
+proves preview-only memory delete plans do not execute; live daily-driver
+uninstall confirmation is guarded with `mutated=false`; cleanup plans are
+enabled but can be cancelled without mutation; the enabled support-bundle
+executor returns a journal id and creates only a redacted temporary artifact;
+stale confirmations still do not execute; and a different thread/session cannot
+apply the pending plan.
 
 `support_bundle_v2_smoke.py` is the installed diagnostics packaging gate. It
 proves the support-bundle executor creates a bounded temporary bundle with a
@@ -149,6 +152,13 @@ staged release promotion, rollback checkpoint creation, forced post-promotion
 rollback, dirty-tree refusal, target-drift refusal, live no-op behavior, and
 unchanged git status. It does not update the real installed daily-driver
 runtime to an unknown remote commit.
+
+`uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
+removes only generated fixture runtime/service/launcher artifacts through the
+Executor Registry, verifies backups, memory, preferences, secrets, repository,
+models, and external packs remain, writes a final backup and uninstall receipt,
+proves idempotency, blocks live daily-driver uninstall, rejects symlink escapes,
+and reports partial failures truthfully.
 
 `cleanup_preview_smoke.py` is the installed cleanup-preview gate. It proves
 cleanup prompts remain read-only, classify old/oversized backup artifacts,

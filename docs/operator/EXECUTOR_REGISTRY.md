@@ -56,6 +56,7 @@ Current enabled executors:
 - `operator.cleanup` via `operator.cleanup.v1`
 - `operator.restore` via `operator.restore.v1`
 - `operator.update` via `operator.update.v1`
+- `operator.uninstall` via `operator.uninstall.v1`
 
 `operator.support_bundle` creates a Support Bundle v2 diagnostics package in a
 temporary directory. It is additive and returns a `journal_id`. Rollback is
@@ -86,22 +87,30 @@ It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
 working trees, and target drift after preview. See
 `docs/operator/UPDATE_EXECUTOR_V1.md`.
 
+`operator.uninstall` is enabled for Uninstall v1 preserve-data execution against
+approved isolated fixtures and for guarded live daily-driver refusal. The
+executor requires a final safety backup, exact owned-resource allowlists,
+target-snapshot validation, and a durable uninstall receipt. Live daily-driver
+uninstall remains blocked unless the target is an approved isolated fixture; it
+does not stop services or remove runtime files from ordinary installed-product
+proofs. See `docs/operator/UNINSTALL_EXECUTOR_V1.md`.
+
 ## Preview-Only Lanes
 
 These remain preview-only in v1:
 
 - memory delete/export/redact/dedupe/control executors
-- uninstall
 - repair lifecycle executors unless a separate bounded executor is already
   used by an existing managed-service path
 
 Confirming one of these plans must return `executor_not_enabled`,
 `mutated=false`, and a registry `journal_id`.
 
-Cleanup, restore, and update are no longer preview-only. They remain Plan Mode
-gated and Executor Registry dispatched. Update v1 live promotion remains
-guarded unless the action is a verified no-op or an approved staged-release
-runner input.
+Cleanup, restore, update, and uninstall are no longer preview-only. They remain
+Plan Mode gated and Executor Registry dispatched. Update v1 live promotion
+remains guarded unless the action is a verified no-op or an approved
+staged-release runner input. Uninstall v1 live daily-driver removal remains
+guarded unless the action targets an approved isolated fixture.
 
 ## Proof
 
@@ -114,11 +123,13 @@ python scripts/backup_v1_smoke.py
 python scripts/cleanup_execution_smoke.py
 python scripts/restore_execution_smoke.py
 python scripts/update_execution_smoke.py
+python scripts/uninstall_execution_smoke.py
 ```
 
 The smoke talks to the installed `/chat` API and proves:
 
-- preview-only memory delete and uninstall cannot execute
+- preview-only memory delete cannot execute
+- live daily-driver uninstall confirmation is guarded with `mutated=false`
 - cleanup has an enabled executor plan and can be cancelled without mutation
 - support bundle has an enabled executor and returns a journal id
 - support bundle creates only a redacted temporary diagnostics artifact
@@ -132,6 +143,10 @@ The smoke talks to the installed `/chat` API and proves:
 - Update v1 execution is proven against isolated fixture releases with staged
   promotion, rollback checkpoint, forced post-promotion rollback, dirty-tree
   refusal, target-drift refusal, and live no-op behavior
+- Uninstall v1 execution is proven against isolated fixture installs with a
+  final safety backup, exact runtime/service removal, preserve-data behavior,
+  durable receipt, idempotency, symlink-escape rejection, live guard, and
+  truthful partial-failure reporting
 - cleanup preview classifies candidates; cleanup execution is proven against
   an isolated generated fixture by `cleanup_execution_smoke.py`
 - stale confirmation after API restart does not execute

@@ -2189,7 +2189,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertTrue(result.get("mutated"))
         self.assertEqual("operator.restore.v1", result.get("executor_id"))
 
-    def test_operator_lifecycle_confirmation_does_not_execute_preview_only_action(self) -> None:
+    def test_operator_lifecycle_confirmation_blocks_live_uninstall_action(self) -> None:
         orchestrator = Orchestrator(
             db=self.db,
             skills_path=self.skills_path,
@@ -2203,8 +2203,8 @@ class TestOrchestrator(unittest.TestCase):
 
         self.assertIn("Uninstall is destructive", preview.text)
         self.assertEqual("operator_lifecycle", confirmed.data.get("route"))
-        self.assertEqual("operator_lifecycle_executor_not_enabled", confirmed.data.get("error_kind"))
-        self.assertIn("I did not change files", confirmed.text)
+        self.assertEqual("uninstall_live_execution_not_enabled", confirmed.data.get("error_kind"))
+        self.assertIn("did not stop services", confirmed.text)
         payload = confirmed.data.get("runtime_payload")
         self.assertIsInstance(payload, dict)
         self.assertFalse(payload.get("mutated"))
@@ -2255,7 +2255,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual(plan.get("plan_id"), payload.get("plan_id"))
         self.assertEqual("operator.uninstall", plan.get("action_type"))
         self.assertEqual("destructive", plan.get("mutation_level"))
-        self.assertEqual("preview_only", plan.get("executor_status"))
+        self.assertEqual("enabled", plan.get("executor_status"))
         self.assertIn("Plan Mode v2:", preview.text)
         self.assertIn("Plan ID:", preview.text)
 
@@ -2335,7 +2335,7 @@ class TestOrchestrator(unittest.TestCase):
             ("Redact sensitive memory", "memory_lifecycle_redact", "memory.redact", "preview_only"),
             ("Install htop", "shell_install_package", "package.install", "enabled"),
             ("Update assistant", "operator_lifecycle_update", "operator.update", "enabled"),
-            ("Uninstall assistant", "operator_lifecycle_uninstall", "operator.uninstall", "preview_only"),
+            ("Uninstall assistant", "operator_lifecycle_uninstall", "operator.uninstall", "enabled"),
         ]
 
         for index, (title, operation, action_type, executor_status) in enumerate(cases):
@@ -2460,7 +2460,6 @@ class TestOrchestrator(unittest.TestCase):
             ("delete all memory about me", "memory.delete_all"),
             ("export my memory", "memory.export"),
             ("redact sensitive memory", "memory.redact"),
-            ("uninstall the assistant", "operator.uninstall"),
         ]
         for prompt, action_type in prompts:
             with self.subTest(prompt=prompt):
@@ -2505,6 +2504,29 @@ class TestOrchestrator(unittest.TestCase):
         self.assertEqual("update_dirty_working_tree", result.get("error_code"))
         self.assertFalse(result.get("mutated"))
         self.assertIn("uncommitted changes", confirmed.text)
+
+    def test_uninstall_confirmation_blocks_live_runtime_without_mutation(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM fallback"),
+        )
+
+        preview = orchestrator.handle_message("uninstall the assistant", "user1")
+        plan = preview.data.get("runtime_payload", {}).get("canonical_plan", {})
+        self.assertEqual("operator.uninstall", plan.get("action_type"))
+        self.assertEqual("enabled", plan.get("executor_status"))
+        self.assertIn("preserve_data", preview.text)
+        self.assertIn("secret store", preview.text.lower())
+
+        confirmed = orchestrator.handle_message("yes", "user1")
+        payload = confirmed.data.get("runtime_payload", {})
+        result = payload.get("executor_result", {})
+        self.assertEqual("uninstall_live_execution_not_enabled", result.get("error_code"))
+        self.assertFalse(result.get("mutated"))
+        self.assertIn("did not stop services", confirmed.text)
 
     def test_memory_status_distinguishes_scopes(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="LLM should not answer memory status.")

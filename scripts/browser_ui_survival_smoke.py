@@ -397,6 +397,16 @@ def _run_browser_journey(args: argparse.Namespace) -> list[Check]:
                 raise SmokeFailure(f"stale confirmation after refresh/restart was not rejected clearly: {_safe_excerpt(stale)}")
             checks.append(_pass("Plan Mode refresh/restart stale confirmation safety", _safe_excerpt(stale), "support bundle preview; reload; API restart; yes"))
 
+            uninstall_preview = ui.send("uninstall the assistant", timeout=45.0)
+            if not _contains_any(uninstall_preview, ("uninstall", "preserve", "backup", "disconnect")):
+                raise SmokeFailure(f"uninstall preview did not render preserve-data warning clearly: {_safe_excerpt(uninstall_preview)}")
+            if _contains_any(uninstall_preview, ("uninstalled", "removed personal agent")):
+                raise SmokeFailure(f"uninstall preview looked executed: {_safe_excerpt(uninstall_preview)}")
+            cancel_uninstall = ui.send("no", timeout=30.0)
+            if not _contains_any(cancel_uninstall, ("cancel", "did not run", "no current action", "cleared")):
+                raise SmokeFailure(f"uninstall cancellation was not clear: {_safe_excerpt(cancel_uninstall)}")
+            checks.append(_pass("uninstall preview renders and cancels safely", _safe_excerpt(cancel_uninstall), "UI uninstall preview; no"))
+
             baseline_count = len(ui.assistant_rows())
             for index in range(10):
                 response = ui.send(f"rewrite this: browser survival message {index}", timeout=30.0)

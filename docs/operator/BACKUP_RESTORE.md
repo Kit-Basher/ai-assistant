@@ -33,6 +33,21 @@ without loss. Back those up first.
 
 ## Restore Steps
 
+For Backup v1 artifacts created by the assistant, prefer the chat flow:
+
+1. Ask `show my backups`.
+2. Ask `validate this backup: <path>` if you need a specific artifact checked.
+3. Ask `restore from backup: <path>`.
+4. Confirm only after the Plan Mode preview shows a valid Backup v1 artifact,
+   supported restore categories, excluded categories, and a pre-restore safety
+   snapshot.
+
+Restore Executor v1 restores only supported non-secret Backup v1 state. It does
+not restore raw secrets, logs, arbitrary files, model caches, runtime releases,
+or executable pack source.
+
+For older full-path manual backups:
+
 1. Stop the user services.
 2. Restore the saved paths above to the same locations.
 3. Run `python -m agent doctor --fix`.
@@ -102,3 +117,13 @@ version-mismatched backup into live state.
 Backups include the encrypted/local secret-store file so same-machine restore can
 preserve provider and Telegram configuration. Proof and dry-run output must not
 print raw secret values. Treat backup archives as sensitive local artifacts.
+
+## Uninstall Safety Backup
+
+Uninstall Executor v1 creates a final bounded Backup v1-style safety artifact
+before fixture uninstall removes any runtime/service files. The uninstall final
+backup is stored outside the removable runtime path and referenced by the
+uninstall receipt.
+
+The default uninstall mode preserves user data in place. Full user-data purge is
+not part of Uninstall Executor v1.

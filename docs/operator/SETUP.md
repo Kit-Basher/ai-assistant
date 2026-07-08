@@ -96,8 +96,11 @@ Debian package lifecycle:
 
 - upgrade/reinstall: rerun `sudo apt install ./dist/personal-agent_<version>_amd64.deb`
 - remove package-owned files: `sudo apt remove personal-agent`
-- remove package and user state: run `personal-agent-uninstall --remove-state`
-  first if you want a full local reset
+- remove the installed runtime while preserving user data: ask the assistant to
+  preview uninstall, or run the package helper documented by the installed
+  release. Uninstall Executor v1 preserves backups, memory, preferences, secret
+  store, repository checkout, models, and external packs by default.
+- full user-data purge is not part of Uninstall Executor v1.
 
 Legacy root-level `install.sh`, `uninstall.sh`, and `doctor.sh` are retired and
 fail closed on purpose. Do not use the old root/system-service path.
@@ -168,9 +171,11 @@ Bundle update / uninstall basics:
 - upgrade: extract the newer bundle and rerun the bundled `install.sh`
 - live split smoke: `python scripts/split_smoke.py`
 - uninstall while preserving state:
-  - run the bundled `uninstall.sh`
+  - ask the assistant for an uninstall preview, or run the bundled uninstall
+    helper when operating outside chat
 - uninstall and remove local state:
-  - run the bundled `uninstall.sh --remove-state`
+  - not implemented by Uninstall Executor v1; use only a separately reviewed
+    purge/reset procedure on a disposable or explicitly backed-up installation
 
 ## Optional Desktop Launcher
 

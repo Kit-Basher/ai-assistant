@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-restore-executor-v1`
-- Commit: `9717ea7`
+- Tag: `v0.2.1-update-executor-v1`
+- Commit: `3ceb95d`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -40,6 +40,11 @@ Current confirmed proof:
   for staged release promotion, rollback checkpoint, forced post-promotion
   rollback, dirty-tree refusal, target-drift refusal, and verified live no-op.
   It does not update the real daily-driver runtime to an unknown commit.
+- `python scripts/uninstall_execution_smoke.py`: isolated Uninstall Executor v1
+  proof for preserve-data fixture uninstall, final safety backup, receipt,
+  idempotency, live daily-driver guard, symlink-escape rejection, and truthful
+  partial-failure reporting. It does not uninstall the real daily-driver
+  runtime.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.
@@ -273,10 +278,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   target, scope, mutation level, affected resources, risk, rollback scope,
   executor status, allowed confirmations, and expiry. Users can inspect, cancel,
   revise, or confirm the current pending plan.
-- Executor Registry v1 sits behind Plan Mode for the first wired lifecycle
-  actions. It refuses preview-only memory/delete/uninstall/cleanup actions with
-  `mutated=false`, records a redacted journal row, and can execute the safe
-  additive support-bundle and backup executors.
+- Executor Registry v1 sits behind Plan Mode for wired lifecycle actions. It
+  refuses preview-only memory/delete actions with `mutated=false`, records a
+  redacted journal row, executes safe support-bundle/backup/cleanup/restore/
+  update paths, and guards live daily-driver uninstall with `mutated=false`
+  unless the target is an approved isolated fixture.
 - Support Bundle v2 creates a temporary redacted diagnostics package with
   doctor/version/ready/state/search/Telegram/pack/journal/git summaries. It
   does not include raw logs, raw secrets, arbitrary home data, or destructive
@@ -298,9 +304,14 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   structured live-promotion blockers when rollback-safe handoff is unavailable.
   It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
   working trees, and target drift after preview.
+- Uninstall Executor v1 is enabled behind Plan Mode for preserve-data outcomes:
+  isolated fixture removal with a final safety backup and receipt, plus a
+  structured no-mutation blocker for live daily-driver uninstall. It preserves
+  backups, memory, preferences, secret store, repository, model caches, and
+  external packs by default.
 - Cleanup preview identifies old or oversized Personal Agent artifacts and
-  estimates recoverable space without deleting anything. Cleanup remains
-  preview-only.
+  estimates recoverable space. Cleanup execution deletes only revalidated
+  approved fixture/owned artifacts and remains guarded by Plan Mode.
 - A fresh isolated user state can start a temporary API, return coherent
   `/ready`, `/state`, and `/version` JSON, serve the web UI entrypoint, report
   missing Telegram as optional, report unconfigured search honestly, start with
@@ -313,9 +324,10 @@ These are not unknowns, but they are not finished:
 
 - Installer/update/uninstall: install, promotion, bundle, and package paths have
   coverage; Update Executor v1 has isolated staged-release execution and
-  rollback proof plus live no-op/blocker behavior; uninstall remains
-  preview-only; full live remote self-update and fresh-host partial-failure
-  recovery remain partial.
+  rollback proof plus live no-op/blocker behavior; Uninstall Executor v1 has
+  isolated preserve-data fixture execution plus live daily-driver no-mutation
+  guard. Full live remote self-update, live daily-driver self-uninstall, and
+  fresh-host partial-failure recovery remain partial.
 - Storage/log growth: read-only installed storage estimate, cleanup preview,
   and bounded cleanup execution for approved old Personal Agent artifacts
   exist; broader rotation/enforced cleanup policy remains partial.
@@ -366,6 +378,7 @@ These are not unknowns, but they are not finished:
 - Do not claim the fresh Debian VM proof is complete.
 - Do not claim full memory completion.
 - Do not claim full installer/update/uninstall lifecycle completion.
+- Do not claim live daily-driver uninstall has been executed.
 - Do not claim bug-free behavior.
 - Do not claim all external skills execute or are complete.
 - Do not claim full web browsing; current search is metadata-only.
@@ -382,9 +395,9 @@ Safe wording:
 1. Manual reboot proof.
 2. Use the system for real daily-driver observation and capture new failures as
    focused acceptance tests.
-3. Operator lifecycle execution: Backup v1 is additive and executable; cleanup
-   is bounded and executable for approved old artifacts; restore/update/uninstall
-   remain preview-only until bounded executors exist.
+3. Operator lifecycle execution: Backup v1 is additive and executable; cleanup,
+   restore, update, and uninstall now have bounded executor paths, but live
+   non-no-op self-update and live daily-driver self-uninstall remain guarded.
 4. Memory lifecycle execution: implement bounded executors for thread/global
    toggles, forget-topic, delete-all, export, redaction, and dedupe.
 5. Executor Registry expansion: move remaining per-flow mutators behind the

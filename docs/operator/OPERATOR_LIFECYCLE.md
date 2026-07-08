@@ -14,7 +14,9 @@ This lane is safe by default:
 - update executes only bounded Update v1 outcomes after confirmation:
   isolated staged-release proof, verified live no-op, or a structured
   no-mutation blocker when live promotion is not rollback-safe
-- uninstall is extra cautious and must not run from an ambiguous chat request
+- uninstall executes only preserve-data Uninstall v1 outcomes after
+  confirmation: isolated fixture removal, or a structured no-mutation blocker
+  for the live daily-driver install unless a safe isolated target is approved
 - support bundle wording must say secrets are redacted
 
 ## Current Product Flow
@@ -43,11 +45,12 @@ The mutating prompts return a preview with:
 - no mutation during preview
 
 For this checkpoint, lifecycle execution is still partial but no longer purely
-preview-only. Backup, support bundle, cleanup, restore, and update have bounded
-Executor Registry paths. Update v1 is intentionally conservative for the live
-installed runtime: dirty checkouts and non-no-op live promotion are blocked
-unless a rollback-safe staged-release handoff is available. Uninstall remains
-preview-only.
+preview-only. Backup, support bundle, cleanup, restore, update, and uninstall
+have bounded Executor Registry paths. Update v1 is intentionally conservative
+for the live installed runtime: dirty checkouts and non-no-op live promotion are
+blocked unless a rollback-safe staged-release handoff is available. Uninstall
+v1 is also conservative: isolated fixture removal is executable, while live
+daily-driver uninstall is guarded and returns a no-mutation blocker.
 
 ## Proof
 
@@ -70,9 +73,14 @@ The smoke talks to `http://127.0.0.1:8765` and verifies:
 Run `python scripts/update_execution_smoke.py` for the isolated Update v1
 execution proof. It does not update the real daily-driver install.
 
+Run `python scripts/uninstall_execution_smoke.py` for the isolated Uninstall v1
+execution proof. It removes only generated fixture runtime/service files and
+verifies preserved data, final backup, receipt, idempotency, and live-install
+guard behavior.
+
 ## Boundaries
 
 Do not claim this lane proves full lifecycle completion. It proves the
 user-facing installed product no longer falls into generic chat for lifecycle
 questions and does not silently mutate destructive operator actions. It does
-not claim arbitrary live self-update or uninstall completion.
+not claim arbitrary live self-update or live daily-driver uninstall completion.

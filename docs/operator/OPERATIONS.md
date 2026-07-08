@@ -93,6 +93,11 @@ Confirm:
   this gate promotes only isolated fixture releases, verifies rollback
   checkpoint and forced rollback behavior, proves dirty-tree and target-drift
   blockers, and does not update the real daily-driver runtime
+- run `python scripts/uninstall_execution_smoke.py` when uninstall execution
+  changes; this gate removes only isolated fixture runtime/service files,
+  verifies preserve-data behavior, final backup, uninstall receipt,
+  idempotency, partial-failure reporting, and the live daily-driver uninstall
+  guard
 - run `python scripts/cleanup_preview_smoke.py` when storage cleanup preview
   behavior feels wrong; this gate verifies candidate classification, protected
   paths, and cancellation without deleting anything

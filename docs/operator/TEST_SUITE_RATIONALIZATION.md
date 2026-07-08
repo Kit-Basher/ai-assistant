@@ -82,6 +82,8 @@ because another phrasing failed once.
 | `scripts/cleanup_execution_smoke.py` | Cleanup execution proof against isolated generated fixture plus installed preview/cancel check. | Medium | Partly; installed API needed for preview section | Isolated fixture only | Yes for preview section | Yes for cleanup execution safety | Yes | Keep under operator safety group; do not delete live daily-driver artifacts in proof. |
 | `scripts/restore_validator_smoke.py` | Read-only restore validator proof. | Medium | Yes | Temp malformed fixture only | No | Yes for restore safety | No | Keep under operator safety group. |
 | `scripts/restore_execution_smoke.py` | Restore Executor v1 proof for validated Backup v1 fixture restore, staging, safety snapshot, and rollback. | Medium | No installed stable needed | Isolated fixture state only | Yes | Yes for restore execution safety | No | Keep under operator safety group; never restore daily-driver state in this proof. |
+| `scripts/update_execution_smoke.py` | Update Executor v1 proof for staged fixture promotion/rollback plus live no-op guard. | Medium | Mixed | Isolated fixture releases only; live no-op only | Yes | Yes for update execution safety | No | Keep under operator safety group; never promote unknown live commits in proof. |
+| `scripts/uninstall_execution_smoke.py` | Uninstall Executor v1 proof for preserve-data uninstall against an isolated fixture. | Medium | No installed stable needed | Isolated fixture runtime/service files only | Yes | Yes for uninstall execution safety | No | Keep under operator safety group; never uninstall the daily-driver runtime in proof. |
 | `scripts/prove_pre_vm_complete.py` | Broad pre-VM subsystem gate. | Slow | Mixed | Runs summaries/child gates | No | Yes before VM proof | No | Keep as periodic; not daily loop. |
 | `scripts/vm_proof_smoke.py` | Post-install VM verifier. | Medium | Clean VM installed product | No destructive mutation | No | Manual VM proof only | No | Keep manual/historical until VM lane starts. |
 | Legacy/live smoke scripts | `assistant_*_smoke.py`, `live_*`, `telegram_*`, `hardware_*`, `provider_matrix_smoke.py`, `split_smoke.py`, `brief_smoke.py` | Mixed | Mixed | Mixed | Mixed | No by default | Sometimes | Historical/manual unless a current gate names them. |
@@ -93,8 +95,10 @@ because another phrasing failed once.
   only because they answer different questions: happy path, abuse path, and
   long-term irritants.
 - `operator_lifecycle_smoke.py`, `support_bundle_v2_smoke.py`,
-  `backup_v1_smoke.py`, `cleanup_preview_smoke.py`, and
-  `restore_validator_smoke.py` overlap on operator prompts. Keep the focused
+  `backup_v1_smoke.py`, `cleanup_preview_smoke.py`,
+  `restore_validator_smoke.py`, `restore_execution_smoke.py`,
+  `update_execution_smoke.py`, and `uninstall_execution_smoke.py` overlap on
+  operator prompts. Keep the focused
   scripts as safety gates, but do not add another generic operator smoke.
 - `plan_mode_v2_smoke.py` and `executor_registry_smoke.py` overlap on
   confirmation safety. Keep both: Plan Mode proves UX/confirmation semantics;
@@ -190,6 +194,8 @@ python scripts/cleanup_preview_smoke.py
 python scripts/cleanup_execution_smoke.py
 python scripts/restore_validator_smoke.py
 python scripts/restore_execution_smoke.py
+python scripts/update_execution_smoke.py
+python scripts/uninstall_execution_smoke.py
 ```
 
 ### 5. Full Local Release Proof
@@ -224,7 +230,6 @@ Run only when the relevant subsystem is being worked or before a major release:
 python scripts/prove_pre_vm_complete.py
 python scripts/restart_survival_smoke.py
 python scripts/browser_ui_survival_smoke.py
-python scripts/update_execution_smoke.py
 python scripts/vm_proof_smoke.py --expected-commit <commit>
 python scripts/telegram_bridge_smoke.py
 python scripts/provider_matrix_smoke.py
@@ -241,8 +246,8 @@ Release blockers:
 - External pack safety gate failures.
 - Token/secret leakage in status, chat, support bundle, or backup output.
 - Installed product abuse failures on the release machine.
-- Backup/support/cleanup/restore mutating outside their scoped additive or
-  preview-only policies.
+- Backup/support/cleanup/restore/update/uninstall mutating outside their scoped
+  additive, fixture, no-op, or preserve-data policies.
 
 Daily-driver irritants:
 

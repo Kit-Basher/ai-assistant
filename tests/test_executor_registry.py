@@ -19,6 +19,7 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    execute_uninstall_v1,
     execute_update_v1,
     restore_backup_v1,
     support_bundle_redact,
@@ -43,6 +44,71 @@ def _write_release(path: Path, commit: str) -> None:
         json.dumps({"git_commit": commit, "version": "fixture"}, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _uninstall_fixture(root: Path) -> tuple[dict, dict]:
+    fixture = root / "fixture-install"
+    runtime = fixture / "personal-agent/runtime"
+    releases = runtime / "releases"
+    state = fixture / "personal-agent"
+    config = fixture / "config/systemd/user"
+    launchers = fixture / "applications"
+    icons = fixture / "icons"
+    repo = fixture / "repo"
+    backups = state / "backups"
+    secrets = state / "secrets.enc.json"
+    release = releases / "0.2.0"
+    for path in (release, state, config, launchers, icons, repo, backups):
+        path.mkdir(parents=True, exist_ok=True)
+    (runtime / "current").symlink_to(release)
+    (config / "personal-agent-api.service").write_text("[Service]\n", encoding="utf-8")
+    (config / "personal-agent-telegram.service").write_text("[Service]\n", encoding="utf-8")
+    (launchers / "personal-agent.desktop").write_text("[Desktop Entry]\n", encoding="utf-8")
+    (icons / "personal-agent.svg").write_text("<svg />\n", encoding="utf-8")
+    (runtime / "install-manifest.json").write_text("{}\n", encoding="utf-8")
+    (state / "agent.db").write_text("memory\n", encoding="utf-8")
+    secrets.write_text('{"token":"secret"}\n', encoding="utf-8")
+    (backups / "existing").mkdir()
+    (repo / "README.md").write_text("repo\n", encoding="utf-8")
+    removable_roots = [str(runtime), str(config), str(launchers), str(icons)]
+    removable = [
+        {"id": "release", "class": "runtime release", "path": str(release), "owned": True, "expected_type": "directory"},
+        {"id": "current", "class": "runtime symlink", "path": str(runtime / "current"), "owned": True, "expected_type": "symlink"},
+        {"id": "manifest", "class": "install metadata", "path": str(runtime / "install-manifest.json"), "owned": True, "expected_type": "file"},
+        {"id": "api-service", "class": "service unit", "path": str(config / "personal-agent-api.service"), "owned": True, "expected_type": "file"},
+        {"id": "telegram-service", "class": "service unit", "path": str(config / "personal-agent-telegram.service"), "owned": True, "expected_type": "file"},
+        {"id": "desktop-entry", "class": "desktop entry", "path": str(launchers / "personal-agent.desktop"), "owned": True, "expected_type": "file"},
+        {"id": "desktop-icon", "class": "desktop icon", "path": str(icons / "personal-agent.svg"), "owned": True, "expected_type": "file"},
+    ]
+    preserved = [
+        {"id": "state", "class": "state root", "path": str(state)},
+        {"id": "secret-store", "class": "secret store", "path": str(secrets)},
+        {"id": "backups", "class": "backup root", "path": str(backups)},
+        {"id": "repo", "class": "repository", "path": str(repo)},
+    ]
+    snapshot = {
+        "fixture_marker": True,
+        "fixture_root": str(fixture),
+        "mode": "preserve_data",
+        "state_root": str(state),
+        "backup_root": str(backups),
+        "receipt_root": str(state / "uninstall_receipts"),
+        "runtime_commit": "fixture",
+        "removable_roots": removable_roots,
+        "removable_resources": removable,
+        "preserved_resources": preserved,
+    }
+    action = {
+        "pending_id": "confirm-test",
+        "operation_id": "uninstall-test",
+        "uninstall_mode": "preserve_data",
+        "uninstall_execution_mode": "fixture_preserve_data",
+        "state_root": str(state),
+        "backup_root": str(backups),
+        "receipt_root": str(state / "uninstall_receipts"),
+        "target_snapshot": snapshot,
+    }
+    return snapshot, action
 
 
 class ExecutorRegistryTests(unittest.TestCase):
@@ -226,6 +292,53 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertFalse(drift["ok"])
         self.assertFalse(drift["mutated"])
         self.assertEqual("update_target_changed_since_preview", drift["error_code"])
+
+    def test_uninstall_executor_fixture_removes_runtime_and_preserves_data(self) -> None:
+        root = Path(self.tmpdir.name)
+        snapshot, action = _uninstall_fixture(root)
+        plan = _plan(action_type="operator.uninstall", target="Personal Agent uninstall", risk_level="high")
+        result = execute_uninstall_v1(plan, action)
+
+        fixture = Path(snapshot["fixture_root"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("completed_verified", result["details"]["status"])
+        self.assertFalse((fixture / "personal-agent/runtime/releases/0.2.0").exists())
+        self.assertFalse((fixture / "config/systemd/user/personal-agent-api.service").exists())
+        self.assertTrue((fixture / "personal-agent/agent.db").exists())
+        self.assertTrue((fixture / "personal-agent/secrets.enc.json").exists())
+        self.assertTrue((fixture / "repo/README.md").exists())
+        self.assertTrue(Path(result["details"]["final_backup_path"]).is_dir())
+        self.assertTrue(Path(result["details"]["receipt_path"]).is_file())
+
+    def test_uninstall_executor_blocks_live_and_snapshot_drift(self) -> None:
+        plan = _plan(action_type="operator.uninstall", target="Personal Agent uninstall", risk_level="high")
+        live = execute_uninstall_v1(plan, {"pending_id": "confirm-test", "uninstall_execution_mode": "live_guarded"})
+        self.assertFalse(live["ok"])
+        self.assertFalse(live["mutated"])
+        self.assertEqual("uninstall_live_execution_not_enabled", live["error_code"])
+
+        snapshot, action = _uninstall_fixture(Path(self.tmpdir.name))
+        action["target_snapshot_hash"] = "not-the-real-hash"
+        drift = execute_uninstall_v1(plan, action)
+        self.assertFalse(drift["ok"])
+        self.assertFalse(drift["mutated"])
+        self.assertEqual("uninstall_target_changed_since_preview", drift["error_code"])
+
+    def test_uninstall_executor_rejects_symlink_escape(self) -> None:
+        root = Path(self.tmpdir.name)
+        snapshot, action = _uninstall_fixture(root)
+        fixture = Path(snapshot["fixture_root"])
+        escape = fixture / "personal-agent/runtime/escape"
+        escape.symlink_to(Path("/tmp"))
+        snapshot["removable_resources"].append(
+            {"id": "escape", "class": "runtime symlink", "path": str(escape), "owned": True, "expected_type": "symlink"}
+        )
+        plan = _plan(action_type="operator.uninstall", target="Personal Agent uninstall", risk_level="high")
+        result = execute_uninstall_v1(plan, action)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("resource_symlink_escape", result["error_code"])
 
     def test_journal_redacts_secrets(self) -> None:
         registry = ExecutorRegistry(self.journal_path)
