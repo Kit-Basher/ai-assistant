@@ -12,6 +12,7 @@ Run:
 
 ```bash
 python scripts/webui_robustness_smoke.py
+python scripts/browser_ui_survival_smoke.py
 ```
 
 The smoke currently proves:
@@ -28,18 +29,21 @@ The smoke currently proves:
 - send failure adds a visible assistant error message
 - transcript export exists
 
-This is intentionally a cheap smoke. It does not replace a browser automation
-suite.
+`webui_robustness_smoke.py` is intentionally cheap and static/component-level.
+`browser_ui_survival_smoke.py` is the installed-product browser proof: it uses
+Playwright with the installed system Chrome to exercise the promoted UI/API at
+`http://127.0.0.1:8765/`.
 
-The current installed daily-driver product proof exercises the web-facing API
-path but not a real browser. The fresh VM proof still needs manual browser
-checks for refresh, hard-refresh after promotion, large transcript behavior,
-and export download.
+The browser smoke covers normal chat, concise and detailed RAM/system-check
+answers, refresh behavior, temporary API interruption and recovery, stale Plan
+Mode confirmation safety, bounded long transcripts, multiline/special-character
+rendering, accidental duplicate-send protection, and browser console/network
+diagnostics.
 
-Restart and manual browser survival checks are tracked in
+Restart and manual reboot survival checks are tracked in
 `docs/operator/REBOOT_PROOF.md`. `scripts/restart_survival_smoke.py` proves the
-installed API service restart path; it does not replace the manual browser
-checklist or a future Playwright suite.
+installed API service restart path; `browser_ui_survival_smoke.py` proves the
+browser-facing path during a bounded API interruption and restart.
 
 ## Current Behavior
 
@@ -69,17 +73,15 @@ expected stable runtime. The final VM proof should include this manual check.
 Transcript export/import: transcript export is implemented as a JSON download.
 Transcript import is not implemented.
 
-## Manual Checks
+## Remaining Manual Checks
 
 Before final release, manually check:
 
-- failed `/chat` request display
-- browser refresh and hard-refresh after promotion
-- very large transcript scroll behavior
+- actual PC reboot/login behavior with the browser open and after relaunch
+- visual polish across desktop/mobile viewport sizes
+- hard-refresh after promotion when browser cache behavior is suspect
+- very large transcript behavior beyond the bounded automated journey
 - disabled-search display in the Basic/Optional capability surfaces
-- approval preview followed by browser refresh, confirming stale approval does
-  not execute without a current matching plan
 - transcript export download
 
-These are documented gaps, not unknown areas. A Playwright-style suite can be
-added later if the UI becomes a primary release surface.
+These are documented gaps, not unknown areas.

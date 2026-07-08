@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-rewrite-routing-polish-clean`
-- Commit: `d245567`
+- Tag: `v0.2.1-normal-user-acceptance-clean3`
+- Commit: `389ed4d2bce9b9fa017f570f4358467de532a0e3`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -120,8 +120,15 @@ New restart/browser survival lane:
 
 - `python scripts/restart_survival_smoke.py`: automated stable API service
   restart proof. It is not a full PC reboot proof.
-- `docs/operator/REBOOT_PROOF.md`: manual reboot and browser survival
-  checklist.
+- `python scripts/browser_ui_survival_smoke.py`: automated installed-browser
+  survival proof using Playwright and the promoted UI/API at
+  `http://127.0.0.1:8765`. It covers initial page load, ordinary chat,
+  concise and detailed RAM/system-check rendering, browser refresh behavior,
+  API interruption and restart recovery, Plan Mode stale-confirmation safety,
+  bounded long transcript behavior, special-character rendering, duplicate-send
+  protection, and browser console/network diagnostics.
+- `docs/operator/REBOOT_PROOF.md`: manual PC reboot checklist plus remaining
+  browser checks that still require human observation.
 
 Earlier readiness gates passed before the first real web UI search request
 failed. That failure proved the repo needed an installed-product gate, not only
@@ -278,9 +285,11 @@ These are not unknowns, but they are not finished:
   fresh-host partial-failure recovery remain partial.
 - Storage/log growth: read-only installed storage estimate and cleanup preview
   exist; rotation/enforced cleanup policy remains partial.
-- Web UI robustness: static/component smoke exists; browser automation and
-  manual refresh/large-transcript checks remain. `REBOOT_PROOF.md` carries the
-  manual UI checklist.
+- Web UI robustness: static/component smoke and installed-browser automation
+  exist. `browser_ui_survival_smoke.py` proves the promoted web UI through a
+  real headless Chrome journey. Manual checks remain for actual PC reboot,
+  visual polish across different display sizes, export-download inspection, and
+  broad browser compatibility beyond installed Chrome.
 - Telegram runtime behavior: optional-service semantics and status UX are
   covered; stale-lock and duplicate-poller fault injection is covered at the
   deterministic runtime/chat layer; full installed-service start/stop/restart
@@ -335,7 +344,8 @@ Safe wording:
 ## Next Release Lanes
 
 1. Manual reboot proof.
-2. Automated browser/UI survival proof.
+2. Use the system for real daily-driver observation and capture new failures as
+   focused acceptance tests.
 3. Operator lifecycle execution: Backup v1 is now additive and executable;
    restore/update/cleanup/uninstall remain preview-only until bounded
    executors exist.

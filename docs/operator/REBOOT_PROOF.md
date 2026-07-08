@@ -93,13 +93,42 @@ chat.
 
 ## UI / Browser Survival
 
-Automated browser proof is not yet implemented. Current automated coverage is:
+Automated browser proof is implemented for the installed promoted UI/API:
 
 ```bash
+python scripts/browser_ui_survival_smoke.py
 python scripts/webui_robustness_smoke.py
 python scripts/restart_survival_smoke.py
 python scripts/installed_product_abuse.py
 ```
+
+`browser_ui_survival_smoke.py` launches a real headless browser against
+`http://127.0.0.1:8765/`. It uses Playwright when available and the installed
+system Chrome. If Playwright is missing, it reports the exact local setup:
+
+```bash
+python -m venv .venv-browser
+.venv-browser/bin/python -m pip install playwright
+python scripts/browser_ui_survival_smoke.py
+```
+
+The automated browser smoke proves:
+
+- initial page load and chat input usability
+- ordinary greeting through the real UI
+- concise normal-user RAM check rendering
+- explicit detailed RAM/process response rendering and scrolling
+- browser refresh coherence; current behavior is transient visible transcript
+  clearing while the thread id persists in session storage
+- temporary API stop, truthful UI error, service restart, and recovery without
+  browser restart
+- Plan Mode preview rendering and stale confirmation rejection after refresh
+  plus API restart
+- bounded long transcript behavior
+- multiline/special-character rendering without script execution
+- accidental double-click duplicate-send protection
+- bounded browser console and network diagnostics, allowing only expected
+  restart-window request failures
 
 Manual UI checklist after promotion or reboot:
 
@@ -116,5 +145,7 @@ Manual UI checklist after promotion or reboot:
   request message
 - export the transcript if needed
 
-These are manual checks until a Playwright or equivalent browser suite exists.
-
+The automated smoke covers the functional path above. Manual checks remain for
+actual PC reboot/login behavior, visual polish across desktop/mobile viewport
+sizes, export-download inspection, and browser compatibility beyond the
+installed Chrome used by the smoke.

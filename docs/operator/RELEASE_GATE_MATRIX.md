@@ -54,6 +54,7 @@ Commands:
 - `python scripts/cleanup_preview_smoke.py`
 - `python scripts/daily_driver_maturity_audit.py`
 - `python scripts/restart_survival_smoke.py`
+- `python scripts/browser_ui_survival_smoke.py`
 - `python scripts/perf_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
 - `python scripts/prove_core_workflows.py`
@@ -86,6 +87,13 @@ failures that internal/mock gates had missed.
 and starts `personal-agent-api.service`, verifies the promoted runtime returns,
 checks managed search recovery, and confirms stale approvals do not survive the
 service restart as executable approvals. It is not a full machine reboot proof.
+
+`browser_ui_survival_smoke.py` is the installed browser/UI survival gate. It
+launches a real headless browser against the promoted UI/API, verifies normal
+chat, RAM-system-check rendering, refresh behavior, temporary API interruption
+and restart recovery, stale Plan Mode confirmation safety, bounded long
+transcripts, special-character rendering, duplicate-send protection, and
+console/network diagnostics. It is a live-runtime gate, not CI-safe.
 
 `operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
 proves health, broken-status, storage, repair, backup, restore, update,
@@ -155,7 +163,8 @@ These require optional services or hardware and are not CI requirements:
 - Telegram bridge smoke
 - local model/Ollama live model smoke
 - local model/provider matrix on the target hardware
-- future browser/GUI automation proof for the desktop web UI
+- browser compatibility beyond the installed Chrome used by
+  `browser_ui_survival_smoke.py`
 - manual reboot proof from `docs/operator/REBOOT_PROOF.md`
 - fresh Debian VM install proof from `docs/operator/VM_PROOF.md`:
   `python scripts/vm_proof_smoke.py --expected-commit <commit>` after install

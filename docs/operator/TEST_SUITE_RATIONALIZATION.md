@@ -48,7 +48,7 @@ because another phrasing failed once.
 | LLM/model/provider | 29 `test_llm_*`, model/provider/model-scout tests | Provider registry, setup flow, model scout, notifications, local model behavior. | Mostly yes | Some are feature gates, not all release gates | Split later into model provider gate vs historical modelops tests. |
 | Telegram | 9 Telegram tests | Token loading, optional service state, bridge, router parity. | Mostly yes | Token redaction/status yes; live bridge optional | Keep unit tests; live Telegram smokes stay optional. |
 | Backup/restore/support/cleanup | `test_backup_restore_proof.py`, executor tests, smoke tests | Additive backup, restore validator, support bundle redaction, cleanup preview. | Mostly yes | Yes for redaction/no-mutation | Keep as operator safety gate; avoid adding another backup proof lane. |
-| Web UI/desktop | webui/desktop/launcher tests | Build, launcher, conversation smoke, latency bundle. | Mostly yes | Build yes; browser behavior mostly daily-driver | Keep build in readiness; browser proof remains manual/lightweight until a real UI runner is justified. |
+| Web UI/desktop | webui/desktop/launcher tests | Build, launcher, conversation smoke, browser survival, latency bundle. | Mostly yes | Build yes; browser proof is installed-product only | Keep build/static checks in readiness; run browser proof after promotion or before UI/restart checkpoints. |
 | Soak/stress/regression | concurrency, soak, barrage, extended tests | Find flakes, load issues, long-tail regressions. | Mixed | No by default | Occasional/manual; do not put in the fast loop. |
 
 ## Named Proof Scripts
@@ -70,7 +70,8 @@ because another phrasing failed once.
 | `scripts/perf_smoke.py` | Latency/no-LLM deterministic route check. | Medium | Yes | No | No | Warning-only unless extreme | Yes | Keep warning-only; do not block release on minor latency. |
 | `scripts/restart_survival_smoke.py` | Stable API stop/start survival. | Slow/disruptive | Yes | Stops/starts user API service; may repair search | No | Yes before VM proof | Yes | Keep as occasional local proof, not fast loop. |
 | `scripts/first_run_smoke.py` | Isolated fresh HOME/state first-run proof. | Medium | No installed stable needed | Temp dirs/process only | Mostly | Yes | No | Keep. |
-| `scripts/webui_robustness_smoke.py`, `scripts/webui_smoke.py` | Web UI build/static/manual robustness proof. | Medium | Mixed | No | Mixed | Partial | Yes | Keep lightweight; do not add full browser automation until needed. |
+| `scripts/browser_ui_survival_smoke.py` | Installed browser/UI survival proof using Playwright and system Chrome. | Slow/disruptive | Yes | Stops/starts user API service; no unsafe mutation | No | Yes before UI/restart checkpoint | Yes | Keep as standalone live-runtime proof; do not put in fast loop. |
+| `scripts/webui_robustness_smoke.py`, `scripts/webui_smoke.py` | Web UI build/static/API-root robustness proof. | Medium | Mixed | No | Mixed | Partial | Yes | Keep lightweight; pairs with browser survival smoke. |
 | `scripts/operator_lifecycle_smoke.py` | Installed operator prompt preview lane. | Medium | Yes | Preview-only | No | Yes for operator safety | Yes | Keep, but consider folding its read-only checks into maturity audit later. |
 | `scripts/memory_lifecycle_smoke.py` | Installed memory lifecycle preview lane. | Medium | Yes | Preview-only | No | Yes for memory safety | Yes | Keep until memory executor grows; then revisit. |
 | `scripts/plan_mode_v2_smoke.py` | Installed Plan Mode v2 UX/safety lane. | Medium | Yes | Preview-only refusals; service restart check may be delegated elsewhere | No | Yes | Yes | Keep as standalone safety gate. |
@@ -168,6 +169,7 @@ python scripts/installed_product_abuse.py
 python scripts/prove_daily_driver_product.py
 python scripts/daily_driver_smoke.py --timeout 90
 python scripts/daily_driver_maturity_audit.py
+python scripts/browser_ui_survival_smoke.py
 ```
 
 ### 4. Operator Safety Check
@@ -217,6 +219,7 @@ Run only when the relevant subsystem is being worked or before a major release:
 ```bash
 python scripts/prove_pre_vm_complete.py
 python scripts/restart_survival_smoke.py
+python scripts/browser_ui_survival_smoke.py
 python scripts/vm_proof_smoke.py --expected-commit <commit>
 python scripts/telegram_bridge_smoke.py
 python scripts/provider_matrix_smoke.py
