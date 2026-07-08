@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,10 +10,12 @@ from unittest.mock import patch
 from agent.host_lifecycle import (
     HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
     HOST_LIFECYCLE_RUNNER_VERSION,
+    _validate_proof_service_name,
     attach_approved_hash,
     load_and_validate_operation,
     write_json_atomic,
 )
+from agent.version import read_git_commit
 from agent.executor_registry import (
     BACKUP_SCHEMA_VERSION,
     BACKUP_MAX_FILE_BYTES,
@@ -175,6 +178,20 @@ class ExecutorRegistryTests(unittest.TestCase):
         write_json_atomic(path, record)
         with self.assertRaisesRegex(ValueError, "arbitrary_command_field_rejected"):
             load_and_validate_operation(path, expected_type="update")
+
+    def test_host_lifecycle_proof_service_name_allowlist(self) -> None:
+        self.assertEqual(
+            "personal-agent-active-host-proof-api.service",
+            _validate_proof_service_name("personal-agent-active-host-proof-api.service"),
+        )
+        with self.assertRaisesRegex(ValueError, "host_lifecycle_service_not_allowlisted"):
+            _validate_proof_service_name("personal-agent-api.service")
+        with self.assertRaisesRegex(ValueError, "host_lifecycle_service_invalid"):
+            _validate_proof_service_name("personal-agent-active-host-proof-api\n.service")
+
+    def test_git_commit_override_is_explicit(self) -> None:
+        with patch.dict(os.environ, {"PERSONAL_AGENT_GIT_COMMIT_OVERRIDE": "active-host-A"}):
+            self.assertEqual("active-host-A", read_git_commit(repo_root=Path(self.tmpdir.name)))
 
     def test_preview_only_refusal_is_journaled(self) -> None:
         registry = ExecutorRegistry(self.journal_path)

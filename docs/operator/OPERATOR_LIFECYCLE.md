@@ -77,6 +77,11 @@ execution proof. It does not update the real daily-driver install.
 Run `python scripts/host_lifecycle_runner_smoke.py` for the shared runner proof.
 Run `python scripts/host_lifecycle_systemd_smoke.py` on an installed Debian host
 to prove user-systemd handoff with fixture roots.
+Run `python scripts/active_host_enablement_smoke.py` on the installed Debian
+host to prove the runner against a real alternate Personal Agent instance with
+separate roots, proof-prefixed service names, update/rollback/resume,
+preserve-data uninstall, post-uninstall status, reinstall sanity, and primary
+installation protection.
 
 Run `python scripts/uninstall_execution_smoke.py` for the isolated Uninstall v1
 execution proof. It removes only generated fixture runtime/service files and

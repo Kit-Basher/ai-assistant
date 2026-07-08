@@ -159,6 +159,11 @@ performed and verified.
 - Live daily-driver self-removal is guarded and not executed by the installed
   proof lanes.
 - Host Lifecycle Runner v1 proves fixture resource selection, sequencing,
-  receipt, and preservation through a shared runner. The systemd handoff proof
-  uses fixture unit names and fixture roots; live host service deletion is not
-  run by automated tests.
+  receipt, and preservation through a shared runner. The active-host proof uses
+  a real alternate installed instance and removes its proof-prefixed user
+  service and runtime while preserving alternate state, backups, dummy secret
+  store, repository, model cache, external packs, and receipt.
+- Live daily-driver self-removal remains guarded. Removing that guard should be
+  a separate small change that wires the same validated active-host operation
+  record fields to the primary profile and re-runs the full installed-host
+  proof.

@@ -150,6 +150,7 @@ Run:
 ```bash
 python scripts/host_lifecycle_runner_smoke.py
 python scripts/host_lifecycle_systemd_smoke.py
+python scripts/active_host_enablement_smoke.py
 python scripts/update_execution_smoke.py
 python scripts/uninstall_execution_smoke.py
 ```
@@ -164,10 +165,19 @@ The runner smoke proves:
 - tampered record rejection
 - arbitrary command field rejection
 
+`active_host_enablement_smoke.py` is the narrow installed-host proof. It creates
+a real alternate Personal Agent instance with proof-prefixed user-systemd
+service names, separate runtime/state roots, and a non-primary loopback port. It
+proves real API readiness, real A -> B promotion, HTTP reconnect, rollback,
+resume, preserve-data uninstall, post-uninstall status, reinstall sanity, and
+primary-installation protection. It never confirms a destructive action against
+the primary daily-driver installation.
+
 ## Remaining Limits
 
 - Active daily-driver non-no-op self-update remains guarded.
 - Active daily-driver self-uninstall remains guarded.
 - Reboot-safe completion is not claimed.
-- Host-systemd proof is fixture-only; it proves handoff mechanics, not removal
-  of the active assistant.
+- The active-host proof uses an alternate installed instance; production guard
+  removal is intentionally deferred to a separate change that wires the same
+  validated record fields to the primary profile.

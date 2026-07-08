@@ -100,6 +100,11 @@ Confirm:
 - run `python scripts/host_lifecycle_systemd_smoke.py` on an installed Debian
   host when host handoff behavior changes; this gate launches the runner through
   a user transient systemd unit with fixture roots and fixture unit names only
+- run `python scripts/active_host_enablement_smoke.py` on the installed Debian
+  host when active host handoff behavior changes; this gate creates a real
+  alternate Personal Agent instance with separate roots, proof-prefixed user
+  service names, and a non-primary port, then proves update, rollback, resume,
+  uninstall, post-uninstall status, reinstall sanity, and primary protection
 - run `python scripts/uninstall_execution_smoke.py` when uninstall execution
   changes; this gate removes only isolated fixture runtime/service files,
   verifies preserve-data behavior, final backup, uninstall receipt,

@@ -54,6 +54,7 @@ Commands:
 - `python scripts/restore_execution_smoke.py`
 - `python scripts/host_lifecycle_runner_smoke.py`
 - `python scripts/host_lifecycle_systemd_smoke.py`
+- `python scripts/active_host_enablement_smoke.py`
 - `python scripts/update_execution_smoke.py`
 - `python scripts/uninstall_execution_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
@@ -165,6 +166,14 @@ command-field rejection.
 gate. It uses fixture runtime roots and fixture unit names only. It may report
 `SKIP` when the environment cannot access a user systemd bus; it must pass on
 the installed Debian host before active live handoff is enabled.
+
+`active_host_enablement_smoke.py` is the narrow active-host proof. It creates a
+real alternate Personal Agent instance with separate roots, a proof-prefixed
+user-systemd API service, and a non-primary loopback port. It proves real A -> B
+update, HTTP reconnect, rollback, interrupted runner resume, preserve-data
+uninstall, post-uninstall status, reinstall sanity, and primary-installation
+protection. It is an installed-host gate, not CI-safe, and it must not target
+the primary `personal-agent-api.service` or port `8765`.
 
 `uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
 removes only generated fixture runtime/service/launcher artifacts through the

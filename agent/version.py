@@ -91,6 +91,9 @@ def read_version(*, repo_root: Path | None = None) -> tuple[str, str]:
 
 
 def read_git_commit(*, repo_root: Path | None = None, timeout_seconds: float | None = None) -> str | None:
+    override = os.getenv("PERSONAL_AGENT_GIT_COMMIT_OVERRIDE", "").strip()
+    if override:
+        return override
     root = (repo_root or repo_root_path()).resolve()
     git_marker = root / ".git"
     if not git_marker.exists():

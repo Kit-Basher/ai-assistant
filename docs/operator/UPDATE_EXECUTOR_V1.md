@@ -103,5 +103,12 @@ checkout is dirty or when live promotion is not rollback-safe. Uninstall remains
 guarded for active daily-driver removal.
 
 Host Lifecycle Runner v1 now proves the shared external runner boundary for
-fixture promotion and rollback. Active daily-driver non-no-op update remains
-guarded until a separate host-safe proof enables that path.
+fixture promotion and rollback. `active_host_enablement_smoke.py` also proves
+the runner against a real alternate installed instance: Release A serves HTTP,
+the host runner promotes it to Release B through user systemd, rollback restores
+Release A after a forced verification failure, and interrupted promotion can be
+resumed.
+
+Active daily-driver non-no-op update remains guarded. Removing that guard should
+be a separate small change that wires the same validated active-host operation
+record fields to the primary profile and re-runs the full installed-host proof.

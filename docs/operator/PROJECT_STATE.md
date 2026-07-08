@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-uninstall-executor-v1-clean`
-- Commit: `6690b4e0f3948cad9a222ac10f0dc1dc0ae6c430`
+- Tag: `v0.2.1-host-lifecycle-runner-v1`
+- Commit: `f571462`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -53,6 +53,14 @@ Current confirmed proof:
   handoff proof for a fixture update unit. It uses fixture roots and fixture
   unit names only; it does not stop or remove the active Personal Agent
   service.
+- `python scripts/active_host_enablement_smoke.py`: installed-host proof using
+  a real alternate Personal Agent instance with separate runtime/state roots,
+  a proof-prefixed user-systemd API service, and a non-primary loopback port. It
+  proves alternate Release A readiness, real A -> B host-runner update, HTTP
+  reconnect, forced rollback to A, interrupted runner resume, preserve-data
+  uninstall after API shutdown, post-uninstall host status, reinstall sanity,
+  and primary-installation protection. It does not update or uninstall the
+  primary daily-driver installation.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.

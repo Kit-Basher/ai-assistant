@@ -126,6 +126,7 @@ python scripts/cleanup_execution_smoke.py
 python scripts/restore_execution_smoke.py
 python scripts/host_lifecycle_runner_smoke.py
 python scripts/host_lifecycle_systemd_smoke.py
+python scripts/active_host_enablement_smoke.py
 python scripts/update_execution_smoke.py
 python scripts/uninstall_execution_smoke.py
 ```

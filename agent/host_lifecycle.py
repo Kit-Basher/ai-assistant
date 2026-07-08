@@ -6,7 +6,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
+import time
 from typing import Any
+import urllib.error
+import urllib.request
 import uuid
 
 
@@ -123,6 +127,68 @@ def _remove_target(path: Path) -> None:
         path.unlink()
 
 
+def _bounded_run(args: list[str], *, timeout: int = 30) -> dict[str, Any]:
+    proc = subprocess.run(
+        args,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+        check=False,
+    )
+    return {
+        "args": [str(item) for item in args[:6]],
+        "returncode": proc.returncode,
+        "output": (proc.stdout or "")[:2000],
+    }
+
+
+def _validate_proof_service_name(name: str) -> str:
+    service = str(name or "").strip()
+    if not service.startswith("personal-agent-active-host-proof-") or not service.endswith(".service"):
+        raise ValueError("host_lifecycle_service_not_allowlisted")
+    if any(ch in service for ch in {"/", "\\", "\x00", " ", "\t", "\n", ";", "&", "|"}):
+        raise ValueError("host_lifecycle_service_invalid")
+    return service
+
+
+def _systemctl_user(action: str, service: str, *, timeout: int = 30) -> dict[str, Any]:
+    if action not in {"start", "stop", "restart", "disable", "reset-failed", "daemon-reload"}:
+        raise ValueError("host_lifecycle_systemctl_action_rejected")
+    if action == "daemon-reload":
+        return _bounded_run(["systemctl", "--user", "daemon-reload"], timeout=timeout)
+    service = _validate_proof_service_name(service)
+    return _bounded_run(["systemctl", "--user", action, service], timeout=timeout)
+
+
+def _http_json(url: str, *, timeout: float = 3.0) -> dict[str, Any]:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        payload = json.loads(response.read(256 * 1024).decode("utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise ValueError("host_lifecycle_http_non_object")
+    return payload
+
+
+def _wait_http_ready(base_url: str, *, expected_commit: str | None = None, timeout: float = 30.0) -> dict[str, Any]:
+    base = str(base_url or "").rstrip("/")
+    if not base.startswith("http://127.0.0.1:"):
+        raise ValueError("host_lifecycle_verify_url_not_loopback")
+    deadline = time.monotonic() + timeout
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            ready = _http_json(f"{base}/ready", timeout=2.0)
+            version = _http_json(f"{base}/version", timeout=2.0)
+            commit = str(version.get("git_commit") or "")
+            if ready.get("ready") is True and (not expected_commit or commit == expected_commit):
+                return {"ready": ready, "version": version}
+            last_error = f"ready={ready.get('ready')} commit={commit}"
+        except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError) as exc:
+            last_error = f"{exc.__class__.__name__}: {exc}"
+        time.sleep(0.5)
+    raise TimeoutError(f"host_lifecycle_http_verify_timeout:{last_error[:500]}")
+
+
 def validate_operation_record_path(path: Path) -> Path:
     raw = path.expanduser()
     if raw.is_symlink():
@@ -192,8 +258,14 @@ def _receipt(record: dict[str, Any], payload: dict[str, Any]) -> None:
 
 
 def _run_update(record: dict[str, Any]) -> dict[str, Any]:
-    if str(record.get("fixture_mode") or "") != "strict":
+    fixture_mode = str(record.get("fixture_mode") or "")
+    if fixture_mode not in {"strict", "active_host_proof"}:
         raise ValueError("update_live_host_handoff_not_enabled")
+    if fixture_mode == "active_host_proof":
+        marker = Path(str(record.get("proof_marker_path") or "")).expanduser().resolve()
+        runtime_root_for_marker = Path(str(record.get("runtime_root") or "")).expanduser().resolve()
+        if not marker.is_file() or not _is_contained(marker, runtime_root_for_marker.parent):
+            raise ValueError("active_host_proof_marker_missing")
     runtime_root = Path(str(record["runtime_root"])).expanduser().resolve()
     releases_root = Path(str(record["releases_root"])).expanduser().resolve()
     current_link = Path(str(record["current_link"])).expanduser()
@@ -204,6 +276,10 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
     target_commit = str(record["target_commit"])
     expected_current_commit = str(record["current_runtime_commit"])
     operation_id = str(record["operation_id"])
+    service_name = str(record.get("api_service_name") or "").strip()
+    verify_base_url = str(record.get("verify_base_url") or "").strip()
+    if service_name:
+        _validate_proof_service_name(service_name)
     if not _is_contained(releases_root, runtime_root) or not _is_contained(current_link.parent, runtime_root):
         raise ValueError("update_path_escape")
     if not source_release.is_dir() or source_release.is_symlink():
@@ -214,6 +290,39 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
     _stage(record, "validated")
     previous_target = current_link.resolve()
     previous_commit = _release_commit(previous_target)
+    if expected_current_commit and previous_commit != expected_current_commit and previous_commit == target_commit:
+        checkpoint_dir = state_root / "update_checkpoints" / operation_id
+        checkpoint = read_json(checkpoint_dir / "manifest.json") if (checkpoint_dir / "manifest.json").is_file() else {}
+        _stage(record, "verifying", {"resume": "target_already_promoted", "checkpoint": checkpoint})
+        service_restart: dict[str, Any] | None = None
+        if service_name:
+            _stage(record, "starting_services", {"resume": "target_already_promoted", "service": service_name})
+            service_restart = _systemctl_user("restart", service_name, timeout=45)
+            restart_code = service_restart.get("returncode")
+            if int(restart_code if restart_code is not None else 1) != 0:
+                raise RuntimeError("update_resume_service_restart_failed")
+        http_verification = None
+        if verify_base_url:
+            http_verification = _wait_http_ready(verify_base_url, expected_commit=target_commit, timeout=45.0)
+        result = {
+            "ok": True,
+            "mutated": False,
+            "status": "completed_verified",
+            "operation_id": operation_id,
+            "operation_type": "update",
+            "previous_runtime_commit": expected_current_commit,
+            "target_commit": target_commit,
+            "promoted_release": str(previous_target),
+            "verified_commit": target_commit,
+            "service_restart": service_restart,
+            "http_verification": http_verification,
+            "checkpoint": checkpoint,
+            "resume": "target_already_promoted",
+            "finished_at": utc_now_iso(),
+        }
+        _stage(record, "completed", result)
+        _receipt(record, result)
+        return result
     if expected_current_commit and previous_commit != expected_current_commit:
         raise ValueError("update_current_changed_since_preview")
     if _release_commit(source_release) != target_commit:
@@ -244,13 +353,81 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
 
     _stage(record, "promoting", {"promoted_release": str(final_release), "checkpoint": checkpoint})
     _replace_symlink(current_link, final_release)
+    if bool(record.get("interrupt_once_after_promotion")):
+        marker_path = Path(str(record.get("interrupt_marker_path") or "")).expanduser().resolve()
+        if not marker_path.is_file():
+            marker_path.parent.mkdir(parents=True, exist_ok=True)
+            marker_path.write_text(utc_now_iso() + "\n", encoding="utf-8")
+            interrupted = {
+                "ok": False,
+                "mutated": True,
+                "status": "interrupted_after_promotion",
+                "operation_id": operation_id,
+                "operation_type": "update",
+                "previous_runtime_commit": previous_commit,
+                "target_commit": target_commit,
+                "promoted_release": str(final_release),
+                "checkpoint": checkpoint,
+                "finished_at": utc_now_iso(),
+            }
+            _stage(record, "failed_after_mutation", interrupted)
+            _receipt(record, interrupted)
+            return interrupted
+    service_restart: dict[str, Any] | None = None
+    if service_name:
+        _stage(record, "starting_services", {"service": service_name, "promoted_release": str(final_release), "checkpoint": checkpoint})
+        service_restart = _systemctl_user("restart", service_name, timeout=45)
+        restart_code = service_restart.get("returncode")
+        if int(restart_code if restart_code is not None else 1) != 0:
+            _stage(record, "rolling_back", {"service_restart": service_restart, "checkpoint": checkpoint})
+            _replace_symlink(current_link, previous_target)
+            _systemctl_user("restart", service_name, timeout=45)
+            rollback_commit = _release_commit(current_link.resolve())
+            rollback_verified = rollback_commit == previous_commit
+            if verify_base_url:
+                try:
+                    _wait_http_ready(verify_base_url, expected_commit=previous_commit, timeout=30.0)
+                except Exception:
+                    rollback_verified = False
+            result = {
+                "ok": False,
+                "mutated": True,
+                "status": "update_failed_rolled_back" if rollback_verified else "update_failed_rollback_failed",
+                "operation_id": operation_id,
+                "operation_type": "update",
+                "previous_runtime_commit": previous_commit,
+                "target_commit": target_commit,
+                "rollback_commit": rollback_commit,
+                "rollback_verified": rollback_verified,
+                "service_restart": service_restart,
+                "checkpoint": checkpoint,
+                "finished_at": utc_now_iso(),
+            }
+            _stage(record, "rollback_completed" if rollback_verified else "rollback_failed", result)
+            _receipt(record, result)
+            return result
     _stage(record, "verifying", {"promoted_release": str(final_release), "checkpoint": checkpoint})
     verified_commit = _release_commit(current_link.resolve())
-    if bool(record.get("force_post_promotion_failure")) or verified_commit != target_commit:
+    http_verification: dict[str, Any] | None = None
+    http_failed = False
+    if verify_base_url and verified_commit == target_commit and not bool(record.get("force_post_promotion_failure")):
+        try:
+            http_verification = _wait_http_ready(verify_base_url, expected_commit=target_commit, timeout=45.0)
+        except Exception as exc:  # noqa: BLE001
+            http_failed = True
+            http_verification = {"error": exc.__class__.__name__, "summary": str(exc)[:500]}
+    if bool(record.get("force_post_promotion_failure")) or verified_commit != target_commit or http_failed:
         _stage(record, "rolling_back", {"verified_commit": verified_commit, "checkpoint": checkpoint})
         _replace_symlink(current_link, previous_target)
+        if service_name:
+            _systemctl_user("restart", service_name, timeout=45)
         rollback_commit = _release_commit(current_link.resolve())
         rollback_verified = rollback_commit == previous_commit
+        if verify_base_url:
+            try:
+                _wait_http_ready(verify_base_url, expected_commit=previous_commit, timeout=45.0)
+            except Exception:
+                rollback_verified = False
         status = "rollback_completed" if rollback_verified else "rollback_failed"
         result = {
             "ok": False,
@@ -263,6 +440,7 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
             "verified_commit": verified_commit,
             "rollback_commit": rollback_commit,
             "rollback_verified": rollback_verified,
+            "http_verification": http_verification,
             "checkpoint": checkpoint,
             "finished_at": utc_now_iso(),
         }
@@ -280,6 +458,8 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
         "target_commit": target_commit,
         "promoted_release": str(final_release),
         "verified_commit": verified_commit,
+        "service_restart": service_restart,
+        "http_verification": http_verification,
         "checkpoint": checkpoint,
         "finished_at": utc_now_iso(),
     }
@@ -289,12 +469,17 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
-    if str(record.get("fixture_mode") or "") != "strict":
+    fixture_mode = str(record.get("fixture_mode") or "")
+    if fixture_mode not in {"strict", "active_host_proof"}:
         raise ValueError("uninstall_live_host_handoff_not_enabled")
     snapshot = record.get("target_snapshot") if isinstance(record.get("target_snapshot"), dict) else {}
     if not snapshot.get("fixture_marker") or snapshot.get("mode") != "preserve_data":
         raise ValueError("uninstall_fixture_marker_missing")
     fixture_root = Path(str(snapshot.get("fixture_root") or "")).expanduser().resolve()
+    if fixture_mode == "active_host_proof":
+        marker = Path(str(record.get("proof_marker_path") or "")).expanduser().resolve()
+        if not marker.is_file() or not _is_contained(marker, fixture_root):
+            raise ValueError("active_host_proof_marker_missing")
     final_backup_path = Path(str(record.get("final_backup_path") or "")).expanduser().resolve()
     if not _is_contained(final_backup_path, fixture_root) or not (final_backup_path / "manifest.json").is_file():
         raise ValueError("uninstall_final_backup_invalid")
@@ -308,6 +493,16 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
     removed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []
+    service_results: list[dict[str, Any]] = []
+    services = [str(item).strip() for item in record.get("service_names", []) if str(item).strip()] if isinstance(record.get("service_names"), list) else []
+    if services:
+        _stage(record, "stopping_services", {"services": services})
+        for service in services:
+            _validate_proof_service_name(service)
+            stop_result = _systemctl_user("stop", service, timeout=45)
+            disable_result = _systemctl_user("disable", service, timeout=45)
+            service_results.append({"service": service, "stop": stop_result, "disable": disable_result})
+        service_results.append({"daemon_reload_before_removal": _systemctl_user("daemon-reload", "", timeout=30)})
     _stage(record, "removing_runtime")
     force_failure_after = str(record.get("force_failure_after_resource_id") or "")
     for resource in resources:
@@ -317,8 +512,15 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
         path = Path(str(resource.get("path") or "")).expanduser()
         if not path.is_absolute():
             path = path.resolve(strict=False)
-        root_ok = any(_is_contained(path.resolve(strict=False), root) or path == root for root in removable_roots)
-        if not root_ok or not _is_contained(path.resolve(strict=False), fixture_root):
+        resolved_path = path.resolve(strict=False)
+        root_ok = any(_is_contained(resolved_path, root) or path == root for root in removable_roots)
+        service_unit_ok = (
+            fixture_mode == "active_host_proof"
+            and resolved_path.parent == (Path.home() / ".config/systemd/user").resolve()
+            and resolved_path.name.startswith("personal-agent-active-host-proof-")
+            and resolved_path.name.endswith(".service")
+        )
+        if not root_ok or (not _is_contained(resolved_path, fixture_root) and not service_unit_ok):
             failures.append({"id": resource_id, "path": str(path), "error": "uninstall_path_escape"})
             break
         if not path.exists() and not path.is_symlink():
@@ -342,6 +544,8 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
         path = Path(raw).expanduser()
         preserved_checked.append({"id": str(resource.get("id") or raw), "path": str(path), "exists": path.exists() or path.is_symlink()})
     status = "partial" if failures else "completed"
+    if services:
+        service_results.append({"daemon_reload_after_removal": _systemctl_user("daemon-reload", "", timeout=30)})
     result = {
         "ok": not failures,
         "mutated": bool(removed),
@@ -352,6 +556,7 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
         "removed_resources": removed,
         "skipped_resources": skipped,
         "failed_resources": failures,
+        "service_results": service_results,
         "preserved_resources": preserved,
         "preserved_checked": preserved_checked,
         "final_backup_path": str(final_backup_path),
