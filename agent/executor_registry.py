@@ -14,6 +14,12 @@ import tempfile
 from typing import Any, Callable
 import uuid
 
+from .host_lifecycle import (
+    HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
+    HOST_LIFECYCLE_RUNNER_VERSION,
+    attach_approved_hash,
+)
+
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
 BACKUP_SCHEMA_VERSION = "backup.v1"
@@ -440,6 +446,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _write_json_unredacted(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
 
 
@@ -1495,6 +1502,90 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             error_code="update_staged_source_missing",
         )
 
+    state_dir = state_root / "host_lifecycle" / "operations" / operation_id
+    receipt_path = state_dir / "receipt.json"
+    operation_state_path = state_dir / "state.json"
+    operation_record_path = state_dir / "operation.json"
+    operation_record = attach_approved_hash(
+        {
+            "schema_version": HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
+            "runner_version": HOST_LIFECYCLE_RUNNER_VERSION,
+            "operation_id": operation_id,
+            "operation_type": "update",
+            "plan_id": plan.get("plan_id"),
+            "created_at": utc_now_iso(),
+            "expires_at": action.get("expires_at"),
+            "current_stage": "created",
+            "fixture_mode": "strict",
+            "state_root": str(state_root),
+            "runtime_root": str(runtime_root),
+            "releases_root": str(releases_root),
+            "current_link": str(current_link),
+            "staged_source_path": str(source_release),
+            "target_release_id": target_release_id,
+            "current_runtime_commit": expected_current_commit,
+            "target_commit": target_commit,
+            "operation_state_path": str(operation_state_path),
+            "receipt_path": str(receipt_path),
+            "force_post_promotion_failure": bool(action.get("force_post_promotion_failure")),
+        }
+    )
+    _write_json_unredacted(operation_record_path, operation_record)
+    resources = [str(operation_record_path), str(operation_state_path), str(receipt_path)]
+    try:
+        runner_result = _launch_host_lifecycle_runner("update", operation_record_path, timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="host_runner_failed",
+            message="The trusted host lifecycle runner failed before update mutation. I left the current runtime untouched.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because the runner did not report mutation.",
+            error_code="update_host_runner_failed",
+            resources=resources,
+            details={"exception": exc.__class__.__name__},
+        )
+    status = str(runner_result.get("status") or "runner_unknown")
+    mutated = bool(runner_result.get("mutated"))
+    ok = bool(runner_result.get("ok"))
+    if ok:
+        return _update_result(
+            plan,
+            action,
+            ok=True,
+            mutated=mutated,
+            status=status,
+            message=(
+                f"Update completed and verified. Personal Agent is now running commit {target_commit[:12]}. "
+                "The previous working release was kept as a rollback checkpoint."
+            ),
+            rollback_available=True,
+            rollback_hint="Use the host lifecycle receipt and checkpoint for manual rollback if needed.",
+            resources=resources,
+            details=runner_result,
+        )
+    rollback_verified = bool(runner_result.get("rollback_verified"))
+    return _update_result(
+        plan,
+        action,
+        ok=False,
+        mutated=mutated,
+        status=status,
+        message=(
+            "The update failed its readiness check, so the host runner restored the previous working release."
+            if rollback_verified
+            else "The update failed before completion. The host runner preserved the operation receipt and stopped further changes."
+        ),
+        rollback_available=rollback_verified or not mutated,
+        rollback_hint="See the host lifecycle receipt for checkpoint and recovery details.",
+        error_code=status,
+        resources=resources,
+        details=runner_result,
+    )
+
     lock_path = state_root / "lifecycle_locks" / "update.lock"
     state_dir = state_root / "update_operations" / operation_id
     lock_payload = {
@@ -2014,11 +2105,11 @@ def run_uninstall_helper_state_file(path: str | Path) -> dict[str, Any]:
 
 
 def _launch_uninstall_helper_state_file(state_path: Path) -> dict[str, Any]:
-    helper = Path(__file__).resolve().parents[1] / "scripts" / "uninstall_helper.py"
+    helper = Path(__file__).resolve().parents[1] / "scripts" / "host_lifecycle_runner.py"
     if not helper.is_file():
-        raise FileNotFoundError(f"uninstall_helper_missing:{helper}")
+        raise FileNotFoundError(f"host_lifecycle_runner_missing:{helper}")
     proc = subprocess.run(
-        [sys.executable, str(helper), "--operation-state", str(state_path)],
+        [sys.executable, str(helper), "uninstall", "--operation-record", str(state_path)],
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -2026,13 +2117,36 @@ def _launch_uninstall_helper_state_file(state_path: Path) -> dict[str, Any]:
         check=False,
     )
     if proc.returncode not in {0, 2}:
-        raise RuntimeError(f"uninstall_helper_failed:{proc.returncode}:{(proc.stdout or '')[:1000]}")
+        raise RuntimeError(f"host_lifecycle_runner_failed:{proc.returncode}:{(proc.stdout or '')[:1000]}")
     try:
         payload = json.loads(proc.stdout or "{}")
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"uninstall_helper_bad_json:{(proc.stdout or '')[:1000]}") from exc
+        raise RuntimeError(f"host_lifecycle_runner_bad_json:{(proc.stdout or '')[:1000]}") from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("uninstall_helper_non_object_json")
+        raise RuntimeError("host_lifecycle_runner_non_object_json")
+    return payload
+
+
+def _launch_host_lifecycle_runner(operation: str, record_path: Path, *, timeout: int = 60) -> dict[str, Any]:
+    runner = Path(__file__).resolve().parents[1] / "scripts" / "host_lifecycle_runner.py"
+    if not runner.is_file():
+        raise FileNotFoundError(f"host_lifecycle_runner_missing:{runner}")
+    proc = subprocess.run(
+        [sys.executable, str(runner), operation, "--operation-record", str(record_path)],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode not in {0, 2}:
+        raise RuntimeError(f"host_lifecycle_runner_failed:{proc.returncode}:{(proc.stdout or '')[:1000]}")
+    try:
+        payload = json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"host_lifecycle_runner_bad_json:{(proc.stdout or '')[:1000]}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("host_lifecycle_runner_non_object_json")
     return payload
 
 
@@ -2188,16 +2302,25 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
         if manifest_payload.get("backup_schema_version") != BACKUP_SCHEMA_VERSION:
             raise ValueError("uninstall_final_backup_invalid")
         touched.append(str(final_backup))
+        state_dir = state_root / "uninstall_operations" / operation_id
         operation_state = {
-            **lock_payload,
-            "stage": "helper_running",
-            "target_snapshot": snapshot,
+            "schema_version": HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
+            "runner_version": HOST_LIFECYCLE_RUNNER_VERSION,
+            "operation_id": operation_id,
+            "operation_type": "uninstall",
+            "plan_id": plan.get("plan_id"),
+            "created_at": utc_now_iso(),
+            "current_stage": "created",
+            "fixture_mode": "strict",
+            "state_root": str(state_root),
+            "operation_state_path": str(state_dir / "state.json"),
             "receipt_path": str(receipt_path),
             "final_backup_path": str(final_backup),
+            "target_snapshot_hash": actual_hash,
+            "target_snapshot": snapshot,
             "force_failure_after_resource_id": action.get("force_failure_after_resource_id"),
         }
-        state_dir = state_root / "uninstall_operations" / operation_id
-        _update_state_write(state_dir, "helper_running", operation_state)
+        operation_state = attach_approved_hash(operation_state)
         touched.append(str(state_dir))
         helper_state = state_dir / "helper_state.json"
         _write_json_unredacted(helper_state, operation_state)

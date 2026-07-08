@@ -76,11 +76,12 @@ under the approved backup root. It includes:
 It excludes raw secrets and arbitrary home-directory data. If backup creation or
 manifest validation fails, uninstall aborts before mutation.
 
-## Helper And Receipt
+## Host Runner And Receipt
 
-The executor prepares an operation state and runs the trusted uninstall helper
-path against the validated fixture. The helper removes only approved resources
-and writes a durable JSON receipt outside the removable runtime path.
+The executor prepares a Host Lifecycle Runner v1 operation record and runs the
+shared trusted runner against the validated fixture. The runner removes only
+approved resources and writes a durable JSON receipt outside the removable
+runtime path.
 
 The receipt records:
 
@@ -133,6 +134,8 @@ Run:
 
 ```bash
 python scripts/uninstall_execution_smoke.py
+python scripts/host_lifecycle_runner_smoke.py
+python scripts/host_lifecycle_systemd_smoke.py
 ```
 
 ## Recovery
@@ -155,6 +158,7 @@ performed and verified.
 - Arbitrary path/service/container uninstall is rejected.
 - Live daily-driver self-removal is guarded and not executed by the installed
   proof lanes.
-- Systemd/container behavior is fixture-proven for resource selection,
-  sequencing, receipt, and preservation; live host service deletion is not run
-  by automated tests.
+- Host Lifecycle Runner v1 proves fixture resource selection, sequencing,
+  receipt, and preservation through a shared runner. The systemd handoff proof
+  uses fixture unit names and fixture roots; live host service deletion is not
+  run by automated tests.

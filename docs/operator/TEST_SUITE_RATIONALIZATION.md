@@ -82,6 +82,8 @@ because another phrasing failed once.
 | `scripts/cleanup_execution_smoke.py` | Cleanup execution proof against isolated generated fixture plus installed preview/cancel check. | Medium | Partly; installed API needed for preview section | Isolated fixture only | Yes for preview section | Yes for cleanup execution safety | Yes | Keep under operator safety group; do not delete live daily-driver artifacts in proof. |
 | `scripts/restore_validator_smoke.py` | Read-only restore validator proof. | Medium | Yes | Temp malformed fixture only | No | Yes for restore safety | No | Keep under operator safety group. |
 | `scripts/restore_execution_smoke.py` | Restore Executor v1 proof for validated Backup v1 fixture restore, staging, safety snapshot, and rollback. | Medium | No installed stable needed | Isolated fixture state only | Yes | Yes for restore execution safety | No | Keep under operator safety group; never restore daily-driver state in this proof. |
+| `scripts/host_lifecycle_runner_smoke.py` | Shared Host Lifecycle Runner v1 proof for fixture update/uninstall handoff, rollback, idempotency, tamper rejection, and command-field rejection. | Medium | No installed stable needed | Isolated fixture runtime/state only | Yes | Yes for host lifecycle runner safety | No | Keep under operator safety group; this is the shared runner proof. |
+| `scripts/host_lifecycle_systemd_smoke.py` | Installed-host user-systemd handoff proof for fixture lifecycle runner operations. | Medium/disruptive | User systemd required | Fixture transient unit and fixture roots only | No when systemd unavailable; yes on installed host | Yes before enabling active live handoff | No | Keep as installed-host proof; skip is acceptable only when no user systemd bus is available. |
 | `scripts/update_execution_smoke.py` | Update Executor v1 proof for staged fixture promotion/rollback plus live no-op guard. | Medium | Mixed | Isolated fixture releases only; live no-op only | Yes | Yes for update execution safety | No | Keep under operator safety group; never promote unknown live commits in proof. |
 | `scripts/uninstall_execution_smoke.py` | Uninstall Executor v1 proof for preserve-data uninstall against an isolated fixture. | Medium | No installed stable needed | Isolated fixture runtime/service files only | Yes | Yes for uninstall execution safety | No | Keep under operator safety group; never uninstall the daily-driver runtime in proof. |
 | `scripts/prove_pre_vm_complete.py` | Broad pre-VM subsystem gate. | Slow | Mixed | Runs summaries/child gates | No | Yes before VM proof | No | Keep as periodic; not daily loop. |
@@ -194,6 +196,8 @@ python scripts/cleanup_preview_smoke.py
 python scripts/cleanup_execution_smoke.py
 python scripts/restore_validator_smoke.py
 python scripts/restore_execution_smoke.py
+python scripts/host_lifecycle_runner_smoke.py
+python scripts/host_lifecycle_systemd_smoke.py
 python scripts/update_execution_smoke.py
 python scripts/uninstall_execution_smoke.py
 ```

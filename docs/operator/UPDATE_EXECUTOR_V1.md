@@ -49,12 +49,12 @@ discard local changes.
 `operator.update.v1` supports three outcomes:
 
 - `fixture_staged_release`: real staged release promotion in an isolated proof
-  root, with rollback checkpoint, operation state, journal record, verification,
-  and forced-failure rollback proof.
+  root through Host Lifecycle Runner v1, with rollback checkpoint, operation
+  state, journal record, verification, and forced-failure rollback proof.
 - `live_noop`: verifies the installed runtime is already at the approved target
   commit and returns `mutated=false`.
 - guarded live update blocker: refuses non-no-op live promotion until the
-  rollback-safe external handoff is available.
+  rollback-safe active-install handoff is available.
 
 Dirty working trees are blocked:
 
@@ -64,7 +64,7 @@ I can’t update yet because the Personal Agent repository has uncommitted chang
 
 ## Rollback
 
-The isolated staged-release executor creates a pre-update checkpoint recording:
+The isolated staged-release runner creates a pre-update checkpoint recording:
 
 - previous release path
 - previous runtime commit
@@ -82,6 +82,7 @@ Run:
 
 ```bash
 python scripts/update_execution_smoke.py
+python scripts/host_lifecycle_runner_smoke.py
 ```
 
 The smoke uses only temporary fixture roots. It proves:
@@ -99,4 +100,8 @@ The smoke uses only temporary fixture roots. It proves:
 Update v1 does not yet perform a live remote fetch or promote an unknown live
 commit from chat. The installed product may preview an update and block when the
 checkout is dirty or when live promotion is not rollback-safe. Uninstall remains
-preview-only.
+guarded for active daily-driver removal.
+
+Host Lifecycle Runner v1 now proves the shared external runner boundary for
+fixture promotion and rollback. Active daily-driver non-no-op update remains
+guarded until a separate host-safe proof enables that path.

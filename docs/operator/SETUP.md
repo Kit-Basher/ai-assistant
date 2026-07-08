@@ -81,6 +81,9 @@ That helper:
 - creates `~/.local/share/personal-agent/runtime/current`
 - installs the stable launcher and `personal-agent-api.service`
 - keeps the checkout separate from the runtime
+- keeps host lifecycle runner source in the preserved repository checkout and
+  uses Personal Agent-owned state paths for validated operation records; the
+  runner is not executed from a user-provided path or chat-provided command
 
 If you installed the Debian package instead:
 

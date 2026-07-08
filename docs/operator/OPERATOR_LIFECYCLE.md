@@ -46,11 +46,12 @@ The mutating prompts return a preview with:
 
 For this checkpoint, lifecycle execution is still partial but no longer purely
 preview-only. Backup, support bundle, cleanup, restore, update, and uninstall
-have bounded Executor Registry paths. Update v1 is intentionally conservative
-for the live installed runtime: dirty checkouts and non-no-op live promotion are
-blocked unless a rollback-safe staged-release handoff is available. Uninstall
-v1 is also conservative: isolated fixture removal is executable, while live
-daily-driver uninstall is guarded and returns a no-mutation blocker.
+have bounded Executor Registry paths. Host Lifecycle Runner v1 is the shared
+external runner for update/uninstall fixture handoff. Update v1 is intentionally
+conservative for the live installed runtime: dirty checkouts and non-no-op live
+promotion are blocked unless a rollback-safe active-install handoff is proven.
+Uninstall v1 is also conservative: isolated fixture removal is executable, while
+live daily-driver uninstall is guarded and returns a no-mutation blocker.
 
 ## Proof
 
@@ -72,6 +73,10 @@ The smoke talks to `http://127.0.0.1:8765` and verifies:
 
 Run `python scripts/update_execution_smoke.py` for the isolated Update v1
 execution proof. It does not update the real daily-driver install.
+
+Run `python scripts/host_lifecycle_runner_smoke.py` for the shared runner proof.
+Run `python scripts/host_lifecycle_systemd_smoke.py` on an installed Debian host
+to prove user-systemd handoff with fixture roots.
 
 Run `python scripts/uninstall_execution_smoke.py` for the isolated Uninstall v1
 execution proof. It removes only generated fixture runtime/service files and

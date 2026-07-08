@@ -81,19 +81,21 @@ restore secrets, logs, arbitrary files, model caches, runtime releases, or
 untrusted executable/pack content.
 
 `operator.update` is enabled for bounded Update v1 outcomes: isolated
-staged-release fixture promotion/rollback proof, verified live no-op, and
-structured live-promotion blockers when preconditions are not rollback-safe.
+staged-release fixture promotion/rollback proof through Host Lifecycle Runner
+v1, verified live no-op, and structured live-promotion blockers when
+preconditions are not rollback-safe.
 It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
 working trees, and target drift after preview. See
 `docs/operator/UPDATE_EXECUTOR_V1.md`.
 
 `operator.uninstall` is enabled for Uninstall v1 preserve-data execution against
-approved isolated fixtures and for guarded live daily-driver refusal. The
-executor requires a final safety backup, exact owned-resource allowlists,
-target-snapshot validation, and a durable uninstall receipt. Live daily-driver
-uninstall remains blocked unless the target is an approved isolated fixture; it
-does not stop services or remove runtime files from ordinary installed-product
-proofs. See `docs/operator/UNINSTALL_EXECUTOR_V1.md`.
+approved isolated fixtures through Host Lifecycle Runner v1 and for guarded
+live daily-driver refusal. The executor requires a final safety backup, exact
+owned-resource allowlists, target-snapshot validation, and a durable uninstall
+receipt. Live daily-driver uninstall remains blocked unless the target is an
+approved isolated fixture; it does not stop services or remove runtime files
+from ordinary installed-product proofs. See
+`docs/operator/UNINSTALL_EXECUTOR_V1.md`.
 
 ## Preview-Only Lanes
 
@@ -122,6 +124,8 @@ python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
 python scripts/cleanup_execution_smoke.py
 python scripts/restore_execution_smoke.py
+python scripts/host_lifecycle_runner_smoke.py
+python scripts/host_lifecycle_systemd_smoke.py
 python scripts/update_execution_smoke.py
 python scripts/uninstall_execution_smoke.py
 ```

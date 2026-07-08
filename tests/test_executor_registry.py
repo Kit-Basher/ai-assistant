@@ -6,6 +6,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from agent.host_lifecycle import (
+    HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
+    HOST_LIFECYCLE_RUNNER_VERSION,
+    attach_approved_hash,
+    load_and_validate_operation,
+    write_json_atomic,
+)
 from agent.executor_registry import (
     BACKUP_SCHEMA_VERSION,
     BACKUP_MAX_FILE_BYTES,
@@ -43,6 +50,31 @@ def _write_release(path: Path, commit: str) -> None:
     (path / "agent" / "BUILD_INFO.json").write_text(
         json.dumps({"git_commit": commit, "version": "fixture"}, sort_keys=True) + "\n",
         encoding="utf-8",
+    )
+
+
+def _host_lifecycle_record(path: Path) -> dict:
+    root = path.parent
+    return attach_approved_hash(
+        {
+            "schema_version": HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
+            "runner_version": HOST_LIFECYCLE_RUNNER_VERSION,
+            "operation_id": "host-test",
+            "operation_type": "update",
+            "plan_id": "host-test",
+            "created_at": "2026-07-08T00:00:00+00:00",
+            "fixture_mode": "strict",
+            "state_root": str(root / "state"),
+            "runtime_root": str(root / "runtime"),
+            "releases_root": str(root / "runtime/releases"),
+            "current_link": str(root / "runtime/current"),
+            "staged_source_path": str(root / "source-release-b"),
+            "target_release_id": "release-b",
+            "current_runtime_commit": "commit-a",
+            "target_commit": "commit-b",
+            "operation_state_path": str(root / "state/host_lifecycle/operations/host-test/state.json"),
+            "receipt_path": str(root / "state/host_lifecycle/operations/host-test/receipt.json"),
+        }
     )
 
 
@@ -122,6 +154,27 @@ class ExecutorRegistryTests(unittest.TestCase):
         spec = ExecutorSpec(executor_id="test.executor", action_type="operator.support_bundle", status="enabled")
         registry.register(spec)
         self.assertEqual(spec, registry.lookup("operator.support_bundle"))
+
+    def test_host_lifecycle_record_validates_and_rejects_tamper(self) -> None:
+        path = Path(self.tmpdir.name) / "host" / "operation.json"
+        record = _host_lifecycle_record(path)
+        write_json_atomic(path, record)
+        _, loaded = load_and_validate_operation(path, expected_type="update")
+        self.assertEqual("host-test", loaded["operation_id"])
+
+        record["target_commit"] = "evil"
+        path.write_text(json.dumps(record), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "operation_record_tampered"):
+            load_and_validate_operation(path, expected_type="update")
+
+    def test_host_lifecycle_record_rejects_command_field(self) -> None:
+        path = Path(self.tmpdir.name) / "host-command" / "operation.json"
+        record = _host_lifecycle_record(path)
+        record["command"] = "rm -rf /"
+        record = attach_approved_hash(record)
+        write_json_atomic(path, record)
+        with self.assertRaisesRegex(ValueError, "arbitrary_command_field_rejected"):
+            load_and_validate_operation(path, expected_type="update")
 
     def test_preview_only_refusal_is_journaled(self) -> None:
         registry = ExecutorRegistry(self.journal_path)

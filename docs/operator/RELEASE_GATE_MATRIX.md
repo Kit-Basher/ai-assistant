@@ -52,6 +52,8 @@ Commands:
 - `python scripts/backup_v1_smoke.py`
 - `python scripts/restore_validator_smoke.py`
 - `python scripts/restore_execution_smoke.py`
+- `python scripts/host_lifecycle_runner_smoke.py`
+- `python scripts/host_lifecycle_systemd_smoke.py`
 - `python scripts/update_execution_smoke.py`
 - `python scripts/uninstall_execution_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
@@ -152,6 +154,17 @@ staged release promotion, rollback checkpoint creation, forced post-promotion
 rollback, dirty-tree refusal, target-drift refusal, live no-op behavior, and
 unchanged git status. It does not update the real installed daily-driver
 runtime to an unknown remote commit.
+
+`host_lifecycle_runner_smoke.py` is the shared Host Lifecycle Runner v1 fixture
+gate. It proves the external runner record validation, fixture update
+promotion, forced rollback, preserve-data fixture uninstall, duplicate
+idempotency, partial uninstall reporting, tamper rejection, and arbitrary
+command-field rejection.
+
+`host_lifecycle_systemd_smoke.py` is the installed-host user-systemd handoff
+gate. It uses fixture runtime roots and fixture unit names only. It may report
+`SKIP` when the environment cannot access a user systemd bus; it must pass on
+the installed Debian host before active live handoff is enabled.
 
 `uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
 removes only generated fixture runtime/service/launcher artifacts through the

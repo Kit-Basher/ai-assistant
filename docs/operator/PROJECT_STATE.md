@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-update-executor-v1`
-- Commit: `3ceb95d`
+- Tag: `v0.2.1-uninstall-executor-v1-clean`
+- Commit: `6690b4e0f3948cad9a222ac10f0dc1dc0ae6c430`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -45,6 +45,14 @@ Current confirmed proof:
   idempotency, live daily-driver guard, symlink-escape rejection, and truthful
   partial-failure reporting. It does not uninstall the real daily-driver
   runtime.
+- `python scripts/host_lifecycle_runner_smoke.py`: shared Host Lifecycle Runner
+  v1 proof for fixture update promotion, forced rollback, preserve-data
+  uninstall, duplicate/idempotent execution, tamper rejection, and arbitrary
+  command-field rejection.
+- `python scripts/host_lifecycle_systemd_smoke.py`: installed-host systemd
+  handoff proof for a fixture update unit. It uses fixture roots and fixture
+  unit names only; it does not stop or remove the active Personal Agent
+  service.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.
@@ -300,15 +308,16 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   personal files, model caches, runtime releases, or untrusted executable/pack
   content.
 - Update Executor v1 is enabled behind Plan Mode for bounded update outcomes:
-  isolated staged-release promotion/rollback proof, verified live no-op, and
-  structured live-promotion blockers when rollback-safe handoff is unavailable.
+  isolated staged-release promotion/rollback proof through Host Lifecycle
+  Runner v1, verified live no-op, and structured live-promotion blockers when
+  rollback-safe active-install handoff is unavailable.
   It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
   working trees, and target drift after preview.
 - Uninstall Executor v1 is enabled behind Plan Mode for preserve-data outcomes:
-  isolated fixture removal with a final safety backup and receipt, plus a
-  structured no-mutation blocker for live daily-driver uninstall. It preserves
-  backups, memory, preferences, secret store, repository, model caches, and
-  external packs by default.
+  isolated fixture removal through Host Lifecycle Runner v1 with a final safety
+  backup and receipt, plus a structured no-mutation blocker for live
+  daily-driver uninstall. It preserves backups, memory, preferences, secret
+  store, repository, model caches, and external packs by default.
 - Cleanup preview identifies old or oversized Personal Agent artifacts and
   estimates recoverable space. Cleanup execution deletes only revalidated
   approved fixture/owned artifacts and remains guarded by Plan Mode.
@@ -324,10 +333,11 @@ These are not unknowns, but they are not finished:
 
 - Installer/update/uninstall: install, promotion, bundle, and package paths have
   coverage; Update Executor v1 has isolated staged-release execution and
-  rollback proof plus live no-op/blocker behavior; Uninstall Executor v1 has
-  isolated preserve-data fixture execution plus live daily-driver no-mutation
-  guard. Full live remote self-update, live daily-driver self-uninstall, and
-  fresh-host partial-failure recovery remain partial.
+  rollback proof through the shared host runner plus live no-op/blocker
+  behavior; Uninstall Executor v1 has isolated preserve-data fixture execution
+  through the shared host runner plus live daily-driver no-mutation guard. Full
+  live remote self-update, live daily-driver self-uninstall, and fresh-host
+  partial-failure recovery remain partial.
 - Storage/log growth: read-only installed storage estimate, cleanup preview,
   and bounded cleanup execution for approved old Personal Agent artifacts
   exist; broader rotation/enforced cleanup policy remains partial.
@@ -357,7 +367,8 @@ These are not unknowns, but they are not finished:
   confirmations across the major action families. Cleanup now has a bounded
   executor for approved old Personal Agent artifacts. Restore now has a bounded
   allowlisted Backup v1 executor. Update now has a bounded staged-release
-  fixture executor and live no-op/blocker path. Uninstall and destructive memory
+  fixture executor and live no-op/blocker path. Uninstall now has a bounded
+  preserve-data fixture executor and live no-op blocker path. Destructive memory
   actions remain preview-only.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
@@ -396,8 +407,10 @@ Safe wording:
 2. Use the system for real daily-driver observation and capture new failures as
    focused acceptance tests.
 3. Operator lifecycle execution: Backup v1 is additive and executable; cleanup,
-   restore, update, and uninstall now have bounded executor paths, but live
-   non-no-op self-update and live daily-driver self-uninstall remain guarded.
+   restore, update, and uninstall now have bounded executor paths. Host
+   Lifecycle Runner v1 provides the shared fixture/systemd handoff boundary, but
+   live non-no-op self-update and live daily-driver self-uninstall remain
+   guarded until active-install proof is added.
 4. Memory lifecycle execution: implement bounded executors for thread/global
    toggles, forget-topic, delete-all, export, redaction, and dedupe.
 5. Executor Registry expansion: move remaining per-flow mutators behind the

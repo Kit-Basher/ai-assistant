@@ -93,6 +93,13 @@ Confirm:
   this gate promotes only isolated fixture releases, verifies rollback
   checkpoint and forced rollback behavior, proves dirty-tree and target-drift
   blockers, and does not update the real daily-driver runtime
+- run `python scripts/host_lifecycle_runner_smoke.py` when shared update/
+  uninstall handoff logic changes; this gate exercises the trusted runner CLI
+  directly against fixture operations and validates tamper/command-field
+  rejection
+- run `python scripts/host_lifecycle_systemd_smoke.py` on an installed Debian
+  host when host handoff behavior changes; this gate launches the runner through
+  a user transient systemd unit with fixture roots and fixture unit names only
 - run `python scripts/uninstall_execution_smoke.py` when uninstall execution
   changes; this gate removes only isolated fixture runtime/service files,
   verifies preserve-data behavior, final backup, uninstall receipt,
