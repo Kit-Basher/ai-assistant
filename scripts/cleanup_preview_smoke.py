@@ -143,7 +143,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
 
     checks.append(
         _pass("cleanup preview uses Plan Mode v2", f"plan_id={plan.get('plan_id')} executor_status={plan.get('executor_status')}", 'POST /chat {"message": "clean old backup files"}')
-        if "Plan Mode v2" in text and plan.get("action_type") == "operator.cleanup" and plan.get("executor_status") == "preview_only"
+        if "Plan Mode v2" in text and plan.get("action_type") == "operator.cleanup" and plan.get("executor_status") == "enabled"
         else _fail("cleanup preview uses Plan Mode v2", json.dumps(preview, sort_keys=True)[:1400], 'POST /chat {"message": "clean old backup files"}')
     )
     checks.append(
@@ -183,13 +183,12 @@ def run(base_url: str, timeout: float) -> list[Check]:
         else _fail("unknown candidates are not marked safe", json.dumps(unsafe_safe, sort_keys=True)[:1600], "inspect cleanup candidates")
     )
 
-    confirm = _post_chat(base_url, "yes", timeout=timeout)
-    confirm_runtime = _runtime_payload(confirm)
-    executor_result = confirm_runtime.get("executor_result") if isinstance(confirm_runtime.get("executor_result"), dict) else {}
+    cancel = _post_chat(base_url, "no", timeout=timeout)
+    cancel_text = _assistant_text(cancel)
     checks.append(
-        _pass("cleanup confirmation does not mutate", json.dumps(executor_result, sort_keys=True)[:1000], 'POST /chat {"message": "yes"}')
-        if executor_result.get("error_code") == "executor_not_enabled" and executor_result.get("mutated") is False
-        else _fail("cleanup confirmation does not mutate", json.dumps(confirm, sort_keys=True)[:1400], 'POST /chat {"message": "yes"}')
+        _pass("cleanup preview can be cancelled without mutation", cancel_text, 'POST /chat {"message": "no"}')
+        if "cancel" in cancel_text.lower()
+        else _fail("cleanup preview can be cancelled without mutation", json.dumps(cancel, sort_keys=True)[:1400], 'POST /chat {"message": "no"}')
     )
 
     after = _git_status_short()

@@ -186,7 +186,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
 
     for prompt, name, expected in (
         ("uninstall the assistant", "uninstall preview", ("destructive", "Executor status: preview_only", "Rollback supported: no")),
-        ("clean old runtime files", "cleanup preview", ("destructive", "Executor status: preview_only", "Rollback supported: no")),
+        ("clean old runtime files", "cleanup preview", ("destructive", "Executor status: enabled", "Rollback supported: no")),
         ("delete all memory about me", "delete memory preview", ("destructive", "Executor status: preview_only", "Rollback supported: no")),
     ):
         payload = _post_chat(base_url, prompt, thread_id=f"plan-{name}", timeout=timeout)

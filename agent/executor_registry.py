@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 from typing import Any, Callable
 import uuid
@@ -19,6 +21,8 @@ EXECUTOR_JOURNAL_MAX_RECORD_BYTES = 64 * 1024
 EXECUTOR_JOURNAL_MAX_STRING_BYTES = 1024
 SUPPORT_BUNDLE_MAX_TOTAL_BYTES = 2 * 1024 * 1024
 SUPPORT_BUNDLE_MAX_FILE_BYTES = 256 * 1024
+CLEANUP_MAX_CANDIDATES = 50
+CLEANUP_MAX_SCAN_ENTRIES = 10000
 
 SECRET_KEY_HINTS = (
     "api_key",
@@ -592,6 +596,227 @@ def _approved_backup_root(action: dict[str, Any]) -> Path:
 def _artifact_dir(root: Path, *, prefix: str) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return root / f"{prefix}-{stamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _tree_size_and_count(path: Path, *, max_entries: int = CLEANUP_MAX_SCAN_ENTRIES) -> tuple[int, int, bool]:
+    total = 0
+    count = 0
+    truncated = False
+    try:
+        if path.is_file() or path.is_symlink():
+            return int(path.lstat().st_size), 1, False
+        for child in path.rglob("*"):
+            count += 1
+            if count > max_entries:
+                truncated = True
+                break
+            try:
+                stat = child.lstat()
+            except OSError:
+                continue
+            total += int(stat.st_size)
+    except OSError:
+        return 0, count, True
+    return total, count, truncated
+
+
+def _cleanup_allowed_roots() -> dict[str, Path]:
+    state_root = (Path.home() / ".local/share/personal-agent").resolve()
+    return {
+        "backup": (state_root / "backups").resolve(),
+        "runtime_release": (state_root / "runtime/releases").resolve(),
+        "support_tmp": Path(tempfile.gettempdir()).resolve(),
+    }
+
+
+def _is_contained(path: Path, root: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+        root_resolved = root.resolve(strict=False)
+    except OSError:
+        return False
+    return resolved == root_resolved or root_resolved in resolved.parents
+
+
+def _cleanup_candidate_kind(classification: str) -> str | None:
+    normalized = str(classification or "").strip().lower()
+    if normalized in {"oversized backup artifact", "old backup artifact"}:
+        return "backup"
+    if normalized == "old support bundle artifact":
+        return "support_tmp"
+    if normalized == "old runtime release":
+        return "runtime_release"
+    return None
+
+
+def _cleanup_path_allowed(path: Path, *, kind: str) -> tuple[bool, str]:
+    roots = _cleanup_allowed_roots()
+    root = roots.get(kind)
+    if root is None:
+        return False, "cleanup_candidate_kind_not_allowed"
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        return False, "cleanup_path_unresolvable"
+    if not _is_contained(resolved, root):
+        return False, "cleanup_path_outside_owned_root"
+    if kind == "backup" and not resolved.name.startswith("personal-agent-backup-"):
+        return False, "cleanup_backup_name_not_owned"
+    if kind == "support_tmp" and not (
+        resolved.name.startswith("personal-agent-support-") or resolved.name.startswith("agent-support-")
+    ):
+        return False, "cleanup_support_name_not_owned"
+    if kind == "runtime_release" and resolved == root:
+        return False, "cleanup_runtime_release_root_protected"
+    return True, ""
+
+
+def _cleanup_has_symlink(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        if path.is_dir():
+            for index, child in enumerate(path.rglob("*")):
+                if index > CLEANUP_MAX_SCAN_ENTRIES:
+                    return True
+                if child.is_symlink():
+                    return True
+    except OSError:
+        return True
+    return False
+
+
+def execute_cleanup(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    preview = action.get("cleanup_preview") if isinstance(action.get("cleanup_preview"), dict) else {}
+    candidates = preview.get("candidates") if isinstance(preview.get("candidates"), list) else []
+    protected = preview.get("protected") if isinstance(preview.get("protected"), list) else []
+    protected_paths = {
+        str(item.get("canonical_path") or "").strip()
+        for item in protected
+        if isinstance(item, dict) and str(item.get("canonical_path") or "").strip()
+    }
+    deleted: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    bytes_recovered = 0
+
+    for raw in candidates[:CLEANUP_MAX_CANDIDATES]:
+        if not isinstance(raw, dict):
+            skipped.append({"reason": "cleanup_candidate_malformed"})
+            continue
+        label = str(raw.get("path") or raw.get("canonical_path") or "").strip()
+        canonical = str(raw.get("canonical_path") or "").strip()
+        classification = str(raw.get("classification") or "").strip()
+        if not canonical:
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_canonical_path_missing"})
+            continue
+        if not bool(raw.get("safe_to_delete_later")):
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_candidate_not_marked_safe"})
+            continue
+        if canonical in protected_paths:
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_candidate_became_protected"})
+            continue
+        kind = _cleanup_candidate_kind(classification)
+        if kind is None:
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_classification_not_deletable"})
+            continue
+        path = Path(canonical).expanduser()
+        allowed, reason = _cleanup_path_allowed(path, kind=kind)
+        if not allowed:
+            skipped.append({"path": label, "classification": classification, "reason": reason})
+            continue
+        try:
+            resolved = path.resolve(strict=True)
+        except OSError:
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_candidate_missing"})
+            continue
+        if os.path.ismount(str(resolved)):
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_mount_point_protected"})
+            continue
+        if _cleanup_has_symlink(resolved):
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_symlink_protected"})
+            continue
+        current_size, current_count, truncated = _tree_size_and_count(resolved)
+        preview_size = raw.get("size_bytes")
+        preview_count = raw.get("file_count")
+        if isinstance(preview_size, int) and current_size != preview_size:
+            skipped.append(
+                {
+                    "path": label,
+                    "classification": classification,
+                    "reason": "cleanup_candidate_changed_after_preview",
+                    "preview_size_bytes": preview_size,
+                    "current_size_bytes": current_size,
+                }
+            )
+            continue
+        if isinstance(preview_count, int) and current_count != preview_count:
+            skipped.append(
+                {
+                    "path": label,
+                    "classification": classification,
+                    "reason": "cleanup_candidate_changed_after_preview",
+                    "preview_file_count": preview_count,
+                    "current_file_count": current_count,
+                }
+            )
+            continue
+        if truncated:
+            skipped.append({"path": label, "classification": classification, "reason": "cleanup_scan_truncated"})
+            continue
+        try:
+            if resolved.is_dir():
+                shutil.rmtree(resolved)
+            else:
+                resolved.unlink()
+        except Exception as exc:  # noqa: BLE001 - independent cleanup failures are reported, not thrown.
+            failures.append({"path": label, "classification": classification, "reason": exc.__class__.__name__})
+            continue
+        bytes_recovered += current_size
+        deleted.append({"path": label, "classification": classification, "size_bytes": current_size})
+
+    ok = not failures
+    mutated = bool(deleted)
+    if deleted and failures:
+        status = "partial_failure"
+        message = (
+            f"Cleanup partially finished. Removed {len(deleted)} Personal Agent artifact(s) and recovered "
+            f"{bytes_recovered} bytes, but {len(failures)} candidate(s) failed."
+        )
+        error_code = "cleanup_partial_failure"
+    elif deleted:
+        status = "completed"
+        message = f"Cleanup finished. Removed {len(deleted)} old Personal Agent artifact(s) and recovered {bytes_recovered} bytes."
+        error_code = None
+    elif failures:
+        status = "failed"
+        message = "Cleanup did not remove anything because every attempted candidate failed."
+        error_code = "cleanup_failed"
+    else:
+        status = "no_op"
+        message = "Cleanup found no eligible candidates to delete after revalidation. I did not remove anything."
+        error_code = None
+    return {
+        "ok": ok,
+        "mutated": mutated,
+        "executor_id": "operator.cleanup.v1",
+        "resources_touched": [str(item.get("path") or "") for item in deleted if str(item.get("path") or "").strip()],
+        "rollback_available": False,
+        "rollback_hint": (
+            "Cleanup deletion is not automatically reversible. The latest valid backup, current runtime, secret store, "
+            "and active service files were protected by policy."
+        ),
+        "error_code": error_code,
+        "user_message": message,
+        "details": {
+            "status": status,
+            "deleted": deleted,
+            "skipped": skipped[:50],
+            "protected_count": len(protected),
+            "failures": failures[:50],
+            "bytes_recovered": bytes_recovered,
+        },
+    }
 
 
 def build_backup_manifest(

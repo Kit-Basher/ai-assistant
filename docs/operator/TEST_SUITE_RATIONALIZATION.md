@@ -47,7 +47,7 @@ because another phrasing failed once.
 | Runtime truth/readiness/doctor | ready/state/recovery/doctor/runtime contract tests | Truth surfaces and optional-service wording. | Yes | Yes for `/ready`/doctor basics | Keep; avoid duplicating every installed smoke case here. |
 | LLM/model/provider | 29 `test_llm_*`, model/provider/model-scout tests | Provider registry, setup flow, model scout, notifications, local model behavior. | Mostly yes | Some are feature gates, not all release gates | Split later into model provider gate vs historical modelops tests. |
 | Telegram | 9 Telegram tests | Token loading, optional service state, bridge, router parity. | Mostly yes | Token redaction/status yes; live bridge optional | Keep unit tests; live Telegram smokes stay optional. |
-| Backup/restore/support/cleanup | `test_backup_restore_proof.py`, executor tests, smoke tests | Additive backup, restore validator, support bundle redaction, cleanup preview. | Mostly yes | Yes for redaction/no-mutation | Keep as operator safety gate; avoid adding another backup proof lane. |
+| Backup/restore/support/cleanup | `test_backup_restore_proof.py`, executor tests, smoke tests | Additive backup, restore validator, support bundle redaction, cleanup preview and isolated cleanup execution. | Mostly yes | Yes for redaction/no-mutation | Keep as operator safety gate; avoid adding another backup proof lane. |
 | Web UI/desktop | webui/desktop/launcher tests | Build, launcher, conversation smoke, browser survival, latency bundle. | Mostly yes | Build yes; browser proof is installed-product only | Keep build/static checks in readiness; run browser proof after promotion or before UI/restart checkpoints. |
 | Soak/stress/regression | concurrency, soak, barrage, extended tests | Find flakes, load issues, long-tail regressions. | Mixed | No by default | Occasional/manual; do not put in the fast loop. |
 
@@ -78,7 +78,8 @@ because another phrasing failed once.
 | `scripts/executor_registry_smoke.py` | Installed executor registry result/refusal lane. | Medium | Yes | Support-bundle executor may create temp artifact | No | Yes | No | Keep as standalone safety gate. |
 | `scripts/support_bundle_v2_smoke.py` | Additive support bundle packaging proof. | Medium | Yes | Creates temp support bundle | No | Yes for diagnostics packaging | No | Keep under operator safety group. |
 | `scripts/backup_v1_smoke.py` | Additive Backup v1 proof. | Medium | Yes | Creates bounded backup artifact | No | Yes for backup lane | No | Keep; do not run in every fast loop. |
-| `scripts/cleanup_preview_smoke.py` | Cleanup preview no-delete proof. | Medium | Yes | No | No | Yes for cleanup safety | Yes | Keep under operator safety group. |
+| `scripts/cleanup_preview_smoke.py` | Cleanup preview and cancel-no-delete proof. | Medium | Yes | No | No | Yes for cleanup safety | Yes | Keep under operator safety group. |
+| `scripts/cleanup_execution_smoke.py` | Cleanup execution proof against isolated generated fixture plus installed preview/cancel check. | Medium | Partly; installed API needed for preview section | Isolated fixture only | Yes for preview section | Yes for cleanup execution safety | Yes | Keep under operator safety group; do not delete live daily-driver artifacts in proof. |
 | `scripts/restore_validator_smoke.py` | Read-only restore validator proof. | Medium | Yes | Temp malformed fixture only | No | Yes for restore safety | No | Keep under operator safety group. |
 | `scripts/prove_pre_vm_complete.py` | Broad pre-VM subsystem gate. | Slow | Mixed | Runs summaries/child gates | No | Yes before VM proof | No | Keep as periodic; not daily loop. |
 | `scripts/vm_proof_smoke.py` | Post-install VM verifier. | Medium | Clean VM installed product | No destructive mutation | No | Manual VM proof only | No | Keep manual/historical until VM lane starts. |
@@ -185,6 +186,7 @@ python scripts/memory_lifecycle_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
 python scripts/cleanup_preview_smoke.py
+python scripts/cleanup_execution_smoke.py
 python scripts/restore_validator_smoke.py
 ```
 

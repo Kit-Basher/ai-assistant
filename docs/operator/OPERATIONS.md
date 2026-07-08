@@ -85,10 +85,12 @@ Confirm:
   wrong; this gate verifies `show my backups`, Backup v1 manifest validation,
   unsafe path rejection, malformed backup handling, and restore preview-only
   refusal without restoring anything
-- run `python scripts/cleanup_preview_smoke.py` when storage cleanup behavior
-  feels wrong; this gate verifies the read-only cleanup preview, candidate
-  classification, protected paths, and preview-only executor refusal without
-  deleting anything
+- run `python scripts/cleanup_preview_smoke.py` when storage cleanup preview
+  behavior feels wrong; this gate verifies candidate classification, protected
+  paths, and cancellation without deleting anything
+- run `python scripts/cleanup_execution_smoke.py` when cleanup execution
+  changes; this gate deletes only an isolated generated fixture through the
+  Executor Registry and does not delete existing daily-driver artifacts
 - run `python scripts/daily_driver_maturity_audit.py` periodically during real
   use; it reports daily-driver blockers, irritants, performance drift, and
   state growth without confirming enabled mutating actions

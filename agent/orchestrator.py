@@ -137,6 +137,7 @@ from agent.executor_registry import (
     ExecutorSpec,
     create_additive_backup,
     create_redacted_support_bundle,
+    execute_cleanup,
 )
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.skill_governance import (
@@ -662,6 +663,16 @@ class Orchestrator:
                 run=create_additive_backup,
                 rollback_available=True,
                 rollback_hint="Remove only the newly created backup directory.",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.cleanup.v1",
+                action_type="operator.cleanup",
+                status="enabled",
+                run=execute_cleanup,
+                rollback_available=False,
+                rollback_hint="Cleanup deletion is not automatically reversible.",
             )
         )
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
@@ -3050,7 +3061,7 @@ class Orchestrator:
     @staticmethod
     def _canonical_plan_executor_status(operation: str) -> str:
         normalized = str(operation or "").strip().lower()
-        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup"}:
+        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup", "operator_lifecycle_cleanup"}:
             return "enabled"
         if normalized.startswith(("memory_lifecycle_", "operator_lifecycle_")):
             return "preview_only"
@@ -15709,6 +15720,7 @@ class Orchestrator:
                 size = size_override
             return {
                 "path": self._operator_lifecycle_path_label(path),
+                "canonical_path": str(path.expanduser().resolve(strict=False)),
                 "classification": classification,
                 "size_bytes": size,
                 "size": self._operator_lifecycle_size_label(size),
@@ -15838,6 +15850,7 @@ class Orchestrator:
             [
                 {
                     "path": self._operator_lifecycle_path_label(state_root / "secrets.enc.json"),
+                    "canonical_path": str((state_root / "secrets.enc.json").expanduser().resolve(strict=False)),
                     "classification": "protected secret store",
                     "size_bytes": None,
                     "size": "not scanned",
@@ -15847,6 +15860,7 @@ class Orchestrator:
                 },
                 {
                     "path": self._operator_lifecycle_path_label(home / ".config/systemd/user"),
+                    "canonical_path": str((home / ".config/systemd/user").expanduser().resolve(strict=False)),
                     "classification": "protected active service files",
                     "size_bytes": None,
                     "size": "not scanned",
@@ -16130,20 +16144,23 @@ class Orchestrator:
             "This is a mutating or potentially destructive operator action, so I need explicit confirmation before doing anything. Say yes to continue, or no to cancel."
         )
         operation = f"operator_lifecycle_{normalized_kind.removeprefix('operator_').removesuffix('_preview')}"
+        action_payload = {
+            "operation": operation,
+            "params": {
+                "kind": normalized_kind,
+                "action_label": spec["action_label"],
+                "resources": resources,
+                "rollback_scope": spec["rollback"],
+            },
+        }
+        if cleanup_snapshot is not None:
+            action_payload["cleanup_preview"] = cleanup_snapshot
         return self._confirmation_preview_response(
             user_id=user_id,
             route="operator_lifecycle",
             question=question,
             used_tools=["operator_lifecycle"],
-            action={
-                "operation": operation,
-                "params": {
-                    "kind": normalized_kind,
-                    "action_label": spec["action_label"],
-                    "resources": resources,
-                    "rollback_scope": spec["rollback"],
-                },
-            },
+            action=action_payload,
             title=str(spec["title"]),
             preview_payload={
                 "type": "operator_lifecycle_preview",

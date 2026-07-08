@@ -52,6 +52,7 @@ Commands:
 - `python scripts/backup_v1_smoke.py`
 - `python scripts/restore_validator_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
+- `python scripts/cleanup_execution_smoke.py`
 - `python scripts/daily_driver_maturity_audit.py`
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/browser_ui_survival_smoke.py`
@@ -114,10 +115,11 @@ clarification, safety-bypass refusal, and thread/session confirmation binding
 through the real `/chat` API.
 
 `executor_registry_smoke.py` is the installed Executor Registry v1 gate. It
-proves preview-only memory delete, uninstall, and cleanup plans do not execute;
-the enabled support-bundle executor returns a journal id and creates only a
-redacted temporary artifact; stale confirmations still do not execute; and a
-different thread/session cannot apply the pending plan.
+proves preview-only memory delete and uninstall plans do not execute; cleanup
+plans are enabled but can be cancelled without mutation; the enabled
+support-bundle executor returns a journal id and creates only a redacted
+temporary artifact; stale confirmations still do not execute; and a different
+thread/session cannot apply the pending plan.
 
 `support_bundle_v2_smoke.py` is the installed diagnostics packaging gate. It
 proves the support-bundle executor creates a bounded temporary bundle with a
@@ -140,8 +142,12 @@ and generic restore confirmation still returns `executor_not_enabled`,
 `cleanup_preview_smoke.py` is the installed cleanup-preview gate. It proves
 cleanup prompts remain read-only, classify old/oversized backup artifacts,
 old support bundle artifacts, and old runtime releases, protect the latest
-valid backup and active runtime, and refuse confirmation with
-`executor_not_enabled`, `mutated=false`.
+valid backup and active runtime, and can be cancelled without mutation.
+
+`cleanup_execution_smoke.py` is the cleanup execution gate. It performs actual
+deletion only against an isolated generated fixture through the Executor
+Registry, journals the result, and verifies the installed daily-driver cleanup
+plan is enabled but not executed by the smoke.
 
 `daily_driver_maturity_audit.py` is the recurring installed-product maturity
 gate. It checks startup honesty, search/Telegram/memory honesty, operator

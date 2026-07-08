@@ -153,10 +153,26 @@ def run(base_url: str, timeout: float) -> list[Check]:
     for prompt, thread_id in (
         ("delete all memory about me", "executor-memory-delete"),
         ("uninstall the assistant", "executor-uninstall"),
-        ("clean old runtime files", "executor-cleanup"),
     ):
         preview_check, confirm_check = _confirm_preview_only(base_url, prompt, thread_id=thread_id, timeout=timeout)
         checks.extend([preview_check, confirm_check])
+
+    cleanup_preview = _post_chat(base_url, "clean old runtime files", thread_id="executor-cleanup", timeout=timeout)
+    cleanup_text = _assistant_text(cleanup_preview)
+    cleanup_payload = _runtime_payload(cleanup_preview)
+    cleanup_plan = cleanup_payload.get("canonical_plan") if isinstance(cleanup_payload.get("canonical_plan"), dict) else {}
+    checks.append(
+        _pass("cleanup has enabled executor plan", f"plan_id={cleanup_plan.get('plan_id')} action={cleanup_plan.get('action_type')}", 'POST /chat {"message": "clean old runtime files"}')
+        if "Plan Mode v2" in cleanup_text and cleanup_plan.get("executor_status") == "enabled" and cleanup_plan.get("action_type") == "operator.cleanup"
+        else _fail("cleanup has enabled executor plan", json.dumps(cleanup_preview, sort_keys=True)[:1400], 'POST /chat {"message": "clean old runtime files"}')
+    )
+    cleanup_cancel = _post_chat(base_url, "no", thread_id="executor-cleanup", timeout=timeout)
+    cleanup_cancel_text = _assistant_text(cleanup_cancel).lower()
+    checks.append(
+        _pass("cleanup enabled plan cancels without execution", _assistant_text(cleanup_cancel), 'POST /chat {"message": "no"}')
+        if "cancel" in cleanup_cancel_text
+        else _fail("cleanup enabled plan cancels without execution", json.dumps(cleanup_cancel, sort_keys=True)[:1400], 'POST /chat {"message": "no"}')
+    )
 
     support_preview = _post_chat(base_url, "make a support bundle", thread_id="executor-support", timeout=timeout)
     support_preview_text = _assistant_text(support_preview)
@@ -240,4 +256,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

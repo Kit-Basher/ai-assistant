@@ -17,6 +17,7 @@ from agent.executor_registry import (
     ExecutorSpec,
     create_additive_backup,
     create_redacted_support_bundle,
+    execute_cleanup,
     support_bundle_redact,
 )
 
@@ -183,6 +184,94 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertEqual(["/tmp/personal-agent-partial/summary.json"], result.resources_touched)
         self.assertIn("Remove only", result.rollback_hint)
         self.assertEqual("/tmp/personal-agent-partial", result.details.get("artifact_path"))
+
+    def test_cleanup_executor_deletes_only_previewed_owned_support_artifact(self) -> None:
+        tmp_root = Path(self.tmpdir.name) / "tmp"
+        tmp_root.mkdir()
+        support = tmp_root / "personal-agent-support-old"
+        support.mkdir()
+        (support / "summary.json").write_text("{}", encoding="utf-8")
+        preview = {
+            "candidates": [
+                {
+                    "path": str(support),
+                    "canonical_path": str(support.resolve()),
+                    "classification": "old support bundle artifact",
+                    "safe_to_delete_later": True,
+                    "size_bytes": sum(path.lstat().st_size for path in support.rglob("*")),
+                    "file_count": 1,
+                }
+            ],
+            "protected": [],
+        }
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_root)):
+            result = execute_cleanup(_plan(action_type="operator.cleanup"), {"cleanup_preview": preview})
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertFalse(support.exists())
+        self.assertEqual("operator.cleanup.v1", result["executor_id"])
+        self.assertEqual("completed", result["details"]["status"])
+
+    def test_cleanup_executor_skips_candidate_changed_after_preview(self) -> None:
+        tmp_root = Path(self.tmpdir.name) / "tmp"
+        tmp_root.mkdir()
+        support = tmp_root / "personal-agent-support-old"
+        support.mkdir()
+        (support / "summary.json").write_text("{}", encoding="utf-8")
+        preview = {
+            "candidates": [
+                {
+                    "path": str(support),
+                    "canonical_path": str(support.resolve()),
+                    "classification": "old support bundle artifact",
+                    "safe_to_delete_later": True,
+                    "size_bytes": 1,
+                    "file_count": 1,
+                }
+            ],
+            "protected": [],
+        }
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_root)):
+            result = execute_cleanup(_plan(action_type="operator.cleanup"), {"cleanup_preview": preview})
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertTrue(support.exists())
+        self.assertEqual("no_op", result["details"]["status"])
+        self.assertEqual("cleanup_candidate_changed_after_preview", result["details"]["skipped"][0]["reason"])
+
+    def test_cleanup_executor_rejects_symlink_candidate(self) -> None:
+        tmp_root = Path(self.tmpdir.name) / "tmp"
+        tmp_root.mkdir()
+        support = tmp_root / "personal-agent-support-old"
+        support.mkdir()
+        outside = Path(self.tmpdir.name) / "outside"
+        outside.mkdir()
+        (support / "escape").symlink_to(outside)
+        preview = {
+            "candidates": [
+                {
+                    "path": str(support),
+                    "canonical_path": str(support.resolve()),
+                    "classification": "old support bundle artifact",
+                    "safe_to_delete_later": True,
+                    "size_bytes": sum(path.lstat().st_size for path in support.rglob("*")),
+                    "file_count": 1,
+                }
+            ],
+            "protected": [],
+        }
+
+        with patch("tempfile.gettempdir", return_value=str(tmp_root)):
+            result = execute_cleanup(_plan(action_type="operator.cleanup"), {"cleanup_preview": preview})
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertTrue(support.exists())
+        self.assertEqual("cleanup_symlink_protected", result["details"]["skipped"][0]["reason"])
 
     def test_malformed_executor_result_returns_structured_failure(self) -> None:
         registry = ExecutorRegistry(self.journal_path)

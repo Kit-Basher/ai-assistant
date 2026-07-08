@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-normal-user-acceptance-clean3`
-- Commit: `389ed4d2bce9b9fa017f570f4358467de532a0e3`
+- Tag: `v0.2.1-browser-ui-survival-proof-clean`
+- Commit: `341d3ae019cf7318178ed4240040493cfb8a025e`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -33,7 +33,11 @@ Current confirmed proof:
   rejection, malformed backup handling, and restore preview-only refusal
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
-  deletion remains disabled
+  the installed daily-driver plan is cancelled during this smoke.
+- `python scripts/cleanup_execution_smoke.py`: cleanup execution proof. It
+  deletes only an isolated generated fixture through the Executor Registry and
+  verifies the installed daily-driver cleanup plan is enabled but not executed
+  by the proof.
 - `python scripts/first_run_smoke.py`: isolated first-run/fresh-state proof
   for a temporary API with empty HOME/XDG/state paths; this is not the fresh
   Debian VM proof
@@ -173,9 +177,9 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   executor blocking, stale confirmation rejection after service restart, and
   thread/session confirmation binding.
 - `scripts/executor_registry_smoke.py`: installed-runtime proof for the shared
-  executor registry result shape, preview-only refusals, support-bundle
-  execution, registry journal ids, stale confirmation rejection, and
-  thread/session binding.
+  executor registry result shape, preview-only refusals, enabled cleanup plan
+  cancellation, support-bundle execution, registry journal ids, stale
+  confirmation rejection, and thread/session binding.
 - `scripts/support_bundle_v2_smoke.py`: installed-runtime proof for the useful
   Support Bundle v2 diagnostics package: manifest, bounded summaries,
   redaction, registry result fields, and scoped rollback hint.
@@ -190,7 +194,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - `scripts/cleanup_preview_smoke.py`: installed-runtime proof for cleanup
   preview. It classifies old/oversized backup artifacts, old support bundles,
   and old runtime releases, protects current runtime/latest backup/secrets, and
-  proves confirmation remains `preview_only` with `mutated=false`.
+  proves the installed plan can be cancelled without mutation.
+- `scripts/cleanup_execution_smoke.py`: isolated cleanup execution proof. It
+  deletes a generated owned support-bundle fixture through the Executor
+  Registry and journals the result, while avoiding deletion of real
+  daily-driver artifacts.
 - `scripts/first_run_smoke.py`: isolated first-run/fresh-state proof. It starts
   a temporary API on a random loopback port with isolated HOME/XDG/state/config
   paths. It does not overwrite the promoted stable runtime and it is not the
@@ -283,8 +291,9 @@ These are not unknowns, but they are not finished:
 - Installer/update/uninstall: install, promotion, bundle, and package paths have
   coverage; user-facing update/uninstall previews exist; full execution and
   fresh-host partial-failure recovery remain partial.
-- Storage/log growth: read-only installed storage estimate and cleanup preview
-  exist; rotation/enforced cleanup policy remains partial.
+- Storage/log growth: read-only installed storage estimate, cleanup preview,
+  and bounded cleanup execution for approved old Personal Agent artifacts
+  exist; broader rotation/enforced cleanup policy remains partial.
 - Web UI robustness: static/component smoke and installed-browser automation
   exist. `browser_ui_survival_smoke.py` proves the promoted web UI through a
   real headless Chrome journey. Manual checks remain for actual PC reboot,
@@ -308,9 +317,9 @@ These are not unknowns, but they are not finished:
 - Plan Mode execution: canonical plan previews, inspection, cancellation,
   thread/session binding, stale-confirmation rejection, and Executor Registry
   v1 exist. Batch 5 covers stale/cancelled/expired/wrong-thread/overwritten
-  confirmations across the major action families. Most mutators are not yet
-  migrated to the registry; destructive lifecycle and memory actions remain
-  preview-only.
+  confirmations across the major action families. Cleanup now has a bounded
+  executor for approved old Personal Agent artifacts. Restore, update,
+  uninstall, and destructive memory actions remain preview-only.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
 - Model/provider management: deterministic guidance and switching paths are
@@ -346,9 +355,9 @@ Safe wording:
 1. Manual reboot proof.
 2. Use the system for real daily-driver observation and capture new failures as
    focused acceptance tests.
-3. Operator lifecycle execution: Backup v1 is now additive and executable;
-   restore/update/cleanup/uninstall remain preview-only until bounded
-   executors exist.
+3. Operator lifecycle execution: Backup v1 is additive and executable; cleanup
+   is bounded and executable for approved old artifacts; restore/update/uninstall
+   remain preview-only until bounded executors exist.
 4. Memory lifecycle execution: implement bounded executors for thread/global
    toggles, forget-topic, delete-all, export, redaction, and dedupe.
 5. Executor Registry expansion: move remaining per-flow mutators behind the

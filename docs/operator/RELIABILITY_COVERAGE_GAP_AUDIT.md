@@ -609,7 +609,8 @@ See `docs/operator/P0_RELIABILITY_RECAP.md` for the checkpoint summary.
 - Backup/support partial artifacts are reported with rollback hints scoped only
   to the new artifact at the registry/unit layer; installed-host failure
   fixtures remain future proof.
-- Full cleanup/delete/restore self-repair remains preview-only by design.
+- Cleanup now has a bounded executor for approved old Personal Agent artifacts.
+  Delete/restore self-repair remains preview-only by design.
 
 ## Top 5 Remaining Implementation Items
 

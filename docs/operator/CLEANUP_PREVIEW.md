@@ -1,8 +1,8 @@
-# Cleanup Preview
+# Cleanup Preview And Execution
 
-Cleanup preview is a read-only operator lane for identifying old or oversized
-Personal Agent artifacts. It estimates recoverable space, but it does not
-delete, move, truncate, rewrite, compress, or stop anything.
+Cleanup preview identifies old or oversized Personal Agent artifacts. Cleanup
+execution is available only after Plan Mode v2 confirmation and only for the
+exact candidates from the preview that still pass revalidation.
 
 ## User Flow
 
@@ -15,15 +15,16 @@ clean old backups
 ```
 
 The assistant returns a Plan Mode v2 preview with `action_type=operator.cleanup`
-and `executor_status=preview_only`. The response must say:
+and `executor_status=enabled`. The preview response must say:
 
 ```text
 I did not delete anything.
 ```
 
-Confirming the plan returns `executor_not_enabled`, `mutated=false`, and a
-registry journal id. Actual deletion is intentionally not implemented in this
-lane.
+Confirming the plan executes `operator.cleanup.v1` through the Executor
+Registry. The executor revalidates every candidate before deletion, skips
+anything that changed or became protected, and journals a bounded redacted
+result.
 
 ## Candidate Classes
 
@@ -57,12 +58,32 @@ Cleanup preview must not suggest deleting:
 The preview also does not scan model caches, virtual environments, broad home
 directories, or raw secret files.
 
+## Execution Boundary
+
+Cleanup can delete only these owned artifact classes:
+
+- old or oversized Backup v1 directories under the approved Personal Agent
+  backup root
+- old support bundle temp directories with the approved Personal Agent support
+  bundle prefix
+- old runtime release directories under the approved Personal Agent runtime
+  releases root
+
+The executor rejects path traversal, symlink candidates, mount points, unknown
+classes, unapproved roots, candidates that changed after preview, the latest
+valid backup, the active runtime, secret stores, active service files, and
+arbitrary user paths.
+
+Cleanup deletion is not automatically reversible. The result must report
+deleted, skipped, protected, and failed candidates truthfully.
+
 ## Proof
 
 Run:
 
 ```bash
 python scripts/cleanup_preview_smoke.py
+python scripts/cleanup_execution_smoke.py
 ```
 
 The installed-product smoke proves:
@@ -72,6 +93,9 @@ The installed-product smoke proves:
 - oversized backup candidates are detected when present
 - the latest valid backup and active runtime are protected
 - unknown candidates are not marked safe
-- confirmation returns `executor_not_enabled`, `mutated=false`
+- cancellation leaves the installed daily-driver cleanup plan unexecuted
 - git status remains unchanged
 
+`cleanup_execution_smoke.py` proves actual deletion against an isolated fixture
+through the Executor Registry, and verifies the installed product exposes the
+enabled cleanup plan without deleting existing daily-driver artifacts.

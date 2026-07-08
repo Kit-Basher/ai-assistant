@@ -369,9 +369,9 @@ def run(timeout: float) -> list[Check]:
         cleanup_chat = _post_chat(base_url, "clean old backup files", thread_id="cleanup-preview", timeout=timeout)
         cleanup_text = _assistant_text(cleanup_chat)
         checks.append(
-            _pass("cleanup remains preview-only and read-only", cleanup_text[:1000], 'POST /chat {"message": "clean old backup files"}')
+            _pass("cleanup remains confirmation-gated and read-only before approval", cleanup_text[:1000], 'POST /chat {"message": "clean old backup files"}')
             if _contains_any(cleanup_text, ("Cleanup old Personal Agent files preview", "I did not delete anything"))
-            else _fail("cleanup remains preview-only and read-only", cleanup_text[:1200], 'POST /chat {"message": "clean old backup files"}')
+            else _fail("cleanup remains confirmation-gated and read-only before approval", cleanup_text[:1200], 'POST /chat {"message": "clean old backup files"}')
         )
 
         created_outside = [

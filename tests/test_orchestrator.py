@@ -2034,7 +2034,35 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(payload.get("mutated"))
         plan = payload.get("canonical_plan")
         self.assertIsInstance(plan, dict)
-        self.assertEqual("preview_only", plan.get("executor_status"))
+        self.assertEqual("enabled", plan.get("executor_status"))
+
+    def test_operator_cleanup_confirmation_executes_bounded_owned_fixture(self) -> None:
+        fake_home = Path(self.tmpdir.name) / "home"
+        tmp_root = Path(self.tmpdir.name) / "tmp"
+        fake_home.mkdir()
+        tmp_root.mkdir()
+        support = tmp_root / "personal-agent-support-old"
+        support.mkdir()
+        (support / "summary.json").write_text("{}", encoding="utf-8")
+        old_time = time.time() - 2 * 86400
+        os.utime(support, (old_time, old_time))
+
+        orchestrator = self._orchestrator()
+        with patch("pathlib.Path.home", return_value=fake_home), patch("tempfile.gettempdir", return_value=str(tmp_root)):
+            preview = orchestrator.handle_message("clean old backup files", "user1")
+            confirmed = orchestrator.handle_message("yes", "user1")
+
+        self.assertIn("Cleanup old Personal Agent files preview", preview.text)
+        self.assertFalse(support.exists())
+        self.assertEqual("operator_lifecycle", confirmed.data.get("route"))
+        payload = confirmed.data.get("runtime_payload")
+        self.assertIsInstance(payload, dict)
+        result = payload.get("executor_result")
+        self.assertIsInstance(result, dict)
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("mutated"))
+        self.assertEqual("operator.cleanup", result.get("action_type"))
+        self.assertEqual("operator.cleanup.v1", result.get("executor_id"))
 
     def test_restore_validator_lists_and_validates_backup_v1_without_mutation(self) -> None:
         fake_home = Path(self.tmpdir.name) / "home"
@@ -2248,7 +2276,7 @@ class TestOrchestrator(unittest.TestCase):
             ("Support bundle", "operator_lifecycle_support_bundle", "operator.support_bundle", "enabled"),
             ("Back up assistant", "operator_lifecycle_backup", "operator.backup", "enabled"),
             ("Restore from backup", "operator_lifecycle_restore", "operator.restore", "preview_only"),
-            ("Cleanup old Personal Agent files", "operator_lifecycle_cleanup", "operator.cleanup", "preview_only"),
+            ("Cleanup old Personal Agent files", "operator_lifecycle_cleanup", "operator.cleanup", "enabled"),
             ("Delete all memory about me", "memory_lifecycle_delete_all", "memory.delete_all", "preview_only"),
             ("Export my memory", "memory_lifecycle_export", "memory.export", "preview_only"),
             ("Redact sensitive memory", "memory_lifecycle_redact", "memory.redact", "preview_only"),
@@ -2377,7 +2405,6 @@ class TestOrchestrator(unittest.TestCase):
     def test_plan_mode_preview_only_confirmations_never_mutate(self) -> None:
         prompts = [
             ("restore from backup", "operator.restore"),
-            ("clean old runtime files", "operator.cleanup"),
             ("delete all memory about me", "memory.delete_all"),
             ("export my memory", "memory.export"),
             ("redact sensitive memory", "memory.redact"),

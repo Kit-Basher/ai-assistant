@@ -71,12 +71,17 @@ These remain preview-only in v1:
 
 - memory delete/export/redact/dedupe/control executors
 - uninstall
-- cleanup
 - restore/update/repair lifecycle executors unless a separate bounded executor
   is already used by an existing managed-service path
 
 Confirming one of these plans must return `executor_not_enabled`,
 `mutated=false`, and a registry `journal_id`.
+
+Cleanup is no longer preview-only. `operator.cleanup` uses
+`operator.cleanup.v1` for approved old Personal Agent artifacts only. It
+revalidates every preview candidate before deletion, skips anything changed or
+protected, writes a bounded redacted journal result, and does not claim
+automatic rollback for destructive deletion.
 
 ## Proof
 
@@ -86,11 +91,13 @@ Run:
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
+python scripts/cleanup_execution_smoke.py
 ```
 
 The smoke talks to the installed `/chat` API and proves:
 
-- preview-only memory delete, uninstall, and cleanup cannot execute
+- preview-only memory delete and uninstall cannot execute
+- cleanup has an enabled executor plan and can be cancelled without mutation
 - support bundle has an enabled executor and returns a journal id
 - support bundle creates only a redacted temporary diagnostics artifact
 - Support Bundle v2 writes a manifest and bounded summary files
@@ -99,8 +106,8 @@ The smoke talks to the installed `/chat` API and proves:
 - restore remains preview-only and returns `mutated=false`
 - Restore v1 Validator is read-only and does not use an executor; generic
   restore remains preview-only through the registry
-- cleanup preview classifies candidates and remains preview-only with
-  `executor_not_enabled`, `mutated=false`
+- cleanup preview classifies candidates; cleanup execution is proven against
+  an isolated generated fixture by `cleanup_execution_smoke.py`
 - stale confirmation after API restart does not execute
 - unrelated thread/session cannot execute the pending plan
 - obvious secret markers are not present in executor results
