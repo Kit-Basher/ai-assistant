@@ -2401,6 +2401,9 @@ def _classify_runtime_chat_route_raw(
             "generic_allowed": False,
             "fallback_reason": "action_tool",
         }
+    operator_lifecycle_route = _classify_operator_lifecycle_route(normalized)
+    if operator_lifecycle_route is not None:
+        return operator_lifecycle_route
     if _looks_like_runtime_status_query(normalized):
         return {
             "route": "runtime_status",
@@ -2563,9 +2566,6 @@ def _classify_runtime_chat_route_raw(
     agent_memory_route = _classify_agent_memory_route(normalized)
     if agent_memory_route is not None:
         return agent_memory_route
-    operator_lifecycle_route = _classify_operator_lifecycle_route(normalized)
-    if operator_lifecycle_route is not None:
-        return operator_lifecycle_route
     filesystem_route = _classify_filesystem_route(text, normalized)
     if filesystem_route is not None:
         return filesystem_route

@@ -80,11 +80,15 @@ Confirm:
 - run `python scripts/backup_v1_smoke.py` when backup behavior feels wrong;
   this gate verifies the Plan Mode-gated backup executor, timestamped local
   backup artifact, bounded redacted summary files, journal id, scoped rollback
-  hint, and restore dry-run/no-mutation behavior
+  hint, and restore preview cancellation behavior
 - run `python scripts/restore_validator_smoke.py` when restore validation feels
   wrong; this gate verifies `show my backups`, Backup v1 manifest validation,
-  unsafe path rejection, malformed backup handling, and restore preview-only
-  refusal without restoring anything
+  unsafe path rejection, malformed backup handling, and restore preview
+  cancellation without restoring anything
+- run `python scripts/restore_execution_smoke.py` when restore execution
+  changes; this gate restores only isolated fixture state through the Executor
+  Registry, verifies staging and safety snapshots, and forces a post-apply
+  failure to prove rollback behavior
 - run `python scripts/cleanup_preview_smoke.py` when storage cleanup preview
   behavior feels wrong; this gate verifies candidate classification, protected
   paths, and cancellation without deleting anything

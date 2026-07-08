@@ -81,6 +81,7 @@ because another phrasing failed once.
 | `scripts/cleanup_preview_smoke.py` | Cleanup preview and cancel-no-delete proof. | Medium | Yes | No | No | Yes for cleanup safety | Yes | Keep under operator safety group. |
 | `scripts/cleanup_execution_smoke.py` | Cleanup execution proof against isolated generated fixture plus installed preview/cancel check. | Medium | Partly; installed API needed for preview section | Isolated fixture only | Yes for preview section | Yes for cleanup execution safety | Yes | Keep under operator safety group; do not delete live daily-driver artifacts in proof. |
 | `scripts/restore_validator_smoke.py` | Read-only restore validator proof. | Medium | Yes | Temp malformed fixture only | No | Yes for restore safety | No | Keep under operator safety group. |
+| `scripts/restore_execution_smoke.py` | Restore Executor v1 proof for validated Backup v1 fixture restore, staging, safety snapshot, and rollback. | Medium | No installed stable needed | Isolated fixture state only | Yes | Yes for restore execution safety | No | Keep under operator safety group; never restore daily-driver state in this proof. |
 | `scripts/prove_pre_vm_complete.py` | Broad pre-VM subsystem gate. | Slow | Mixed | Runs summaries/child gates | No | Yes before VM proof | No | Keep as periodic; not daily loop. |
 | `scripts/vm_proof_smoke.py` | Post-install VM verifier. | Medium | Clean VM installed product | No destructive mutation | No | Manual VM proof only | No | Keep manual/historical until VM lane starts. |
 | Legacy/live smoke scripts | `assistant_*_smoke.py`, `live_*`, `telegram_*`, `hardware_*`, `provider_matrix_smoke.py`, `split_smoke.py`, `brief_smoke.py` | Mixed | Mixed | Mixed | Mixed | No by default | Sometimes | Historical/manual unless a current gate names them. |
@@ -188,6 +189,7 @@ python scripts/backup_v1_smoke.py
 python scripts/cleanup_preview_smoke.py
 python scripts/cleanup_execution_smoke.py
 python scripts/restore_validator_smoke.py
+python scripts/restore_execution_smoke.py
 ```
 
 ### 5. Full Local Release Proof

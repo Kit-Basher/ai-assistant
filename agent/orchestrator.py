@@ -4,6 +4,7 @@ import copy
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from functools import partial
+import hashlib
 import platform
 import re
 from typing import Any, Callable
@@ -138,6 +139,7 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    restore_backup_v1,
 )
 from agent.runtime_truth_service import RuntimeTruthService
 from agent.skill_governance import (
@@ -673,6 +675,16 @@ class Orchestrator:
                 run=execute_cleanup,
                 rollback_available=False,
                 rollback_hint="Cleanup deletion is not automatically reversible.",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.restore.v1",
+                action_type="operator.restore",
+                status="enabled",
+                run=restore_backup_v1,
+                rollback_available=True,
+                rollback_hint="Use the pre-restore safety snapshot created before restore mutation.",
             )
         )
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
@@ -3061,7 +3073,7 @@ class Orchestrator:
     @staticmethod
     def _canonical_plan_executor_status(operation: str) -> str:
         normalized = str(operation or "").strip().lower()
-        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup", "operator_lifecycle_cleanup"}:
+        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup", "operator_lifecycle_cleanup", "operator_lifecycle_restore"}:
             return "enabled"
         if normalized.startswith(("memory_lifecycle_", "operator_lifecycle_")):
             return "preview_only"
@@ -3965,6 +3977,12 @@ class Orchestrator:
                 message = (
                     f"{action_label} executed through Executor Registry v1. "
                     f"mutated=true. Journal: {result.journal_id}. {result.user_message}"
+                )
+                error_kind = None
+            elif result.ok:
+                message = (
+                    f"{action_label} completed through Executor Registry v1. "
+                    f"mutated=false. Journal: {result.journal_id}. {result.user_message}"
                 )
                 error_kind = None
             else:
@@ -15443,12 +15461,29 @@ class Orchestrator:
             r"(?is)\bvalidate this backup\s*:?\s+(?P<path>\S.+)$",
             r"(?is)\bcheck this backup before restore\s*:?\s+(?P<path>\S.+)$",
             r"(?is)\binspect backup\s*:?\s+(?P<path>\S.+)$",
+            r"(?is)\brestore from backup\s*:?\s+(?P<path>\S.+)$",
+            r"(?is)\brestore backup\s*:?\s+(?P<path>\S.+)$",
         )
         for pattern in patterns:
             match = re.search(pattern, raw)
             if match is not None:
                 return str(match.group("path") or "").strip()
         return ""
+
+    @staticmethod
+    def _backup_v1_fingerprint(path: Path, included_files: list[str]) -> str:
+        digest = hashlib.sha256()
+        for name in sorted(str(item) for item in included_files if str(item).strip()):
+            if "/" in name or "\\" in name or name.startswith("."):
+                continue
+            file_path = path / name
+            if not file_path.is_file() or file_path.is_symlink():
+                continue
+            data = file_path.read_bytes()
+            digest.update(name.encode("utf-8", errors="replace"))
+            digest.update(str(len(data)).encode("ascii"))
+            digest.update(hashlib.sha256(data).hexdigest().encode("ascii"))
+        return digest.hexdigest()
 
     def _backup_artifact_summary(self, path: Path) -> dict[str, Any]:
         size, count, truncated = self._operator_lifecycle_size(path, max_entries=10000)
@@ -15499,6 +15534,24 @@ class Orchestrator:
             "mutated": False,
         }
 
+    def _latest_valid_backup_path(self) -> Path | None:
+        backup_root = (Path.home() / ".local/share/personal-agent/backups").expanduser()
+        backups: list[tuple[float, Path]] = []
+        if not backup_root.is_dir():
+            return None
+        for child in backup_root.iterdir():
+            if child.name.startswith("personal-agent-backup-") and child.is_dir():
+                try:
+                    stamp = float(child.stat().st_mtime)
+                except OSError:
+                    stamp = 0.0
+                backups.append((stamp, child))
+        for _stamp, path in sorted(backups, key=lambda item: item[0], reverse=True):
+            ok, _manifest = self._backup_manifest_summary(path)
+            if ok:
+                return path
+        return None
+
     def _operator_backup_list_response(self) -> OrchestratorResponse:
         listing = self._list_backup_artifacts()
         backups = listing.get("backups") if isinstance(listing.get("backups"), list) else []
@@ -15515,7 +15568,10 @@ class Orchestrator:
             )
         if listing.get("latest_valid_backup"):
             lines.append(f"Latest valid backup: {listing.get('latest_valid_backup')}.")
-        lines.append("Live restore is not enabled. Ask 'validate this backup: <path>' to inspect one safely.")
+        lines.append(
+            "Restore v1 is confirmation-gated and applies only allowlisted non-secret Backup v1 preferences. "
+            "Ask 'validate this backup: <path>' to inspect one safely."
+        )
         return self._runtime_truth_response(
             text="\n".join(lines),
             route="operator_lifecycle",
@@ -15565,10 +15621,13 @@ class Orchestrator:
             return {"valid": False, "error": "manifest_not_object", "path": label, "mutated": False}
         if manifest.get("backup_schema_version") != BACKUP_SCHEMA_VERSION:
             errors.append("backup_schema_version is not backup.v1")
-        if manifest.get("restore_status") != "dry_run_only":
-            errors.append("restore_status is not dry_run_only")
-        if manifest.get("live_restore") != "restore_not_enabled":
-            errors.append("live_restore is not restore_not_enabled")
+        restore_status = str(manifest.get("restore_status") or "").strip()
+        live_restore = str(manifest.get("live_restore") or "").strip()
+        allowed_restore_markers = {"dry_run_only", "restore_not_enabled", "restore_v1_allowlisted_preferences_only"}
+        if restore_status not in allowed_restore_markers:
+            errors.append("restore_status is not a supported Backup v1 restore marker")
+        if live_restore not in allowed_restore_markers:
+            errors.append("live_restore is not a supported Backup v1 restore marker")
         included = [str(item) for item in manifest.get("included_files", []) if str(item).strip()] if isinstance(manifest.get("included_files"), list) else []
         included_set = set(included)
         required = self._backup_v1_required_files()
@@ -15620,6 +15679,12 @@ class Orchestrator:
             errors.append("manifest excluded_files does not document raw secrets/logs/arbitrary home data exclusions")
         if secret_hits:
             errors.append("obvious raw secret markers found in included JSON files")
+        fingerprint = ""
+        if not errors:
+            try:
+                fingerprint = self._backup_v1_fingerprint(path, sorted(included_set))
+            except Exception:
+                warnings.append("could not compute backup fingerprint")
         valid = not errors
         return {
             "valid": valid,
@@ -15637,6 +15702,8 @@ class Orchestrator:
             "live_restore": manifest.get("live_restore"),
             "total_size_bytes": total_size,
             "total_size": self._operator_lifecycle_size_label(total_size),
+            "absolute_path": str(path),
+            "fingerprint": fingerprint,
             "mutated": False,
         }
 
@@ -15647,7 +15714,7 @@ class Orchestrator:
                 text=(
                     "Send the backup directory path to validate it, for example: "
                     "validate this backup: ~/.local/share/personal-agent/backups/personal-agent-backup-..."
-                    "\nLive restore is not enabled, and validation will not write or restore anything."
+                    "\nValidation is read-only. To restore, ask 'restore from backup: <path>' and confirm the Plan Mode preview."
                 ),
                 route="operator_lifecycle",
                 used_runtime_state=True,
@@ -15683,7 +15750,9 @@ class Orchestrator:
             lines.append(f"Validation errors: {'; '.join(str(item) for item in errors[:5])}.")
         if result.get("error") and not errors:
             lines.append(f"Reason: {result.get('error')}.")
-        lines.append("Live restore is not enabled. I did not write files, create a restore directory, restart services, or overwrite anything.")
+        lines.append("Validation is read-only. I did not write files, create a restore directory, restart services, or overwrite anything.")
+        if valid:
+            lines.append("To restore supported state from this backup, ask: restore from backup: <path>.")
         return self._runtime_truth_response(
             text="\n".join(lines),
             route="operator_lifecycle",
@@ -16004,6 +16073,23 @@ class Orchestrator:
             db_size = Path(self.db.db_path).expanduser().resolve().stat().st_size
         except OSError:
             db_size = None
+        allowed_restore_preference_keys = {"system_resource_baseline_v1", "system_resource_baseline_context_v1"}
+        safe_preferences: list[dict[str, Any]] = []
+        try:
+            for row in self.db.list_preferences():
+                key = str(row.get("key") or "").strip()
+                value = row.get("value")
+                if key in allowed_restore_preference_keys and isinstance(value, str):
+                    safe_preferences.append(
+                        {
+                            "key": key,
+                            "value": value,
+                            "updated_at": row.get("updated_at"),
+                            "restore_supported": True,
+                        }
+                    )
+        except Exception:
+            safe_preferences = []
         return {
             "state_database": {
                 "path": str(Path(self.db.db_path).expanduser().resolve()),
@@ -16011,8 +16097,11 @@ class Orchestrator:
                 "size_bytes": db_size,
             },
             "preferences": {
-                "mode": "summary_only",
+                "mode": "allowlisted_restore_export",
                 "source": "runtime state database/preferences tables where available",
+                "preferences": safe_preferences,
+                "restore_supported_keys": sorted(allowed_restore_preference_keys),
+                "excluded": "All non-allowlisted preferences are excluded from Restore v1.",
             },
             "memory": {
                 "mode": "summary_only_raw_memory_text_excluded",
@@ -16057,8 +16146,8 @@ class Orchestrator:
                 "title": "Restore from backup preview",
                 "action_label": "Restore from backup",
                 "resources": ["target restore directory", "memory/state database", "preferences", "pack registry", "runtime config"],
-                "rollback": "dry-run/preview-only in this build; live restore is not enabled and will not overwrite live state",
-                "message": "Restore is dry-run/preview-only in this build. I can validate and explain a backup, but live restore is not enabled and I will not overwrite live state.",
+                "rollback": "create a pre-restore safety snapshot for the supported preferences before applying any restore changes",
+                "message": "I can restore supported Personal Agent settings and memory baseline state from a validated Backup v1 artifact.",
             },
             "operator_update_preview": {
                 "title": "Update assistant preview",
@@ -16104,6 +16193,9 @@ class Orchestrator:
         resources = [str(item) for item in spec["resources"]]
         cleanup_snapshot: dict[str, Any] | None = None
         cleanup_lines: list[str] = []
+        restore_validation: dict[str, Any] | None = None
+        restore_lines: list[str] = []
+        restore_backup_path: Path | None = None
         if normalized_kind == "operator_cleanup_preview":
             cleanup_snapshot = self._operator_cleanup_preview_snapshot()
             candidates = cleanup_snapshot.get("candidates") if isinstance(cleanup_snapshot.get("candidates"), list) else []
@@ -16134,10 +16226,48 @@ class Orchestrator:
                     cleanup_lines.append(f"- {item.get('classification')}: {item.get('path')} - {item.get('reason')}")
                 if len(protected) > 5:
                     cleanup_lines.append(f"- {len(protected) - 5} more protected entries omitted from chat; see response payload.")
+        if normalized_kind == "operator_restore_preview":
+            raw_restore_path = self._extract_restore_validation_path(text)
+            if raw_restore_path:
+                path, path_error = self._approved_restore_validation_path(raw_restore_path)
+                if path_error is not None:
+                    return self._operator_restore_validate_response(text)
+                restore_backup_path = path
+            else:
+                restore_backup_path = self._latest_valid_backup_path()
+            if restore_backup_path is None:
+                return self._runtime_truth_response(
+                    text=(
+                        "I could not find a valid Backup v1 artifact to restore. "
+                        "Ask 'show my backups' first, or provide a path with 'restore from backup: <path>'."
+                    ),
+                    route="operator_lifecycle",
+                    used_runtime_state=True,
+                    used_tools=["restore_validator"],
+                    ok=False,
+                    error_kind="restore_backup_missing",
+                    payload={"type": "operator_restore_preview", "valid": False, "mutated": False},
+                    skip_post_response_hooks=True,
+                )
+            restore_validation = self._validate_backup_artifact(str(restore_backup_path))
+            if not bool(restore_validation.get("valid")):
+                return self._operator_restore_validate_response(f"validate this backup: {restore_backup_path}")
+            supported_files = restore_validation.get("included_files") if isinstance(restore_validation.get("included_files"), list) else []
+            restore_lines.extend(
+                [
+                    f"Backup: {restore_validation.get('path') or self._operator_lifecycle_path_label(restore_backup_path)}.",
+                    f"Created: {restore_validation.get('created_at') or 'unknown'}.",
+                    "Supported Restore v1 categories: allowlisted preferences for system-resource baselines/context.",
+                    "Excluded: secrets, raw logs, model files, arbitrary personal files, runtime releases, and untrusted pack source text.",
+                    "Before changing anything, I will create a pre-restore safety snapshot of the supported current state.",
+                    f"Validated Backup v1 files: {len(supported_files)}.",
+                ]
+            )
         question = (
             f"{spec['title']}.\n"
             f"{spec['message']}\n"
             + (("\n".join(cleanup_lines) + "\n") if cleanup_lines else "")
+            + (("\n".join(restore_lines) + "\n") if restore_lines else "")
             +
             f"Resources that may be created/changed/deleted: {', '.join(resources)}.\n"
             f"Rollback scope: {spec['rollback']}.\n"
@@ -16155,6 +16285,14 @@ class Orchestrator:
         }
         if cleanup_snapshot is not None:
             action_payload["cleanup_preview"] = cleanup_snapshot
+        if restore_validation is not None and restore_backup_path is not None:
+            state_root = Path(self.db.db_path).expanduser().resolve().parent
+            action_payload["restore_backup_path"] = str(restore_backup_path.expanduser().resolve())
+            action_payload["restore_fingerprint"] = str(restore_validation.get("fingerprint") or "")
+            action_payload["restore_validation"] = restore_validation
+            action_payload["db_path"] = str(Path(self.db.db_path).expanduser().resolve())
+            action_payload["state_root"] = str(state_root)
+            action_payload["backup_root"] = str((Path.home() / ".local/share/personal-agent/backups").expanduser().resolve())
         return self._confirmation_preview_response(
             user_id=user_id,
             route="operator_lifecycle",
@@ -16169,6 +16307,7 @@ class Orchestrator:
                 "rollback_scope": spec["rollback"],
                 "rollback_supported": normalized_kind not in {"operator_cleanup_preview", "operator_uninstall_preview"},
                 "cleanup_preview": cleanup_snapshot,
+                "restore_validation": restore_validation,
                 "mutated": False,
             },
             skip_post_response_hooks=True,

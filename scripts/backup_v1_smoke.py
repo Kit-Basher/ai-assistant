@@ -175,8 +175,8 @@ def run(base_url: str, timeout: float) -> list[Check]:
         checks.append(
             _pass("manifest exists and lists expected bounded files", json.dumps(manifest, sort_keys=True)[:1000], "inspect manifest.json")
             if manifest.get("backup_schema_version") == "backup.v1"
-            and manifest.get("restore_status") == "dry_run_only"
-            and manifest.get("live_restore") == "restore_not_enabled"
+            and manifest.get("restore_status") in {"dry_run_only", "restore_v1_allowlisted_preferences_only"}
+            and manifest.get("live_restore") in {"restore_not_enabled", "restore_v1_allowlisted_preferences_only"}
             and not missing
             else _fail("manifest exists and lists expected bounded files", f"missing={missing}; manifest={json.dumps(manifest, sort_keys=True)[:1200]}", "inspect manifest.json")
         )
@@ -213,9 +213,11 @@ def run(base_url: str, timeout: float) -> list[Check]:
             else _fail("backup files do not contain obvious raw secrets", combined[:1600], "scan backup files")
         )
         checks.append(
-            _pass("backup documents exclusions and restore dry-run", "raw secret-store files excluded; restore_not_enabled present", "inspect backup files")
-            if "raw secret-store files" in combined and "restore_not_enabled" in combined and "summary_only_raw_database_excluded" in combined
-            else _fail("backup documents exclusions and restore dry-run", combined[:1600], "inspect backup files")
+            _pass("backup documents exclusions and Restore v1 boundary", "raw secret-store files excluded; restore capability documented", "inspect backup files")
+            if "raw secret-store files" in combined
+            and ("restore_v1_allowlisted_preferences_only" in combined or "restore_not_enabled" in combined)
+            and "summary_only_raw_database_excluded" in combined
+            else _fail("backup documents exclusions and Restore v1 boundary", combined[:1600], "inspect backup files")
         )
         rollback_hint = str(executor_result.get("rollback_hint") or "")
         checks.append(
@@ -230,7 +232,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
                 _fail("expected bounded summary files exist", "artifact missing", "inspect backup files"),
                 _fail("backup artifact size is bounded", "artifact missing", "inspect backup file sizes"),
                 _fail("backup files do not contain obvious raw secrets", "artifact missing", "scan backup files"),
-                _fail("backup documents exclusions and restore dry-run", "artifact missing", "inspect backup files"),
+                _fail("backup documents exclusions and Restore v1 boundary", "artifact missing", "inspect backup files"),
                 _fail("rollback hint scoped to new backup path only", "artifact missing", "inspect executor result"),
             ]
         )
@@ -247,20 +249,18 @@ def run(base_url: str, timeout: float) -> list[Check]:
     restore_payload = _runtime_payload(restore_preview)
     restore_plan = restore_payload.get("canonical_plan") if isinstance(restore_payload.get("canonical_plan"), dict) else {}
     checks.append(
-        _pass("restore remains dry-run preview-only", f"plan_id={restore_plan.get('plan_id')} executor_status={restore_plan.get('executor_status')}", 'POST /chat {"message": "restore from backup"}')
-        if "dry-run" in restore_text.lower()
-        and "live restore is not enabled" in restore_text.lower()
+        _pass("restore preview is validation-gated and enabled", f"plan_id={restore_plan.get('plan_id')} executor_status={restore_plan.get('executor_status')}", 'POST /chat {"message": "restore from backup"}')
+        if "safety snapshot" in restore_text.lower()
         and restore_plan.get("action_type") == "operator.restore"
-        and restore_plan.get("executor_status") == "preview_only"
-        else _fail("restore remains dry-run preview-only", json.dumps(restore_preview, sort_keys=True)[:1400], 'POST /chat {"message": "restore from backup"}')
+        and restore_plan.get("executor_status") == "enabled"
+        else _fail("restore preview is validation-gated and enabled", json.dumps(restore_preview, sort_keys=True)[:1400], 'POST /chat {"message": "restore from backup"}')
     )
-    restore_confirm = _post_chat(base_url, "yes", thread_id="backup-v1-restore", timeout=timeout)
-    restore_runtime = _runtime_payload(restore_confirm)
-    restore_result = restore_runtime.get("executor_result") if isinstance(restore_runtime.get("executor_result"), dict) else {}
+    restore_cancel = _post_chat(base_url, "no", thread_id="backup-v1-restore", timeout=timeout)
+    restore_cancel_text = _assistant_text(restore_cancel).lower()
     checks.append(
-        _pass("restore confirmation does not mutate live state", json.dumps(restore_result, sort_keys=True)[:1000], 'POST /chat {"message": "yes"}')
-        if restore_result.get("error_code") == "executor_not_enabled" and restore_result.get("mutated") is False
-        else _fail("restore confirmation does not mutate live state", json.dumps(restore_confirm, sort_keys=True)[:1400], 'POST /chat {"message": "yes"}')
+        _pass("restore preview cancels without live mutation", _assistant_text(restore_cancel)[:1000], 'POST /chat {"message": "no"}')
+        if "cancel" in restore_cancel_text and "mutated=true" not in restore_cancel_text
+        else _fail("restore preview cancels without live mutation", json.dumps(restore_cancel, sort_keys=True)[:1400], 'POST /chat {"message": "no"}')
     )
 
     final_git = _git_status_short()

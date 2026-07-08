@@ -68,7 +68,7 @@ def test_first_run_smoke_accepts_safe_fresh_state(monkeypatch, tmp_path) -> None
             "install htop": "Plan Mode v2\nAction type: package.install\nThis mutates the local system. Say yes to confirm.",
             "make a support bundle": "Support bundle preview. It will create a redacted support bundle and exclude raw tokens.",
             "back up the assistant": "Backup assistant preview. Secrets must remain redacted. This requires explicit confirmation.",
-            "restore from backup": "Restore from backup preview. Live restore is not enabled and will not overwrite live state.",
+            "restore from backup": "Restore from backup preview. Restore v1 is confirmation-gated and uses a safety snapshot.",
             "clean old backup files": "Cleanup old Personal Agent files preview. I did not delete anything.",
         }
         return {"response": responses[message]}

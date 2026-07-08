@@ -96,14 +96,19 @@ Treat the backup directory as local-sensitive.
 
 ## Restore Status
 
-Restore remains dry-run/preview-only:
+Backup v1 artifacts are still summary/export based. Restore Executor v1 can
+apply only the narrow non-secret preference subset that Backup v1 now exports
+for safe restore:
 
-- `restore_status= dry_run_only`
-- `live_restore= restore_not_enabled`
+- `system_resource_baseline_v1`
+- `system_resource_baseline_context_v1`
 
-The prompt `restore from backup` must show a preview-only Plan Mode response.
-Confirming that preview must return `executor_not_enabled` and `mutated=false`.
-Live restore must not overwrite local state in Backup v1.
+The prompt `restore from backup` must show a Plan Mode response with Backup v1
+validation, excluded categories, and the pre-restore safety snapshot
+requirement. Confirmation executes through `operator.restore.v1`.
+
+Restore does not restore raw secrets, logs, arbitrary files, model caches,
+runtime releases, untrusted pack source text, or executable content.
 
 Restore v1 Validator can inspect Backup v1 artifacts without restoring them:
 
@@ -114,6 +119,12 @@ python scripts/restore_validator_smoke.py
 User-facing prompts such as `show my backups` and
 `validate this backup: <path>` list and validate backup artifacts read-only.
 See `docs/operator/RESTORE_VALIDATOR.md`.
+
+Restore execution is proven only against isolated fixture state by:
+
+```bash
+python scripts/restore_execution_smoke.py
+```
 
 ## Proof
 
@@ -133,5 +144,5 @@ The installed-product smoke proves:
 - obvious raw secret samples are absent from backup files
 - executor journal recorded the action
 - rollback hint is scoped to the new backup path only
-- restore remains dry-run/preview-only and does not mutate
+- restore preview is validation-gated and can be cancelled without mutation
 - git status remains unchanged

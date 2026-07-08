@@ -49,7 +49,9 @@ It does not mean finished, bug-free, production-ready, or VM-proven.
 5. Operator safety: install/update/uninstall/cleanup/restore remain gated;
    stale and unrelated confirmations do not execute.
 6. Backup/restore sanity: backup listing and restore validation are read-only;
-   live restore remains disabled; cleanup preview does not delete anything.
+   Restore Executor v1 restores only allowlisted non-secret Backup v1
+   preference data through staging/safety-snapshot/verification; cleanup preview
+   does not delete anything.
 7. User-facing friction: common questions should be short, useful, and free of
    stale text from unrelated flows. Provided-text transforms such as
    `rewrite this: ...` must not be hijacked by prior status/doctor context, and

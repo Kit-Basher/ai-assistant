@@ -53,6 +53,8 @@ Current enabled executors:
 
 - `operator.support_bundle` via `operator.support_bundle.v1`
 - `operator.backup` via `operator.backup.v1`
+- `operator.cleanup` via `operator.cleanup.v1`
+- `operator.restore` via `operator.restore.v1`
 
 `operator.support_bundle` creates a Support Bundle v2 diagnostics package in a
 temporary directory. It is additive and returns a `journal_id`. Rollback is
@@ -61,9 +63,20 @@ limited to removing the newly created temporary support bundle directory. See
 
 `operator.backup` creates a Backup v1 directory under the approved Personal
 Agent local backup path. It is additive and returns a `journal_id`. Rollback is
-limited to removing the newly created backup directory. Restore remains
-dry-run/preview-only and live restore is not enabled. See
+limited to removing the newly created backup directory. See
 `docs/operator/BACKUP_V1.md`.
+
+`operator.cleanup` deletes only preview-identified, revalidated, owned
+Personal Agent artifacts such as generated cleanup fixtures, old backups, old
+support bundles, and old runtime releases. It preserves current runtime, active
+service files, secret stores, latest valid backup, and arbitrary user files.
+
+`operator.restore` restores only validated Backup v1 allowlisted non-secret
+preference values for system-resource baselines/context. It stages content,
+creates a pre-restore safety snapshot, verifies live state after apply, and
+attempts rollback from the snapshot on post-mutation failure. It does not
+restore secrets, logs, arbitrary files, model caches, runtime releases, or
+untrusted executable/pack content.
 
 ## Preview-Only Lanes
 
@@ -71,17 +84,14 @@ These remain preview-only in v1:
 
 - memory delete/export/redact/dedupe/control executors
 - uninstall
-- restore/update/repair lifecycle executors unless a separate bounded executor
-  is already used by an existing managed-service path
+- update/repair lifecycle executors unless a separate bounded executor is
+  already used by an existing managed-service path
 
 Confirming one of these plans must return `executor_not_enabled`,
 `mutated=false`, and a registry `journal_id`.
 
-Cleanup is no longer preview-only. `operator.cleanup` uses
-`operator.cleanup.v1` for approved old Personal Agent artifacts only. It
-revalidates every preview candidate before deletion, skips anything changed or
-protected, writes a bounded redacted journal result, and does not claim
-automatic rollback for destructive deletion.
+Cleanup and restore are no longer preview-only. Both remain Plan Mode gated and
+Executor Registry dispatched.
 
 ## Proof
 
@@ -92,6 +102,7 @@ python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
 python scripts/cleanup_execution_smoke.py
+python scripts/restore_execution_smoke.py
 ```
 
 The smoke talks to the installed `/chat` API and proves:
@@ -103,9 +114,10 @@ The smoke talks to the installed `/chat` API and proves:
 - Support Bundle v2 writes a manifest and bounded summary files
 - backup has an enabled executor and returns a journal id
 - Backup v1 writes a manifest and bounded redacted summary files
-- restore remains preview-only and returns `mutated=false`
-- Restore v1 Validator is read-only and does not use an executor; generic
-  restore remains preview-only through the registry
+- Restore v1 Validator is read-only
+- Restore v1 execution is proven against isolated fixture state with staging,
+  safety snapshot, allowlisted preference apply, duplicate confirmation safety,
+  and rollback on forced post-apply verification failure
 - cleanup preview classifies candidates; cleanup execution is proven against
   an isolated generated fixture by `cleanup_execution_smoke.py`
 - stale confirmation after API restart does not execute

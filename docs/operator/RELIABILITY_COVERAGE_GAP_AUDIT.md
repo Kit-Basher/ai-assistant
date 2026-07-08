@@ -253,8 +253,8 @@ Existing proof:
 - `plan_mode_v2_smoke.py`, `executor_registry_smoke.py`,
   `installed_product_abuse.py`, `test_plan_policy.py`, executor tests.
 - Batch 5 focused orchestrator matrix covers search setup/repair, Telegram
-  start/stop/restart, support bundle, backup, restore preview-only, cleanup
-  preview-only, memory delete/export/redact preview-only, package install,
+  start/stop/restart, support bundle, backup, restore confirmation binding,
+  cleanup, memory delete/export/redact preview-only, package install,
   operator update, and uninstall.
 
 Weak or missing:
@@ -340,7 +340,8 @@ Required guarantees:
 - latest valid backup detection works.
 - malformed backup is detected.
 - outside paths are rejected.
-- live restore remains disabled.
+- Restore Executor v1 restores only allowlisted non-secret Backup v1 preference
+  values through staging, safety snapshot, verification, and rollback.
 - cleanup preview protects latest backup/current runtime/secrets/services.
 - preview-only cleanup never deletes.
 - state growth is visible.
@@ -355,7 +356,8 @@ Weak or missing:
 
 - `partial`: repeated backup growth and cleanup-candidate drift.
 - `partial`: corrupt backup archive/directory variants beyond missing manifest.
-- `missing`: live restore executor by design; not a current gap if documented.
+- `covered narrow`: Restore Executor v1 is implemented for allowlisted
+  preferences only; broader state restore remains out of scope.
 
 Recommended fault injection:
 

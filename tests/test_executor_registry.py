@@ -11,6 +11,7 @@ from agent.executor_registry import (
     BACKUP_MAX_FILE_BYTES,
     BACKUP_MAX_TOTAL_BYTES,
     EXECUTOR_JOURNAL_MAX_RECORD_BYTES,
+    RESTORE_V1_CAPABILITY,
     SUPPORT_BUNDLE_SCHEMA_VERSION,
     ExecutorRegistry,
     ExecutorPartialFailure,
@@ -18,6 +19,7 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    restore_backup_v1,
     support_bundle_redact,
 )
 
@@ -273,6 +275,170 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertTrue(support.exists())
         self.assertEqual("cleanup_symlink_protected", result["details"]["skipped"][0]["reason"])
 
+    def _restore_fixture_db(self, root: Path, *, initial_value: str | None = None) -> Path:
+        db_path = root / "agent.db"
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute("CREATE TABLE preferences (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
+            if initial_value is not None:
+                conn.execute(
+                    "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?)",
+                    ("system_resource_baseline_v1", initial_value, "before"),
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        return db_path
+
+    def _restore_fixture_backup(self, root: Path, *, value: str = "restored") -> Path:
+        backup = root / "backups" / "personal-agent-backup-fixture"
+        backup.mkdir(parents=True)
+        files = {
+            "backup_summary.json": {"backup_schema_version": "backup.v1"},
+            "diagnostics_summary.json": {"ok": True},
+            "executor_registry_journal_summary.json": {"entries": []},
+            "memory_anchors_summary.json": {"mode": "summary_only_raw_memory_text_excluded"},
+            "pack_metadata_summary.json": {"raw_pack_text": "excluded"},
+            "preferences_summary.json": {
+                "mode": "allowlisted_restore_export",
+                "preferences": [{"key": "system_resource_baseline_v1", "value": value, "restore_supported": True}],
+            },
+            "runtime_config_summary.json": {"version": {"git_commit": "abc123"}},
+            "state_database_summary.json": {"mode": "summary_only_raw_database_excluded"},
+            "support_bundle_style_summary.json": {"redaction": "same redaction helper as Support Bundle v2"},
+        }
+        file_sizes: dict[str, int] = {}
+        for name, payload in files.items():
+            text = json.dumps(payload, sort_keys=True) + "\n"
+            (backup / name).write_text(text, encoding="utf-8")
+            file_sizes[name] = len(text.encode("utf-8"))
+        included = sorted([*files.keys(), "manifest.json"])
+        manifest = {
+            "backup_schema_version": "backup.v1",
+            "created_at": "2026-07-02T00:00:00+00:00",
+            "runtime_commit": "abc123",
+            "runtime_instance": "stable",
+            "included_files": included,
+            "excluded_files": ["raw secret-store files", "raw logs and full support bundles", "arbitrary home directory files"],
+            "file_sizes": file_sizes,
+            "total_size_bytes": sum(file_sizes.values()),
+            "restore_status": "dry_run_only",
+            "live_restore": "restore_not_enabled",
+        }
+        manifest_text = json.dumps(manifest, sort_keys=True) + "\n"
+        (backup / "manifest.json").write_text(manifest_text, encoding="utf-8")
+        return backup
+
+    def test_restore_backup_v1_applies_allowlisted_preferences_with_snapshot(self) -> None:
+        root = Path(self.tmpdir.name) / "state"
+        root.mkdir()
+        db_path = self._restore_fixture_db(root, initial_value="old")
+        backup = self._restore_fixture_backup(root, value="new")
+        result = restore_backup_v1(
+            _plan(action_type="operator.restore"),
+            {
+                "pending_id": "confirm-test",
+                "state_root": str(root),
+                "db_path": str(db_path),
+                "backup_root": str(root / "backups"),
+                "restore_backup_path": str(backup),
+            },
+        )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("operator.restore.v1", result["executor_id"])
+        self.assertEqual("completed_verified", result["details"]["status"])
+        self.assertTrue(Path(result["details"]["snapshot_path"]).joinpath("manifest.json").exists())
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute("SELECT value FROM preferences WHERE key = ?", ("system_resource_baseline_v1",)).fetchone()
+            self.assertEqual("new", row[0])
+        finally:
+            conn.close()
+
+    def test_restore_backup_v1_noops_when_state_matches(self) -> None:
+        root = Path(self.tmpdir.name) / "state-noop"
+        root.mkdir()
+        db_path = self._restore_fixture_db(root, initial_value="same")
+        backup = self._restore_fixture_backup(root, value="same")
+        result = restore_backup_v1(
+            _plan(action_type="operator.restore"),
+            {
+                "pending_id": "confirm-test",
+                "state_root": str(root),
+                "db_path": str(db_path),
+                "backup_root": str(root / "backups"),
+                "restore_backup_path": str(backup),
+            },
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("no_op_already_matches", result["details"]["status"])
+
+    def test_restore_backup_v1_blocks_changed_since_preview(self) -> None:
+        root = Path(self.tmpdir.name) / "state-changed"
+        root.mkdir()
+        db_path = self._restore_fixture_db(root, initial_value="old")
+        backup = self._restore_fixture_backup(root, value="new")
+        result = restore_backup_v1(
+            _plan(action_type="operator.restore"),
+            {
+                "pending_id": "confirm-test",
+                "state_root": str(root),
+                "db_path": str(db_path),
+                "backup_root": str(root / "backups"),
+                "restore_backup_path": str(backup),
+                "restore_fingerprint": "different",
+            },
+        )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("backup_changed_since_preview", result["error_code"])
+
+    def test_restore_backup_v1_rolls_back_on_post_apply_verification_failure(self) -> None:
+        root = Path(self.tmpdir.name) / "state-rollback"
+        root.mkdir()
+        db_path = self._restore_fixture_db(root, initial_value="old")
+        backup = self._restore_fixture_backup(root, value="new")
+        import agent.executor_registry as registry_module
+
+        real_current = registry_module._current_preferences
+        calls = 0
+
+        def _current_with_bad_verification(path, keys):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                return {"system_resource_baseline_v1": "wrong-after-apply"}
+            return real_current(path, keys)
+
+        with patch("agent.executor_registry._current_preferences", side_effect=_current_with_bad_verification):
+            result = restore_backup_v1(
+                _plan(action_type="operator.restore"),
+                {
+                    "pending_id": "confirm-test",
+                    "state_root": str(root),
+                    "db_path": str(db_path),
+                    "backup_root": str(root / "backups"),
+                    "restore_backup_path": str(backup),
+                },
+            )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("restore_failed_rolled_back", result["error_code"])
+        import sqlite3
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            row = conn.execute("SELECT value FROM preferences WHERE key = ?", ("system_resource_baseline_v1",)).fetchone()
+            self.assertEqual("old", row[0])
+        finally:
+            conn.close()
+
     def test_malformed_executor_result_returns_structured_failure(self) -> None:
         registry = ExecutorRegistry(self.journal_path)
 
@@ -509,8 +675,8 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertEqual("operator.backup.v1", result["executor_id"])
         self.assertEqual(BACKUP_SCHEMA_VERSION, manifest["backup_schema_version"])
         self.assertEqual("abc123", manifest["runtime_commit"])
-        self.assertEqual("dry_run_only", manifest["restore_status"])
-        self.assertEqual("restore_not_enabled", manifest["live_restore"])
+        self.assertEqual(RESTORE_V1_CAPABILITY, manifest["restore_status"])
+        self.assertEqual(RESTORE_V1_CAPABILITY, manifest["live_restore"])
         self.assertLess(manifest["total_size_bytes"], BACKUP_MAX_TOTAL_BYTES)
         self.assertEqual(BACKUP_MAX_FILE_BYTES, manifest["size_caps"]["max_file_bytes"])
         self.assertTrue(expected.issubset(set(manifest["included_files"])))
@@ -540,7 +706,7 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertNotIn("letmein", combined)
         self.assertIn("raw secret-store files", combined)
         self.assertIn("summary_only_raw_database_excluded", combined)
-        self.assertIn("restore_not_enabled", combined)
+        self.assertIn(RESTORE_V1_CAPABILITY, combined)
 
     def test_backup_v1_summarizes_recursive_executor_journal(self) -> None:
         huge_payload = "x" * (BACKUP_MAX_FILE_BYTES + 1024)

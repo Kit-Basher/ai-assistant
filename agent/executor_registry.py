@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import tempfile
 from typing import Any, Callable
 import uuid
@@ -23,6 +24,13 @@ SUPPORT_BUNDLE_MAX_TOTAL_BYTES = 2 * 1024 * 1024
 SUPPORT_BUNDLE_MAX_FILE_BYTES = 256 * 1024
 CLEANUP_MAX_CANDIDATES = 50
 CLEANUP_MAX_SCAN_ENTRIES = 10000
+RESTORE_SNAPSHOT_SCHEMA_VERSION = "restore_snapshot.v1"
+RESTORE_STAGE_SCHEMA_VERSION = "restore_stage.v1"
+RESTORE_ALLOWED_PREFERENCE_KEYS = {
+    "system_resource_baseline_v1",
+    "system_resource_baseline_context_v1",
+}
+RESTORE_V1_CAPABILITY = "restore_v1_allowlisted_preferences_only"
 
 SECRET_KEY_HINTS = (
     "api_key",
@@ -819,6 +827,411 @@ def execute_cleanup(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, A
     }
 
 
+def _approved_restore_root(action: dict[str, Any]) -> Path:
+    raw = str(action.get("state_root") or "").strip()
+    if raw:
+        root = Path(raw).expanduser().resolve()
+    else:
+        root = (Path.home() / ".local/share/personal-agent").resolve()
+    home_state = (Path.home() / ".local/share/personal-agent").resolve()
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+    if root != home_state and home_state not in root.parents and root != tmp_root and tmp_root not in root.parents:
+        raise ValueError("restore_state_root_not_approved")
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _restore_backup_path(action: dict[str, Any]) -> Path:
+    raw = str(action.get("restore_backup_path") or "").strip()
+    if not raw:
+        raise ValueError("restore_backup_path_missing")
+    path = Path(raw).expanduser().resolve()
+    backup_root = str(action.get("backup_root") or "").strip()
+    approved_roots = [(Path.home() / ".local/share/personal-agent/backups").resolve(), Path(tempfile.gettempdir()).resolve()]
+    if backup_root:
+        approved_roots.append(Path(backup_root).expanduser().resolve())
+    if not any(path == root or root in path.parents for root in approved_roots):
+        raise ValueError("restore_backup_path_outside_approved_locations")
+    return path
+
+
+def _read_json_file(path: Path, *, max_bytes: int = BACKUP_MAX_FILE_BYTES) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ValueError(f"restore_symlink_rejected:{path.name}")
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"restore_file_size_cap_exceeded:{path.name}")
+    payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"restore_json_not_object:{path.name}")
+    return payload
+
+
+def _backup_fingerprint(path: Path, included_files: list[str]) -> str:
+    digest = hashlib.sha256()
+    for name in sorted(included_files):
+        if "/" in name or "\\" in name or name.startswith("."):
+            raise ValueError(f"restore_unsafe_included_file:{name}")
+        file_path = path / name
+        if file_path.is_symlink():
+            raise ValueError(f"restore_symlink_rejected:{name}")
+        stat = file_path.stat()
+        digest.update(name.encode("utf-8"))
+        digest.update(str(int(stat.st_size)).encode("ascii"))
+        digest.update(hashlib.sha256(file_path.read_bytes()).hexdigest().encode("ascii"))
+    return digest.hexdigest()
+
+
+def _validate_restore_backup(path: Path) -> dict[str, Any]:
+    if not path.is_dir():
+        return {"valid": False, "error_code": "backup_path_not_directory"}
+    if path.is_symlink():
+        return {"valid": False, "error_code": "backup_path_symlink_rejected"}
+    manifest_path = path / "manifest.json"
+    if not manifest_path.is_file():
+        return {"valid": False, "error_code": "manifest_missing"}
+    try:
+        manifest = _read_json_file(manifest_path)
+    except Exception as exc:  # noqa: BLE001 - restore reports validation failure.
+        return {"valid": False, "error_code": "manifest_unreadable", "exception": exc.__class__.__name__}
+    if manifest.get("backup_schema_version") != BACKUP_SCHEMA_VERSION:
+        return {"valid": False, "error_code": "unsupported_backup_schema", "schema_version": manifest.get("backup_schema_version")}
+    included = [str(item) for item in manifest.get("included_files", []) if str(item).strip()] if isinstance(manifest.get("included_files"), list) else []
+    required = {
+        "backup_summary.json",
+        "diagnostics_summary.json",
+        "executor_registry_journal_summary.json",
+        "manifest.json",
+        "memory_anchors_summary.json",
+        "pack_metadata_summary.json",
+        "preferences_summary.json",
+        "runtime_config_summary.json",
+        "state_database_summary.json",
+        "support_bundle_style_summary.json",
+    }
+    missing = sorted(name for name in required if name not in set(included) or not (path / name).is_file())
+    if missing:
+        return {"valid": False, "error_code": "required_files_missing", "missing_files": missing}
+    total_size = 0
+    parsed_files: dict[str, dict[str, Any]] = {}
+    try:
+        for name in sorted(set(included) | required):
+            if "/" in name or "\\" in name or name.startswith("."):
+                return {"valid": False, "error_code": "unsafe_included_file_name", "file": name}
+            file_path = path / name
+            if not file_path.is_file():
+                continue
+            if file_path.is_symlink():
+                return {"valid": False, "error_code": "backup_contains_symlink", "file": name}
+            size = file_path.stat().st_size
+            total_size += size
+            if size > BACKUP_MAX_FILE_BYTES:
+                return {"valid": False, "error_code": "backup_file_size_cap_exceeded", "file": name}
+            parsed_files[name] = _read_json_file(file_path)
+    except Exception as exc:  # noqa: BLE001
+        return {"valid": False, "error_code": "backup_file_validation_failed", "exception": exc.__class__.__name__}
+    if total_size > BACKUP_MAX_TOTAL_BYTES:
+        return {"valid": False, "error_code": "backup_total_size_cap_exceeded"}
+    preferences = parsed_files.get("preferences_summary.json", {})
+    preference_items = preferences.get("preferences") if isinstance(preferences.get("preferences"), list) else []
+    supported_preferences: list[dict[str, str]] = []
+    skipped_preferences: list[str] = []
+    for item in preference_items:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        value = item.get("value")
+        if key not in RESTORE_ALLOWED_PREFERENCE_KEYS:
+            skipped_preferences.append(key or "unknown")
+            continue
+        if not isinstance(value, str) or len(value.encode("utf-8", errors="replace")) > 64 * 1024:
+            return {"valid": False, "error_code": "preference_value_invalid", "preference_key": key}
+        supported_preferences.append({"key": key, "value": value})
+    try:
+        fingerprint = _backup_fingerprint(path, included)
+    except Exception as exc:  # noqa: BLE001
+        return {"valid": False, "error_code": "backup_fingerprint_failed", "exception": exc.__class__.__name__}
+    return {
+        "valid": True,
+        "manifest": manifest,
+        "included_files": sorted(set(included)),
+        "fingerprint": fingerprint,
+        "supported_preferences": supported_preferences,
+        "skipped_preferences": sorted(set(skipped_preferences)),
+        "created_at": manifest.get("created_at"),
+        "runtime_commit": manifest.get("runtime_commit"),
+        "total_size_bytes": total_size,
+    }
+
+
+def _restore_lock_path(state_root: Path) -> Path:
+    return state_root / "lifecycle_locks" / "restore.lock"
+
+
+def _acquire_restore_lock(state_root: Path, *, operation_id: str, target: str) -> tuple[Path | None, str | None]:
+    lock_path = _restore_lock_path(state_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "operation": "restore",
+        "operation_id": operation_id,
+        "target": target,
+        "started_at": utc_now_iso(),
+        "pid": os.getpid(),
+    }
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return None, "restore_lock_active"
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(support_bundle_redact(payload), sort_keys=True, ensure_ascii=True) + "\n")
+    return lock_path, None
+
+
+def _release_restore_lock(lock_path: Path | None) -> None:
+    if lock_path is None:
+        return
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
+def _current_preferences(db_path: Path, keys: list[str]) -> dict[str, str | None]:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        out: dict[str, str | None] = {}
+        for key in keys:
+            row = conn.execute("SELECT value FROM preferences WHERE key = ?", (key,)).fetchone()
+            out[key] = str(row[0]) if row is not None else None
+        return out
+    finally:
+        conn.close()
+
+
+def _write_preferences(db_path: Path, values: dict[str, str | None]) -> None:
+    conn = sqlite3.connect(str(db_path))
+    try:
+        now = utc_now_iso()
+        with conn:
+            for key, value in values.items():
+                if value is None:
+                    conn.execute("DELETE FROM preferences WHERE key = ?", (key,))
+                else:
+                    conn.execute(
+                        "INSERT INTO preferences (key, value, updated_at) VALUES (?, ?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                        (key, value, now),
+                    )
+    finally:
+        conn.close()
+
+
+def _make_restore_snapshot(*, state_root: Path, db_path: Path, before: dict[str, str | None], plan_id: str, backup_path: Path) -> Path:
+    root = _artifact_dir(state_root / "restore_snapshots", prefix="personal-agent-restore-snapshot")
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)
+    preferences_payload = {
+        "schema": RESTORE_SNAPSHOT_SCHEMA_VERSION,
+        "preferences": [{"key": key, "value": value, "present": value is not None} for key, value in sorted(before.items())],
+    }
+    _write_backup_json(root / "preferences_snapshot.json", preferences_payload)
+    manifest = {
+        "snapshot_schema_version": RESTORE_SNAPSHOT_SCHEMA_VERSION,
+        "created_at": utc_now_iso(),
+        "plan_id": plan_id,
+        "source_backup": str(backup_path),
+        "captured_categories": ["allowlisted_preferences"],
+        "excluded": ["raw secrets", "raw logs", "arbitrary home data", "model caches", "untrusted pack source text"],
+    }
+    text = json.dumps(support_bundle_redact(_bounded_backup_value(manifest)), indent=2, sort_keys=True, ensure_ascii=True) + "\n"
+    if len(text.encode("utf-8")) > BACKUP_MAX_FILE_BYTES:
+        raise ValueError("restore_snapshot_manifest_size_cap_exceeded")
+    (root / "manifest.json").write_text(text, encoding="utf-8")
+    return root
+
+
+def _restore_from_snapshot(snapshot_root: Path, db_path: Path) -> bool:
+    try:
+        payload = _read_json_file(snapshot_root / "preferences_snapshot.json")
+        rows = payload.get("preferences") if isinstance(payload.get("preferences"), list) else []
+        values: dict[str, str | None] = {}
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            key = str(item.get("key") or "").strip()
+            if key in RESTORE_ALLOWED_PREFERENCE_KEYS:
+                values[key] = str(item.get("value")) if item.get("present") else None
+        _write_preferences(db_path, values)
+        return _current_preferences(db_path, list(values.keys())) == values
+    except Exception:
+        return False
+
+
+def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    plan_id = str(plan.get("plan_id") or action.get("pending_id") or "unknown").strip() or "unknown"
+    state_root = _approved_restore_root(action)
+    db_path = Path(str(action.get("db_path") or "")).expanduser().resolve()
+    if not db_path.is_file() or not _is_contained(db_path, state_root):
+        return {
+            "ok": False,
+            "mutated": False,
+            "executor_id": "operator.restore.v1",
+            "error_code": "restore_db_path_not_approved",
+            "user_message": "Restore could not start because the state database path is not approved.",
+        }
+    backup_path = _restore_backup_path(action)
+    lock_path, lock_error = _acquire_restore_lock(state_root, operation_id=plan_id, target=str(backup_path))
+    if lock_error:
+        return {
+            "ok": False,
+            "mutated": False,
+            "executor_id": "operator.restore.v1",
+            "error_code": lock_error,
+            "user_message": "Restore is blocked because another restore/lifecycle operation appears active. I did not change state.",
+            "rollback_available": False,
+            "rollback_hint": "Do not clear a live restore lock automatically. Check restore status first.",
+        }
+    snapshot_root: Path | None = None
+    staging_root: Path | None = None
+    resources: list[str] = []
+    try:
+        validation = _validate_restore_backup(backup_path)
+        if not validation.get("valid"):
+            return {
+                "ok": False,
+                "mutated": False,
+                "executor_id": "operator.restore.v1",
+                "error_code": str(validation.get("error_code") or "restore_validation_failed"),
+                "user_message": "Restore did not start because the Backup v1 artifact failed validation.",
+                "details": {"validation": validation},
+            }
+        preview_fingerprint = str(action.get("restore_fingerprint") or "").strip()
+        if preview_fingerprint and preview_fingerprint != validation.get("fingerprint"):
+            return {
+                "ok": False,
+                "mutated": False,
+                "executor_id": "operator.restore.v1",
+                "error_code": "backup_changed_since_preview",
+                "user_message": "Restore did not start because the backup changed after preview. Ask for a fresh restore preview.",
+                "details": {"current_fingerprint": validation.get("fingerprint")},
+            }
+        supported = validation.get("supported_preferences") if isinstance(validation.get("supported_preferences"), list) else []
+        target_values = {str(item["key"]): str(item["value"]) for item in supported if isinstance(item, dict) and str(item.get("key") or "") in RESTORE_ALLOWED_PREFERENCE_KEYS}
+        staging_root = _artifact_dir(state_root / "restore_staging", prefix="personal-agent-restore-stage")
+        staging_root.mkdir(mode=0o700, parents=True, exist_ok=False)
+        _write_backup_json(
+            staging_root / "stage.json",
+            {
+                "stage_schema_version": RESTORE_STAGE_SCHEMA_VERSION,
+                "created_at": utc_now_iso(),
+                "source_backup": str(backup_path),
+                "target_preferences": [{"key": key, "value": value} for key, value in sorted(target_values.items())],
+                "excluded": ["secrets", "logs", "arbitrary files", "model caches", "untrusted pack source text"],
+            },
+        )
+        resources.append(str(staging_root / "stage.json"))
+        before = _current_preferences(db_path, sorted(target_values.keys()))
+        snapshot_root = _make_restore_snapshot(state_root=state_root, db_path=db_path, before=before, plan_id=plan_id, backup_path=backup_path)
+        resources.extend([str(snapshot_root / "manifest.json"), str(snapshot_root / "preferences_snapshot.json")])
+        if not target_values:
+            return {
+                "ok": True,
+                "mutated": False,
+                "executor_id": "operator.restore.v1",
+                "resources_touched": resources,
+                "rollback_available": True,
+                "rollback_hint": f"Pre-restore safety snapshot is at {snapshot_root}. No live state was changed.",
+                "user_message": "Nothing needed restoring. This Backup v1 artifact contains no supported restorable state.",
+                "details": {
+                    "status": "no_op",
+                    "snapshot_path": str(snapshot_root),
+                    "staging_path": str(staging_root),
+                    "restored_categories": [],
+                    "skipped_categories": ["secrets", "logs", "runtime metadata", "pack source text", "model caches"],
+                },
+            }
+        if before == target_values:
+            return {
+                "ok": True,
+                "mutated": False,
+                "executor_id": "operator.restore.v1",
+                "resources_touched": resources,
+                "rollback_available": True,
+                "rollback_hint": f"Pre-restore safety snapshot is at {snapshot_root}. No live state was changed.",
+                "user_message": "Nothing needed restoring. Your current supported state already matches that backup.",
+                "details": {
+                    "status": "no_op_already_matches",
+                    "snapshot_path": str(snapshot_root),
+                    "staging_path": str(staging_root),
+                    "restored_categories": [],
+                    "preference_keys": sorted(target_values.keys()),
+                },
+            }
+        _write_preferences(db_path, target_values)
+        after = _current_preferences(db_path, sorted(target_values.keys()))
+        if after != target_values:
+            rolled_back = _restore_from_snapshot(snapshot_root, db_path)
+            return {
+                "ok": False,
+                "mutated": False,
+                "executor_id": "operator.restore.v1",
+                "resources_touched": resources,
+                "rollback_available": True,
+                "rollback_hint": f"Safety snapshot preserved at {snapshot_root}.",
+                "error_code": "restore_failed_rolled_back" if rolled_back else "restore_failed_rollback_failed",
+                "user_message": (
+                    "The restore failed during verification, so I restored your previous state from the safety snapshot."
+                    if rolled_back
+                    else "The restore did not complete, and automatic rollback could not be fully verified. I preserved the safety snapshot."
+                ),
+                "details": {
+                    "status": "restore_failed_rolled_back" if rolled_back else "restore_failed_rollback_failed",
+                    "snapshot_path": str(snapshot_root),
+                    "staging_path": str(staging_root),
+                    "preference_keys": sorted(target_values.keys()),
+                },
+            }
+        return {
+            "ok": True,
+            "mutated": True,
+            "executor_id": "operator.restore.v1",
+            "resources_touched": [*resources, str(db_path)],
+            "rollback_available": True,
+            "rollback_hint": f"Use the pre-restore safety snapshot at {snapshot_root} to restore the previous supported preferences.",
+            "user_message": (
+                "Restore completed and verified. I restored the supported settings and memory baseline state from the Backup v1 artifact. "
+                "Secrets, logs, model files, and unrelated personal files were not restored."
+            ),
+            "details": {
+                "status": "completed_verified",
+                "snapshot_path": str(snapshot_root),
+                "staging_path": str(staging_root),
+                "source_backup": str(backup_path),
+                "restored_categories": ["allowlisted_preferences"],
+                "preference_keys": sorted(target_values.keys()),
+                "skipped_categories": ["secrets", "logs", "runtime metadata", "pack source text", "model caches"],
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        rolled_back = _restore_from_snapshot(snapshot_root, db_path) if snapshot_root is not None else False
+        return {
+            "ok": False,
+            "mutated": False,
+            "executor_id": "operator.restore.v1",
+            "resources_touched": resources,
+            "rollback_available": snapshot_root is not None,
+            "rollback_hint": f"Safety snapshot preserved at {snapshot_root}." if snapshot_root is not None else "No rollback needed because mutation did not start.",
+            "error_code": "restore_failed_rolled_back" if rolled_back else "restore_executor_exception",
+            "user_message": (
+                "Restore failed and I restored the previous supported state from the safety snapshot."
+                if rolled_back
+                else "Restore failed before I could verify completion. I preserved any safety snapshot that was created."
+            ),
+            "details": {"exception": exc.__class__.__name__, "snapshot_path": str(snapshot_root) if snapshot_root else None},
+        }
+    finally:
+        _release_restore_lock(lock_path)
+
+
 def build_backup_manifest(
     *,
     root: Path,
@@ -852,8 +1265,8 @@ def build_backup_manifest(
             },
             "redaction/encryption policy": policy,
             "redaction_encryption_policy": policy,
-            "restore_status": "dry_run_only",
-            "live_restore": "restore_not_enabled",
+            "restore_status": RESTORE_V1_CAPABILITY,
+            "live_restore": RESTORE_V1_CAPABILITY,
             "backup_path": str(root),
         }
     )
@@ -885,7 +1298,7 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "model caches/downloads and GGUF/model artifacts",
         "raw external pack archives, SKILL.md, AGENTS.md, and untrusted source text",
         "browser caches, downloaded pages, and search result page contents",
-        "live restore output; restore is dry-run/preview-only in Backup v1",
+        "unsupported restore payloads; Restore v1 only applies allowlisted non-secret preferences",
     ]
     files: dict[str, dict[str, Any]] = {}
     files["state_database_summary.json"] = {
@@ -893,10 +1306,14 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "mode": "summary_only_raw_database_excluded",
         "state_database": backup_sources.get("state_database"),
     }
+    preference_source = backup_sources.get("preferences") if isinstance(backup_sources.get("preferences"), dict) else {}
+    preference_items = preference_source.get("preferences") if isinstance(preference_source.get("preferences"), list) else []
     files["preferences_summary.json"] = {
         "source": "preferences summary",
-        "mode": "summary_only",
-        "preferences": backup_sources.get("preferences", {"status": "not_exported_in_backup_v1"}),
+        "mode": "allowlisted_restore_export",
+        "preferences": preference_items,
+        "restore_supported_keys": preference_source.get("restore_supported_keys", sorted(RESTORE_ALLOWED_PREFERENCE_KEYS)),
+        "excluded": preference_source.get("excluded", "All non-allowlisted preferences are excluded from Restore v1."),
     }
     files["memory_anchors_summary.json"] = {
         "source": "memory/anchors summary",
@@ -971,8 +1388,8 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "action_type": str(plan.get("action_type") or "operator.backup"),
         "target": str(plan.get("target") or "backup assistant"),
         "backup_schema_version": BACKUP_SCHEMA_VERSION,
-        "restore_status": "dry_run_only",
-        "live_restore": "restore_not_enabled",
+        "restore_status": RESTORE_V1_CAPABILITY,
+        "live_restore": RESTORE_V1_CAPABILITY,
         "contents": sorted(files.keys()),
         "size_caps": {
             "max_total_bytes": BACKUP_MAX_TOTAL_BYTES,
@@ -1029,7 +1446,10 @@ def create_additive_backup(plan: dict[str, Any], action: dict[str, Any]) -> dict
         "resources_touched": resources,
         "rollback_available": True,
         "rollback_hint": f"Remove only the newly created backup directory: {root}",
-        "user_message": f"Backup v1 created at {root}. It contains redacted summaries only; live restore is not enabled.",
+        "user_message": (
+            f"Backup v1 created at {root}. It contains redacted summaries only. "
+            "Restore v1 can apply only allowlisted non-secret preferences."
+        ),
         "details": {"artifact_path": str(root), "files": included_files, "manifest_path": str(root / "manifest.json")},
     }
 

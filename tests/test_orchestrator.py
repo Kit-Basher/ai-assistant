@@ -1930,7 +1930,7 @@ class TestOrchestrator(unittest.TestCase):
     def test_operator_lifecycle_mutators_require_confirmation(self) -> None:
         cases = {
             "back up the assistant": ("Backup assistant preview", "include local state"),
-            "restore from backup": ("Restore from backup preview", "dry-run"),
+            "restore from backup": ("Restore from backup preview", "safety snapshot"),
             "update the assistant": ("Update assistant preview", "not pull code"),
             "clean old runtime files": ("Cleanup old Personal Agent files preview", "show exact paths"),
             "uninstall the assistant": ("Uninstall assistant preview", "Uninstall is destructive"),
@@ -2110,7 +2110,7 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(listed.data.get("runtime_payload", {}).get("mutated"))
         self.assertEqual("operator_lifecycle", validated.data.get("route"))
         self.assertIn("Backup validation result: valid.", validated.text)
-        self.assertIn("Live restore is not enabled", validated.text)
+        self.assertIn("Validation is read-only", validated.text)
         payload = validated.data.get("runtime_payload")
         self.assertIsInstance(payload, dict)
         self.assertTrue(payload.get("valid"))
@@ -2135,6 +2135,59 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse(unsafe_response.data.get("runtime_payload", {}).get("mutated"))
         self.assertIn("manifest_missing", malformed_response.text)
         self.assertFalse(malformed_response.data.get("runtime_payload", {}).get("mutated"))
+
+    def test_operator_restore_confirmation_applies_allowlisted_preferences_fixture(self) -> None:
+        fake_home = Path(self.tmpdir.name) / "home"
+        backup_root = fake_home / ".local/share/personal-agent/backups"
+        backup = backup_root / "personal-agent-backup-restore"
+        backup.mkdir(parents=True)
+        self.db.set_preference("system_resource_baseline_v1", "old-baseline")
+        files = {
+            "backup_summary.json": {"backup_schema_version": "backup.v1"},
+            "diagnostics_summary.json": {"ok": True},
+            "executor_registry_journal_summary.json": {"entries": []},
+            "memory_anchors_summary.json": {"mode": "summary_only_raw_memory_text_excluded"},
+            "pack_metadata_summary.json": {"raw_pack_text": "excluded"},
+            "preferences_summary.json": {
+                "mode": "allowlisted_restore_export",
+                "preferences": [{"key": "system_resource_baseline_v1", "value": "restored-baseline", "restore_supported": True}],
+            },
+            "runtime_config_summary.json": {"version": {"git_commit": "abc123"}},
+            "state_database_summary.json": {"mode": "summary_only_raw_database_excluded"},
+            "support_bundle_style_summary.json": {"redaction": "same redaction helper as Support Bundle v2"},
+        }
+        file_sizes: dict[str, int] = {}
+        for name, payload in files.items():
+            text = json.dumps(payload, sort_keys=True) + "\n"
+            (backup / name).write_text(text, encoding="utf-8")
+            file_sizes[name] = len(text.encode("utf-8"))
+        manifest = {
+            "backup_schema_version": "backup.v1",
+            "created_at": "2026-07-02T00:00:00+00:00",
+            "runtime_commit": "abc123",
+            "runtime_instance": "stable",
+            "included_files": sorted([*files.keys(), "manifest.json"]),
+            "excluded_files": ["raw secret-store files", "raw logs and full support bundles", "arbitrary home directory files"],
+            "file_sizes": file_sizes,
+            "total_size_bytes": sum(file_sizes.values()),
+            "restore_status": "dry_run_only",
+            "live_restore": "restore_not_enabled",
+        }
+        (backup / "manifest.json").write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
+
+        orchestrator = self._orchestrator()
+        with patch("pathlib.Path.home", return_value=fake_home):
+            preview = orchestrator.handle_message(f"restore from backup: {backup}", "user1")
+            confirmed = orchestrator.handle_message("yes", "user1")
+
+        self.assertEqual("operator.restore", preview.data.get("runtime_payload", {}).get("canonical_plan", {}).get("action_type"))
+        self.assertEqual("enabled", preview.data.get("runtime_payload", {}).get("canonical_plan", {}).get("executor_status"))
+        self.assertIn("safety snapshot", preview.text)
+        self.assertEqual("restored-baseline", self.db.get_preference("system_resource_baseline_v1"))
+        result = confirmed.data.get("runtime_payload", {}).get("executor_result", {})
+        self.assertTrue(result.get("ok"))
+        self.assertTrue(result.get("mutated"))
+        self.assertEqual("operator.restore.v1", result.get("executor_id"))
 
     def test_operator_lifecycle_confirmation_does_not_execute_preview_only_action(self) -> None:
         orchestrator = Orchestrator(
@@ -2275,7 +2328,7 @@ class TestOrchestrator(unittest.TestCase):
             ("Telegram start confirmation", "telegram_service_action", "telegram_service_action", "enabled"),
             ("Support bundle", "operator_lifecycle_support_bundle", "operator.support_bundle", "enabled"),
             ("Back up assistant", "operator_lifecycle_backup", "operator.backup", "enabled"),
-            ("Restore from backup", "operator_lifecycle_restore", "operator.restore", "preview_only"),
+            ("Restore from backup", "operator_lifecycle_restore", "operator.restore", "enabled"),
             ("Cleanup old Personal Agent files", "operator_lifecycle_cleanup", "operator.cleanup", "enabled"),
             ("Delete all memory about me", "memory_lifecycle_delete_all", "memory.delete_all", "preview_only"),
             ("Export my memory", "memory_lifecycle_export", "memory.export", "preview_only"),
@@ -2404,7 +2457,6 @@ class TestOrchestrator(unittest.TestCase):
 
     def test_plan_mode_preview_only_confirmations_never_mutate(self) -> None:
         prompts = [
-            ("restore from backup", "operator.restore"),
             ("delete all memory about me", "memory.delete_all"),
             ("export my memory", "memory.export"),
             ("redact sensitive memory", "memory.redact"),

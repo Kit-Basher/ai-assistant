@@ -192,7 +192,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
                 name="restore preview",
                 prompt="restore from backup",
                 thread_id="restore",
-                must_contain=("Restore from backup preview", "dry-run", "will not overwrite live state"),
+                must_contain=("Restore from backup preview", "safety snapshot", "Excluded:"),
             ),
             _check_chat(
                 base_url,

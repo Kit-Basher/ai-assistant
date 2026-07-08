@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-browser-ui-survival-proof-clean`
-- Commit: `341d3ae019cf7318178ed4240040493cfb8a025e`
+- Tag: `v0.2.1-cleanup-executor-v1`
+- Commit: `0d787ec`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -27,10 +27,15 @@ Current confirmed proof:
 - `python scripts/support_bundle_v2_smoke.py`: installed Support Bundle v2
   diagnostics packaging proof
 - `python scripts/backup_v1_smoke.py`: installed Backup v1 additive backup
-  proof for redacted bounded summaries; live restore remains dry-run-only
+  proof for redacted bounded summaries and restore preview cancellation
 - `python scripts/restore_validator_smoke.py`: installed Restore v1 Validator
   proof for read-only backup listing, Backup v1 validation, unsafe path
-  rejection, malformed backup handling, and restore preview-only refusal
+  rejection, malformed backup handling, and restore preview cancellation
+- `python scripts/restore_execution_smoke.py`: isolated Restore Executor v1
+  proof for validated Backup v1 restore, staging, pre-restore safety snapshot,
+  allowlisted preference apply, duplicate confirmation safety, and rollback on
+  forced post-apply verification failure. It does not restore real personal
+  daily-driver state.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.
@@ -186,11 +191,16 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - `scripts/backup_v1_smoke.py`: installed-runtime proof for Backup v1:
   Plan Mode preview, Executor Registry confirmation, timestamped local backup
   directory, manifest, bounded redacted summary files, scoped rollback hint,
-  and restore dry-run/no-mutation behavior.
+  and restore preview cancellation behavior.
 - `scripts/restore_validator_smoke.py`: installed-runtime proof for Restore v1
   Validator. It lists recent backups, identifies the latest valid backup,
   validates Backup v1 manifests and required summaries, rejects unsafe outside
-  paths, detects missing manifests, and keeps live restore disabled.
+  paths, detects missing manifests, and keeps validation read-only.
+- `scripts/restore_execution_smoke.py`: isolated Restore Executor v1 proof. It
+  restores only fixture state, validates Backup v1, stages supported content,
+  creates a pre-restore safety snapshot, applies allowlisted preferences,
+  verifies live fixture state, and proves rollback on forced post-apply
+  verification failure.
 - `scripts/cleanup_preview_smoke.py`: installed-runtime proof for cleanup
   preview. It classifies old/oversized backup artifacts, old support bundles,
   and old runtime releases, protects current runtime/latest backup/secrets, and
@@ -206,7 +216,7 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - `scripts/vm_proof_smoke.py`: post-install clean-VM API smoke. It runs against
   `http://127.0.0.1:8765` after the VM install and verifies status surfaces,
   optional Telegram, unconfigured search guidance, Plan Mode previews, support
-  preview, backup preview, and restore preview-only behavior. It does not run
+  preview, backup preview, and restore confirmation-gated behavior. It does not run
   the installer by itself.
 - `scripts/daily_driver_maturity_audit.py`: recurring installed-product audit
   for startup/search/Telegram/memory/operator/backup/user-friction/performance
@@ -270,11 +280,15 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 - Backup v1 creates an approved local timestamped backup directory with a
   manifest, redacted state/preferences/memory/pack/runtime/journal summaries,
   and explicit exclusions for raw secret stores, logs, arbitrary home data,
-  model caches, and untrusted pack/source text. Restore remains
-  dry-run/preview-only and live restore is not enabled.
+  model caches, and untrusted pack/source text.
 - Restore v1 Validator can inspect Backup v1 artifacts read-only and explain
-  validity, missing files, warnings, and restore-disabled state without writing
-  or restoring anything.
+  validity, missing files, and warnings without writing or restoring anything.
+- Restore Executor v1 can apply only allowlisted non-secret Backup v1
+  preference values for system-resource baselines/context. It uses staging, a
+  pre-restore safety snapshot, post-apply verification, and rollback on
+  verification failure. It does not restore raw secrets, raw logs, arbitrary
+  personal files, model caches, runtime releases, or untrusted executable/pack
+  content.
 - Cleanup preview identifies old or oversized Personal Agent artifacts and
   estimates recoverable space without deleting anything. Cleanup remains
   preview-only.

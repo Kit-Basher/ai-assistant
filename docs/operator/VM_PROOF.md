@@ -38,7 +38,7 @@ From a clean VM:
 10. Confirm Plan Mode gates mutating actions.
 11. Confirm support bundle preview works.
 12. Confirm backup remains confirmation-gated.
-13. Confirm restore remains preview-only.
+13. Confirm restore remains confirmation-gated and validation-gated.
 
 Do not configure a real Telegram token for this proof. Do not require live web
 search. Do not delete host data. Uninstall and cleanup guidance applies only to

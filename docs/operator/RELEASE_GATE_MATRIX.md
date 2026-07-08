@@ -51,6 +51,7 @@ Commands:
 - `python scripts/support_bundle_v2_smoke.py`
 - `python scripts/backup_v1_smoke.py`
 - `python scripts/restore_validator_smoke.py`
+- `python scripts/restore_execution_smoke.py`
 - `python scripts/cleanup_preview_smoke.py`
 - `python scripts/cleanup_execution_smoke.py`
 - `python scripts/daily_driver_maturity_audit.py`
@@ -130,14 +131,18 @@ hint, and no obvious raw secret samples.
 backup prompt is Plan Mode gated, confirmation executes through Executor
 Registry v1, a timestamped local backup directory is created with a manifest
 and bounded redacted summaries, obvious raw secrets are absent, rollback is
-scoped to that new directory, and restore remains dry-run/preview-only with
-`mutated=false`.
+scoped to that new directory, and restore preview can be cancelled without
+mutation.
 
 `restore_validator_smoke.py` is the installed restore-validator gate. It proves
 backup discovery and validation are read-only, the latest valid backup can be
 identified, unsafe outside paths are rejected, malformed backups are explained,
-and generic restore confirmation still returns `executor_not_enabled`,
-`mutated=false`.
+and generic restore preview is validation-gated.
+
+`restore_execution_smoke.py` is the isolated Restore Executor v1 gate. It
+restores only fixture state, proves staging, pre-restore safety snapshot,
+allowlisted preference apply, duplicate confirmation safety, and rollback on a
+forced post-apply verification failure.
 
 `cleanup_preview_smoke.py` is the installed cleanup-preview gate. It proves
 cleanup prompts remain read-only, classify old/oversized backup artifacts,

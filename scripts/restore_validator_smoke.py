@@ -141,7 +141,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
         _pass("latest valid backup validates", validated_text[:1000], 'POST /chat {"message": "validate this backup: <latest>"}')
         if validated_runtime.get("valid") is True
         and "Backup validation result: valid" in validated_text
-        and "Live restore is not enabled" in validated_text
+        and "Validation is read-only" in validated_text
         and validated_runtime.get("mutated") is False
         else _fail("latest valid backup validates", json.dumps(validated, sort_keys=True)[:1600], 'POST /chat {"message": "validate this backup: <latest>"}')
     )
@@ -188,17 +188,18 @@ def run(base_url: str, timeout: float) -> list[Check]:
     restore_runtime = _runtime_payload(restore_preview)
     restore_plan = restore_runtime.get("canonical_plan") if isinstance(restore_runtime.get("canonical_plan"), dict) else {}
     checks.append(
-        _pass("restore remains preview-only", f"plan_id={restore_plan.get('plan_id')} executor_status={restore_plan.get('executor_status')}", 'POST /chat {"message": "restore from backup"}')
-        if restore_plan.get("action_type") == "operator.restore" and restore_plan.get("executor_status") == "preview_only"
-        else _fail("restore remains preview-only", json.dumps(restore_preview, sort_keys=True)[:1400], 'POST /chat {"message": "restore from backup"}')
+        _pass("restore preview is enabled and validation-gated", f"plan_id={restore_plan.get('plan_id')} executor_status={restore_plan.get('executor_status')}", 'POST /chat {"message": "restore from backup"}')
+        if restore_plan.get("action_type") == "operator.restore"
+        and restore_plan.get("executor_status") == "enabled"
+        and "safety snapshot" in _assistant_text(restore_preview).lower()
+        else _fail("restore preview is enabled and validation-gated", json.dumps(restore_preview, sort_keys=True)[:1400], 'POST /chat {"message": "restore from backup"}')
     )
-    restore_confirm = _post_chat(base_url, "yes", thread_id="restore-validator-preview", timeout=timeout)
-    confirm_runtime = _runtime_payload(restore_confirm)
-    executor_result = confirm_runtime.get("executor_result") if isinstance(confirm_runtime.get("executor_result"), dict) else {}
+    restore_cancel = _post_chat(base_url, "no", thread_id="restore-validator-preview", timeout=timeout)
+    cancel_text = _assistant_text(restore_cancel).lower()
     checks.append(
-        _pass("restore confirmation does not mutate", json.dumps(executor_result, sort_keys=True)[:1000], 'POST /chat {"message": "yes"}')
-        if executor_result.get("error_code") == "executor_not_enabled" and executor_result.get("mutated") is False
-        else _fail("restore confirmation does not mutate", json.dumps(restore_confirm, sort_keys=True)[:1400], 'POST /chat {"message": "yes"}')
+        _pass("restore preview can be cancelled without mutation", _assistant_text(restore_cancel)[:1000], 'POST /chat {"message": "no"}')
+        if "cancel" in cancel_text and "mutated=true" not in cancel_text
+        else _fail("restore preview can be cancelled without mutation", json.dumps(restore_cancel, sort_keys=True)[:1400], 'POST /chat {"message": "no"}')
     )
 
     after = _git_status_short()
