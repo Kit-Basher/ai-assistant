@@ -361,9 +361,9 @@ def run(timeout: float) -> list[Check]:
         restore_chat = _post_chat(base_url, "restore from backup", thread_id="restore-preview", timeout=timeout)
         restore_text = _assistant_text(restore_chat)
         checks.append(
-            _pass("restore remains preview-only", restore_text[:1000], 'POST /chat {"message": "restore from backup"}')
-            if _contains_any(restore_text, ("Restore from backup preview", "live restore is not enabled", "will not overwrite"))
-            else _fail("restore remains preview-only", restore_text[:1200], 'POST /chat {"message": "restore from backup"}')
+            _pass("restore is safe in fresh state", restore_text[:1000], 'POST /chat {"message": "restore from backup"}')
+            if _contains_any(restore_text, ("Restore from backup preview", "safety snapshot", "could not find a valid Backup v1 artifact"))
+            else _fail("restore is safe in fresh state", restore_text[:1200], 'POST /chat {"message": "restore from backup"}')
         )
 
         cleanup_chat = _post_chat(base_url, "clean old backup files", thread_id="cleanup-preview", timeout=timeout)

@@ -203,9 +203,9 @@ def run(*, base_url: str, expected_commit: str | None, allow_existing_config: bo
     restore = _post_chat(base_url, "restore from backup", thread_id="vm-restore-preview")
     restore_text = _assistant_text(restore)
     checks.append(
-        _pass("restore remains preview-only", restore_text[:1000], 'POST /chat {"message": "restore from backup"}')
-        if _contains_any(restore_text, ("Restore from backup preview", "live restore is not enabled", "will not overwrite", "preview-only"))
-        else _fail("restore remains preview-only", restore_text[:1200], 'POST /chat {"message": "restore from backup"}')
+        _pass("restore remains confirmation-gated", restore_text[:1000], 'POST /chat {"message": "restore from backup"}')
+        if _contains_any(restore_text, ("Restore from backup preview", "safety snapshot", "could not find a valid Backup v1 artifact"))
+        else _fail("restore remains confirmation-gated", restore_text[:1200], 'POST /chat {"message": "restore from backup"}')
     )
 
     after = _git_status_short()
