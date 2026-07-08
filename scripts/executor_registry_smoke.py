@@ -150,12 +150,26 @@ def run(base_url: str, timeout: float) -> list[Check]:
     checks: list[Check] = []
     baseline_git = _git_status_short()
 
-    for prompt, thread_id in (
-        ("delete all memory about me", "executor-memory-delete"),
-        ("uninstall the assistant", "executor-uninstall"),
-    ):
-        preview_check, confirm_check = _confirm_preview_only(base_url, prompt, thread_id=thread_id, timeout=timeout)
-        checks.extend([preview_check, confirm_check])
+    preview_check, confirm_check = _confirm_preview_only(base_url, "delete all memory about me", thread_id="executor-memory-delete", timeout=timeout)
+    checks.extend([preview_check, confirm_check])
+
+    uninstall_preview = _post_chat(base_url, "uninstall the assistant", thread_id="executor-uninstall", timeout=timeout)
+    uninstall_text = _assistant_text(uninstall_preview)
+    uninstall_payload = _runtime_payload(uninstall_preview)
+    uninstall_plan = uninstall_payload.get("canonical_plan") if isinstance(uninstall_payload.get("canonical_plan"), dict) else {}
+    checks.append(
+        _pass("uninstall has enabled guarded executor plan", f"plan_id={uninstall_plan.get('plan_id')} action={uninstall_plan.get('action_type')}", 'POST /chat {"message": "uninstall the assistant"}')
+        if "Plan Mode v2" in uninstall_text and uninstall_plan.get("executor_status") == "enabled" and uninstall_plan.get("action_type") == "operator.uninstall"
+        else _fail("uninstall has enabled guarded executor plan", json.dumps(uninstall_preview, sort_keys=True)[:1400], 'POST /chat {"message": "uninstall the assistant"}')
+    )
+    uninstall_confirm = _post_chat(base_url, "yes", thread_id="executor-uninstall", timeout=timeout)
+    uninstall_confirm_payload = _runtime_payload(uninstall_confirm)
+    uninstall_result = uninstall_confirm_payload.get("executor_result") if isinstance(uninstall_confirm_payload.get("executor_result"), dict) else {}
+    checks.append(
+        _pass("uninstall live guard refuses installed runtime", _assistant_text(uninstall_confirm), 'POST /chat {"message": "yes"}')
+        if uninstall_result.get("error_code") == "uninstall_live_execution_not_enabled" and uninstall_result.get("mutated") is False
+        else _fail("uninstall live guard refuses installed runtime", json.dumps(uninstall_confirm, sort_keys=True)[:1400], 'POST /chat {"message": "yes"}')
+    )
 
     cleanup_preview = _post_chat(base_url, "clean old runtime files", thread_id="executor-cleanup", timeout=timeout)
     cleanup_text = _assistant_text(cleanup_preview)

@@ -278,10 +278,10 @@ def run(base_url: str, timeout: float) -> list[Check]:
 
     for prompt, expected in (
         ("install htop", ("Plan Mode", "mutates the local system", "Say yes")),
-        ("update the assistant", ("Update assistant preview", "explicit confirmation")),
+        ("update the assistant", ("Update assistant preview", "Trusted source")),
         ("uninstall the assistant", ("Uninstall assistant preview", "destructive")),
         ("clean old runtime files", ("Cleanup old Personal Agent files preview", "I did not delete anything")),
-        ("restore from backup", ("Restore from backup preview", "live restore is not enabled")),
+        ("restore from backup", ("Restore from backup preview", "safety snapshot")),
     ):
         payload = _post_chat(base_url, prompt, thread_id=f"operator-{prompt.split()[0]}", timeout=timeout)
         text = _assistant_text(payload)
@@ -305,7 +305,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
         latest_path = latest_match.group(1)
         validator = _post_chat(base_url, f"validate this backup: {latest_path}", thread_id="backup-validate", timeout=timeout)
         validator_text = _assistant_text(validator)
-        checks.append(_pass("backup/restore sanity", "restore validator identifies latest backup", f'POST /chat {{"message": "validate this backup: {latest_path}"}}', validator_text) if _contains_any(validator_text, ("valid", "Live restore is not enabled", "did not write")) else _warn("backup/restore sanity", "restore validator identifies latest backup", f'POST /chat {{"message": "validate this backup: {latest_path}"}}', validator_text, "Restore validator should explain latest backup validity without writing."))
+        checks.append(_pass("backup/restore sanity", "restore validator identifies latest backup", f'POST /chat {{"message": "validate this backup: {latest_path}"}}', validator_text) if _contains_any(validator_text, ("valid", "Validation is read-only", "did not write")) else _warn("backup/restore sanity", "restore validator identifies latest backup", f'POST /chat {{"message": "validate this backup: {latest_path}"}}', validator_text, "Restore validator should explain latest backup validity without writing."))
     else:
         checks.append(_warn("backup/restore sanity", "restore validator identifies latest backup", 'POST /chat {"message": "show my backups"}', backups_text, "Create one Backup v1 artifact if you want restore-validator daily-driver coverage."))
     cleanup = _post_chat(base_url, "clean old backup files", thread_id="backup-cleanup", timeout=timeout)

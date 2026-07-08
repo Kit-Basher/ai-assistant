@@ -51,6 +51,9 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/backup_v1_smoke.py",
     "scripts/cleanup_preview_smoke.py",
     "scripts/restore_validator_smoke.py",
+    "scripts/restore_execution_smoke.py",
+    "scripts/update_execution_smoke.py",
+    "scripts/uninstall_execution_smoke.py",
     "scripts/first_run_smoke.py",
     "scripts/vm_proof_smoke.py",
     "scripts/daily_driver_maturity_audit.py",
@@ -69,6 +72,8 @@ def _gates() -> list[Gate]:
         Gate("llm_behavior_eval deterministic e2e behavior", (sys.executable, "scripts/llm_behavior_eval.py"), 180),
         Gate("perf_smoke read-only latency smoke", (sys.executable, "scripts/perf_smoke.py"), 180),
         Gate("release_smoke canonical smoke suite", (sys.executable, "scripts/release_smoke.py"), 420),
+        Gate("update_execution_smoke isolated update executor", (sys.executable, "scripts/update_execution_smoke.py"), 120),
+        Gate("uninstall_execution_smoke isolated uninstall executor", (sys.executable, "scripts/uninstall_execution_smoke.py"), 120),
         Gate(
             "direct behavior release gates",
             (
