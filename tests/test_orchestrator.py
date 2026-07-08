@@ -2334,7 +2334,7 @@ class TestOrchestrator(unittest.TestCase):
             ("Export my memory", "memory_lifecycle_export", "memory.export", "preview_only"),
             ("Redact sensitive memory", "memory_lifecycle_redact", "memory.redact", "preview_only"),
             ("Install htop", "shell_install_package", "package.install", "enabled"),
-            ("Update assistant", "operator_lifecycle_update", "operator.update", "preview_only"),
+            ("Update assistant", "operator_lifecycle_update", "operator.update", "enabled"),
             ("Uninstall assistant", "operator_lifecycle_uninstall", "operator.uninstall", "preview_only"),
         ]
 
@@ -2460,7 +2460,6 @@ class TestOrchestrator(unittest.TestCase):
             ("delete all memory about me", "memory.delete_all"),
             ("export my memory", "memory.export"),
             ("redact sensitive memory", "memory.redact"),
-            ("update the assistant", "operator.update"),
             ("uninstall the assistant", "operator.uninstall"),
         ]
         for prompt, action_type in prompts:
@@ -2480,6 +2479,32 @@ class TestOrchestrator(unittest.TestCase):
                 blob = json.dumps(confirmed.data, sort_keys=True).lower()
                 self.assertIn("executor_not_enabled", blob)
                 self.assertIn('"mutated": false', blob)
+
+    def test_update_confirmation_blocks_dirty_working_tree_without_mutation(self) -> None:
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=_FakeChatLLM(enabled=True, text="LLM fallback"),
+        )
+
+        preview = orchestrator.handle_message("update the assistant", "user1")
+        plan = preview.data.get("runtime_payload", {}).get("canonical_plan", {})
+        self.assertEqual("operator.update", plan.get("action_type"))
+        self.assertEqual("enabled", plan.get("executor_status"))
+
+        pending = orchestrator.confirmations.get("user1")
+        self.assertIsNotNone(pending)
+        pending.action["working_tree_clean"] = False  # type: ignore[index,union-attr]
+        pending.action["dirty_files"] = ["M agent/orchestrator.py"]  # type: ignore[index,union-attr]
+
+        confirmed = orchestrator.handle_message("yes", "user1")
+        payload = confirmed.data.get("runtime_payload", {})
+        result = payload.get("executor_result", {})
+        self.assertEqual("update_dirty_working_tree", result.get("error_code"))
+        self.assertFalse(result.get("mutated"))
+        self.assertIn("uncommitted changes", confirmed.text)
 
     def test_memory_status_distinguishes_scopes(self) -> None:
         llm = _FakeChatLLM(enabled=True, text="LLM should not answer memory status.")

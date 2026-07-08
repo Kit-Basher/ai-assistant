@@ -26,6 +26,8 @@ CLEANUP_MAX_CANDIDATES = 50
 CLEANUP_MAX_SCAN_ENTRIES = 10000
 RESTORE_SNAPSHOT_SCHEMA_VERSION = "restore_snapshot.v1"
 RESTORE_STAGE_SCHEMA_VERSION = "restore_stage.v1"
+UPDATE_OPERATION_SCHEMA_VERSION = "update_operation.v1"
+UPDATE_CHECKPOINT_SCHEMA_VERSION = "update_checkpoint.v1"
 RESTORE_ALLOWED_PREFERENCE_KEYS = {
     "system_resource_baseline_v1",
     "system_resource_baseline_context_v1",
@@ -430,6 +432,11 @@ class ExecutorRegistry:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(support_bundle_redact(payload), indent=2, sort_keys=True, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    parsed = json.loads(path.read_text(encoding="utf-8"))
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _bounded_journal_value(value: Any, *, depth: int = 0) -> Any:
@@ -1230,6 +1237,519 @@ def restore_backup_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
         }
     finally:
         _release_restore_lock(lock_path)
+
+
+def _release_commit(path: Path) -> str:
+    for candidate in (
+        path / "agent" / "BUILD_INFO.json",
+        path / "BUILD_INFO.json",
+        path / "build_info.json",
+    ):
+        if candidate.exists() and candidate.is_file():
+            try:
+                payload = _read_json(candidate)
+            except (OSError, json.JSONDecodeError):
+                continue
+            commit = str(payload.get("git_commit") or payload.get("commit") or "").strip()
+            if commit:
+                return commit
+    marker = path / "VERSION_COMMIT"
+    if marker.exists() and marker.is_file():
+        try:
+            return marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
+    return ""
+
+
+def _replace_symlink(link: Path, target: Path) -> None:
+    temp_link = link.with_name(f"{link.name}.tmp-{uuid.uuid4().hex[:8]}")
+    temp_link.symlink_to(target)
+    os.replace(temp_link, link)
+
+
+def _acquire_operation_lock(lock_path: Path, payload: dict[str, Any]) -> bool:
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(support_bundle_redact(payload), sort_keys=True, ensure_ascii=True) + "\n")
+    return True
+
+
+def _release_operation_lock(lock_path: Path, operation_id: str) -> None:
+    try:
+        existing = _read_json(lock_path)
+    except (OSError, json.JSONDecodeError):
+        return
+    if str(existing.get("operation_id") or "") == operation_id:
+        try:
+            lock_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _update_state_write(state_dir: Path, stage: str, payload: dict[str, Any]) -> None:
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "update_operation_schema_version": UPDATE_OPERATION_SCHEMA_VERSION,
+        "stage": stage,
+        "updated_at": utc_now_iso(),
+        **payload,
+    }
+    temp = state_dir / "state.json.tmp"
+    _write_json(temp, state)
+    os.replace(temp, state_dir / "state.json")
+
+
+def _update_result(
+    plan: dict[str, Any],
+    action: dict[str, Any],
+    *,
+    ok: bool,
+    mutated: bool,
+    status: str,
+    message: str,
+    resources: list[str] | None = None,
+    rollback_available: bool = True,
+    rollback_hint: str = "",
+    error_code: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "ok": bool(ok),
+        "mutated": bool(mutated),
+        "executor_id": "operator.update.v1",
+        "resources_touched": [safe_path_label(item) for item in list(resources or [])],
+        "rollback_available": bool(rollback_available),
+        "rollback_hint": rollback_hint,
+        "error_code": error_code,
+        "user_message": message,
+        "details": {
+            "status": status,
+            "update_operation_schema_version": UPDATE_OPERATION_SCHEMA_VERSION,
+            **(details or {}),
+        },
+    }
+
+
+def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    """Bounded Update v1 executor using trusted staged-release inputs only."""
+
+    action_type = str(plan.get("action_type") or "").strip().lower()
+    if action_type != "operator.update":
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked",
+            message="I blocked update execution because the plan action type was not operator.update.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_action_type_mismatch",
+        )
+
+    mode = str(action.get("update_mode") or "live_guarded").strip().lower()
+    operation_id = str(action.get("operation_id") or plan.get("plan_id") or f"update-{uuid.uuid4().hex[:12]}").strip()
+    target_commit = str(action.get("target_commit") or "").strip()
+    preview_target_commit = str(action.get("preview_target_commit") or target_commit).strip()
+    expected_current_commit = str(action.get("expected_current_commit") or "").strip()
+
+    if action.get("working_tree_clean") is False:
+        changed = action.get("dirty_files") if isinstance(action.get("dirty_files"), list) else []
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_dirty_working_tree",
+            message="I can’t update yet because the Personal Agent repository has uncommitted changes. I left them untouched.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_dirty_working_tree",
+            details={"dirty_files": [str(item) for item in changed[:20]]},
+        )
+
+    if preview_target_commit and target_commit and preview_target_commit != target_commit:
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_target_changed",
+            message="The approved update target changed after the preview, so I blocked execution. Ask for a fresh update preview.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_target_changed_since_preview",
+            details={"preview_target_commit": preview_target_commit, "target_commit": target_commit},
+        )
+
+    if mode == "live_noop":
+        current_commit = str(action.get("current_runtime_commit") or "").strip()
+        if not current_commit or not target_commit or current_commit != target_commit:
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_live_update_not_enabled",
+                message=(
+                    "Live update execution is blocked because this is not a verified no-op. "
+                    "I did not fetch code, promote a runtime, restart services, or change files."
+                ),
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_live_promotion_not_enabled",
+                details={"current_runtime_commit": current_commit, "target_commit": target_commit},
+            )
+        return _update_result(
+            plan,
+            action,
+            ok=True,
+            mutated=False,
+            status="already_current",
+            message="You’re already running the current approved version. Nothing needed updating.",
+            rollback_available=True,
+            rollback_hint="The current runtime was not changed.",
+            details={"current_runtime_commit": current_commit, "target_commit": target_commit},
+        )
+
+    if mode != "fixture_staged_release":
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_live_update_not_enabled",
+            message=(
+                "Update execution is enabled only for the trusted staged-release runner. "
+                "This request did not include an approved internal update target, so I did not mutate state."
+            ),
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_live_promotion_not_enabled",
+        )
+
+    state_root = Path(str(action.get("state_root") or "")).expanduser()
+    runtime_root = Path(str(action.get("runtime_root") or "")).expanduser()
+    releases_root = Path(str(action.get("releases_root") or runtime_root / "releases")).expanduser()
+    current_link = Path(str(action.get("current_link") or runtime_root / "current")).expanduser()
+    source_release = Path(str(action.get("staged_source_path") or "")).expanduser()
+    target_release_id = str(action.get("target_release_id") or f"update-{target_commit[:12]}").strip()
+
+    try:
+        state_root = state_root.resolve()
+        runtime_root = runtime_root.resolve()
+        releases_root = releases_root.resolve()
+        current_link_parent = current_link.parent.resolve()
+        source_release = source_release.resolve()
+    except OSError as exc:
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_invalid_path",
+            message="I blocked the update because one of the internal update paths could not be resolved.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_invalid_path",
+            details={"exception": exc.__class__.__name__},
+        )
+
+    current_link = current_link_parent / current_link.name
+    if not _is_contained(releases_root, runtime_root) or not _is_contained(current_link_parent, runtime_root):
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_path_escape",
+            message="I blocked the update because runtime paths were outside the approved Personal Agent runtime root.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_path_escape",
+        )
+    if not source_release.exists() or not source_release.is_dir() or source_release.is_symlink():
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_missing_staged_source",
+            message="I blocked the update because the approved staged release source was missing.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_staged_source_missing",
+        )
+
+    lock_path = state_root / "lifecycle_locks" / "update.lock"
+    state_dir = state_root / "update_operations" / operation_id
+    lock_payload = {
+        "operation_type": "operator.update",
+        "operation_id": operation_id,
+        "started_at": utc_now_iso(),
+        "source_commit": expected_current_commit,
+        "target_commit": target_commit,
+        "stage": "starting",
+    }
+    if not _acquire_operation_lock(lock_path, lock_payload):
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_lock_conflict",
+            message="Another lifecycle operation is already using the update lock. I did not start a second update.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_lock_conflict",
+        )
+
+    resources: list[str] = [str(lock_path), str(state_dir)]
+    previous_target: Path | None = None
+    promoted = False
+    checkpoint: dict[str, Any] = {}
+    try:
+        _update_state_write(state_dir, "validating", lock_payload)
+        if not current_link.is_symlink():
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_current_not_symlink",
+                message="I blocked the update because runtime/current is not the expected Personal Agent symlink.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_current_not_symlink",
+            )
+        previous_target = current_link.resolve()
+        previous_commit = _release_commit(previous_target)
+        if expected_current_commit and previous_commit and previous_commit != expected_current_commit:
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_current_changed",
+                message="The running runtime changed after the update preview, so I blocked execution. Ask for a fresh update preview.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_current_changed_since_preview",
+                details={"expected_current_commit": expected_current_commit, "actual_current_commit": previous_commit},
+            )
+        source_commit = _release_commit(source_release)
+        if target_commit and source_commit != target_commit:
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_target_metadata_mismatch",
+                message="I blocked the update because the staged release metadata did not match the approved target commit.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_target_metadata_mismatch",
+                details={"target_commit": target_commit, "staged_commit": source_commit},
+            )
+        if previous_commit and target_commit and previous_commit == target_commit:
+            return _update_result(
+                plan,
+                action,
+                ok=True,
+                mutated=False,
+                status="already_current",
+                message="You’re already running the approved target version. Nothing needed updating.",
+                rollback_available=True,
+                rollback_hint="The current runtime was not changed.",
+                details={"current_runtime_commit": previous_commit, "target_commit": target_commit},
+            )
+
+        checkpoint_dir = state_root / "update_checkpoints" / operation_id
+        checkpoint_dir.mkdir(parents=True, exist_ok=False)
+        checkpoint = {
+            "update_checkpoint_schema_version": UPDATE_CHECKPOINT_SCHEMA_VERSION,
+            "operation_id": operation_id,
+            "created_at": utc_now_iso(),
+            "previous_release_path": str(previous_target),
+            "previous_runtime_commit": previous_commit,
+            "current_link": str(current_link),
+            "target_commit": target_commit,
+        }
+        _write_json(checkpoint_dir / "manifest.json", checkpoint)
+        resources.append(str(checkpoint_dir))
+        _update_state_write(state_dir, "checkpoint_created", {**lock_payload, "checkpoint": checkpoint})
+
+        final_release = releases_root / target_release_id
+        stage_release = releases_root / f"{target_release_id}.staging-{uuid.uuid4().hex[:8]}"
+        if final_release.exists():
+            existing_commit = _release_commit(final_release)
+            if existing_commit != target_commit:
+                return _update_result(
+                    plan,
+                    action,
+                    ok=False,
+                    mutated=False,
+                    status="blocked_existing_release_mismatch",
+                    message="I blocked the update because an existing staged release id points at a different commit.",
+                    rollback_available=True,
+                    rollback_hint=f"Previous runtime remains at {safe_path_label(previous_target)}.",
+                    error_code="update_existing_release_mismatch",
+                    resources=resources,
+                    details={"existing_commit": existing_commit, "target_commit": target_commit},
+                )
+        else:
+            _update_state_write(state_dir, "staging", {**lock_payload, "checkpoint": checkpoint})
+            shutil.copytree(source_release, stage_release, symlinks=False)
+            resources.append(str(stage_release))
+            staged_commit = _release_commit(stage_release)
+            if staged_commit != target_commit:
+                shutil.rmtree(stage_release, ignore_errors=True)
+                return _update_result(
+                    plan,
+                    action,
+                    ok=False,
+                    mutated=False,
+                    status="failed_before_promotion",
+                    message="The staged release failed its metadata check, so I left the current runtime untouched.",
+                    rollback_available=True,
+                    rollback_hint=f"Previous runtime remains at {safe_path_label(previous_target)}.",
+                    error_code="update_pre_promotion_check_failed",
+                    resources=resources,
+                    details={"staged_commit": staged_commit, "target_commit": target_commit},
+                )
+            os.replace(stage_release, final_release)
+            resources.append(str(final_release))
+
+        _update_state_write(state_dir, "promoting", {**lock_payload, "checkpoint": checkpoint, "staged_release": str(final_release)})
+        _replace_symlink(current_link, final_release)
+        promoted = True
+        resources.append(str(current_link))
+
+        _update_state_write(state_dir, "verifying", {**lock_payload, "checkpoint": checkpoint, "promoted_release": str(final_release)})
+        verified_commit = _release_commit(current_link.resolve())
+        if bool(action.get("force_post_promotion_failure")) or verified_commit != target_commit:
+            _replace_symlink(current_link, previous_target)
+            rollback_commit = _release_commit(current_link.resolve())
+            rollback_verified = bool(previous_commit and rollback_commit == previous_commit)
+            status = "update_failed_rolled_back" if rollback_verified else "update_failed_rollback_failed"
+            _update_state_write(
+                state_dir,
+                status,
+                {
+                    **lock_payload,
+                    "checkpoint": checkpoint,
+                    "verified_commit": verified_commit,
+                    "rollback_commit": rollback_commit,
+                    "rollback_verified": rollback_verified,
+                },
+            )
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=True,
+                status=status,
+                message=(
+                    "The update failed its readiness check, so I restored the previous working release."
+                    if rollback_verified
+                    else "The update failed, and I could not fully verify the previous release after rollback. I stopped further changes."
+                ),
+                rollback_available=rollback_verified,
+                rollback_hint=(
+                    f"Runtime/current is back at {safe_path_label(previous_target)}."
+                    if rollback_verified
+                    else f"Use the rollback checkpoint at {safe_path_label(checkpoint_dir)}."
+                ),
+                error_code=status,
+                resources=resources,
+                details={
+                    "checkpoint": checkpoint,
+                    "verified_commit": verified_commit,
+                    "rollback_commit": rollback_commit,
+                    "rollback_verified": rollback_verified,
+                },
+            )
+
+        _update_state_write(
+            state_dir,
+            "completed_verified",
+            {**lock_payload, "checkpoint": checkpoint, "promoted_release": str(final_release), "verified_commit": verified_commit},
+        )
+        return _update_result(
+            plan,
+            action,
+            ok=True,
+            mutated=True,
+            status="completed_verified",
+            message=(
+                f"Update completed and verified. Personal Agent is now running commit {target_commit[:12]}. "
+                "The previous working release was kept as a rollback checkpoint."
+            ),
+            rollback_available=True,
+            rollback_hint=f"Switch runtime/current back to {safe_path_label(previous_target)} if manual rollback is needed.",
+            resources=resources,
+            details={
+                "checkpoint": checkpoint,
+                "previous_runtime_commit": previous_commit,
+                "target_commit": target_commit,
+                "promoted_release": str(final_release),
+                "verified_commit": verified_commit,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - executor boundary must stay structured.
+        rollback_verified = False
+        rollback_commit = ""
+        if promoted and previous_target is not None:
+            try:
+                _replace_symlink(current_link, previous_target)
+                rollback_commit = _release_commit(current_link.resolve())
+                rollback_verified = not expected_current_commit or rollback_commit == expected_current_commit
+            except Exception:  # noqa: BLE001 - report rollback failure below.
+                rollback_verified = False
+        status = "update_failed_rolled_back" if rollback_verified else ("update_failed_rollback_failed" if promoted else "failed_before_promotion")
+        _update_state_write(
+            state_dir,
+            status,
+            {
+                **lock_payload,
+                "checkpoint": checkpoint,
+                "exception": exc.__class__.__name__,
+                "rollback_commit": rollback_commit,
+                "rollback_verified": rollback_verified,
+            },
+        )
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=bool(promoted),
+            status=status,
+            message=(
+                "The update failed before promotion, so I left the current runtime untouched."
+                if not promoted
+                else (
+                    "The update failed after promotion, so I restored the previous working release."
+                    if rollback_verified
+                    else "The update failed after promotion, and rollback could not be fully verified."
+                )
+            ),
+            rollback_available=rollback_verified or not promoted,
+            rollback_hint=(
+                "No rollback needed because promotion did not happen."
+                if not promoted
+                else f"Use the rollback checkpoint at {safe_path_label(state_root / 'update_checkpoints' / operation_id)}."
+            ),
+            error_code=status,
+            resources=resources,
+            details={"exception": exc.__class__.__name__, "rollback_commit": rollback_commit, "rollback_verified": rollback_verified},
+        )
+    finally:
+        _release_operation_lock(lock_path, operation_id)
 
 
 def build_backup_manifest(

@@ -19,6 +19,7 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    execute_update_v1,
     restore_backup_v1,
     support_bundle_redact,
 )
@@ -34,6 +35,14 @@ def _plan(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def _write_release(path: Path, commit: str) -> None:
+    (path / "agent").mkdir(parents=True)
+    (path / "agent" / "BUILD_INFO.json").write_text(
+        json.dumps({"git_commit": commit, "version": "fixture"}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
 
 
 class ExecutorRegistryTests(unittest.TestCase):
@@ -116,6 +125,107 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["mutated"])
         self.assertEqual("test.enabled", payload["executor_id"])
+
+    def test_update_executor_fixture_promotes_staged_release(self) -> None:
+        root = Path(self.tmpdir.name)
+        runtime = root / "runtime"
+        releases = runtime / "releases"
+        state = root / "state"
+        release_a = releases / "release-a"
+        source_b = root / "source-release-b"
+        releases.mkdir(parents=True)
+        _write_release(release_a, "commit-a")
+        _write_release(source_b, "commit-b")
+        (runtime / "current").symlink_to(release_a)
+        plan = _plan(action_type="operator.update", target="Personal Agent update")
+        action = {
+            "pending_id": "confirm-test",
+            "update_mode": "fixture_staged_release",
+            "state_root": str(state),
+            "runtime_root": str(runtime),
+            "releases_root": str(releases),
+            "current_link": str(runtime / "current"),
+            "staged_source_path": str(source_b),
+            "target_release_id": "release-b",
+            "expected_current_commit": "commit-a",
+            "target_commit": "commit-b",
+            "preview_target_commit": "commit-b",
+            "working_tree_clean": True,
+        }
+
+        result = execute_update_v1(plan, action)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("completed_verified", result["details"]["status"])
+        self.assertEqual((runtime / "current").resolve(), releases / "release-b")
+        self.assertTrue((state / "update_checkpoints" / "confirm-test" / "manifest.json").is_file())
+
+    def test_update_executor_fixture_rolls_back_failed_verification(self) -> None:
+        root = Path(self.tmpdir.name)
+        runtime = root / "runtime"
+        releases = runtime / "releases"
+        state = root / "state"
+        release_a = releases / "release-a"
+        source_b = root / "source-release-b"
+        releases.mkdir(parents=True)
+        _write_release(release_a, "commit-a")
+        _write_release(source_b, "commit-b")
+        (runtime / "current").symlink_to(release_a)
+        plan = _plan(action_type="operator.update", target="Personal Agent update")
+        action = {
+            "pending_id": "confirm-test",
+            "update_mode": "fixture_staged_release",
+            "state_root": str(state),
+            "runtime_root": str(runtime),
+            "releases_root": str(releases),
+            "current_link": str(runtime / "current"),
+            "staged_source_path": str(source_b),
+            "target_release_id": "release-b",
+            "expected_current_commit": "commit-a",
+            "target_commit": "commit-b",
+            "preview_target_commit": "commit-b",
+            "working_tree_clean": True,
+            "force_post_promotion_failure": True,
+        }
+
+        result = execute_update_v1(plan, action)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("update_failed_rolled_back", result["details"]["status"])
+        self.assertEqual((runtime / "current").resolve(), release_a)
+
+    def test_update_executor_refuses_dirty_tree_and_target_drift(self) -> None:
+        plan = _plan(action_type="operator.update", target="Personal Agent update")
+        dirty = execute_update_v1(
+            plan,
+            {
+                "pending_id": "confirm-test",
+                "update_mode": "fixture_staged_release",
+                "working_tree_clean": False,
+                "dirty_files": ["M agent/orchestrator.py"],
+                "target_commit": "commit-b",
+                "preview_target_commit": "commit-b",
+            },
+        )
+        self.assertFalse(dirty["ok"])
+        self.assertFalse(dirty["mutated"])
+        self.assertEqual("update_dirty_working_tree", dirty["error_code"])
+
+        drift = execute_update_v1(
+            plan,
+            {
+                "pending_id": "confirm-test",
+                "update_mode": "fixture_staged_release",
+                "working_tree_clean": True,
+                "target_commit": "commit-b",
+                "preview_target_commit": "commit-old",
+            },
+        )
+        self.assertFalse(drift["ok"])
+        self.assertFalse(drift["mutated"])
+        self.assertEqual("update_target_changed_since_preview", drift["error_code"])
 
     def test_journal_redacts_secrets(self) -> None:
         registry = ExecutorRegistry(self.journal_path)

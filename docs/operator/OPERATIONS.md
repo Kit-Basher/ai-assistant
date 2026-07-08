@@ -89,6 +89,10 @@ Confirm:
   changes; this gate restores only isolated fixture state through the Executor
   Registry, verifies staging and safety snapshots, and forces a post-apply
   failure to prove rollback behavior
+- run `python scripts/update_execution_smoke.py` when update execution changes;
+  this gate promotes only isolated fixture releases, verifies rollback
+  checkpoint and forced rollback behavior, proves dirty-tree and target-drift
+  blockers, and does not update the real daily-driver runtime
 - run `python scripts/cleanup_preview_smoke.py` when storage cleanup preview
   behavior feels wrong; this gate verifies candidate classification, protected
   paths, and cancellation without deleting anything

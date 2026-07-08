@@ -224,6 +224,7 @@ Run only when the relevant subsystem is being worked or before a major release:
 python scripts/prove_pre_vm_complete.py
 python scripts/restart_survival_smoke.py
 python scripts/browser_ui_survival_smoke.py
+python scripts/update_execution_smoke.py
 python scripts/vm_proof_smoke.py --expected-commit <commit>
 python scripts/telegram_bridge_smoke.py
 python scripts/provider_matrix_smoke.py

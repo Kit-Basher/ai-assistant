@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-cleanup-executor-v1`
-- Commit: `0d787ec`
+- Tag: `v0.2.1-restore-executor-v1`
+- Commit: `9717ea7`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -36,6 +36,10 @@ Current confirmed proof:
   allowlisted preference apply, duplicate confirmation safety, and rollback on
   forced post-apply verification failure. It does not restore real personal
   daily-driver state.
+- `python scripts/update_execution_smoke.py`: isolated Update Executor v1 proof
+  for staged release promotion, rollback checkpoint, forced post-promotion
+  rollback, dirty-tree refusal, target-drift refusal, and verified live no-op.
+  It does not update the real daily-driver runtime to an unknown commit.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.
@@ -289,6 +293,11 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
   verification failure. It does not restore raw secrets, raw logs, arbitrary
   personal files, model caches, runtime releases, or untrusted executable/pack
   content.
+- Update Executor v1 is enabled behind Plan Mode for bounded update outcomes:
+  isolated staged-release promotion/rollback proof, verified live no-op, and
+  structured live-promotion blockers when rollback-safe handoff is unavailable.
+  It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
+  working trees, and target drift after preview.
 - Cleanup preview identifies old or oversized Personal Agent artifacts and
   estimates recoverable space without deleting anything. Cleanup remains
   preview-only.
@@ -303,8 +312,10 @@ internal and mock-heavy tests. `installed_product_abuse.py` and
 These are not unknowns, but they are not finished:
 
 - Installer/update/uninstall: install, promotion, bundle, and package paths have
-  coverage; user-facing update/uninstall previews exist; full execution and
-  fresh-host partial-failure recovery remain partial.
+  coverage; Update Executor v1 has isolated staged-release execution and
+  rollback proof plus live no-op/blocker behavior; uninstall remains
+  preview-only; full live remote self-update and fresh-host partial-failure
+  recovery remain partial.
 - Storage/log growth: read-only installed storage estimate, cleanup preview,
   and bounded cleanup execution for approved old Personal Agent artifacts
   exist; broader rotation/enforced cleanup policy remains partial.
@@ -332,8 +343,10 @@ These are not unknowns, but they are not finished:
   thread/session binding, stale-confirmation rejection, and Executor Registry
   v1 exist. Batch 5 covers stale/cancelled/expired/wrong-thread/overwritten
   confirmations across the major action families. Cleanup now has a bounded
-  executor for approved old Personal Agent artifacts. Restore, update,
-  uninstall, and destructive memory actions remain preview-only.
+  executor for approved old Personal Agent artifacts. Restore now has a bounded
+  allowlisted Backup v1 executor. Update now has a bounded staged-release
+  fixture executor and live no-op/blocker path. Uninstall and destructive memory
+  actions remain preview-only.
 - Release/CI automation: CI-safe and live-runtime gates are split; broader CI
   adoption remains future work.
 - Model/provider management: deterministic guidance and switching paths are

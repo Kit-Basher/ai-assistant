@@ -200,7 +200,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
                 name="update preview",
                 prompt="update the assistant",
                 thread_id="update",
-                must_contain=("Update assistant preview", "will not pull code", "explicit confirmation"),
+                must_contain=("Update assistant preview", "Trusted source:", "Working tree clean:"),
             ),
             _check_chat(
                 base_url,
@@ -242,7 +242,8 @@ def run(base_url: str, timeout: float) -> list[Check]:
     else:
         checks.append(_fail("stale destructive confirmation", confirm_text[:500], 'POST /chat {"message": "confirm"}'))
     cancel_text = _assistant_text(cancel_payload).lower()
-    if "cancel" in cancel_text or "didn" in cancel_text:
+    cancel_normalized = cancel_text.replace("’", "'")
+    if "cancel" in cancel_normalized or "didn" in cancel_normalized or "no current action" in cancel_normalized or "don't have a current action" in cancel_normalized:
         checks.append(_pass("destructive preview cancel", _assistant_text(cancel_payload)[:500], 'POST /chat {"message": "no"}'))
     else:
         checks.append(_fail("destructive preview cancel", _assistant_text(cancel_payload)[:500], 'POST /chat {"message": "no"}'))

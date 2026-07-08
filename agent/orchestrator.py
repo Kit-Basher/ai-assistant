@@ -139,6 +139,7 @@ from agent.executor_registry import (
     create_additive_backup,
     create_redacted_support_bundle,
     execute_cleanup,
+    execute_update_v1,
     restore_backup_v1,
 )
 from agent.runtime_truth_service import RuntimeTruthService
@@ -685,6 +686,16 @@ class Orchestrator:
                 run=restore_backup_v1,
                 rollback_available=True,
                 rollback_hint="Use the pre-restore safety snapshot created before restore mutation.",
+            )
+        )
+        self._executor_registry.register(
+            ExecutorSpec(
+                executor_id="operator.update.v1",
+                action_type="operator.update",
+                status="enabled",
+                run=execute_update_v1,
+                rollback_available=True,
+                rollback_hint="Use the pre-update rollback checkpoint to return runtime/current to the previous verified release.",
             )
         )
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
@@ -3073,7 +3084,7 @@ class Orchestrator:
     @staticmethod
     def _canonical_plan_executor_status(operation: str) -> str:
         normalized = str(operation or "").strip().lower()
-        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup", "operator_lifecycle_cleanup", "operator_lifecycle_restore"}:
+        if normalized in {"operator_lifecycle_support_bundle", "operator_lifecycle_backup", "operator_lifecycle_cleanup", "operator_lifecycle_restore", "operator_lifecycle_update"}:
             return "enabled"
         if normalized.startswith(("memory_lifecycle_", "operator_lifecycle_")):
             return "preview_only"
@@ -15396,6 +15407,65 @@ class Orchestrator:
             return "~/" + raw[len(home) + 1 :]
         return raw
 
+    def _operator_update_preview_snapshot(self) -> dict[str, Any]:
+        repo_root = Path(__file__).resolve().parents[1]
+
+        def _git(args: list[str]) -> str:
+            try:
+                result = subprocess.run(
+                    ["git", *args],
+                    cwd=str(repo_root),
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=5,
+                )
+            except Exception:  # noqa: BLE001 - status text should degrade, not crash chat.
+                return ""
+            if result.returncode != 0:
+                return ""
+            return result.stdout.strip()
+
+        checkout_commit = _git(["rev-parse", "HEAD"])
+        branch = _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown"
+        remote = _git(["remote", "get-url", "origin"]) or "local checkout only"
+        dirty_lines = [line for line in _git(["status", "--short"]).splitlines() if line.strip()]
+        build_info: dict[str, Any] = {}
+        for candidate in (Path(__file__).resolve().parent / "BUILD_INFO.json", repo_root / "agent" / "BUILD_INFO.json"):
+            if candidate.exists():
+                try:
+                    parsed = json.loads(candidate.read_text(encoding="utf-8"))
+                    if isinstance(parsed, dict):
+                        build_info = parsed
+                        break
+                except (OSError, json.JSONDecodeError):
+                    pass
+        runtime_commit = str(build_info.get("git_commit") or checkout_commit or "unknown")
+        clean = not dirty_lines
+        if clean and checkout_commit and runtime_commit == checkout_commit:
+            mode = "live_noop"
+            status = "already_current"
+        elif clean and checkout_commit:
+            mode = "live_guarded"
+            status = "live_update_blocked_until_rollback_safe"
+        else:
+            mode = "live_guarded"
+            status = "blocked_dirty_working_tree"
+        return {
+            "repo_root": str(repo_root),
+            "trusted_source": "configured local Personal Agent checkout",
+            "trusted_remote": remote,
+            "approved_channel": branch,
+            "checkout_commit": checkout_commit or "unknown",
+            "runtime_commit": runtime_commit,
+            "target_commit": checkout_commit or runtime_commit,
+            "working_tree_clean": clean,
+            "dirty_files": dirty_lines[:20],
+            "update_mode": mode,
+            "status": status,
+            "rollback_policy": "requires a verified previous runtime release before live promotion",
+        }
+
     def _backup_manifest_summary(self, path: Path) -> tuple[bool, dict[str, Any]]:
         manifest_path = path / "manifest.json" if path.is_dir() else path
         if not manifest_path.is_file():
@@ -16196,6 +16266,8 @@ class Orchestrator:
         restore_validation: dict[str, Any] | None = None
         restore_lines: list[str] = []
         restore_backup_path: Path | None = None
+        update_snapshot: dict[str, Any] | None = None
+        update_lines: list[str] = []
         if normalized_kind == "operator_cleanup_preview":
             cleanup_snapshot = self._operator_cleanup_preview_snapshot()
             candidates = cleanup_snapshot.get("candidates") if isinstance(cleanup_snapshot.get("candidates"), list) else []
@@ -16263,11 +16335,33 @@ class Orchestrator:
                     f"Validated Backup v1 files: {len(supported_files)}.",
                 ]
             )
+        if normalized_kind == "operator_update_preview":
+            update_snapshot = self._operator_update_preview_snapshot()
+            dirty_files = update_snapshot.get("dirty_files") if isinstance(update_snapshot.get("dirty_files"), list) else []
+            update_lines.extend(
+                [
+                    f"Trusted source: {update_snapshot.get('trusted_source')}.",
+                    f"Approved channel: {update_snapshot.get('approved_channel')}.",
+                    f"Current runtime commit: {str(update_snapshot.get('runtime_commit') or 'unknown')[:12]}.",
+                    f"Approved target commit: {str(update_snapshot.get('target_commit') or 'unknown')[:12]}.",
+                    f"Working tree clean: {'yes' if update_snapshot.get('working_tree_clean') else 'no'}.",
+                ]
+            )
+            if dirty_files:
+                update_lines.append("Blocker: the trusted checkout has uncommitted changes. I will not discard, stash, reset, or overwrite them.")
+                update_lines.append("Changed files:")
+                for item in dirty_files[:8]:
+                    update_lines.append(f"- {item}")
+            elif update_snapshot.get("status") == "already_current":
+                update_lines.append("No update appears necessary: checkout and runtime commit already match.")
+            else:
+                update_lines.append("Live promotion requires a verified rollback-safe staged release handoff before runtime mutation.")
         question = (
             f"{spec['title']}.\n"
             f"{spec['message']}\n"
             + (("\n".join(cleanup_lines) + "\n") if cleanup_lines else "")
             + (("\n".join(restore_lines) + "\n") if restore_lines else "")
+            + (("\n".join(update_lines) + "\n") if update_lines else "")
             +
             f"Resources that may be created/changed/deleted: {', '.join(resources)}.\n"
             f"Rollback scope: {spec['rollback']}.\n"
@@ -16293,6 +16387,21 @@ class Orchestrator:
             action_payload["db_path"] = str(Path(self.db.db_path).expanduser().resolve())
             action_payload["state_root"] = str(state_root)
             action_payload["backup_root"] = str((Path.home() / ".local/share/personal-agent/backups").expanduser().resolve())
+        if update_snapshot is not None:
+            action_payload.update(
+                {
+                    "update_mode": update_snapshot.get("update_mode"),
+                    "working_tree_clean": bool(update_snapshot.get("working_tree_clean")),
+                    "dirty_files": update_snapshot.get("dirty_files") if isinstance(update_snapshot.get("dirty_files"), list) else [],
+                    "current_runtime_commit": str(update_snapshot.get("runtime_commit") or ""),
+                    "expected_current_commit": str(update_snapshot.get("runtime_commit") or ""),
+                    "target_commit": str(update_snapshot.get("target_commit") or ""),
+                    "preview_target_commit": str(update_snapshot.get("target_commit") or ""),
+                    "trusted_source": update_snapshot.get("trusted_source"),
+                    "trusted_remote": update_snapshot.get("trusted_remote"),
+                    "approved_channel": update_snapshot.get("approved_channel"),
+                }
+            )
         return self._confirmation_preview_response(
             user_id=user_id,
             route="operator_lifecycle",
@@ -16308,6 +16417,7 @@ class Orchestrator:
                 "rollback_supported": normalized_kind not in {"operator_cleanup_preview", "operator_uninstall_preview"},
                 "cleanup_preview": cleanup_snapshot,
                 "restore_validation": restore_validation,
+                "update_preview": update_snapshot,
                 "mutated": False,
             },
             skip_post_response_hooks=True,

@@ -144,6 +144,12 @@ restores only fixture state, proves staging, pre-restore safety snapshot,
 allowlisted preference apply, duplicate confirmation safety, and rollback on a
 forced post-apply verification failure.
 
+`update_execution_smoke.py` is the isolated Update Executor v1 gate. It proves
+staged release promotion, rollback checkpoint creation, forced post-promotion
+rollback, dirty-tree refusal, target-drift refusal, live no-op behavior, and
+unchanged git status. It does not update the real installed daily-driver
+runtime to an unknown remote commit.
+
 `cleanup_preview_smoke.py` is the installed cleanup-preview gate. It proves
 cleanup prompts remain read-only, classify old/oversized backup artifacts,
 old support bundle artifacts, and old runtime releases, protect the latest

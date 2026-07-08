@@ -55,6 +55,7 @@ Current enabled executors:
 - `operator.backup` via `operator.backup.v1`
 - `operator.cleanup` via `operator.cleanup.v1`
 - `operator.restore` via `operator.restore.v1`
+- `operator.update` via `operator.update.v1`
 
 `operator.support_bundle` creates a Support Bundle v2 diagnostics package in a
 temporary directory. It is additive and returns a `journal_id`. Rollback is
@@ -78,20 +79,29 @@ attempts rollback from the snapshot on post-mutation failure. It does not
 restore secrets, logs, arbitrary files, model caches, runtime releases, or
 untrusted executable/pack content.
 
+`operator.update` is enabled for bounded Update v1 outcomes: isolated
+staged-release fixture promotion/rollback proof, verified live no-op, and
+structured live-promotion blockers when preconditions are not rollback-safe.
+It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
+working trees, and target drift after preview. See
+`docs/operator/UPDATE_EXECUTOR_V1.md`.
+
 ## Preview-Only Lanes
 
 These remain preview-only in v1:
 
 - memory delete/export/redact/dedupe/control executors
 - uninstall
-- update/repair lifecycle executors unless a separate bounded executor is
-  already used by an existing managed-service path
+- repair lifecycle executors unless a separate bounded executor is already
+  used by an existing managed-service path
 
 Confirming one of these plans must return `executor_not_enabled`,
 `mutated=false`, and a registry `journal_id`.
 
-Cleanup and restore are no longer preview-only. Both remain Plan Mode gated and
-Executor Registry dispatched.
+Cleanup, restore, and update are no longer preview-only. They remain Plan Mode
+gated and Executor Registry dispatched. Update v1 live promotion remains
+guarded unless the action is a verified no-op or an approved staged-release
+runner input.
 
 ## Proof
 
@@ -103,6 +113,7 @@ python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py
 python scripts/cleanup_execution_smoke.py
 python scripts/restore_execution_smoke.py
+python scripts/update_execution_smoke.py
 ```
 
 The smoke talks to the installed `/chat` API and proves:
@@ -118,6 +129,9 @@ The smoke talks to the installed `/chat` API and proves:
 - Restore v1 execution is proven against isolated fixture state with staging,
   safety snapshot, allowlisted preference apply, duplicate confirmation safety,
   and rollback on forced post-apply verification failure
+- Update v1 execution is proven against isolated fixture releases with staged
+  promotion, rollback checkpoint, forced post-promotion rollback, dirty-tree
+  refusal, target-drift refusal, and live no-op behavior
 - cleanup preview classifies candidates; cleanup execution is proven against
   an isolated generated fixture by `cleanup_execution_smoke.py`
 - stale confirmation after API restart does not execute
