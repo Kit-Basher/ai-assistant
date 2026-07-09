@@ -55,17 +55,17 @@ or git status changes unexpectedly.
 ## Guard Decision
 
 The proof validates the host runner against a real alternate installed instance,
-but production active-install guards remain in place for now:
+and Primary Update Guard Wiring v1 uses that same runner path for the primary
+daily-driver update proof:
 
-- active daily-driver non-no-op self-update remains guarded
+- active daily-driver non-no-op self-update is wired through
+  `operator.update.v1` -> Host Lifecycle Runner v1 for approved primary staged
+  releases
 - active daily-driver preserve-data uninstall remains guarded
 
-Reason: the alternate proof uses the same Host Lifecycle Runner and operation
-schema, but the chat-facing production executor still generates `live_guarded`
-plans for the primary installation. Removing the primary guard should be a
-separate small change that wires the same validated active-host record fields to
-the production profile and re-runs the full installed-host proof. No primary
-destructive action was confirmed or executed during this proof.
+Primary update enablement is documented in
+`docs/operator/PRIMARY_UPDATE_ENABLEMENT.md`. No primary uninstall was confirmed
+or executed during this proof.
 
 ## Run
 

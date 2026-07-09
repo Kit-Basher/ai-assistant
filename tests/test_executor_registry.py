@@ -11,6 +11,7 @@ from agent.host_lifecycle import (
     HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
     HOST_LIFECYCLE_RUNNER_VERSION,
     _validate_proof_service_name,
+    _validate_update_service_name,
     attach_approved_hash,
     load_and_validate_operation,
     write_json_atomic,
@@ -189,6 +190,16 @@ class ExecutorRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "host_lifecycle_service_invalid"):
             _validate_proof_service_name("personal-agent-active-host-proof-api\n.service")
 
+    def test_host_lifecycle_primary_update_service_allowlist(self) -> None:
+        self.assertEqual(
+            "personal-agent-api.service",
+            _validate_update_service_name("personal-agent-api.service", fixture_mode="primary_update_proof"),
+        )
+        with self.assertRaisesRegex(ValueError, "host_lifecycle_service_not_allowlisted"):
+            _validate_update_service_name("personal-agent-telegram.service", fixture_mode="primary_update_proof")
+        with self.assertRaisesRegex(ValueError, "host_lifecycle_service_not_allowlisted"):
+            _validate_update_service_name("personal-agent-api.service", fixture_mode="active_host_proof")
+
     def test_git_commit_override_is_explicit(self) -> None:
         with patch.dict(os.environ, {"PERSONAL_AGENT_GIT_COMMIT_OVERRIDE": "active-host-A"}):
             self.assertEqual("active-host-A", read_git_commit(repo_root=Path(self.tmpdir.name)))
@@ -331,6 +342,102 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertTrue(result["mutated"])
         self.assertEqual("update_failed_rolled_back", result["details"]["status"])
         self.assertEqual((runtime / "current").resolve(), release_a)
+
+    def test_update_executor_primary_handoff_returns_in_progress(self) -> None:
+        root = Path(self.tmpdir.name)
+        fake_home = root / "home"
+        state = fake_home / ".local/share/personal-agent"
+        runtime = state / "runtime"
+        releases = runtime / "releases"
+        release_a = releases / "release-a"
+        source_b = state / "host_lifecycle/staged_sources/source-b"
+        releases.mkdir(parents=True)
+        _write_release(release_a, "commit-a")
+        _write_release(source_b, "commit-a")
+        (runtime / "current").symlink_to(release_a)
+        marker = state / "host_lifecycle/primary_update_enablement.marker"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok\n", encoding="utf-8")
+        plan = _plan(action_type="operator.update", target="Personal Agent update")
+        action = {
+            "pending_id": "confirm-test",
+            "operation_id": "primary-update-test",
+            "update_mode": "primary_staged_release",
+            "state_root": str(state),
+            "runtime_root": str(runtime),
+            "releases_root": str(releases),
+            "current_link": str(runtime / "current"),
+            "staged_source_path": str(source_b),
+            "target_release_id": "release-b",
+            "expected_current_commit": "commit-a",
+            "target_commit": "commit-a",
+            "preview_target_commit": "commit-a",
+            "working_tree_clean": True,
+            "api_service_name": "personal-agent-api.service",
+            "verify_base_url": "http://127.0.0.1:8765",
+            "proof_marker_path": str(marker),
+            "expires_at": 1783556574,
+        }
+
+        with patch("agent.executor_registry.Path.home", return_value=fake_home), patch(
+            "agent.executor_registry._launch_host_lifecycle_runner_systemd",
+            return_value={"ok": True, "unit": "personal-agent-host-lifecycle-update-primary-update-test.service", "returncode": 0},
+        ) as launch:
+            result = execute_update_v1(plan, action)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("in_progress", result["details"]["status"])
+        launch.assert_called_once()
+        record_path = state / "host_lifecycle/operations/primary-update-test/operation.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        self.assertEqual("primary_update_proof", record["fixture_mode"])
+        self.assertEqual("2026-07-09T00:22:54+00:00", record["expires_at"])
+        self.assertEqual("personal-agent-api.service", record["api_service_name"])
+        self.assertEqual("http://127.0.0.1:8765", record["verify_base_url"])
+
+    def test_update_executor_primary_handoff_rejects_path_escape(self) -> None:
+        root = Path(self.tmpdir.name)
+        fake_home = root / "home"
+        state = fake_home / ".local/share/personal-agent"
+        runtime = state / "runtime"
+        releases = runtime / "releases"
+        release_a = releases / "release-a"
+        source_b = root / "outside-source"
+        releases.mkdir(parents=True)
+        _write_release(release_a, "commit-a")
+        _write_release(source_b, "commit-a")
+        (runtime / "current").symlink_to(release_a)
+        marker = state / "host_lifecycle/primary_update_enablement.marker"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("ok\n", encoding="utf-8")
+        plan = _plan(action_type="operator.update", target="Personal Agent update")
+
+        with patch("agent.executor_registry.Path.home", return_value=fake_home):
+            result = execute_update_v1(
+                plan,
+                {
+                    "pending_id": "confirm-test",
+                    "operation_id": "primary-update-test",
+                    "update_mode": "primary_staged_release",
+                    "state_root": str(state),
+                    "runtime_root": str(runtime),
+                    "releases_root": str(releases),
+                    "current_link": str(runtime / "current"),
+                    "staged_source_path": str(source_b),
+                    "target_release_id": "release-b",
+                    "expected_current_commit": "commit-a",
+                    "target_commit": "commit-a",
+                    "preview_target_commit": "commit-a",
+                    "working_tree_clean": True,
+                    "api_service_name": "personal-agent-api.service",
+                    "verify_base_url": "http://127.0.0.1:8765",
+                    "proof_marker_path": str(marker),
+                },
+            )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("update_primary_staged_source_escape", result["error_code"])
 
     def test_update_executor_refuses_dirty_tree_and_target_drift(self) -> None:
         plan = _plan(action_type="operator.update", target="Personal Agent update")

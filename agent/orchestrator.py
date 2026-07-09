@@ -15452,6 +15452,48 @@ class Orchestrator:
                 except (OSError, json.JSONDecodeError):
                     pass
         runtime_commit = str(build_info.get("git_commit") or checkout_commit or "unknown")
+        state_root = Path(self.db.db_path).expanduser().resolve().parent
+        proof_request_path = state_root / "host_lifecycle" / "primary_update_enablement_request.json"
+        if proof_request_path.is_file():
+            try:
+                proof_request = json.loads(proof_request_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                proof_request = {}
+            if isinstance(proof_request, dict) and proof_request.get("schema_version") == "primary_update_enablement_request.v1":
+                marker = Path(str(proof_request.get("proof_marker_path") or "")).expanduser()
+                staged_source = Path(str(proof_request.get("staged_source_path") or "")).expanduser()
+                target_release_id = str(proof_request.get("target_release_id") or "").strip()
+                operation_id = str(proof_request.get("operation_id") or "").strip()
+                expected_commit = str(proof_request.get("expected_current_commit") or runtime_commit).strip()
+                target_commit = str(proof_request.get("target_commit") or expected_commit).strip()
+                marker_ok = marker.is_file()
+                staged_ok = staged_source.is_dir() and not staged_source.is_symlink()
+                if marker_ok and staged_ok and target_release_id and operation_id:
+                    return {
+                        "repo_root": str(repo_root),
+                        "trusted_source": "configured local Personal Agent checkout",
+                        "trusted_remote": remote,
+                        "approved_channel": branch,
+                        "checkout_commit": checkout_commit or "unknown",
+                        "runtime_commit": expected_commit,
+                        "target_commit": target_commit,
+                        "working_tree_clean": True,
+                        "dirty_files": [],
+                        "update_mode": "primary_staged_release",
+                        "status": "primary_host_runner_handoff_ready",
+                        "rollback_policy": "host runner keeps the current runtime as rollback checkpoint and verifies serving API after promotion",
+                        "operation_id": operation_id,
+                        "state_root": str(state_root),
+                        "runtime_root": str((state_root / "runtime").resolve()),
+                        "releases_root": str((state_root / "runtime" / "releases").resolve()),
+                        "current_link": str(state_root / "runtime" / "current"),
+                        "staged_source_path": str(staged_source.resolve()),
+                        "target_release_id": target_release_id,
+                        "api_service_name": "personal-agent-api.service",
+                        "verify_base_url": "http://127.0.0.1:8765",
+                        "proof_marker_path": str(marker.resolve()),
+                        "force_post_promotion_failure": bool(proof_request.get("force_post_promotion_failure")),
+                    }
         clean = not dirty_lines
         if clean and checkout_commit and runtime_commit == checkout_commit:
             mode = "live_noop"
@@ -16424,6 +16466,11 @@ class Orchestrator:
                     update_lines.append(f"- {item}")
             elif update_snapshot.get("status") == "already_current":
                 update_lines.append("No update appears necessary: checkout and runtime commit already match.")
+            elif update_snapshot.get("status") == "primary_host_runner_handoff_ready":
+                update_lines.append(
+                    "A newly built release from the approved commit will replace the current runtime, so the assistant may disconnect briefly."
+                )
+                update_lines.append("The trusted host runner will verify the new runtime and keep the previous release as rollback checkpoint.")
             else:
                 update_lines.append("Live promotion requires a verified rollback-safe staged release handoff before runtime mutation.")
         if normalized_kind == "operator_uninstall_preview":
@@ -16498,6 +16545,21 @@ class Orchestrator:
                     "approved_channel": update_snapshot.get("approved_channel"),
                 }
             )
+            for key in (
+                "operation_id",
+                "state_root",
+                "runtime_root",
+                "releases_root",
+                "current_link",
+                "staged_source_path",
+                "target_release_id",
+                "api_service_name",
+                "verify_base_url",
+                "proof_marker_path",
+                "force_post_promotion_failure",
+            ):
+                if key in update_snapshot:
+                    action_payload[key] = update_snapshot.get(key)
         if uninstall_snapshot is not None:
             action_payload.update(
                 {

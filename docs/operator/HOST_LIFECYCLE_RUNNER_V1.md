@@ -97,9 +97,9 @@ For strict fixture updates, the runner:
 If verification fails, it switches `runtime/current` back to the previous
 release and verifies the previous commit before reporting rollback success.
 
-Active daily-driver non-no-op update is still guarded. Update v1 supports live
-no-op and fixture proof; it does not promote an unknown live remote commit from
-chat.
+Active daily-driver non-no-op update is enabled only for approved primary
+staged-release handoff records. Update v1 still does not promote an unknown
+live remote commit from chat.
 
 ## Uninstall Flow
 
@@ -151,6 +151,7 @@ Run:
 python scripts/host_lifecycle_runner_smoke.py
 python scripts/host_lifecycle_systemd_smoke.py
 python scripts/active_host_enablement_smoke.py
+python scripts/primary_update_enablement_smoke.py --allow-primary-update-proof --expected-commit <current-serving-commit>
 python scripts/update_execution_smoke.py
 python scripts/uninstall_execution_smoke.py
 ```
@@ -173,11 +174,18 @@ resume, preserve-data uninstall, post-uninstall status, reinstall sanity, and
 primary-installation protection. It never confirms a destructive action against
 the primary daily-driver installation.
 
+`primary_update_enablement_smoke.py` is the explicit primary update proof. It
+targets the primary profile only with `--allow-primary-update-proof`, uses the
+same operation schema and runner, allowlists only `personal-agent-api.service`
+and `http://127.0.0.1:8765`, proves primary API recovery, and forces one
+post-promotion rollback. It never confirms primary uninstall.
+
 ## Remaining Limits
 
-- Active daily-driver non-no-op self-update remains guarded.
+- Active daily-driver non-no-op self-update is enabled only through approved
+  primary staged-release handoff to Host Lifecycle Runner v1.
 - Active daily-driver self-uninstall remains guarded.
 - Reboot-safe completion is not claimed.
-- The active-host proof uses an alternate installed instance; production guard
-  removal is intentionally deferred to a separate change that wires the same
-  validated record fields to the primary profile.
+- The active-host proof uses an alternate installed instance; the primary
+  update proof is a separate explicit installed-host proof because it restarts
+  the daily-driver API.

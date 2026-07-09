@@ -59,6 +59,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/host_lifecycle_runner_smoke.py",
     "scripts/host_lifecycle_systemd_smoke.py",
     "scripts/active_host_enablement_smoke.py",
+    "scripts/primary_update_enablement_smoke.py",
     "scripts/uninstall_helper.py",
     "scripts/first_run_smoke.py",
     "scripts/vm_proof_smoke.py",

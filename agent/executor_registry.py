@@ -1433,7 +1433,7 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             details={"current_runtime_commit": current_commit, "target_commit": target_commit},
         )
 
-    if mode != "fixture_staged_release":
+    if mode not in {"fixture_staged_release", "primary_staged_release"}:
         return _update_result(
             plan,
             action,
@@ -1501,11 +1501,93 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             rollback_hint="No rollback needed because nothing changed.",
             error_code="update_staged_source_missing",
         )
+    if not target_release_id or any(ch in target_release_id for ch in {"/", "\\", "\x00"}) or ".." in Path(target_release_id).parts:
+        return _update_result(
+            plan,
+            action,
+            ok=False,
+            mutated=False,
+            status="blocked_invalid_release_id",
+            message="I blocked the update because the internal target release id was not safe.",
+            rollback_available=False,
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="update_invalid_release_id",
+        )
+
+    fixture_mode = "primary_update_proof" if mode == "primary_staged_release" else "strict"
+    api_service_name = str(action.get("api_service_name") or "").strip()
+    verify_base_url = str(action.get("verify_base_url") or "").strip()
+    proof_marker_path = str(action.get("proof_marker_path") or "").strip()
+    if mode == "primary_staged_release":
+        expected_state_root = (Path.home() / ".local/share/personal-agent").expanduser().resolve()
+        expected_runtime_root = (expected_state_root / "runtime").resolve()
+        if state_root != expected_state_root or runtime_root != expected_runtime_root:
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_primary_path_mismatch",
+                message="I blocked primary update handoff because the approved target was not the primary Personal Agent runtime.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_primary_path_mismatch",
+            )
+        staged_root = expected_state_root / "host_lifecycle" / "staged_sources"
+        if not _is_contained(source_release, staged_root.resolve()):
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_primary_staged_source_escape",
+                message="I blocked primary update handoff because the staged release source was outside the approved host lifecycle staging root.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_primary_staged_source_escape",
+            )
+        if api_service_name != "personal-agent-api.service" or verify_base_url != "http://127.0.0.1:8765":
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_primary_service_mismatch",
+                message="I blocked primary update handoff because the service or API endpoint was not the approved primary target.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_primary_service_mismatch",
+            )
+        marker = Path(proof_marker_path).expanduser() if proof_marker_path else expected_state_root / "host_lifecycle" / "primary_update_enablement.marker"
+        try:
+            marker = marker.resolve()
+        except OSError:
+            marker = expected_state_root / "host_lifecycle" / "primary_update_enablement.marker"
+        if not marker.is_file() or not _is_contained(marker, expected_state_root):
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="blocked_primary_proof_marker_missing",
+                message="I blocked primary update handoff because the required installed-host proof marker is missing.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="update_primary_proof_marker_missing",
+            )
+        proof_marker_path = str(marker)
 
     state_dir = state_root / "host_lifecycle" / "operations" / operation_id
     receipt_path = state_dir / "receipt.json"
     operation_state_path = state_dir / "state.json"
     operation_record_path = state_dir / "operation.json"
+    expires_at_raw = action.get("expires_at")
+    if isinstance(expires_at_raw, (int, float)):
+        expires_at = datetime.fromtimestamp(float(expires_at_raw), timezone.utc).isoformat()
+    elif isinstance(expires_at_raw, str) and expires_at_raw.strip():
+        expires_at = expires_at_raw.strip()
+    else:
+        expires_at = ""
     operation_record = attach_approved_hash(
         {
             "schema_version": HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
@@ -1514,9 +1596,9 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             "operation_type": "update",
             "plan_id": plan.get("plan_id"),
             "created_at": utc_now_iso(),
-            "expires_at": action.get("expires_at"),
+            "expires_at": expires_at,
             "current_stage": "created",
-            "fixture_mode": "strict",
+            "fixture_mode": fixture_mode,
             "state_root": str(state_root),
             "runtime_root": str(runtime_root),
             "releases_root": str(releases_root),
@@ -1528,10 +1610,67 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             "operation_state_path": str(operation_state_path),
             "receipt_path": str(receipt_path),
             "force_post_promotion_failure": bool(action.get("force_post_promotion_failure")),
+            "api_service_name": api_service_name,
+            "verify_base_url": verify_base_url,
+            "proof_marker_path": proof_marker_path,
         }
     )
     _write_json_unredacted(operation_record_path, operation_record)
     resources = [str(operation_record_path), str(operation_state_path), str(receipt_path)]
+    if mode == "primary_staged_release":
+        try:
+            handoff = _launch_host_lifecycle_runner_systemd("update", operation_record_path, operation_id=operation_id, timeout=20)
+        except Exception as exc:  # noqa: BLE001
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="host_runner_handoff_failed",
+                message="The trusted host lifecycle runner could not be started. I left the current runtime untouched.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because host handoff did not start.",
+                error_code="update_host_runner_handoff_failed",
+                resources=resources,
+                details={"exception": exc.__class__.__name__},
+            )
+        if not handoff.get("ok"):
+            return _update_result(
+                plan,
+                action,
+                ok=False,
+                mutated=False,
+                status="host_runner_handoff_failed",
+                message="The trusted host lifecycle runner refused the update handoff. I left the current runtime untouched.",
+                rollback_available=False,
+                rollback_hint="No rollback needed because host handoff did not start.",
+                error_code="update_host_runner_handoff_failed",
+                resources=resources,
+                details={"handoff": handoff},
+            )
+        return _update_result(
+            plan,
+            action,
+            ok=True,
+            mutated=True,
+            status="in_progress",
+            message=(
+                "The update has started. I built and checked the new release, created a rollback checkpoint, "
+                "and handed the switch to the trusted host runner. The assistant may disconnect briefly."
+            ),
+            rollback_available=True,
+            rollback_hint="The host lifecycle runner will keep the previous working release as a rollback checkpoint.",
+            resources=resources,
+            details={
+                "operation_id": operation_id,
+                "operation_record_path": str(operation_record_path),
+                "operation_state_path": str(operation_state_path),
+                "receipt_path": str(receipt_path),
+                "target_commit": target_commit,
+                "target_release_id": target_release_id,
+                "handoff": handoff,
+            },
+        )
     try:
         runner_result = _launch_host_lifecycle_runner("update", operation_record_path, timeout=60)
     except Exception as exc:  # noqa: BLE001
@@ -2148,6 +2287,52 @@ def _launch_host_lifecycle_runner(operation: str, record_path: Path, *, timeout:
     if not isinstance(payload, dict):
         raise RuntimeError("host_lifecycle_runner_non_object_json")
     return payload
+
+
+def _launch_host_lifecycle_runner_systemd(operation: str, record_path: Path, *, operation_id: str, timeout: int = 20) -> dict[str, Any]:
+    runner_candidates = [
+        Path(str(os.environ.get("PERSONAL_AGENT_HOST_LIFECYCLE_RUNNER") or "")),
+        Path(__file__).resolve().parents[1] / "scripts" / "host_lifecycle_runner.py",
+        Path.home() / "personal-agent" / "scripts" / "host_lifecycle_runner.py",
+    ]
+    runner = next((candidate.expanduser().resolve() for candidate in runner_candidates if str(candidate) and candidate.expanduser().is_file()), None)
+    if runner is None:
+        raise FileNotFoundError("host_lifecycle_runner_missing")
+    allowed_runner_roots = {
+        (Path(__file__).resolve().parents[1] / "scripts").resolve(),
+        (Path.home() / "personal-agent" / "scripts").resolve(),
+    }
+    if runner.parent not in allowed_runner_roots:
+        raise FileNotFoundError("host_lifecycle_runner_untrusted_path")
+    systemd_run = shutil.which("systemd-run") or "/usr/bin/systemd-run"
+    if not Path(systemd_run).is_file():
+        raise FileNotFoundError(f"systemd_run_missing:{systemd_run}")
+    safe_operation_id = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in operation_id.lower())[:48] or uuid.uuid4().hex[:12]
+    unit_name = f"personal-agent-host-lifecycle-update-{safe_operation_id}.service"
+    proc = subprocess.run(
+        [
+            systemd_run,
+            "--user",
+            "--collect",
+            f"--unit={unit_name.removesuffix('.service')}",
+            sys.executable,
+            str(runner),
+            operation,
+            "--operation-record",
+            str(record_path),
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+        check=False,
+    )
+    return {
+        "ok": proc.returncode == 0,
+        "unit": unit_name,
+        "returncode": proc.returncode,
+        "output": (proc.stdout or "")[:1000],
+    }
 
 
 def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:

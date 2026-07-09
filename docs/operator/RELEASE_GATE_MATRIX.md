@@ -175,6 +175,14 @@ uninstall, post-uninstall status, reinstall sanity, and primary-installation
 protection. It is an installed-host gate, not CI-safe, and it must not target
 the primary `personal-agent-api.service` or port `8765`.
 
+`primary_update_enablement_smoke.py` is the explicit primary-update proof. It
+requires `--allow-primary-update-proof` and an expected serving commit. It uses
+the normal `/chat` Plan Mode path, writes a host lifecycle operation record,
+launches the shared runner through user systemd, verifies primary API recovery,
+forces one post-promotion rollback, and confirms primary uninstall remains
+guarded. It is not part of automatic release gates because it restarts the
+primary daily-driver API.
+
 `uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
 removes only generated fixture runtime/service/launcher artifacts through the
 Executor Registry, verifies backups, memory, preferences, secrets, repository,

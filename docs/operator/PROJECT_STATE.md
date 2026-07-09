@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-host-lifecycle-runner-v1`
-- Commit: `f571462`
+- Tag: `v0.2.1-active-host-enablement-proof`
+- Commit: `95beaac`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -61,6 +61,16 @@ Current confirmed proof:
   uninstall after API shutdown, post-uninstall host status, reinstall sanity,
   and primary-installation protection. It does not update or uninstall the
   primary daily-driver installation.
+- `python scripts/primary_update_enablement_smoke.py --allow-primary-update-proof
+  --expected-commit <current-serving-commit>`: explicit installed-host proof
+  for primary daily-driver update handoff. It builds a second release from the
+  currently serving trusted commit, drives the normal Plan Mode `/chat`
+  confirmation path, launches Host Lifecycle Runner v1 through user systemd,
+  verifies API disconnect/recovery and runtime path switch, injects one
+  proof-only post-promotion failure, verifies rollback against the serving API,
+  and confirms primary uninstall still returns
+  `uninstall_live_execution_not_enabled`. This proof is intentionally not run
+  automatically by `prove_ready.py`.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.

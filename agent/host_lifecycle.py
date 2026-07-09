@@ -152,12 +152,24 @@ def _validate_proof_service_name(name: str) -> str:
     return service
 
 
-def _systemctl_user(action: str, service: str, *, timeout: int = 30) -> dict[str, Any]:
+def _validate_update_service_name(name: str, *, fixture_mode: str) -> str:
+    service = str(name or "").strip()
+    if fixture_mode == "primary_update_proof":
+        if service != "personal-agent-api.service":
+            raise ValueError("host_lifecycle_service_not_allowlisted")
+    else:
+        _validate_proof_service_name(service)
+    if any(ch in service for ch in {"/", "\\", "\x00", " ", "\t", "\n", ";", "&", "|"}):
+        raise ValueError("host_lifecycle_service_invalid")
+    return service
+
+
+def _systemctl_user(action: str, service: str, *, timeout: int = 30, fixture_mode: str = "active_host_proof") -> dict[str, Any]:
     if action not in {"start", "stop", "restart", "disable", "reset-failed", "daemon-reload"}:
         raise ValueError("host_lifecycle_systemctl_action_rejected")
     if action == "daemon-reload":
         return _bounded_run(["systemctl", "--user", "daemon-reload"], timeout=timeout)
-    service = _validate_proof_service_name(service)
+    service = _validate_update_service_name(service, fixture_mode=fixture_mode)
     return _bounded_run(["systemctl", "--user", action, service], timeout=timeout)
 
 
@@ -259,9 +271,9 @@ def _receipt(record: dict[str, Any], payload: dict[str, Any]) -> None:
 
 def _run_update(record: dict[str, Any]) -> dict[str, Any]:
     fixture_mode = str(record.get("fixture_mode") or "")
-    if fixture_mode not in {"strict", "active_host_proof"}:
+    if fixture_mode not in {"strict", "active_host_proof", "primary_update_proof"}:
         raise ValueError("update_live_host_handoff_not_enabled")
-    if fixture_mode == "active_host_proof":
+    if fixture_mode in {"active_host_proof", "primary_update_proof"}:
         marker = Path(str(record.get("proof_marker_path") or "")).expanduser().resolve()
         runtime_root_for_marker = Path(str(record.get("runtime_root") or "")).expanduser().resolve()
         if not marker.is_file() or not _is_contained(marker, runtime_root_for_marker.parent):
@@ -279,7 +291,9 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
     service_name = str(record.get("api_service_name") or "").strip()
     verify_base_url = str(record.get("verify_base_url") or "").strip()
     if service_name:
-        _validate_proof_service_name(service_name)
+        _validate_update_service_name(service_name, fixture_mode=fixture_mode)
+    if not target_release_id or any(ch in target_release_id for ch in {"/", "\\", "\x00"}) or ".." in Path(target_release_id).parts:
+        raise ValueError("update_invalid_release_id")
     if not _is_contained(releases_root, runtime_root) or not _is_contained(current_link.parent, runtime_root):
         raise ValueError("update_path_escape")
     if not source_release.is_dir() or source_release.is_symlink():
@@ -297,7 +311,7 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
         service_restart: dict[str, Any] | None = None
         if service_name:
             _stage(record, "starting_services", {"resume": "target_already_promoted", "service": service_name})
-            service_restart = _systemctl_user("restart", service_name, timeout=45)
+            service_restart = _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
             restart_code = service_restart.get("returncode")
             if int(restart_code if restart_code is not None else 1) != 0:
                 raise RuntimeError("update_resume_service_restart_failed")
@@ -376,12 +390,12 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
     service_restart: dict[str, Any] | None = None
     if service_name:
         _stage(record, "starting_services", {"service": service_name, "promoted_release": str(final_release), "checkpoint": checkpoint})
-        service_restart = _systemctl_user("restart", service_name, timeout=45)
+        service_restart = _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
         restart_code = service_restart.get("returncode")
         if int(restart_code if restart_code is not None else 1) != 0:
             _stage(record, "rolling_back", {"service_restart": service_restart, "checkpoint": checkpoint})
             _replace_symlink(current_link, previous_target)
-            _systemctl_user("restart", service_name, timeout=45)
+            _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
             rollback_commit = _release_commit(current_link.resolve())
             rollback_verified = rollback_commit == previous_commit
             if verify_base_url:
@@ -420,7 +434,7 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
         _stage(record, "rolling_back", {"verified_commit": verified_commit, "checkpoint": checkpoint})
         _replace_symlink(current_link, previous_target)
         if service_name:
-            _systemctl_user("restart", service_name, timeout=45)
+            _systemctl_user("restart", service_name, timeout=45, fixture_mode=fixture_mode)
         rollback_commit = _release_commit(current_link.resolve())
         rollback_verified = rollback_commit == previous_commit
         if verify_base_url:
