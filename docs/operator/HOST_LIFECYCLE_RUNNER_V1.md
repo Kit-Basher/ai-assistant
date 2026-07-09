@@ -152,6 +152,7 @@ python scripts/host_lifecycle_runner_smoke.py
 python scripts/host_lifecycle_systemd_smoke.py
 python scripts/active_host_enablement_smoke.py
 python scripts/primary_update_enablement_smoke.py --allow-primary-update-proof --expected-commit <current-serving-commit>
+python scripts/primary_uninstall_enablement_smoke.py --allow-primary-uninstall-shaped-proof --expected-commit <current-serving-commit>
 python scripts/update_execution_smoke.py
 python scripts/uninstall_execution_smoke.py
 ```
@@ -180,11 +181,18 @@ same operation schema and runner, allowlists only `personal-agent-api.service`
 and `http://127.0.0.1:8765`, proves primary API recovery, and forces one
 post-promotion rollback. It never confirms primary uninstall.
 
+`primary_uninstall_enablement_smoke.py` is the explicit production-shaped
+preserve-data uninstall proof. It uses the same operation schema and runner
+against an isolated install-shaped tree, verifies receipt/final backup/data
+preservation/idempotency/partial failure, and confirms the active primary
+installation remains unchanged. It never confirms active primary uninstall.
+
 ## Remaining Limits
 
 - Active daily-driver non-no-op self-update is enabled only through approved
   primary staged-release handoff to Host Lifecycle Runner v1.
-- Active daily-driver self-uninstall remains guarded.
+- Active daily-driver self-uninstall requires the reviewed primary uninstall
+  enablement marker and is not executed by automated proof.
 - Reboot-safe completion is not claimed.
 - The active-host proof uses an alternate installed instance; the primary
   update proof is a separate explicit installed-host proof because it restarts

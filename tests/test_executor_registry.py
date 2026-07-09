@@ -495,12 +495,44 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertFalse(live["mutated"])
         self.assertEqual("uninstall_live_execution_not_enabled", live["error_code"])
 
+        primary_without_marker = execute_uninstall_v1(
+            plan,
+            {
+                "pending_id": "confirm-test",
+                "uninstall_execution_mode": "primary_preserve_data",
+                "target_snapshot": {
+                    "mode": "preserve_data",
+                    "state_root": str(Path.home() / ".local/share/personal-agent"),
+                    "runtime_root": str(Path.home() / ".local/share/personal-agent/runtime"),
+                    "removable_roots": [],
+                    "removable_resources": [],
+                    "preserved_resources": [],
+                },
+            },
+        )
+        self.assertFalse(primary_without_marker["ok"])
+        self.assertFalse(primary_without_marker["mutated"])
+        self.assertEqual("uninstall_live_execution_not_enabled", primary_without_marker["error_code"])
+
         snapshot, action = _uninstall_fixture(Path(self.tmpdir.name))
         action["target_snapshot_hash"] = "not-the-real-hash"
         drift = execute_uninstall_v1(plan, action)
         self.assertFalse(drift["ok"])
         self.assertFalse(drift["mutated"])
         self.assertEqual("uninstall_target_changed_since_preview", drift["error_code"])
+
+    def test_uninstall_executor_production_shaped_fixture_uses_preserve_data_path(self) -> None:
+        root = Path(self.tmpdir.name) / "shaped"
+        snapshot, action = _uninstall_fixture(root)
+        action["uninstall_execution_mode"] = "production_shaped_preserve_data"
+        snapshot["proof_marker_path"] = str(Path(snapshot["fixture_root"]) / ".proof-marker")
+        Path(snapshot["proof_marker_path"]).write_text("proof\n", encoding="utf-8")
+        action["proof_marker_path"] = snapshot["proof_marker_path"]
+        plan = _plan(action_type="operator.uninstall", target="Personal Agent uninstall", risk_level="high")
+        result = execute_uninstall_v1(plan, action)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("completed_verified", result["details"]["status"])
 
     def test_uninstall_executor_rejects_symlink_escape(self) -> None:
         root = Path(self.tmpdir.name)

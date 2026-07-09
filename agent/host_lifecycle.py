@@ -164,12 +164,27 @@ def _validate_update_service_name(name: str, *, fixture_mode: str) -> str:
     return service
 
 
+def _validate_uninstall_service_name(name: str, *, fixture_mode: str) -> str:
+    service = str(name or "").strip()
+    if fixture_mode == "primary_uninstall":
+        if service not in {"personal-agent-api.service", "personal-agent-telegram.service"}:
+            raise ValueError("host_lifecycle_service_not_allowlisted")
+    else:
+        _validate_proof_service_name(service)
+    if any(ch in service for ch in {"/", "\\", "\x00", " ", "\t", "\n", ";", "&", "|"}):
+        raise ValueError("host_lifecycle_service_invalid")
+    return service
+
+
 def _systemctl_user(action: str, service: str, *, timeout: int = 30, fixture_mode: str = "active_host_proof") -> dict[str, Any]:
     if action not in {"start", "stop", "restart", "disable", "reset-failed", "daemon-reload"}:
         raise ValueError("host_lifecycle_systemctl_action_rejected")
     if action == "daemon-reload":
         return _bounded_run(["systemctl", "--user", "daemon-reload"], timeout=timeout)
-    service = _validate_update_service_name(service, fixture_mode=fixture_mode)
+    if fixture_mode in {"primary_uninstall", "primary_uninstall_shaped_proof"}:
+        service = _validate_uninstall_service_name(service, fixture_mode=fixture_mode)
+    else:
+        service = _validate_update_service_name(service, fixture_mode=fixture_mode)
     return _bounded_run(["systemctl", "--user", action, service], timeout=timeout)
 
 
@@ -484,18 +499,22 @@ def _run_update(record: dict[str, Any]) -> dict[str, Any]:
 
 def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
     fixture_mode = str(record.get("fixture_mode") or "")
-    if fixture_mode not in {"strict", "active_host_proof"}:
+    if fixture_mode not in {"strict", "active_host_proof", "primary_uninstall_shaped_proof", "primary_uninstall"}:
         raise ValueError("uninstall_live_host_handoff_not_enabled")
     snapshot = record.get("target_snapshot") if isinstance(record.get("target_snapshot"), dict) else {}
-    if not snapshot.get("fixture_marker") or snapshot.get("mode") != "preserve_data":
+    if not snapshot.get("fixture_marker") and fixture_mode != "primary_uninstall":
+        raise ValueError("uninstall_fixture_marker_missing")
+    if snapshot.get("mode") != "preserve_data":
         raise ValueError("uninstall_fixture_marker_missing")
     fixture_root = Path(str(snapshot.get("fixture_root") or "")).expanduser().resolve()
-    if fixture_mode == "active_host_proof":
+    state_root = Path(str(snapshot.get("state_root") or record.get("state_root") or "")).expanduser().resolve()
+    if fixture_mode in {"active_host_proof", "primary_uninstall_shaped_proof"}:
         marker = Path(str(record.get("proof_marker_path") or "")).expanduser().resolve()
         if not marker.is_file() or not _is_contained(marker, fixture_root):
             raise ValueError("active_host_proof_marker_missing")
     final_backup_path = Path(str(record.get("final_backup_path") or "")).expanduser().resolve()
-    if not _is_contained(final_backup_path, fixture_root) or not (final_backup_path / "manifest.json").is_file():
+    backup_containment_root = fixture_root if fixture_mode != "primary_uninstall" else state_root
+    if not _is_contained(final_backup_path, backup_containment_root) or not (final_backup_path / "manifest.json").is_file():
         raise ValueError("uninstall_final_backup_invalid")
     resources = snapshot.get("removable_resources") if isinstance(snapshot.get("removable_resources"), list) else []
     preserved = snapshot.get("preserved_resources") if isinstance(snapshot.get("preserved_resources"), list) else []
@@ -512,9 +531,9 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
     if services:
         _stage(record, "stopping_services", {"services": services})
         for service in services:
-            _validate_proof_service_name(service)
-            stop_result = _systemctl_user("stop", service, timeout=45)
-            disable_result = _systemctl_user("disable", service, timeout=45)
+            _validate_uninstall_service_name(service, fixture_mode=fixture_mode)
+            stop_result = _systemctl_user("stop", service, timeout=45, fixture_mode=fixture_mode)
+            disable_result = _systemctl_user("disable", service, timeout=45, fixture_mode=fixture_mode)
             service_results.append({"service": service, "stop": stop_result, "disable": disable_result})
         service_results.append({"daemon_reload_before_removal": _systemctl_user("daemon-reload", "", timeout=30)})
     _stage(record, "removing_runtime")
@@ -529,12 +548,18 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
         resolved_path = path.resolve(strict=False)
         root_ok = any(_is_contained(resolved_path, root) or path == root for root in removable_roots)
         service_unit_ok = (
-            fixture_mode == "active_host_proof"
+            fixture_mode in {"active_host_proof", "primary_uninstall_shaped_proof"}
             and resolved_path.parent == (Path.home() / ".config/systemd/user").resolve()
             and resolved_path.name.startswith("personal-agent-active-host-proof-")
             and resolved_path.name.endswith(".service")
         )
-        if not root_ok or (not _is_contained(resolved_path, fixture_root) and not service_unit_ok):
+        primary_service_unit_ok = (
+            fixture_mode == "primary_uninstall"
+            and resolved_path.parent == (Path.home() / ".config/systemd/user").resolve()
+            and resolved_path.name in {"personal-agent-api.service", "personal-agent-telegram.service"}
+        )
+        containment_ok = _is_contained(resolved_path, fixture_root) if fixture_mode != "primary_uninstall" else _is_contained(resolved_path, Path.home().resolve())
+        if not root_ok or (not containment_ok and not service_unit_ok and not primary_service_unit_ok):
             failures.append({"id": resource_id, "path": str(path), "error": "uninstall_path_escape"})
             break
         if not path.exists() and not path.is_symlink():

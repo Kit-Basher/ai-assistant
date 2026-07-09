@@ -61,11 +61,14 @@ daily-driver update proof:
 - active daily-driver non-no-op self-update is wired through
   `operator.update.v1` -> Host Lifecycle Runner v1 for approved primary staged
   releases
-- active daily-driver preserve-data uninstall remains guarded
+- active daily-driver preserve-data uninstall now has a separate
+  production-shaped proof and still is not destructively proven against the
+  primary install
 
 Primary update enablement is documented in
-`docs/operator/PRIMARY_UPDATE_ENABLEMENT.md`. No primary uninstall was confirmed
-or executed during this proof.
+`docs/operator/PRIMARY_UPDATE_ENABLEMENT.md`. Primary preserve-data uninstall
+enablement is documented in `docs/operator/PRIMARY_UNINSTALL_ENABLEMENT.md`.
+No active primary uninstall was confirmed or executed during this proof.
 
 ## Run
 

@@ -183,6 +183,15 @@ forces one post-promotion rollback, and confirms primary uninstall remains
 guarded. It is not part of automatic release gates because it restarts the
 primary daily-driver API.
 
+`primary_uninstall_enablement_smoke.py` is the explicit production-shaped
+primary-uninstall proof. It requires
+`--allow-primary-uninstall-shaped-proof` and an expected serving commit. It
+creates an isolated install-shaped tree, confirms preserve-data uninstall
+through `operator.uninstall.v1`, verifies final backup, receipt, preservation,
+idempotency, and partial-failure reporting, and verifies the real primary
+installation remains unchanged. It is not part of automatic release gates
+because active primary uninstall must never be confirmed by a normal smoke.
+
 `uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
 removes only generated fixture runtime/service/launcher artifacts through the
 Executor Registry, verifies backups, memory, preferences, secrets, repository,

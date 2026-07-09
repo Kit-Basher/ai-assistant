@@ -2029,7 +2029,13 @@ def _uninstall_resource_path(resource: dict[str, Any]) -> Path:
     return Path(str(resource.get("path") or "")).expanduser()
 
 
-def _validate_uninstall_resource(resource: dict[str, Any], *, fixture_root: Path, removable_roots: list[Path]) -> tuple[bool, str, Path | None]:
+def _validate_uninstall_resource(
+    resource: dict[str, Any],
+    *,
+    containment_root: Path,
+    removable_roots: list[Path],
+    preserved_roots: list[Path] | None = None,
+) -> tuple[bool, str, Path | None]:
     if not isinstance(resource, dict):
         return False, "resource_not_object", None
     if not bool(resource.get("owned")):
@@ -2048,8 +2054,8 @@ def _validate_uninstall_resource(resource: dict[str, Any], *, fixture_root: Path
         root_text = str(root_value)
         return path_text == root_text or path_text.startswith(root_text.rstrip("/") + "/")
 
-    if not _lexically_contained(lexical, fixture_root):
-        return False, "resource_outside_fixture_root", lexical
+    if not _lexically_contained(lexical, containment_root):
+        return False, "resource_outside_uninstall_root", lexical
     if not any(_lexically_contained(lexical, root) for root in removable_roots):
         return False, "resource_outside_removable_roots", lexical
     expected_type = str(resource.get("expected_type") or "").strip().lower()
@@ -2072,6 +2078,9 @@ def _validate_uninstall_resource(resource: dict[str, Any], *, fixture_root: Path
             return False, "resource_type_mismatch", lexical
         if expected_type == "symlink" and not lexical.is_symlink():
             return False, "resource_type_mismatch", lexical
+    for preserved in list(preserved_roots or []):
+        if _lexically_contained(lexical, preserved):
+            return False, "resource_overlaps_preserved_root", lexical
     return True, "ok", lexical
 
 
@@ -2290,6 +2299,8 @@ def _launch_host_lifecycle_runner(operation: str, record_path: Path, *, timeout:
 
 
 def _launch_host_lifecycle_runner_systemd(operation: str, record_path: Path, *, operation_id: str, timeout: int = 20) -> dict[str, Any]:
+    if operation not in {"update", "uninstall"}:
+        raise ValueError("host_lifecycle_operation_not_supported")
     runner_candidates = [
         Path(str(os.environ.get("PERSONAL_AGENT_HOST_LIFECYCLE_RUNNER") or "")),
         Path(__file__).resolve().parents[1] / "scripts" / "host_lifecycle_runner.py",
@@ -2308,7 +2319,7 @@ def _launch_host_lifecycle_runner_systemd(operation: str, record_path: Path, *, 
     if not Path(systemd_run).is_file():
         raise FileNotFoundError(f"systemd_run_missing:{systemd_run}")
     safe_operation_id = "".join(ch if ch.isalnum() or ch == "-" else "-" for ch in operation_id.lower())[:48] or uuid.uuid4().hex[:12]
-    unit_name = f"personal-agent-host-lifecycle-update-{safe_operation_id}.service"
+    unit_name = f"personal-agent-host-lifecycle-{operation}-{safe_operation_id}.service"
     proc = subprocess.run(
         [
             systemd_run,
@@ -2357,7 +2368,8 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             error_code="uninstall_mode_not_supported",
         )
     execution_mode = str(action.get("uninstall_execution_mode") or "live_guarded").strip().lower()
-    if execution_mode != "fixture_preserve_data":
+    allowed_execution_modes = {"fixture_preserve_data", "primary_preserve_data", "production_shaped_preserve_data"}
+    if execution_mode not in allowed_execution_modes:
         return _uninstall_result(
             ok=False,
             mutated=False,
@@ -2369,6 +2381,8 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             rollback_hint="No rollback needed because nothing changed.",
             error_code="uninstall_live_execution_not_enabled",
         )
+    is_primary = execution_mode == "primary_preserve_data"
+    is_production_shaped = execution_mode == "production_shaped_preserve_data"
 
     operation_id = str(action.get("operation_id") or plan.get("plan_id") or f"uninstall-{uuid.uuid4().hex[:12]}").strip()
     snapshot = action.get("target_snapshot") if isinstance(action.get("target_snapshot"), dict) else {}
@@ -2384,7 +2398,16 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             error_code="uninstall_target_changed_since_preview",
             details={"expected_hash": expected_hash, "actual_hash": actual_hash},
         )
-    if not bool(snapshot.get("fixture_marker")) or str(snapshot.get("mode") or "") != UNINSTALL_MODE_PRESERVE_DATA:
+    if str(snapshot.get("mode") or "") != UNINSTALL_MODE_PRESERVE_DATA:
+        return _uninstall_result(
+            ok=False,
+            mutated=False,
+            status="blocked_missing_preserve_data_mode",
+            message="I blocked uninstall because the target snapshot was not preserve-data mode.",
+            rollback_hint="No rollback needed because nothing changed.",
+            error_code="uninstall_preserve_data_required",
+        )
+    if not is_primary and not bool(snapshot.get("fixture_marker")):
         return _uninstall_result(
             ok=False,
             mutated=False,
@@ -2399,6 +2422,7 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
         state_root = Path(str(action.get("state_root") or snapshot.get("state_root") or "")).expanduser().resolve()
         receipt_root = Path(str(action.get("receipt_root") or snapshot.get("receipt_root") or state_root / "uninstall_receipts")).expanduser().resolve()
         backup_root = Path(str(action.get("backup_root") or snapshot.get("backup_root") or state_root / "backups")).expanduser().resolve()
+        runtime_root = Path(str(snapshot.get("runtime_root") or "")).expanduser().resolve()
     except OSError as exc:
         return _uninstall_result(
             ok=False,
@@ -2409,7 +2433,30 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             error_code="uninstall_invalid_path",
             details={"exception": exc.__class__.__name__},
         )
-    if not fixture_root.exists() or not _is_contained(state_root, fixture_root) or not _is_contained(receipt_root, fixture_root) or not _is_contained(backup_root, fixture_root):
+    containment_root = fixture_root
+    if is_primary:
+        expected_state = (Path.home() / ".local/share/personal-agent").expanduser().resolve()
+        expected_runtime = (expected_state / "runtime").resolve()
+        enablement_marker = expected_state / "host_lifecycle" / "primary_uninstall_enabled.json"
+        if state_root != expected_state or runtime_root != expected_runtime or not enablement_marker.is_file():
+            return _uninstall_result(
+                ok=False,
+                mutated=False,
+                status="blocked_primary_enablement_missing",
+                message=(
+                    "Primary preserve-data uninstall is not enabled on this host. "
+                    "I did not stop services, remove runtime files, delete state, or uninstall anything."
+                ),
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="uninstall_live_execution_not_enabled",
+            )
+        containment_root = Path.home().expanduser().resolve()
+    if not is_primary and (
+        not fixture_root.exists()
+        or not _is_contained(state_root, fixture_root)
+        or not _is_contained(receipt_root, fixture_root)
+        or not _is_contained(backup_root, fixture_root)
+    ):
         return _uninstall_result(
             ok=False,
             mutated=False,
@@ -2425,7 +2472,17 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             root = Path(str(raw)).expanduser().resolve()
         except OSError:
             continue
-        if _is_contained(root, fixture_root):
+        if is_primary:
+            allowed_primary_roots = {
+                runtime_root,
+                (Path.home() / ".config/systemd/user").expanduser().resolve(),
+                (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "applications").expanduser().resolve(),
+                (Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "icons").expanduser().resolve(),
+                (state_root / "bin").resolve(),
+            }
+            if root in allowed_primary_roots or any(_is_contained(root, allowed) for allowed in allowed_primary_roots):
+                removable_roots.append(root)
+        elif _is_contained(root, fixture_root):
             removable_roots.append(root)
     if not removable_roots:
         return _uninstall_result(
@@ -2438,9 +2495,27 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
         )
 
     resources = snapshot.get("removable_resources") if isinstance(snapshot.get("removable_resources"), list) else []
+    preserved_roots: list[Path] = []
+    for resource in snapshot.get("preserved_resources") if isinstance(snapshot.get("preserved_resources"), list) else []:
+        if not isinstance(resource, dict):
+            continue
+        raw = str(resource.get("path") or "")
+        resource_id = str(resource.get("id") or "")
+        resource_class = str(resource.get("class") or "").lower()
+        if not raw or raw.startswith("~/.cache") or resource_id in {"state-root", "state"} or resource_class == "state root":
+            continue
+        try:
+            preserved_roots.append(Path(raw).expanduser().resolve())
+        except OSError:
+            continue
     validated_paths: list[str] = []
     for resource in resources:
-        ok, reason, resolved = _validate_uninstall_resource(resource, fixture_root=fixture_root, removable_roots=removable_roots)
+        ok, reason, resolved = _validate_uninstall_resource(
+            resource,
+            containment_root=containment_root,
+            removable_roots=removable_roots,
+            preserved_roots=preserved_roots,
+        )
         if not ok:
             return _uninstall_result(
                 ok=False,
@@ -2496,19 +2571,48 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             "plan_id": plan.get("plan_id"),
             "created_at": utc_now_iso(),
             "current_stage": "created",
-            "fixture_mode": "strict",
+            "fixture_mode": "primary_uninstall" if is_primary else ("primary_uninstall_shaped_proof" if is_production_shaped else "strict"),
+            "proof_marker_path": snapshot.get("proof_marker_path") or action.get("proof_marker_path"),
             "state_root": str(state_root),
             "operation_state_path": str(state_dir / "state.json"),
             "receipt_path": str(receipt_path),
             "final_backup_path": str(final_backup),
             "target_snapshot_hash": actual_hash,
             "target_snapshot": snapshot,
+            "service_names": action.get("service_names") if isinstance(action.get("service_names"), list) else snapshot.get("service_names"),
             "force_failure_after_resource_id": action.get("force_failure_after_resource_id"),
         }
         operation_state = attach_approved_hash(operation_state)
         touched.append(str(state_dir))
         helper_state = state_dir / "helper_state.json"
         _write_json_unredacted(helper_state, operation_state)
+        if is_primary:
+            handoff = _launch_host_lifecycle_runner_systemd("uninstall", helper_state, operation_id=operation_id, timeout=20)
+            if not handoff.get("ok"):
+                raise RuntimeError(f"host_lifecycle_uninstall_handoff_failed:{handoff.get('returncode')}")
+            _update_state_write(state_dir, "in_progress", {**operation_state, "handoff": handoff})
+            message = (
+                "Uninstall has started.\n\n"
+                "I created and verified a final safety backup and handed the removal to the trusted host runner.\n\n"
+                "Your data will be preserved. This chat will disconnect shortly."
+            )
+            return _uninstall_result(
+                ok=True,
+                mutated=True,
+                status="in_progress",
+                message=message,
+                resources=touched,
+                rollback_available=False,
+                rollback_hint="Uninstall is not automatically reversible. Reinstall Personal Agent, then restore supported state from the final uninstall backup.",
+                details={
+                    "operation_id": operation_id,
+                    "target_snapshot_hash": actual_hash,
+                    "final_backup_path": str(final_backup),
+                    "receipt_path": str(receipt_path),
+                    "handoff": support_bundle_redact(handoff),
+                    "preserved_resource_count": len(snapshot.get("preserved_resources") if isinstance(snapshot.get("preserved_resources"), list) else []),
+                },
+            )
         receipt = _launch_uninstall_helper_state_file(helper_state)
         status = str(receipt.get("status") or "verification_incomplete")
         completed = status == "completed_verified"

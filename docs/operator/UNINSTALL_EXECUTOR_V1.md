@@ -3,10 +3,10 @@
 Uninstall Executor v1 is the bounded preserve-data uninstall path behind Plan
 Mode and Executor Registry.
 
-It is not a purge feature, not an arbitrary software uninstaller, and not proof
-that the daily-driver runtime can safely delete itself from a normal chat
-session. The destructive execution proof runs only against an isolated generated
-fixture.
+It is not a purge feature and not an arbitrary software uninstaller. Active
+primary uninstall is wired only through the same Host Lifecycle Runner path and
+requires the reviewed primary enablement marker. Automated proof still does not
+uninstall the active daily-driver runtime.
 
 ## Current Checkpoint
 
@@ -98,10 +98,16 @@ The receipt records:
 
 The receipt is bounded and redacted.
 
-## Live Daily-Driver Guard
+## Primary Daily-Driver Enablement
 
-Live daily-driver uninstall is intentionally guarded in v1. A confirmed live
-install plan returns a structured no-mutation result:
+Primary preserve-data uninstall is conditionally enabled. Confirmation can hand
+off to the Host Lifecycle Runner only when the canonical primary inventory
+validates and the local enablement marker exists:
+
+`~/.local/share/personal-agent/host_lifecycle/primary_uninstall_enabled.json`
+
+Without that marker, a confirmed live install plan returns a structured
+no-mutation result:
 
 - `error_code=uninstall_live_execution_not_enabled`
 - `mutated=false`
@@ -109,9 +115,10 @@ install plan returns a structured no-mutation result:
 - no runtime files are removed
 - no state, secrets, or backups are deleted
 
-This lets installed-product safety gates prove that uninstall is routed through
-Plan Mode and Executor Registry without removing the operator's active
-assistant.
+The production-shaped proof exercises the same operation shape against an
+isolated install-shaped tree and verifies the real primary installation remains
+unchanged. Normal installed-product safety gates still do not confirm active
+primary uninstall.
 
 ## Verification
 
@@ -136,6 +143,7 @@ Run:
 python scripts/uninstall_execution_smoke.py
 python scripts/host_lifecycle_runner_smoke.py
 python scripts/host_lifecycle_systemd_smoke.py
+python scripts/primary_uninstall_enablement_smoke.py --allow-primary-uninstall-shaped-proof --expected-commit <current-serving-commit>
 ```
 
 ## Recovery

@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-active-host-enablement-proof`
-- Commit: `95beaac`
+- Tag: `v0.2.1-primary-update-guard-wiring-v1`
+- Commit: `bc38e92d0fb87d161b06ddcb3fa67f6238aadb7f`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -71,6 +71,16 @@ Current confirmed proof:
   and confirms primary uninstall still returns
   `uninstall_live_execution_not_enabled`. This proof is intentionally not run
   automatically by `prove_ready.py`.
+- `python scripts/primary_uninstall_enablement_smoke.py
+  --allow-primary-uninstall-shaped-proof --expected-commit
+  <current-serving-commit>`: explicit production-shaped preserve-data uninstall
+  proof. It creates an isolated install-shaped Personal Agent tree, confirms
+  uninstall through `operator.uninstall.v1`, runs the shared Host Lifecycle
+  Runner path, verifies final backup/receipt/preserved data, proves duplicate
+  idempotency and truthful partial failure, and verifies the active primary
+  installation remains unchanged. It does not uninstall the active primary
+  daily-driver runtime and is intentionally not run automatically by
+  `prove_ready.py`.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.
