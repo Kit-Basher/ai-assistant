@@ -18,6 +18,9 @@ This lane is safe by default:
   confirmation: isolated fixture removal, or a structured no-mutation blocker
   for the live daily-driver install unless a safe isolated target is approved
 - support bundle wording must say secrets are redacted
+- cleanup, update, and uninstall are bound to Capability Policy v1 ids
+  (`cleanup.execute`, `system.update`, `system.uninstall`) before mutation.
+  Primary uninstall still requires local activation in addition to confirmation.
 
 ## Current Product Flow
 
@@ -93,7 +96,11 @@ uninstall activation-policy proof. It uses isolated policy roots for marker
 mutation and reads the actual host status without enabling or uninstalling the
 active primary installation.
 
-Run `python scripts/v0_2_1_release_closure.py --expected-commit 226c149` for
+Run `python scripts/capability_policy_smoke.py` and
+`python scripts/capability_policy_audit.py` when lifecycle authorization
+metadata or central gate behavior changes.
+
+Run `python scripts/v0_2_1_release_closure.py --expected-commit f900954` for
 the v0.2.1 sequential installed-product closure proof. It intentionally avoids
 parallel HTTP-heavy proof suites and never enables primary uninstall.
 

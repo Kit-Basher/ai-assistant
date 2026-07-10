@@ -5,12 +5,29 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-rc1`
-- Commit: `b0a7fe51d271c528c644289018458944860dd5ec`
+- Tag: `v0.2.1`
+- Commit: `f900954c8086588592ff91c502c89057aa630ed2`
 - Fresh Debian VM proof: not run
-- Release status: RC1 latency closure complete; final v0.2.1 decision pending clean commit/tag
+- Release status: v0.2.1 lifecycle and release-hardening phase closed; current work is post-release authorization foundation
 
-## Next Phase: v0.2.1 Release Closure and Installed-Product Hardening
+## Next Phase: Tool Authorization and Plan Mode Maturity
+
+The v0.2.1 lifecycle roadmap is complete.
+
+The next phase applies the same safety model to all mutating assistant
+capabilities:
+
+- central capability policy;
+- read-only versus mutating classification;
+- Plan Mode as the universal mutation gateway;
+- capability-scoped confirmation and activation;
+- durable operation status and receipts;
+- adversarial bypass prevention.
+
+The first checkpoint is Capability Policy Schema and Central Authorization Gate
+v1.
+
+## Completed Phase: v0.2.1 Release Closure and Installed-Product Hardening
 
 The lifecycle roadmap is complete through:
 

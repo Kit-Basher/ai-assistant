@@ -47,6 +47,8 @@ Commands:
 - `python scripts/operator_lifecycle_smoke.py`
 - `python scripts/memory_lifecycle_smoke.py`
 - `python scripts/plan_mode_v2_smoke.py`
+- `python scripts/capability_policy_smoke.py`
+- `python scripts/capability_policy_audit.py`
 - `python scripts/executor_registry_smoke.py`
 - `python scripts/support_bundle_v2_smoke.py`
 - `python scripts/backup_v1_smoke.py`
@@ -126,6 +128,18 @@ plan fields, plan inspection, cancellation, preview-only executor blocking,
 stale confirmation rejection after service restart, ambiguous restart
 clarification, safety-bypass refusal, and thread/session confirmation binding
 through the real `/chat` API.
+
+`capability_policy_smoke.py` is the Capability Policy v1 foundation gate. It
+proves registry load, schema validation, read-only allow, Plan/confirmation
+requirements, local activation requirement, stale/changed target blocking,
+shell package-install bypass blocking, receipt metadata, status categories, and
+unmigrated action reporting. It is non-destructive and does not enable primary
+uninstall.
+
+`capability_policy_audit.py` reports registered capabilities, migrated executor
+bindings, receipt/revalidation/bypass requirements, and explicit warnings for
+legacy unmigrated action paths. Warnings for documented unmigrated actions are
+expected in this foundation checkpoint.
 
 `executor_registry_smoke.py` is the installed Executor Registry v1 gate. It
 proves preview-only memory delete plans do not execute; live daily-driver

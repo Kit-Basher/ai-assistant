@@ -69,6 +69,11 @@ Confirm:
   wrong; this gate verifies canonical plans, inspect/cancel/revise, stale
   confirmation rejection, and thread/session binding without executing
   destructive actions
+- run `python scripts/capability_policy_smoke.py` and
+  `python scripts/capability_policy_audit.py` when authorization policy,
+  executor capability binding, receipt metadata, or generic package-install
+  bypass protection changes; these gates are non-destructive and do not enable
+  primary uninstall
 - run `python scripts/executor_registry_smoke.py` when Plan Mode apply behavior
   feels wrong; this gate verifies preview-only executor refusals, the safe
   support-bundle executor, journal ids, stale confirmation rejection, and
@@ -468,7 +473,7 @@ python scripts/primary_uninstall_policy.py repair-permissions \
 Release-closure proof is sequential to avoid artificial HTTP load:
 
 ```bash
-python scripts/v0_2_1_release_closure.py --expected-commit 226c149
+python scripts/v0_2_1_release_closure.py --expected-commit f900954
 ```
 
 ## Lightweight Monitoring Mindset

@@ -5,6 +5,9 @@ Mode still owns preview, user confirmation, expiry, and thread/session binding.
 The registry owns executor lookup, refusal for non-enabled executors, canonical
 result fields, and an append-only redacted mutation journal.
 
+Capability Policy v1 adds central authorization metadata for migrated
+executors. See `docs/operator/CAPABILITY_POLICY_V1.md`.
+
 ## Result Schema
 
 Every registry result includes:
@@ -23,6 +26,14 @@ Every registry result includes:
 - `rollback_hint`
 - `error_code`
 - `user_message`
+- `capability_id`
+- `policy_schema_version`
+- `authorization_mode`
+- `risk_level`
+- `plan_fingerprint`
+- `target_fingerprint`
+- `authorization_decision_id`
+- `confirmation_timestamp`
 
 ## Enforcement
 
@@ -36,6 +47,9 @@ Every registry result includes:
   enabled unless a bounded executor exists.
 - Registry refusals are journaled too, so attempted preview-only execution is
   auditable.
+- Migrated mutating executors call the central capability gate before mutation.
+  A denied decision returns `mutated=false` and is journaled.
+- Executor capability ids come from trusted registration code, not user text.
 
 ## Journal
 
@@ -72,6 +86,7 @@ limited to removing the newly created backup directory. See
 Personal Agent artifacts such as generated cleanup fixtures, old backups, old
 support bundles, and old runtime releases. It preserves current runtime, active
 service files, secret stores, latest valid backup, and arbitrary user files.
+It is bound to `cleanup.execute`.
 
 `operator.restore` restores only validated Backup v1 allowlisted non-secret
 preference values for system-resource baselines/context. It stages content,
@@ -86,7 +101,7 @@ v1, verified live no-op, and structured live-promotion blockers when
 preconditions are not rollback-safe.
 It rejects arbitrary repositories, branches, commits, scripts, URLs, dirty
 working trees, and target drift after preview. See
-`docs/operator/UPDATE_EXECUTOR_V1.md`.
+`docs/operator/UPDATE_EXECUTOR_V1.md`. It is bound to `system.update`.
 
 `operator.uninstall` is enabled for Uninstall v1 preserve-data execution against
 approved isolated fixtures through Host Lifecycle Runner v1 and for guarded
@@ -95,7 +110,7 @@ owned-resource allowlists, target-snapshot validation, and a durable uninstall
 receipt. Live daily-driver uninstall remains blocked unless the target is an
 approved isolated fixture; it does not stop services or remove runtime files
 from ordinary installed-product proofs. See
-`docs/operator/UNINSTALL_EXECUTOR_V1.md`.
+`docs/operator/UNINSTALL_EXECUTOR_V1.md`. It is bound to `system.uninstall`.
 
 ## Preview-Only Lanes
 
@@ -119,6 +134,8 @@ guarded unless the action targets an approved isolated fixture.
 Run:
 
 ```bash
+python scripts/capability_policy_smoke.py
+python scripts/capability_policy_audit.py
 python scripts/executor_registry_smoke.py
 python scripts/support_bundle_v2_smoke.py
 python scripts/backup_v1_smoke.py

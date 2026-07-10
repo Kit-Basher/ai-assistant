@@ -22,12 +22,22 @@ Every chat-native Plan Mode preview now exposes a canonical Plan object with:
 - `confirmation_words`
 - `expires_at`
 - `staleness_policy`
+- `capability_id` for migrated actions
+- `policy_schema_version` for migrated actions
+- `target_fingerprint` and `plan_fingerprint` for migrated actions
 
 The same fields are included in the user-visible preview text and in the
 structured chat payload. `executor_status` is important: `enabled` means a
 bounded apply path may exist through the executor registry, while
 `preview_only` means confirmation is still blocked from real execution and
 returns `executor_not_enabled` with `mutated=false`.
+
+Capability Policy v1 extends Plan Mode for representative migrated actions:
+package install, cleanup execution, system update, and system uninstall. The
+confirmation is bound to capability id, policy version, Plan fingerprint,
+target fingerprint, executor id, expiry, and thread/session. A changed target,
+stale Plan, policy version change, or missing local uninstall activation fails
+closed with `mutated=false`.
 
 ## User Flows
 
@@ -62,6 +72,7 @@ Run:
 
 ```bash
 python scripts/plan_mode_v2_smoke.py
+python scripts/capability_policy_smoke.py
 python scripts/executor_registry_smoke.py
 ```
 
@@ -84,6 +95,9 @@ The installed-product smoke proves:
 - Executor Registry v1 records preview-only refusals and executes the safe
   support-bundle, backup, cleanup, restore, update, and fixture uninstall
   executors with redacted journal results.
+- Capability Policy v1 adds central authorization decisions for package
+  install, cleanup, update, and uninstall while leaving unmigrated actions
+  audit-visible.
 
 ## Remaining Gaps
 
@@ -91,6 +105,7 @@ The installed-product smoke proves:
 - Canonical Plan objects are now exposed for chat-native previews, but older
   non-chat API-specific plan surfaces may still have their historical payload
   shape.
-- Executor Registry v1 exists, but only a small set of safe/additive actions is
-  wired through it. Most existing managed-service, external-pack, model, and
-  lifecycle mutators still use their established bounded apply paths.
+- Executor Registry v1 and Capability Policy v1 cover only a representative
+  migrated set. Most existing managed-service, external-pack, model, file, Git,
+  and communication mutators still use their established bounded apply paths or
+  remain legacy/unmigrated audit findings.

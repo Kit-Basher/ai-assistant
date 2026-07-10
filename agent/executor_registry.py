@@ -14,6 +14,14 @@ import tempfile
 from typing import Any, Callable
 import uuid
 
+from .capability_policy import (
+    POLICY_SCHEMA_VERSION,
+    TrustedInvocationContext,
+    authorize_capability,
+    build_default_capability_registry,
+    capability_for_action_type,
+    stable_fingerprint,
+)
 from .host_lifecycle import (
     HOST_LIFECYCLE_OPERATION_SCHEMA_VERSION,
     HOST_LIFECYCLE_RUNNER_VERSION,
@@ -73,6 +81,10 @@ def utc_now_iso() -> str:
 
 def redact_executor_value(value: Any, *, key_hint: str = "") -> Any:
     normalized_key = str(key_hint or "").lower()
+    if normalized_key in {"authorization_mode", "authorization_decision_id", "capability_id", "policy_schema_version", "plan_fingerprint", "target_fingerprint"}:
+        return value
+    if normalized_key in {"authorization", "authorization_decision"} and isinstance(value, dict) and "capability_id" in value and "reason_code" in value:
+        return {str(key): redact_executor_value(item, key_hint=str(key)) for key, item in value.items()}
     if any(hint in normalized_key for hint in SECRET_KEY_HINTS):
         return "[REDACTED]"
     if isinstance(value, dict):
@@ -156,6 +168,14 @@ class ExecutorResult:
     error_code: str | None = None
     user_message: str = ""
     details: dict[str, Any] = field(default_factory=dict)
+    capability_id: str = ""
+    policy_schema_version: int = POLICY_SCHEMA_VERSION
+    authorization_mode: str = ""
+    risk_level: str = ""
+    plan_fingerprint: str = ""
+    target_fingerprint: str = ""
+    authorization_decision_id: str = ""
+    confirmation_timestamp: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload = {
@@ -174,6 +194,14 @@ class ExecutorResult:
             "error_code": self.error_code,
             "user_message": self.user_message,
             "details": dict(self.details),
+            "capability_id": self.capability_id,
+            "policy_schema_version": int(self.policy_schema_version),
+            "authorization_mode": self.authorization_mode,
+            "risk_level": self.risk_level,
+            "plan_fingerprint": self.plan_fingerprint,
+            "target_fingerprint": self.target_fingerprint,
+            "authorization_decision_id": self.authorization_decision_id,
+            "confirmation_timestamp": self.confirmation_timestamp,
         }
         return redact_executor_value(payload)
 
@@ -204,6 +232,7 @@ class ExecutorSpec:
     run: ExecutorFn | None = None
     rollback_available: bool = False
     rollback_hint: str = ""
+    capability_id: str | None = None
 
 
 class MutationJournal:
@@ -273,6 +302,10 @@ class ExecutorRegistry:
         executor_status = str(plan.get("executor_status") or "unavailable").strip().lower() or "unavailable"
         risk_level = str(plan.get("risk_level") or "").strip().lower()
         journal_id = f"executor-{uuid.uuid4().hex[:12]}"
+        capability_id = str(plan.get("capability_id") or capability_for_action_type(action_type) or "").strip()
+        plan_fingerprint = str(plan.get("plan_fingerprint") or "").strip()
+        target_fingerprint = str(plan.get("target_fingerprint") or "").strip()
+        authorization_metadata: dict[str, Any] = {}
 
         def _result(
             *,
@@ -303,6 +336,14 @@ class ExecutorRegistry:
                 error_code=error_code,
                 user_message=user_message,
                 details=dict(details or {}),
+                capability_id=str(authorization_metadata.get("capability_id") or capability_id),
+                policy_schema_version=int(authorization_metadata.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+                authorization_mode=str(authorization_metadata.get("authorization_mode") or ""),
+                risk_level=str(authorization_metadata.get("risk_level") or risk_level),
+                plan_fingerprint=str(authorization_metadata.get("plan_fingerprint") or plan_fingerprint),
+                target_fingerprint=str(authorization_metadata.get("target_fingerprint") or target_fingerprint),
+                authorization_decision_id=str(authorization_metadata.get("authorization_decision_id") or ""),
+                confirmation_timestamp=str(authorization_metadata.get("confirmation_timestamp") or ""),
             )
             self.journal.append(
                 {
@@ -378,6 +419,82 @@ class ExecutorRegistry:
                 rollback_available=False,
                 rollback_hint="No rollback needed because nothing was changed.",
             )
+        trusted_capability_id = str(spec.capability_id or capability_id or "").strip()
+        if trusted_capability_id:
+            capability_id = trusted_capability_id
+            if not plan_fingerprint:
+                plan_fingerprint = stable_fingerprint(
+                    {
+                        "plan_id": plan_id,
+                        "action_type": action_type,
+                        "target": target,
+                        "resources_affected": plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else [],
+                        "capability_id": capability_id,
+                        "executor_id": spec.executor_id,
+                    }
+                )
+                plan["plan_fingerprint"] = plan_fingerprint
+            if not target_fingerprint:
+                target_fingerprint = stable_fingerprint(
+                    {
+                        "action_type": action_type,
+                        "target": target,
+                        "resources_affected": plan.get("resources_affected") if isinstance(plan.get("resources_affected"), list) else [],
+                    }
+                )
+                plan["target_fingerprint"] = target_fingerprint
+            activation_context = _activation_context_for_capability(capability_id, plan=plan, action=action)
+            decision = authorize_capability(
+                capability_id,
+                request_context={
+                    "action_type": action_type,
+                    "executor_id": spec.executor_id,
+                    "origin": str(action.get("origin") or "executor_registry"),
+                },
+                target_snapshot={"target_fingerprint": target_fingerprint},
+                plan_context={
+                    "plan_id": plan_id,
+                    "plan_fingerprint": plan_fingerprint,
+                    "target_fingerprint": target_fingerprint,
+                    "policy_version": int(plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+                    "stale": bool(plan.get("stale")),
+                },
+                confirmation_context={
+                    "confirmed": True,
+                    "pending_id": str(action.get("pending_id") or ""),
+                },
+                activation_context=activation_context,
+                registry=build_default_capability_registry(),
+            )
+            authorization_metadata = {
+                "capability_id": capability_id,
+                "policy_schema_version": POLICY_SCHEMA_VERSION,
+                "authorization_mode": decision.authorization_mode,
+                "risk_level": decision.risk_level,
+                "plan_fingerprint": plan_fingerprint,
+                "target_fingerprint": target_fingerprint,
+                "authorization_decision_id": decision.decision_id,
+                "confirmation_timestamp": utc_now_iso(),
+            }
+            action["authorization_decision"] = decision.to_dict()
+            action["trusted_invocation_context"] = TrustedInvocationContext(
+                capability_id=capability_id,
+                executor_id=spec.executor_id,
+                authorization_decision_id=decision.decision_id,
+                plan_fingerprint=plan_fingerprint,
+                operation_id=plan_id,
+            ).to_dict()
+            if not decision.allowed:
+                return _result(
+                    ok=False,
+                    mutated=False,
+                    executor_id=spec.executor_id,
+                    error_code=decision.reason_code,
+                    user_message=f"Capability policy blocked {capability_id}: {decision.reason_code}.",
+                    rollback_available=False,
+                    rollback_hint="No rollback needed because nothing was changed.",
+                    details={"authorization": decision.to_dict()},
+                )
         try:
             raw = spec.run(plan, action)
             if isinstance(raw, ExecutorResult):
@@ -401,7 +518,18 @@ class ExecutorRegistry:
                     rollback_hint=str(raw.get("rollback_hint") or spec.rollback_hint),
                     error_code=str(raw.get("error_code") or "") or None,
                     user_message=str(raw.get("user_message") or ""),
-                    details=dict(raw.get("details") if isinstance(raw.get("details"), dict) else {}),
+                    details={
+                        **dict(raw.get("details") if isinstance(raw.get("details"), dict) else {}),
+                        **({"authorization": action.get("authorization_decision")} if isinstance(action.get("authorization_decision"), dict) else {}),
+                    },
+                    capability_id=str(authorization_metadata.get("capability_id") or capability_id),
+                    policy_schema_version=int(authorization_metadata.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+                    authorization_mode=str(authorization_metadata.get("authorization_mode") or ""),
+                    risk_level=str(authorization_metadata.get("risk_level") or risk_level),
+                    plan_fingerprint=str(authorization_metadata.get("plan_fingerprint") or plan_fingerprint),
+                    target_fingerprint=str(authorization_metadata.get("target_fingerprint") or target_fingerprint),
+                    authorization_decision_id=str(authorization_metadata.get("authorization_decision_id") or ""),
+                    confirmation_timestamp=str(authorization_metadata.get("confirmation_timestamp") or ""),
                 )
         except ExecutorPartialFailure as exc:
             return _result(
@@ -432,6 +560,14 @@ class ExecutorRegistry:
                 "journal_id": journal_id,
                 "started_at": result.started_at or started_at,
                 "finished_at": result.finished_at or utc_now_iso(),
+                "capability_id": result.capability_id or str(authorization_metadata.get("capability_id") or capability_id),
+                "policy_schema_version": int(authorization_metadata.get("policy_schema_version") or result.policy_schema_version),
+                "authorization_mode": result.authorization_mode or str(authorization_metadata.get("authorization_mode") or ""),
+                "risk_level": result.risk_level or str(authorization_metadata.get("risk_level") or risk_level),
+                "plan_fingerprint": result.plan_fingerprint or str(authorization_metadata.get("plan_fingerprint") or plan_fingerprint),
+                "target_fingerprint": result.target_fingerprint or str(authorization_metadata.get("target_fingerprint") or target_fingerprint),
+                "authorization_decision_id": result.authorization_decision_id or str(authorization_metadata.get("authorization_decision_id") or ""),
+                "confirmation_timestamp": result.confirmation_timestamp or str(authorization_metadata.get("confirmation_timestamp") or ""),
             }
         )
         self.journal.append(
@@ -444,6 +580,41 @@ class ExecutorRegistry:
             }
         )
         return result
+
+
+def _activation_context_for_capability(capability_id: str, *, plan: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    if capability_id != "system.uninstall":
+        return {"valid": True, "reason_code": "allowed"}
+    snapshot = action.get("target_snapshot") if isinstance(action.get("target_snapshot"), dict) else {}
+    execution_mode = str(action.get("uninstall_execution_mode") or "").strip().lower()
+    target = str(plan.get("target") or "").strip().lower()
+    if bool(snapshot.get("fixture_marker")) or execution_mode in {"fixture_preserve_data", "production_shaped_preserve_data"} or "fixture" in target or "proof" in target:
+        return {"valid": True, "reason_code": "allowed", "activation_source": "isolated_fixture"}
+    try:
+        status = validate_primary_uninstall_marker()
+    except Exception as exc:  # noqa: BLE001 - activation validator failures must fail closed.
+        return {"valid": False, "reason_code": "activation_invalid", "error": exc.__class__.__name__}
+    if bool(getattr(status, "valid", False)):
+        return {"valid": True, "reason_code": "allowed", "activation_source": "primary_marker"}
+    reason = str(getattr(status, "reason_code", "") or "local_activation_required")
+    return {"valid": False, "reason_code": reason}
+
+
+def _capability_policy_record(action: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any] | None:
+    decision = action.get("authorization_decision") if isinstance(action.get("authorization_decision"), dict) else {}
+    capability_id = str(decision.get("capability_id") or plan.get("capability_id") or "").strip()
+    if not capability_id:
+        return None
+    return {
+        "capability_id": capability_id,
+        "policy_schema_version": int(decision.get("policy_version") or plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+        "authorization_mode": str(decision.get("authorization_mode") or ""),
+        "risk_level": str(decision.get("risk_level") or plan.get("risk_level") or ""),
+        "plan_fingerprint": str(decision.get("plan_fingerprint") or plan.get("plan_fingerprint") or ""),
+        "target_fingerprint": str(decision.get("target_fingerprint") or plan.get("target_fingerprint") or ""),
+        "authorization_decision_id": str(decision.get("decision_id") or ""),
+        "receipt_required": bool(decision.get("receipt_required", True)),
+    }
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -500,6 +671,9 @@ def _compact_journal_record(record: dict[str, Any]) -> dict[str, Any]:
             "action_type": result.get("action_type") or plan.get("action_type"),
             "target": result.get("target") or plan.get("target"),
             "executor_id": result.get("executor_id"),
+            "capability_id": result.get("capability_id") or plan.get("capability_id"),
+            "policy_schema_version": result.get("policy_schema_version") or plan.get("policy_schema_version"),
+            "authorization_decision_id": result.get("authorization_decision_id"),
             "ok": result.get("ok"),
             "mutated": result.get("mutated"),
             "error_code": result.get("error_code"),
@@ -1618,6 +1792,7 @@ def execute_update_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[str,
             "api_service_name": api_service_name,
             "verify_base_url": verify_base_url,
             "proof_marker_path": proof_marker_path,
+            "capability_policy": _capability_policy_record(action, plan),
         }
     )
     _write_json_unredacted(operation_record_path, operation_record)
@@ -2185,6 +2360,7 @@ def _run_uninstall_helper(operation_state: dict[str, Any]) -> dict[str, Any]:
         "removed_resources": [],
         "skipped_resources": [],
         "preserved_resources": preserved,
+        "capability_policy": operation_state.get("capability_policy") if isinstance(operation_state.get("capability_policy"), dict) else None,
         "reinstall_guidance": "Reinstall from the preserved Personal Agent repository, then restore supported state from the final uninstall backup.",
     }
     _write_json(receipt_path, initial_receipt)
@@ -2608,6 +2784,7 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             "target_snapshot": snapshot,
             "service_names": action.get("service_names") if isinstance(action.get("service_names"), list) else snapshot.get("service_names"),
             "force_failure_after_resource_id": action.get("force_failure_after_resource_id"),
+            "capability_policy": _capability_policy_record(action, plan),
         }
         if is_primary:
             policy_summary = {

@@ -21,6 +21,14 @@ from zoneinfo import ZoneInfo
 from pathlib import Path
 
 from agent.intent_router import route_message
+from agent.capability_policy import (
+    POLICY_SCHEMA_VERSION,
+    TrustedInvocationContext,
+    authorize_capability,
+    build_default_capability_registry,
+    capability_for_action_type,
+    stable_fingerprint,
+)
 from agent.disk_diff import diff_disk_reports, time_since
 from agent.disk_anomalies import detect_anomalies
 from agent.doctor import (
@@ -679,6 +687,7 @@ class Orchestrator:
                 run=execute_cleanup,
                 rollback_available=False,
                 rollback_hint="Cleanup deletion is not automatically reversible.",
+                capability_id="cleanup.execute",
             )
         )
         self._executor_registry.register(
@@ -699,6 +708,7 @@ class Orchestrator:
                 run=execute_update_v1,
                 rollback_available=True,
                 rollback_hint="Use the pre-update rollback checkpoint to return runtime/current to the previous verified release.",
+                capability_id="system.update",
             )
         )
         self._executor_registry.register(
@@ -709,6 +719,7 @@ class Orchestrator:
                 run=execute_uninstall_v1,
                 rollback_available=False,
                 rollback_hint="Uninstall is not automatically reversible. Reinstall Personal Agent, then restore supported state from the final uninstall backup.",
+                capability_id="system.uninstall",
             )
         )
         self._pack_store = PackStore(db.db_path, journal_store=self._managed_action_journal_store)
@@ -3135,13 +3146,15 @@ class Orchestrator:
         if not bool(action.get("mutating", True)):
             mutation_level = "preflight"
             risk_level = "low"
-        return build_canonical_plan(
+        action_type = self._canonical_plan_action_type(operation)
+        resources_affected = self._canonical_plan_resources(params, preview_payload)
+        plan = build_canonical_plan(
             plan_id=pending_id,
-            action_type=self._canonical_plan_action_type(operation),
+            action_type=action_type,
             target=target,
             scope=scope,
             mutation_level=mutation_level,
-            resources_affected=self._canonical_plan_resources(params, preview_payload),
+            resources_affected=resources_affected,
             risk_level=risk_level,
             rollback_scope=rollback_scope,
             rollback_supported=rollback_supported,
@@ -3149,6 +3162,50 @@ class Orchestrator:
             expires_at=expires_at,
             staleness_policy="This plan is bound to the current user/session, expires after 10 minutes, and is cleared by cancel or service restart.",
         )
+        capability_id = capability_for_action_type(action_type)
+        if capability_id:
+            registry = build_default_capability_registry()
+            definition = registry.get(capability_id)
+            target_fingerprint = stable_fingerprint(
+                {
+                    "action_type": action_type,
+                    "target": target,
+                    "resources_affected": resources_affected,
+                }
+            )
+            plan_fingerprint = stable_fingerprint(
+                {
+                    "plan_id": pending_id,
+                    "action_type": action_type,
+                    "target": target,
+                    "resources_affected": resources_affected,
+                    "capability_id": capability_id,
+                    "policy_schema_version": POLICY_SCHEMA_VERSION,
+                    "target_fingerprint": target_fingerprint,
+                }
+            )
+            plan.update(
+                {
+                    "capability_id": capability_id,
+                    "policy_schema_version": POLICY_SCHEMA_VERSION,
+                    "target_fingerprint": target_fingerprint,
+                    "plan_fingerprint": plan_fingerprint,
+                }
+            )
+            if definition is not None:
+                plan.update(
+                    {
+                        "capability_title": definition.title,
+                        "capability_scope": definition.scope,
+                        "capability_reversibility": definition.reversibility,
+                        "capability_risk_level": definition.risk_level,
+                        "authorization_mode": definition.authorization_mode,
+                        "receipt_required": bool(definition.receipt_required),
+                        "runtime_revalidation_required": bool(definition.runtime_revalidation_required),
+                        "local_activation_required": definition.authorization_mode == "local_activation_and_confirm",
+                    }
+                )
+        return plan
 
     @staticmethod
     def _render_canonical_plan_lines(plan: dict[str, Any]) -> list[str]:
@@ -3159,6 +3216,8 @@ class Orchestrator:
             "Plan Mode v2:",
             f"Plan ID: {str(plan.get('plan_id') or '').strip()}.",
             f"Action type: {str(plan.get('action_type') or '').strip()}.",
+            f"Capability: {str(plan.get('capability_title') or 'legacy/unmapped').strip()} ({str(plan.get('capability_id') or 'legacy.unmapped').strip()}).",
+            f"Authorization: {str(plan.get('authorization_mode') or 'legacy').strip()}.",
             f"Target: {str(plan.get('target') or '').strip()}.",
             f"Scope: {str(plan.get('scope') or '').strip()}.",
             f"Mutation level: {str(plan.get('mutation_level') or '').strip()}.",
@@ -3974,6 +4033,55 @@ class Orchestrator:
                 payload=payload,
             )
         if operation == "shell_install_package":
+            plan = action.get("canonical_plan") if isinstance(action.get("canonical_plan"), dict) else {}
+            target_fingerprint = str(plan.get("target_fingerprint") or "").strip()
+            plan_fingerprint = str(plan.get("plan_fingerprint") or "").strip()
+            if not plan_fingerprint:
+                plan_fingerprint = stable_fingerprint(
+                    {
+                        "plan_id": str(action.get("pending_id") or ""),
+                        "action_type": "package.install",
+                        "target": str(params.get("package") or ""),
+                        "capability_id": "system.package.install",
+                        "policy_schema_version": POLICY_SCHEMA_VERSION,
+                    }
+                )
+            decision = authorize_capability(
+                "system.package.install",
+                request_context={"origin": "plan_mode_confirmation", "executor_id": "shell.install_package.v1"},
+                target_snapshot={"target_fingerprint": target_fingerprint},
+                plan_context={
+                    "plan_id": str(action.get("pending_id") or ""),
+                    "plan_fingerprint": plan_fingerprint,
+                    "target_fingerprint": target_fingerprint,
+                    "policy_version": int(plan.get("policy_schema_version") or POLICY_SCHEMA_VERSION),
+                },
+                confirmation_context={"confirmed": True, "pending_id": str(action.get("pending_id") or "")},
+                registry=build_default_capability_registry(),
+            )
+            if not decision.allowed:
+                return self._runtime_truth_response(
+                    text=f"Package installation was confirmed, but capability policy blocked it: {decision.reason_code}. I did not mutate state.",
+                    route="action_tool",
+                    used_tools=["shell"],
+                    ok=False,
+                    error_kind=decision.reason_code,
+                    payload={
+                        "type": "capability_policy_denial",
+                        "operation": operation,
+                        "capability_id": "system.package.install",
+                        "mutated": False,
+                        "authorization": decision.to_dict(),
+                    },
+                    skip_post_response_hooks=True,
+                )
+            invocation_context = TrustedInvocationContext(
+                capability_id="system.package.install",
+                executor_id="shell.install_package.v1",
+                authorization_decision_id=decision.decision_id,
+                plan_fingerprint=plan_fingerprint,
+                operation_id=str(action.get("pending_id") or ""),
+            ).to_dict()
             return self._shell_install_package_response(
                 user_id=user_id,
                 manager=str(params.get("manager") or "").strip() or None,
@@ -3981,6 +4089,7 @@ class Orchestrator:
                 scope=str(params.get("scope") or "").strip() or None,
                 dry_run=bool(params.get("dry_run", False)),
                 confirmed=True,
+                invocation_context=invocation_context,
             )
         if operation.startswith("operator_lifecycle_"):
             action_label = str(params.get("action_label") or operation.replace("operator_lifecycle_", "")).strip() or "operator action"
@@ -14720,6 +14829,7 @@ class Orchestrator:
         scope: str | None = None,
         dry_run: bool = False,
         confirmed: bool = False,
+        invocation_context: dict[str, Any] | None = None,
     ) -> OrchestratorResponse:
         truth = self._runtime_truth()
         if truth is None:
@@ -14785,6 +14895,7 @@ class Orchestrator:
             package=package,
             scope=scope,
             dry_run=dry_run,
+            invocation_context=invocation_context,
         )
         payload = dict(payload) if isinstance(payload, dict) else {}
         return self._shell_command_payload_response(payload)
@@ -14830,19 +14941,6 @@ class Orchestrator:
                 },
             )
         return self._execute_model_controller_switch_back(user_id)
-        if not callable(getattr(truth, "shell_install_package", None)):
-            return self._runtime_state_unavailable_response(
-                route="action_tool",
-                reason="shell_install_package_unavailable",
-            )
-        payload = truth.shell_install_package(
-            manager=manager,
-            package=package,
-            scope=scope,
-            dry_run=dry_run,
-        )
-        payload = dict(payload) if isinstance(payload, dict) else {}
-        return self._shell_command_payload_response(payload)
 
     def _shell_create_directory_response(self, user_id: str, path_hint: str | None, *, confirmed: bool = False) -> OrchestratorResponse:
         if not str(path_hint or "").strip():
@@ -15473,6 +15571,60 @@ class Orchestrator:
             used_runtime_state=True,
             used_tools=["primary_uninstall_policy"],
             payload={"type": "primary_uninstall_policy_status", **status.redacted_dict(), "mutated": False},
+            skip_post_response_hooks=True,
+        )
+
+    @staticmethod
+    def _looks_like_capability_policy_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        phrases = (
+            "what can you change",
+            "can you install software",
+            "which actions require confirmation",
+            "which actions are disabled",
+            "why was that blocked",
+            "what policy controls this",
+            "capability policy",
+            "authorization policy",
+            "what can you do",
+        )
+        return any(phrase in normalized for phrase in phrases)
+
+    def _capability_policy_status_response(self, user_id: str, text: str | None = None) -> OrchestratorResponse:
+        mark_onboarding_completed(self.db, user_id)
+        registry = build_default_capability_registry()
+        categories = registry.status_categories()
+        normalized = " ".join(str(text or "").strip().lower().split())
+        lines = ["Capability policy v1 is active for the migrated representative executor set."]
+        if "install" in normalized:
+            pkg = registry.get("system.package.install")
+            if pkg is not None:
+                lines.append(
+                    f"Software install is controlled by {pkg.capability_id}: {pkg.authorization_mode}, {pkg.risk_level} risk. "
+                    "It requires Plan Mode confirmation before mutation."
+                )
+        else:
+            lines.extend(
+                [
+                    "Available without confirmation: "
+                    + ", ".join(item["capability_id"] for item in categories["available_without_confirmation"][:6]),
+                    "Requires confirmation: "
+                    + ", ".join(item["capability_id"] for item in categories["requires_confirmation"]),
+                    "Requires local activation: "
+                    + ", ".join(item["capability_id"] for item in categories["requires_local_activation"]),
+                    "Legacy/unmigrated audit-visible: "
+                    + ", ".join(item["capability_id"] for item in categories["legacy_unmigrated"][:8]),
+                ]
+            )
+        lines.append("Unmigrated actions are not claimed as centrally enforced yet.")
+        return self._runtime_truth_response(
+            text="\n".join(lines),
+            route="capability_policy",
+            used_runtime_state=True,
+            used_tools=["capability_policy"],
+            payload={"type": "capability_policy_status", "categories": categories, "mutated": False},
             skip_post_response_hooks=True,
         )
 
@@ -21101,6 +21253,8 @@ class Orchestrator:
             normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
             if not cmd and self._looks_like_primary_uninstall_policy_request(effective_user_text):
                 return self._primary_uninstall_policy_status_response(user_id, effective_user_text)
+            if not cmd and self._looks_like_capability_policy_request(effective_user_text):
+                return self._capability_policy_status_response(user_id, effective_user_text)
             if not cmd and self._looks_like_plan_inspect_request(effective_user_text):
                 return self._current_plan_response(user_id)
             if not cmd and self._looks_like_plan_cancel_request(effective_user_text):

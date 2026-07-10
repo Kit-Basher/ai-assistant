@@ -7,6 +7,10 @@ from pathlib import Path
 from typing import Any
 import re
 
+from agent.capability_policy import (
+    REASON_GENERIC_BYPASS_BLOCKED,
+    validate_trusted_invocation_context,
+)
 from agent.diagnostics import redact_secrets
 from agent.filesystem_skill import FileSystemSkill
 
@@ -653,6 +657,7 @@ class ShellSkill(FileSystemSkill):
         cwd: str | None = None,
         timeout_s: float = 10.0,
         max_output_chars: int = _DEFAULT_OUTPUT_CHARS,
+        invocation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_manager, normalized_package, normalized_scope, preview_dry_run, argv, resolved_cwd, error = (
             self._build_install_command(
@@ -666,6 +671,23 @@ class ShellSkill(FileSystemSkill):
         if error is not None:
             return error
         assert normalized_manager is not None and normalized_package is not None and argv is not None and resolved_cwd is not None
+        if not preview_dry_run:
+            valid_context, reason, context = validate_trusted_invocation_context(
+                invocation_context,
+                capability_id="system.package.install",
+                executor_id="shell.install_package.v1",
+                plan_fingerprint=str((invocation_context or {}).get("plan_fingerprint") or ""),
+            )
+            if not valid_context:
+                return self._blocked_result(
+                    "install_package",
+                    blocked_reason=reason or REASON_GENERIC_BYPASS_BLOCKED,
+                    message="Package installation requires an authorized Plan Mode confirmation.",
+                    extra={
+                        "capability_id": "system.package.install",
+                        "generic_bypass_blocked": True,
+                    },
+                )
 
         return self._run_command(
             action="install_package",
@@ -680,6 +702,9 @@ class ShellSkill(FileSystemSkill):
                 "package": normalized_package,
                 "scope": normalized_scope,
                 "dry_run": preview_dry_run,
+                "capability_id": "system.package.install",
+                "authorization_decision_id": str((invocation_context or {}).get("authorization_decision_id") or ""),
+                "plan_fingerprint": str((invocation_context or {}).get("plan_fingerprint") or ""),
             },
         )
 

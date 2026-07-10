@@ -38,6 +38,9 @@ fresh Debian VM install proof passes.
 - Shell/package/system mutations: normal chat may preview bounded package or
   managed-service actions only. It must not expose arbitrary shell, arbitrary
   Podman/Docker, host networking, broad filesystem writes, or hidden sudo.
+  Capability Policy v1 centrally gates package install, cleanup, update, and
+  uninstall. The package-install shell primitive rejects direct mutation without
+  a trusted invocation context from a confirmed Plan.
 - Telegram: optional by default. Inactive optional Telegram must not fail core
   readiness. Raw tokens must not appear in status/chat/doctor output.
 - Backup/restore/support: backup paths include sensitive local state. Support
@@ -61,6 +64,12 @@ fresh Debian VM install proof passes.
 - `python scripts/prove_ready.py` runs the current single-command readiness
   gate and distinguishes release-blocking failures from optional runtime
   warnings such as isolated proof search being disabled.
+- `python scripts/capability_policy_smoke.py` and
+  `python scripts/capability_policy_audit.py` cover the Capability Policy v1
+  schema, central gate, migrated executor bindings, receipt metadata, stale
+  Plan blocking, local activation requirement, and generic package-install
+  bypass blocking. Audit warnings for documented unmigrated actions are
+  expected until later authorization-migration checkpoints.
 
 ## Release Blockers
 
@@ -75,6 +84,10 @@ fresh Debian VM install proof passes.
 ## Non-Blocking Gaps To Track
 
 - Broader managed-action journal rollout is intentionally paused.
+- Universal capability migration is intentionally incomplete. File, Git,
+  communication, service-control, backup, restore, and support-bundle mutation
+  paths remain legacy/unmigrated audit findings unless another bounded policy
+  already controls them.
 - Startup auto-recovery that mutates state is intentionally absent.
 - Direct llama.cpp binary/library management is absent.
 - MCP/tool runtime execution is absent.

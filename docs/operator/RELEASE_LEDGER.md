@@ -7,39 +7,28 @@ line. It does not replace detailed design, operator, or checkpoint documents.
 
 ## Current Stable Checkpoint
 
-Current stable checkpoint: `v0.2.0-live-usefulness-proof`
+Current stable checkpoint: `v0.2.1`
 
-Commit: `e5dc9f8` Prove live search and external pack usefulness
+Commit: `f900954` Close v0.2.1 lifecycle and release hardening
 
 Summary:
 
-- Managed local SearXNG safe web search is implemented as the first managed
-  local service.
-- Plan Mode is the central policy layer for read-only versus mutating runtime
-  operations.
-- External pack lifecycle writes now use Plan Mode plan/apply flows for install,
-  approve, enable, grant, and remove/tombstone.
-- Managed SearXNG and external pack lifecycle user-facing chat/API/Telegram
-  confirmations now preserve `plan_id`, `confirmation_token`, and
-  `mutation_plan` through preview and apply. Telegram output stays concise and
-  does not dump raw JSON or confirmation tokens.
-- Operator proof surfaces are internally consistent: `/ready` no longer emits
-  `UNKNOWN_FAILURE` recovery when the runtime is `READY`; optional inactive
-  Telegram is informational, not required recovery; and `python -m agent doctor`
-  exits OK when optional Telegram is the only inactive surface.
-- Development `/packs/state` can retain old blocked smoke-test packs without
-  being a release proof failure. Remove them only through confirmed
-  remove/tombstone, or use a fresh state directory for final proof.
-- Live usefulness proof now demonstrates both core user-facing promises on the
-  primary workstation: managed SearXNG can be previewed/applied through Plan
-  Mode and then used through `/chat`, and a starter text-only external pack can
-  be previewed, imported, approved, enabled, reported usable by `/packs/state`,
-  and used through normal chat without executing pack code.
+- Host Lifecycle Runner v1, primary update, verified rollback, preserve-data
+  uninstall wiring, strict local uninstall activation, backup/restore/cleanup,
+  runtime truth, receipts, and full sequential installed-product proof are
+  complete.
+- Primary uninstall remains disabled unless a local operator creates a valid
+  activation marker. Purge remains unsupported.
+- Release warnings are zero at the v0.2.1 checkpoint.
+- The next phase is Tool Authorization and Plan Mode Maturity, starting with
+  Capability Policy Schema and Central Authorization Gate v1.
 
 ## Recent Release Tags
 
 | Tag | Date | Commit | What it records |
 | --- | --- | --- | --- |
+| `v0.2.1` | 2026-07-10 | `f900954` | Lifecycle and release-hardening closure. |
+| `v0.2.2-capability-policy-schema-v1` | not cut | pending | Recommended foundation checkpoint for Capability Policy v1. |
 | `v0.2.0-managed-searxng` | 2026-06-14 | `f26ba6f` | Managed local SearXNG safe web search. |
 | `v0.2.0-plan-mode-policy` | 2026-06-14 | `e88281b` | Central Plan Mode policy layer. |
 | `v0.2.0-plan-mode-pack-lifecycle` | 2026-06-14 | `7096852` | Plan Mode enforcement for external pack lifecycle writes. |

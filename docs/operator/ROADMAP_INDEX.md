@@ -19,6 +19,7 @@ future work where to look first.
 | External pack lifecycle | `docs/design/PACK_LIFECYCLE.md` and `docs/design/PACK_ACQUISITION.md` |
 | External pack format and safety | `docs/design/EXTERNAL_PACK_FORMAT.md` |
 | Plan Mode policy | `docs/design/PLAN_MODE_POLICY.md` |
+| Capability policy and central authorization gate | `docs/operator/CAPABILITY_POLICY_V1.md` |
 | Managed local services and sandboxed tools | `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md` |
 | Managed SearXNG operator details | `docs/operator/SAFE_WEB_SEARCH.md` |
 | Managed-action reliability | `docs/design/MANAGED_ACTION_RELIABILITY_STANDARD.md` and `docs/operator/MANAGED_ACTION_RELIABILITY_AUDIT.md` |
@@ -95,10 +96,9 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. Close v0.2.1 as a trusted daily-driver release candidate/final checkpoint.
-   The lifecycle roadmap is complete through primary non-no-op update,
-   verified rollback, primary preserve-data uninstall wiring, and strict local
-   uninstall activation policy.
+1. Build Tool Authorization and Plan Mode maturity on top of the completed
+   v0.2.1 lifecycle roadmap. The current foundation checkpoint is Capability
+   Policy Schema and Central Authorization Gate v1.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured
@@ -108,8 +108,8 @@ because they overlap current docs.
    write, verify the result, and roll back only owned resources.
 4. If adding more managed local services or sandboxed tool/MCP runtimes, start
    from `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`.
-5. After v0.2.1 release closure, return to broader tool authorization and Plan
-   Mode policy maturity.
+5. Keep unmigrated mutating actions audit-visible until universal Plan Mode
+   enforcement and executor authorization migration are complete.
 
 ## Do Not Start Until Later
 
