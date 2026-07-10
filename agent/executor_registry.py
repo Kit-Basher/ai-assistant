@@ -19,6 +19,11 @@ from .host_lifecycle import (
     HOST_LIFECYCLE_RUNNER_VERSION,
     attach_approved_hash,
 )
+from .primary_uninstall_policy import (
+    build_policy_context,
+    consume_primary_uninstall_marker,
+    validate_primary_uninstall_marker,
+)
 
 
 SUPPORT_BUNDLE_SCHEMA_VERSION = "support_bundle.v2"
@@ -2437,18 +2442,40 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
     if is_primary:
         expected_state = (Path.home() / ".local/share/personal-agent").expanduser().resolve()
         expected_runtime = (expected_state / "runtime").resolve()
-        enablement_marker = expected_state / "host_lifecycle" / "primary_uninstall_enabled.json"
-        if state_root != expected_state or runtime_root != expected_runtime or not enablement_marker.is_file():
+        policy_status = validate_primary_uninstall_marker(
+            build_policy_context(state_root=expected_state),
+            expected_fingerprint=str(action.get("primary_uninstall_marker_fingerprint") or "") or None,
+        )
+        if state_root != expected_state or runtime_root != expected_runtime or not policy_status.enabled:
             return _uninstall_result(
                 ok=False,
                 mutated=False,
-                status="blocked_primary_enablement_missing",
+                status="blocked_primary_enablement_invalid",
                 message=(
-                    "Primary preserve-data uninstall is not enabled on this host. "
+                    "Primary preserve-data uninstall is not enabled on this host "
+                    f"({policy_status.reason}). "
                     "I did not stop services, remove runtime files, delete state, or uninstall anything."
                 ),
                 rollback_hint="No rollback needed because nothing changed.",
                 error_code="uninstall_live_execution_not_enabled",
+                details={
+                    "policy_status": policy_status.redacted_dict(),
+                    "operator_status_command": "python scripts/primary_uninstall_policy.py status",
+                },
+            )
+        snapshot_fingerprint = str(snapshot.get("primary_uninstall_marker_fingerprint") or "")
+        if snapshot_fingerprint and snapshot_fingerprint != str(policy_status.fingerprint or ""):
+            return _uninstall_result(
+                ok=False,
+                mutated=False,
+                status="blocked_primary_enablement_changed",
+                message=(
+                    "Primary uninstall enablement changed after preview, so I blocked execution. "
+                    "Ask for a fresh uninstall preview."
+                ),
+                rollback_hint="No rollback needed because nothing changed.",
+                error_code="uninstall_primary_enablement_changed_since_preview",
+                details={"policy_status": policy_status.redacted_dict()},
             )
         containment_root = Path.home().expanduser().resolve()
     if not is_primary and (
@@ -2582,11 +2609,27 @@ def execute_uninstall_v1(plan: dict[str, Any], action: dict[str, Any]) -> dict[s
             "service_names": action.get("service_names") if isinstance(action.get("service_names"), list) else snapshot.get("service_names"),
             "force_failure_after_resource_id": action.get("force_failure_after_resource_id"),
         }
+        if is_primary:
+            policy_summary = {
+                "schema_version": policy_status.schema_version,
+                "capability": "primary_preserve_data_uninstall",
+                "mode": "preserve_data",
+                "unsupported_modes": ["purge"],
+                "expires_at": policy_status.expires_at,
+                "marker_fingerprint": policy_status.fingerprint,
+            }
+            operation_state["primary_uninstall_policy"] = policy_summary
         operation_state = attach_approved_hash(operation_state)
         touched.append(str(state_dir))
         helper_state = state_dir / "helper_state.json"
         _write_json_unredacted(helper_state, operation_state)
         if is_primary:
+            consumed = consume_primary_uninstall_marker(build_policy_context(state_root=expected_state))
+            if not consumed.get("consumed"):
+                raise RuntimeError(f"primary_uninstall_marker_consume_failed:{consumed.get('reason')}")
+            operation_state["primary_uninstall_policy_consumed"] = consumed
+            operation_state = attach_approved_hash(operation_state)
+            _write_json_unredacted(helper_state, operation_state)
             handoff = _launch_host_lifecycle_runner_systemd("uninstall", helper_state, operation_id=operation_id, timeout=20)
             if not handoff.get("ok"):
                 raise RuntimeError(f"host_lifecycle_uninstall_handoff_failed:{handoff.get('returncode')}")

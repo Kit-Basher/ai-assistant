@@ -5,8 +5,8 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-primary-update-guard-wiring-v1`
-- Commit: `bc38e92d0fb87d161b06ddcb3fa67f6238aadb7f`
+- Tag: `v0.2.1-primary-uninstall-guard-wiring-v1`
+- Commit: `e64a2f7f4708f43d9f58b619ea3144da99f583bb`
 - Fresh Debian VM proof: not run
 - Release status: ready for VM proof, not finished
 
@@ -81,6 +81,12 @@ Current confirmed proof:
   installation remains unchanged. It does not uninstall the active primary
   daily-driver runtime and is intentionally not run automatically by
   `prove_ready.py`.
+- `python scripts/primary_uninstall_policy_smoke.py`: strict activation-policy
+  proof for primary preserve-data uninstall. It validates the v1 marker schema,
+  installation binding, permissions, expiry, integrity, local enable/disable
+  helpers, update-shaped marker survival, marker consumption, reinstall default
+  disabled state, and actual-host read-only status. It never enables or
+  confirms uninstall against the active primary installation.
 - `python scripts/cleanup_preview_smoke.py`: installed cleanup preview proof
   for old/oversized backup, support bundle, and runtime-release candidates;
   the installed daily-driver plan is cancelled during this smoke.

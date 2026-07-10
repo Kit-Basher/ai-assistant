@@ -42,6 +42,7 @@ from agent.doctor import (
     run_doctor_report,
 )
 from agent.runner import Runner
+from agent.primary_uninstall_policy import build_policy_context, validate_primary_uninstall_marker
 from agent.disk_grow import resolve_allowed_path, build_growth_report, _run_du
 from agent.action_gate import handle_action_text, propose_action
 from agent.assistant_planner import AssistantPlanner, AssistantPlan, validate_assistant_plan
@@ -15419,6 +15420,62 @@ class Orchestrator:
             return "~/" + raw[len(home) + 1 :]
         return raw
 
+    @staticmethod
+    def _looks_like_primary_uninstall_policy_request(text: str | None) -> bool:
+        normalized = " ".join(str(text or "").strip().lower().split())
+        if not normalized:
+            return False
+        phrases = (
+            "can you uninstall yourself",
+            "is uninstall enabled",
+            "why can't you uninstall",
+            "why cant you uninstall",
+            "when does uninstall permission expire",
+            "how do i enable uninstall",
+            "how do i disable uninstall",
+            "enable uninstall",
+            "let yourself uninstall",
+            "turn on uninstall capability",
+            "create the uninstall marker",
+            "run the enable script",
+            "remove the guard",
+        )
+        return any(phrase in normalized for phrase in phrases) or ("purge" in normalized and "uninstall" in normalized)
+
+    def _primary_uninstall_policy_status_response(self, user_id: str, text: str | None = None) -> OrchestratorResponse:
+        _ = user_id
+        status = validate_primary_uninstall_marker(build_policy_context())
+        normalized = " ".join(str(text or "").strip().lower().split())
+        lines: list[str] = []
+        if "how do i enable" in normalized:
+            lines.append(
+                "A local operator can enable primary preserve-data uninstall with: "
+                "python scripts/primary_uninstall_policy.py enable --acknowledge-primary-uninstall-capability --expires-in-days 30"
+            )
+            lines.append("I cannot run that command or create the marker from chat.")
+        elif "how do i disable" in normalized:
+            lines.append("Disable it locally with: python scripts/primary_uninstall_policy.py disable")
+            lines.append("I cannot modify the marker from chat.")
+        elif status.enabled:
+            lines.append(f"Primary preserve-data uninstall is enabled on this host until {status.expires_at}.")
+            lines.append("Only preserve-data uninstall is allowed. Purge remains unsupported.")
+        elif status.reason != "marker_missing":
+            lines.append(f"The primary uninstall marker exists but is invalid because {status.reason}.")
+            lines.append("Uninstall remains disabled.")
+        else:
+            lines.append("Primary preserve-data uninstall is wired but not currently enabled on this host.")
+            lines.append("A local operator must enable it with the primary uninstall policy command. Purge is not supported.")
+        if "purge" in normalized:
+            lines.append("Purge is not supported by Uninstall Executor v1.")
+        return self._runtime_truth_response(
+            text="\n\n".join(lines),
+            route="operator_lifecycle",
+            used_runtime_state=True,
+            used_tools=["primary_uninstall_policy"],
+            payload={"type": "primary_uninstall_policy_status", **status.redacted_dict(), "mutated": False},
+            skip_post_response_hooks=True,
+        )
+
     def _operator_update_preview_snapshot(self) -> dict[str, Any]:
         repo_root = Path(__file__).resolve().parents[1]
 
@@ -15524,7 +15581,7 @@ class Orchestrator:
         home = Path.home()
         data_home = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share").expanduser()
         config_home = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config").expanduser()
-        install_root = (data_home / "personal-agent").expanduser()
+        install_root = (home / ".local/share/personal-agent").expanduser()
         runtime_root = install_root / "runtime"
         current_root = runtime_root / "current"
         releases_root = runtime_root / "releases"
@@ -15539,8 +15596,9 @@ class Orchestrator:
         state_db = install_root / "agent.db"
         secret_store = install_root / "secrets.enc.json"
         backups = install_root / "backups"
+        policy_status = validate_primary_uninstall_marker(build_policy_context(state_root=install_root, repository_path=repo_root))
         enablement_marker = install_root / "host_lifecycle" / "primary_uninstall_enabled.json"
-        execution_mode = "primary_preserve_data" if enablement_marker.is_file() else "live_guarded"
+        execution_mode = "primary_preserve_data" if policy_status.enabled else "live_guarded"
         preserved = [
             {"id": "state-root", "class": "state/config root", "path": str(install_root), "reason": "preserve user state by default"},
             {"id": "memory-db", "class": "memory/preferences", "path": str(state_db), "reason": "preserve memory and preferences"},
@@ -15565,6 +15623,9 @@ class Orchestrator:
             "mode": "preserve_data",
             "uninstall_execution_mode": execution_mode,
             "status": "primary_uninstall_enabled" if execution_mode == "primary_preserve_data" else "live_uninstall_blocked_without_primary_enablement",
+            "primary_uninstall_policy": policy_status.redacted_dict(),
+            "primary_uninstall_marker_fingerprint": policy_status.fingerprint if policy_status.enabled else None,
+            "primary_uninstall_expires_at": policy_status.expires_at if policy_status.enabled else None,
             "runtime_root": str(runtime_root),
             "current_root": str(current_root),
             "state_root": str(install_root),
@@ -16496,7 +16557,14 @@ class Orchestrator:
                 ]
             )
             if uninstall_snapshot.get("uninstall_execution_mode") != "primary_preserve_data":
-                uninstall_lines.append("Live daily-driver uninstall is blocked until the primary uninstall enablement proof marker is present.")
+                policy = uninstall_snapshot.get("primary_uninstall_policy") if isinstance(uninstall_snapshot.get("primary_uninstall_policy"), dict) else {}
+                reason = str(policy.get("reason") or "marker_missing")
+                uninstall_lines.append(
+                    "Live daily-driver uninstall is blocked until a local operator enables the primary uninstall policy "
+                    f"({reason}). Run: python scripts/primary_uninstall_policy.py status."
+                )
+            else:
+                uninstall_lines.append(f"Primary uninstall activation expires at {uninstall_snapshot.get('primary_uninstall_expires_at')}.")
             if removable:
                 uninstall_lines.append("Removable owned resources:")
                 for item in removable[:8]:
@@ -16583,6 +16651,7 @@ class Orchestrator:
                     "state_root": uninstall_snapshot.get("state_root"),
                     "proof_marker_path": uninstall_snapshot.get("proof_marker_path"),
                     "service_names": uninstall_snapshot.get("service_names"),
+                    "primary_uninstall_marker_fingerprint": uninstall_snapshot.get("primary_uninstall_marker_fingerprint"),
                 }
             )
         return self._confirmation_preview_response(
@@ -21028,6 +21097,8 @@ class Orchestrator:
                     except Exception:
                         pass
             normalized_effective_user_text = " ".join(str(effective_user_text or "").strip().lower().split())
+            if not cmd and self._looks_like_primary_uninstall_policy_request(effective_user_text):
+                return self._primary_uninstall_policy_status_response(user_id, effective_user_text)
             if not cmd and self._looks_like_plan_inspect_request(effective_user_text):
                 return self._current_plan_response(user_id)
             if not cmd and self._looks_like_plan_cancel_request(effective_user_text):

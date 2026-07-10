@@ -88,9 +88,17 @@ execution proof. It removes only generated fixture runtime/service files and
 verifies preserved data, final backup, receipt, idempotency, and live-install
 guard behavior.
 
+Run `python scripts/primary_uninstall_policy_smoke.py` for the strict primary
+uninstall activation-policy proof. It uses isolated policy roots for marker
+mutation and reads the actual host status without enabling or uninstalling the
+active primary installation.
+
 ## Boundaries
 
 Do not claim this lane proves full lifecycle completion. It proves the
 user-facing installed product no longer falls into generic chat for lifecycle
 questions and does not silently mutate destructive operator actions. It does
 not claim arbitrary live self-update or live daily-driver uninstall completion.
+Primary daily-driver uninstall additionally requires local activation through
+`scripts/primary_uninstall_policy.py`; chat cannot enable it, and purge remains
+unsupported.

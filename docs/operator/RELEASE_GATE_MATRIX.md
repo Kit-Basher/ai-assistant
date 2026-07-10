@@ -192,6 +192,12 @@ idempotency, and partial-failure reporting, and verifies the real primary
 installation remains unchanged. It is not part of automatic release gates
 because active primary uninstall must never be confirmed by a normal smoke.
 
+`primary_uninstall_policy_smoke.py` is the activation-policy proof. It validates
+the strict marker schema, file security, expiry, binding, integrity, local
+enable/disable helpers, update-shaped marker survival, marker consumption, and
+reinstall disabled default using isolated policy roots. Its installed-host check
+is read-only and never creates the active marker or runs uninstall.
+
 `uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
 removes only generated fixture runtime/service/launcher artifacts through the
 Executor Registry, verifies backups, memory, preferences, secrets, repository,

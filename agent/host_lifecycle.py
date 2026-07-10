@@ -512,6 +512,16 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
         marker = Path(str(record.get("proof_marker_path") or "")).expanduser().resolve()
         if not marker.is_file() or not _is_contained(marker, fixture_root):
             raise ValueError("active_host_proof_marker_missing")
+    if fixture_mode == "primary_uninstall":
+        policy = record.get("primary_uninstall_policy") if isinstance(record.get("primary_uninstall_policy"), dict) else {}
+        if policy.get("capability") != "primary_preserve_data_uninstall":
+            raise ValueError("primary_uninstall_policy_missing")
+        if policy.get("mode") != "preserve_data":
+            raise ValueError("primary_uninstall_policy_mode_invalid")
+        if not str(policy.get("marker_fingerprint") or ""):
+            raise ValueError("primary_uninstall_policy_fingerprint_missing")
+        if "purge_allowed" in policy or "purge" in policy:
+            raise ValueError("primary_uninstall_policy_purge_field_rejected")
     final_backup_path = Path(str(record.get("final_backup_path") or "")).expanduser().resolve()
     backup_containment_root = fixture_root if fixture_mode != "primary_uninstall" else state_root
     if not _is_contained(final_backup_path, backup_containment_root) or not (final_backup_path / "manifest.json").is_file():
@@ -599,6 +609,8 @@ def _run_uninstall(record: dict[str, Any]) -> dict[str, Any]:
         "preserved_resources": preserved,
         "preserved_checked": preserved_checked,
         "final_backup_path": str(final_backup_path),
+        "primary_uninstall_policy": record.get("primary_uninstall_policy") if fixture_mode == "primary_uninstall" else None,
+        "primary_uninstall_policy_consumed": record.get("primary_uninstall_policy_consumed") if fixture_mode == "primary_uninstall" else None,
         "finished_at": utc_now_iso(),
         "reinstall_guidance": "Reinstall from the preserved Personal Agent repository, then restore supported state from the final uninstall backup.",
     }

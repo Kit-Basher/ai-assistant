@@ -40,12 +40,33 @@ The active primary path uses the same operation record schema, target snapshot
 hash, final backup logic, receipt format, Host Lifecycle Runner, removal logic,
 and preserved-resource verification as the alternate proof path.
 
-Primary execution additionally requires a local enablement marker:
+Primary execution additionally requires a strict local activation-policy
+marker:
 
 `~/.local/share/personal-agent/host_lifecycle/primary_uninstall_enabled.json`
 
-Without that marker, confirmation returns `uninstall_live_execution_not_enabled`
-with `mutated=false`.
+The marker is not enabled by file existence. It must pass the v1 schema,
+ownership, `0600` marker mode, `0700` host-lifecycle directory mode, integrity,
+expiry, installation id, canonical repository path, primary service, uid, and
+host binding checks documented in
+`docs/operator/PRIMARY_UNINSTALL_ACTIVATION_POLICY.md`.
+
+Enable, disable, and status are local operator commands only:
+
+```bash
+python scripts/primary_uninstall_policy.py enable \
+  --acknowledge-primary-uninstall-capability \
+  --expires-in-days 30
+python scripts/primary_uninstall_policy.py disable
+python scripts/primary_uninstall_policy.py status
+```
+
+Without a valid marker, confirmation returns
+`uninstall_live_execution_not_enabled` with `mutated=false`, no backup, no
+operation record, and no runner handoff.
+
+The assistant may report status and show these commands, but it must not run
+the enable command or create/modify the marker from chat.
 
 ## Proof
 
@@ -68,6 +89,9 @@ installation stays healthy and unchanged.
 
 The proof never confirms uninstall against the active primary service, primary
 runtime root, primary state root, or port `8765`.
+
+`scripts/primary_uninstall_policy_smoke.py` separately proves the marker
+activation policy without enabling or uninstalling the active primary host.
 
 ## Recovery
 

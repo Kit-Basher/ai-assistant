@@ -102,11 +102,16 @@ The receipt is bounded and redacted.
 
 Primary preserve-data uninstall is conditionally enabled. Confirmation can hand
 off to the Host Lifecycle Runner only when the canonical primary inventory
-validates and the local enablement marker exists:
+validates and the local activation-policy marker is valid:
 
 `~/.local/share/personal-agent/host_lifecycle/primary_uninstall_enabled.json`
 
-Without that marker, a confirmed live install plan returns a structured
+The marker is schema v1, preserve-data only, time-limited, installation-bound,
+integrity checked, owned by the current user, mode `0600`, and stored under a
+host-lifecycle directory no broader than `0700`. Raw file existence is not
+authorization.
+
+Without a valid marker, a confirmed live install plan returns a structured
 no-mutation result:
 
 - `error_code=uninstall_live_execution_not_enabled`
@@ -114,6 +119,13 @@ no-mutation result:
 - no services are stopped
 - no runtime files are removed
 - no state, secrets, or backups are deleted
+- no final backup, uninstall operation record, or runner handoff is created
+
+Preview carries the marker fingerprint when enabled. Confirmation revalidates
+the marker and blocks if it was removed, replaced, expired, loosened, or rebound
+after preview. Accepted primary uninstall operation records contain the marker
+fingerprint and preserve-data policy summary, not raw marker JSON. The marker
+is consumed before runner handoff so reinstall defaults back to disabled.
 
 The production-shaped proof exercises the same operation shape against an
 isolated install-shaped tree and verifies the real primary installation remains

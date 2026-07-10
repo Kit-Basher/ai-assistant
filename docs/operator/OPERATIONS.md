@@ -425,6 +425,33 @@ If a fix changes:
 
 then the relevant operator docs must change too.
 
+## Primary Uninstall Activation
+
+Primary preserve-data uninstall is disabled unless the strict local activation
+marker validates. Check status with:
+
+```bash
+python scripts/primary_uninstall_policy.py status
+```
+
+Enablement is local-operator only:
+
+```bash
+python scripts/primary_uninstall_policy.py enable \
+  --acknowledge-primary-uninstall-capability \
+  --expires-in-days 30
+```
+
+Disable:
+
+```bash
+python scripts/primary_uninstall_policy.py disable
+```
+
+The assistant must not run the enable command or create the marker from chat.
+Purge remains unsupported. See
+`docs/operator/PRIMARY_UNINSTALL_ACTIVATION_POLICY.md`.
+
 ## Lightweight Monitoring Mindset
 
 Do not depend on a new dashboard before you can diagnose normal issues.

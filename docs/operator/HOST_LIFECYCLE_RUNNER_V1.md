@@ -187,12 +187,18 @@ against an isolated install-shaped tree, verifies receipt/final backup/data
 preservation/idempotency/partial failure, and confirms the active primary
 installation remains unchanged. It never confirms active primary uninstall.
 
+Primary uninstall handoff records must include a validated activation-policy
+fingerprint and preserve-data policy summary. The runner does not require the
+marker to remain present after handoff; the executor consumes the marker before
+starting the runner and the hash-protected operation record is the immutable
+authority for that accepted operation only. Purge remains unsupported.
+
 ## Remaining Limits
 
 - Active daily-driver non-no-op self-update is enabled only through approved
   primary staged-release handoff to Host Lifecycle Runner v1.
 - Active daily-driver self-uninstall requires the reviewed primary uninstall
-  enablement marker and is not executed by automated proof.
+  activation-policy marker and is not executed by automated proof.
 - Reboot-safe completion is not claimed.
 - The active-host proof uses an alternate installed instance; the primary
   update proof is a separate explicit installed-host proof because it restarts

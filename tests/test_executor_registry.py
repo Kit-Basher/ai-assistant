@@ -16,6 +16,10 @@ from agent.host_lifecycle import (
     load_and_validate_operation,
     write_json_atomic,
 )
+from agent.primary_uninstall_policy import (
+    build_policy_context,
+    enable_primary_uninstall_marker,
+)
 from agent.version import read_git_commit
 from agent.executor_registry import (
     BACKUP_SCHEMA_VERSION,
@@ -533,6 +537,99 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertTrue(result["mutated"])
         self.assertEqual("completed_verified", result["details"]["status"])
+
+    def test_primary_uninstall_requires_current_marker_fingerprint_and_consumes_marker(self) -> None:
+        home = Path(self.tmpdir.name) / "home"
+        state = home / ".local/share/personal-agent"
+        runtime = state / "runtime"
+        service_dir = home / ".config/systemd/user"
+        app_dir = home / ".local/share/applications"
+        release = runtime / "releases/0.2.0"
+        for path in (release, service_dir, app_dir, state / "backups"):
+            path.mkdir(parents=True, exist_ok=True)
+        (runtime / "current").symlink_to(release)
+        (runtime / "install-manifest.json").write_text("{}\n", encoding="utf-8")
+        (service_dir / "personal-agent-api.service").write_text("[Service]\n", encoding="utf-8")
+        (state / "agent.db").write_text("memory\n", encoding="utf-8")
+        ctx = build_policy_context(state_root=state, repository_path=Path(__file__).resolve().parents[1], create_identity=True)
+        marker = enable_primary_uninstall_marker(context=ctx)
+        snapshot = {
+            "mode": "preserve_data",
+            "fixture_root": str(home),
+            "state_root": str(state),
+            "runtime_root": str(runtime),
+            "backup_root": str(state / "backups"),
+            "receipt_root": str(state / "uninstall_receipts"),
+            "primary_uninstall_marker_fingerprint": marker.fingerprint,
+            "removable_roots": [str(runtime), str(service_dir), str(app_dir)],
+            "removable_resources": [
+                {"id": "current", "class": "runtime symlink", "path": str(runtime / "current"), "owned": True, "expected_type": "symlink"},
+                {"id": "api-service", "class": "service unit", "path": str(service_dir / "personal-agent-api.service"), "owned": True, "expected_type": "file"},
+            ],
+            "preserved_resources": [{"id": "memory-db", "class": "memory", "path": str(state / "agent.db")}],
+            "service_names": [],
+        }
+        action = {
+            "operation_id": "primary-uninstall-test",
+            "uninstall_mode": "preserve_data",
+            "uninstall_execution_mode": "primary_preserve_data",
+            "state_root": str(state),
+            "backup_root": str(state / "backups"),
+            "receipt_root": str(state / "uninstall_receipts"),
+            "target_snapshot": snapshot,
+            "primary_uninstall_marker_fingerprint": marker.fingerprint,
+        }
+        plan = _plan(action_type="operator.uninstall", target="Personal Agent uninstall", risk_level="high")
+        with patch("agent.executor_registry.Path.home", return_value=home), patch(
+            "agent.primary_uninstall_policy.Path.home", return_value=home
+        ), patch("agent.executor_registry._launch_host_lifecycle_runner_systemd", return_value={"ok": True, "unit": "mock.service"}):
+            result = execute_uninstall_v1(plan, action)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["mutated"])
+        self.assertEqual("in_progress", result["details"]["status"])
+        self.assertFalse(ctx.marker_path.exists())
+
+    def test_primary_uninstall_marker_changed_after_preview_blocks_before_backup(self) -> None:
+        home = Path(self.tmpdir.name) / "race-home"
+        state = home / ".local/share/personal-agent"
+        runtime = state / "runtime"
+        (runtime / "releases/0.2.0").mkdir(parents=True)
+        (state / "backups").mkdir(parents=True)
+        ctx = build_policy_context(state_root=state, repository_path=Path(__file__).resolve().parents[1], create_identity=True)
+        marker = enable_primary_uninstall_marker(context=ctx)
+        replacement = enable_primary_uninstall_marker(context=ctx, expires_in_days=2)
+        self.assertNotEqual(marker.fingerprint, replacement.fingerprint)
+        snapshot = {
+            "mode": "preserve_data",
+            "fixture_root": str(home),
+            "state_root": str(state),
+            "runtime_root": str(runtime),
+            "backup_root": str(state / "backups"),
+            "receipt_root": str(state / "uninstall_receipts"),
+            "primary_uninstall_marker_fingerprint": marker.fingerprint,
+            "removable_roots": [str(runtime)],
+            "removable_resources": [{"id": "runtime", "class": "runtime", "path": str(runtime), "owned": True, "expected_type": "directory"}],
+            "preserved_resources": [],
+            "service_names": [],
+        }
+        action = {
+            "operation_id": "primary-uninstall-race",
+            "uninstall_mode": "preserve_data",
+            "uninstall_execution_mode": "primary_preserve_data",
+            "state_root": str(state),
+            "backup_root": str(state / "backups"),
+            "receipt_root": str(state / "uninstall_receipts"),
+            "target_snapshot": snapshot,
+            "primary_uninstall_marker_fingerprint": marker.fingerprint,
+        }
+        plan = _plan(action_type="operator.uninstall", target="Personal Agent uninstall", risk_level="high")
+        with patch("agent.executor_registry.Path.home", return_value=home), patch("agent.primary_uninstall_policy.Path.home", return_value=home):
+            result = execute_uninstall_v1(plan, action)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("uninstall_live_execution_not_enabled", result["error_code"])
+        self.assertFalse((state / "uninstall_operations").exists())
+        self.assertEqual([], list((state / "backups").glob("personal-agent-uninstall-backup-*")))
 
     def test_uninstall_executor_rejects_symlink_escape(self) -> None:
         root = Path(self.tmpdir.name)
