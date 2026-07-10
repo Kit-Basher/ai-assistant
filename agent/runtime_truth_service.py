@@ -449,8 +449,14 @@ class RuntimeTruthService:
         return self._cached_snapshot("ready_status", self._ready_status_uncached)
 
     def _ready_status_uncached(self) -> dict[str, Any]:
+        started = time.monotonic()
+        timings: dict[str, int] = {}
+        section_started = time.monotonic()
         observability = self.runtime._runtime_observability_context()
+        timings["observability_ms"] = int(max(0.0, time.monotonic() - section_started) * 1000)
+        section_started = time.monotonic()
         safe_mode_target = self.runtime.safe_mode_target_status()
+        timings["safe_mode_ms"] = int(max(0.0, time.monotonic() - section_started) * 1000)
         telegram = observability["telegram"] if isinstance(observability.get("telegram"), dict) else {}
         telegram_state = str(observability.get("telegram_state") or "stopped")
         telegram_enabled = bool(observability.get("telegram_enabled", False))
@@ -461,7 +467,6 @@ class RuntimeTruthService:
             if isinstance(observability.get("canonical_llm_runtime_status"), dict)
             else {}
         )
-        hf_status = self.runtime._model_watch_hf_status_snapshot()
         startup_phase = str(observability.get("startup_phase") or "starting").strip().lower() or "starting"
         phase = (
             str(observability.get("phase") or RuntimeLifecyclePhase.READY.value).strip().lower()
@@ -569,7 +574,6 @@ class RuntimeTruthService:
             except Exception:
                 chat_usable = bool(ready)
         uptime_seconds = max(0, int((datetime.now(timezone.utc) - self.runtime.started_at).total_seconds()))
-        recent_messages = self.runtime._ready_recent_telegram_messages(limit=5)
         runtime_state_label = str(failure_recovery.get("state_label") or "").strip() if isinstance(failure_recovery, dict) else ""
         runtime_reason = str(failure_recovery.get("reason") or "").strip() if isinstance(failure_recovery, dict) else ""
         runtime_blocker = str(failure_recovery.get("blocker") or "").strip() if isinstance(failure_recovery, dict) else ""
@@ -628,7 +632,7 @@ class RuntimeTruthService:
                 "warning": telegram_warning,
                 "next_action": telegram_next_action,
                 "status": telegram_state,
-                "recent_messages": recent_messages,
+                "recent_messages": [],
             },
             "surfaces": {
                 "telegram": {
@@ -641,7 +645,7 @@ class RuntimeTruthService:
             },
             "surface_warnings": surface_warnings,
             "model_watch": {
-                "hf": hf_status,
+                "hf": {"status": "not_checked_on_ready", "reason": "available in detailed runtime state"},
             },
             "safe_mode_target": safe_mode_target,
             "llm": {
@@ -658,6 +662,10 @@ class RuntimeTruthService:
                 "default_model": llm_status.get("default_model"),
                 "allow_remote_fallback": bool(llm_status.get("allow_remote_fallback", True)),
                 "policy": llm_status.get("policy") if isinstance(llm_status.get("policy"), dict) else {},
+            },
+            "timing_ms": {
+                **timings,
+                "total_ms": int(max(0.0, time.monotonic() - started) * 1000),
             },
             "message": message,
         }

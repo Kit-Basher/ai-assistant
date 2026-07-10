@@ -68,6 +68,7 @@ releases_root="$runtime_root/releases"
 release_root="$releases_root/$version"
 current_root="$runtime_root/current"
 stable_bin_root="$install_root/bin"
+host_lifecycle_root="$install_root/host_lifecycle"
 launcher_path="$stable_bin_root/personal-agent-webui"
 uninstall_path="$stable_bin_root/personal-agent-uninstall"
 desktop_root="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
@@ -81,7 +82,8 @@ if "$systemctl_bin" --user is-active --quiet personal-agent-api.service >/dev/nu
     "$systemctl_bin" --user stop personal-agent-api.service >/dev/null 2>&1 || true
 fi
 
-mkdir -p "$releases_root" "$stable_bin_root" "$desktop_root" "$icon_root" "$service_dir"
+mkdir -p "$releases_root" "$stable_bin_root" "$host_lifecycle_root" "$desktop_root" "$icon_root" "$service_dir"
+chmod 700 "$host_lifecycle_root"
 rm -rf "$release_root"
 cp -a "$bundle_root/payload/." "$release_root/"
 install -m 755 "$bundle_root/uninstall.sh" "$release_root/bin/personal-agent-uninstall"

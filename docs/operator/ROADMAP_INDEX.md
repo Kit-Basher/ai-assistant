@@ -25,6 +25,7 @@ future work where to look first.
 | Persistent journal scope and limits | `docs/design/PERSISTENT_MANAGED_ACTION_JOURNAL.md` |
 | Local model provider boundaries | `docs/operator/LOCAL_MODEL_PROVIDER_SUPPORT.md` |
 | Install/operate/backup/doctor | `docs/operator/SETUP.md`, `docs/operator/OPERATIONS.md`, `docs/operator/BACKUP_RESTORE.md`, `docs/operator/doctor.md` |
+| v0.2.1 release closure | `docs/operator/V0_2_1_RELEASE_CLOSURE.md` |
 | Security boundary audit | `docs/operator/SECURITY_AUDIT.md` |
 | Memory architecture/safety audit | `docs/operator/MEMORY_AUDIT.md` |
 | Release hardening audit | `docs/operator/RELEASE_HARDENING_AUDIT.md` |
@@ -94,11 +95,10 @@ because they overlap current docs.
 
 ## Current Next Work
 
-1. Keep the current track on final release proof, not broad new infrastructure.
-   The pre-VM hardening track now uses `python scripts/prove_ready.py` as the
-   compact local readiness gate before spending time on the fresh Debian VM.
-   Live managed SearXNG search and starter text-pack use have been proven
-   through user-facing `/chat` and API paths when search is enabled.
+1. Close v0.2.1 as a trusted daily-driver release candidate/final checkpoint.
+   The lifecycle roadmap is complete through primary non-no-op update,
+   verified rollback, primary preserve-data uninstall wiring, and strict local
+   uninstall activation policy.
 2. Keep managed SearXNG live verification separate from isolated proof:
    `prove_core_workflows.py` can honestly report search `BLOCKED` when no
    backend is configured, while live `/search/status` proves the configured
@@ -108,9 +108,8 @@ because they overlap current docs.
    write, verify the result, and roll back only owned resources.
 4. If adding more managed local services or sandboxed tool/MCP runtimes, start
    from `docs/design/MANAGED_LOCAL_SERVICES_AND_SANDBOXED_TOOLS.md`.
-5. Before any public trial, run the final fresh Debian VM install proof and
-   rerun the verification command groups in
-   `docs/operator/RELEASE_LEDGER.md`.
+5. After v0.2.1 release closure, return to broader tool authorization and Plan
+   Mode policy maturity.
 
 ## Do Not Start Until Later
 

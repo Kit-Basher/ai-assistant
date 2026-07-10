@@ -39,6 +39,8 @@ PRIMARY_UNINSTALL_ALLOWED_KEYS = {
 }
 PRIMARY_UNINSTALL_ALLOWED_POLICY_KEYS = {"mode", "purge_allowed"}
 PRIMARY_UNINSTALL_ALLOWED_INTEGRITY_KEYS = {"algorithm", "payload_sha256"}
+PRIMARY_UNINSTALL_EXPECTED_ROOT_MODE = 0o700
+PRIMARY_UNINSTALL_EXPECTED_MARKER_MODE = 0o600
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,42 @@ class PrimaryUninstallPolicyStatus:
             "purge_allowed": self.purge_allowed,
             "fingerprint": self.fingerprint,
             "details": self.details or {},
+        }
+
+
+@dataclass(frozen=True)
+class PrimaryUninstallHostPolicyDiagnostic:
+    host_lifecycle_root: str
+    exists: bool
+    is_symlink: bool
+    is_directory: bool
+    owner_uid: int | None
+    expected_owner_uid: int
+    mode: str | None
+    expected_mode: str
+    marker_exists: bool
+    marker_is_symlink: bool
+    marker_mode: str | None
+    expected_marker_mode: str
+    repair_available: bool
+    repair_reason: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "host_lifecycle_root": self.host_lifecycle_root,
+            "exists": self.exists,
+            "is_symlink": self.is_symlink,
+            "is_directory": self.is_directory,
+            "owner_uid": self.owner_uid,
+            "expected_owner_uid": self.expected_owner_uid,
+            "mode": self.mode,
+            "expected_mode": self.expected_mode,
+            "marker_exists": self.marker_exists,
+            "marker_is_symlink": self.marker_is_symlink,
+            "marker_mode": self.marker_mode,
+            "expected_marker_mode": self.expected_marker_mode,
+            "repair_available": self.repair_available,
+            "repair_reason": self.repair_reason,
         }
 
 
@@ -162,9 +200,9 @@ def marker_fingerprint(payload: dict[str, Any]) -> str:
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any], *, mode: int = 0o600) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=PRIMARY_UNINSTALL_EXPECTED_ROOT_MODE)
     try:
-        os.chmod(path.parent, 0o700)
+        os.chmod(path.parent, PRIMARY_UNINSTALL_EXPECTED_ROOT_MODE)
     except OSError:
         pass
     temp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex[:8]}")
@@ -478,3 +516,83 @@ def consume_primary_uninstall_marker(context: PrimaryUninstallPolicyContext | No
         return {"consumed": False, "reason": status.reason}
     disabled = disable_primary_uninstall_marker(context)
     return {"consumed": disabled.reason == "marker_missing", "reason": disabled.reason, "fingerprint": status.fingerprint}
+
+
+def diagnose_primary_uninstall_host_policy(
+    context: PrimaryUninstallPolicyContext | None = None,
+) -> PrimaryUninstallHostPolicyDiagnostic:
+    ctx = context or build_policy_context()
+    owner_uid: int | None = None
+    mode: str | None = None
+    exists = False
+    is_symlink = False
+    is_directory = False
+    repair_available = False
+    repair_reason: str | None = None
+    try:
+        st = os.lstat(ctx.host_lifecycle_root)
+        exists = True
+        is_symlink = stat.S_ISLNK(st.st_mode)
+        is_directory = stat.S_ISDIR(st.st_mode)
+        owner_uid = st.st_uid
+        mode = oct(stat.S_IMODE(st.st_mode))
+        repair_available = bool(is_directory and not is_symlink and st.st_uid == ctx.uid)
+        if not repair_available:
+            repair_reason = "root_missing_or_unsafe"
+        elif st.st_mode & 0o077:
+            repair_reason = "chmod_0700_available"
+        else:
+            repair_reason = "already_secure"
+    except OSError:
+        repair_available = True
+        repair_reason = "mkdir_0700_available"
+
+    marker_exists = False
+    marker_is_symlink = False
+    marker_mode: str | None = None
+    try:
+        marker_st = os.lstat(ctx.marker_path)
+        marker_exists = True
+        marker_is_symlink = stat.S_ISLNK(marker_st.st_mode)
+        marker_mode = oct(stat.S_IMODE(marker_st.st_mode))
+    except OSError:
+        pass
+    if marker_exists and marker_is_symlink:
+        repair_available = False
+        repair_reason = "marker_symlink_rejected"
+    return PrimaryUninstallHostPolicyDiagnostic(
+        host_lifecycle_root=str(ctx.host_lifecycle_root),
+        exists=exists,
+        is_symlink=is_symlink,
+        is_directory=is_directory,
+        owner_uid=owner_uid,
+        expected_owner_uid=ctx.uid,
+        mode=mode,
+        expected_mode=oct(PRIMARY_UNINSTALL_EXPECTED_ROOT_MODE),
+        marker_exists=marker_exists,
+        marker_is_symlink=marker_is_symlink,
+        marker_mode=marker_mode,
+        expected_marker_mode=oct(PRIMARY_UNINSTALL_EXPECTED_MARKER_MODE),
+        repair_available=repair_available,
+        repair_reason=repair_reason,
+    )
+
+
+def repair_primary_uninstall_host_policy_permissions(
+    context: PrimaryUninstallPolicyContext | None = None,
+) -> dict[str, Any]:
+    ctx = context or build_policy_context()
+    before = diagnose_primary_uninstall_host_policy(ctx)
+    if before.exists and (before.is_symlink or not before.is_directory or before.owner_uid != ctx.uid):
+        return {"ok": False, "changed": False, "reason": before.repair_reason or "root_unsafe", "before": before.to_dict()}
+    if before.marker_exists and before.marker_is_symlink:
+        return {"ok": False, "changed": False, "reason": "marker_symlink_rejected", "before": before.to_dict()}
+    ctx.host_lifecycle_root.mkdir(parents=True, exist_ok=True, mode=PRIMARY_UNINSTALL_EXPECTED_ROOT_MODE)
+    os.chmod(ctx.host_lifecycle_root, PRIMARY_UNINSTALL_EXPECTED_ROOT_MODE)
+    if ctx.marker_path.exists() and not ctx.marker_path.is_symlink():
+        marker_st = os.lstat(ctx.marker_path)
+        if stat.S_ISREG(marker_st.st_mode) and marker_st.st_uid == ctx.uid:
+            os.chmod(ctx.marker_path, PRIMARY_UNINSTALL_EXPECTED_MARKER_MODE)
+    after = diagnose_primary_uninstall_host_policy(ctx)
+    changed = before.mode != after.mode or before.marker_mode != after.marker_mode or before.exists != after.exists
+    return {"ok": True, "changed": changed, "reason": "repaired", "before": before.to_dict(), "after": after.to_dict()}

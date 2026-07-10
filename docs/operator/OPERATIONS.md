@@ -452,6 +452,25 @@ The assistant must not run the enable command or create the marker from chat.
 Purge remains unsupported. See
 `docs/operator/PRIMARY_UNINSTALL_ACTIVATION_POLICY.md`.
 
+If status reports `host_lifecycle_root_permissions_too_broad`, inspect first:
+
+```bash
+python scripts/primary_uninstall_policy.py diagnose
+```
+
+The narrow repair command is explicit and does not enable uninstall:
+
+```bash
+python scripts/primary_uninstall_policy.py repair-permissions \
+  --acknowledge-host-policy-repair
+```
+
+Release-closure proof is sequential to avoid artificial HTTP load:
+
+```bash
+python scripts/v0_2_1_release_closure.py --expected-commit 226c149
+```
+
 ## Lightweight Monitoring Mindset
 
 Do not depend on a new dashboard before you can diagnose normal issues.

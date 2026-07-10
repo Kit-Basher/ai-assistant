@@ -12408,7 +12408,19 @@ class AgentRuntime:
         return self._safe_web_search_client
 
     def search_status(self) -> dict[str, Any]:
+        cache = getattr(self, "_search_status_cache", None)
+        now = time.monotonic()
+        if isinstance(cache, dict):
+            cached_at = float(cache.get("cached_at_monotonic") or 0.0)
+            cached_payload = cache.get("payload")
+            if cached_at and now - cached_at <= 2.0 and isinstance(cached_payload, dict):
+                payload = dict(cached_payload)
+                payload["cached"] = True
+                payload["cached_age_ms"] = int(max(0.0, now - cached_at) * 1000)
+                return payload
+        started = time.monotonic()
         status = self._safe_web_search().status()
+        elapsed_ms = int(max(0.0, time.monotonic() - started) * 1000)
         status["persistent_config"] = {
             "supported": True,
             "path": "runtime_state/search_runtime_config.json",
@@ -12422,6 +12434,10 @@ class AgentRuntime:
             )
         if str(status.get("reason") or "") == "invalid_persisted_search_config":
             status["search_state"] = "invalid_or_untrusted_config"
+        status["cached"] = False
+        status["cached_at"] = datetime.now(timezone.utc).isoformat()
+        status["timing_ms"] = {"search_health_ms": elapsed_ms, "total_ms": elapsed_ms}
+        self._search_status_cache = {"cached_at_monotonic": time.monotonic(), "payload": dict(status)}
         return status
 
     def _search_runtime_config_path(self) -> Path | None:

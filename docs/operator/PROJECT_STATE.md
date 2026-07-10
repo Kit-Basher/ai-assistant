@@ -5,12 +5,32 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-primary-uninstall-guard-wiring-v1`
-- Commit: `e64a2f7f4708f43d9f58b619ea3144da99f583bb`
+- Tag: `v0.2.1-primary-uninstall-activation-policy-v1`
+- Commit: `226c1497db85549de38417c22488fa859f8b2d41`
 - Fresh Debian VM proof: not run
-- Release status: ready for VM proof, not finished
+- Release status: v0.2.1 release closure in progress; not final
 
-Current confirmed proof:
+## Next Phase: v0.2.1 Release Closure and Installed-Product Hardening
+
+The lifecycle roadmap is complete through:
+
+- primary non-no-op update;
+- verified rollback;
+- primary preserve-data uninstall wiring;
+- strict local uninstall activation policy.
+
+Next work:
+
+1. Clean minor repository and host-policy issues.
+2. Diagnose remaining latency warnings.
+3. Run a full sequential installed-product proof from the current checkpoint.
+4. Audit Debian setup, recovery, backup, update, and uninstall documentation.
+5. Cut a v0.2.1 release candidate or final v0.2.1 checkpoint.
+
+After release closure, return to broader tool authorization and Plan Mode
+policy maturity.
+
+## Current Confirmed Proof
 
 - `python scripts/installed_product_abuse.py`: `PASS=40 WARN=0 FAIL=0`
   when search starts `configured_running`; `PASS=42 WARN=0 FAIL=0` when search

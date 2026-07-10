@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import timedelta
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,9 +12,11 @@ from agent.primary_uninstall_policy import (
     PRIMARY_UNINSTALL_MAX_DAYS,
     build_policy_context,
     build_primary_uninstall_marker_payload,
+    diagnose_primary_uninstall_host_policy,
     disable_primary_uninstall_marker,
     enable_primary_uninstall_marker,
     payload_sha256,
+    repair_primary_uninstall_host_policy_permissions,
     utc_now,
     validate_primary_uninstall_marker,
 )
@@ -108,6 +111,34 @@ class PrimaryUninstallPolicyTests(unittest.TestCase):
         self.assertEqual("marker_missing", again.reason)
         with self.assertRaisesRegex(ValueError, "expiry_exceeds_maximum"):
             build_primary_uninstall_marker_payload(self.ctx, expires_in_days=PRIMARY_UNINSTALL_MAX_DAYS + 1)
+
+    def test_host_policy_diagnose_and_repair_permissions(self) -> None:
+        self.ctx.host_lifecycle_root.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.ctx.host_lifecycle_root, 0o775)
+        diagnostic = diagnose_primary_uninstall_host_policy(self.ctx)
+        self.assertEqual("0o775", diagnostic.mode)
+        self.assertTrue(diagnostic.repair_available)
+        self.assertEqual("chmod_0700_available", diagnostic.repair_reason)
+
+        result = repair_primary_uninstall_host_policy_permissions(self.ctx)
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["changed"])
+        after = diagnose_primary_uninstall_host_policy(self.ctx)
+        self.assertEqual("0o700", after.mode)
+        self.assertFalse(self.ctx.marker_path.exists())
+
+    def test_host_policy_repair_refuses_symlink_root(self) -> None:
+        target = self.root / "target"
+        target.mkdir()
+        self.ctx.host_lifecycle_root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(self.ctx.host_lifecycle_root)
+        self.ctx.host_lifecycle_root.symlink_to(target)
+        diagnostic = diagnose_primary_uninstall_host_policy(self.ctx)
+        self.assertTrue(diagnostic.is_symlink)
+        self.assertFalse(diagnostic.repair_available)
+        result = repair_primary_uninstall_host_policy_permissions(self.ctx)
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["changed"])
 
 
 if __name__ == "__main__":

@@ -93,6 +93,10 @@ uninstall activation-policy proof. It uses isolated policy roots for marker
 mutation and reads the actual host status without enabling or uninstalling the
 active primary installation.
 
+Run `python scripts/v0_2_1_release_closure.py --expected-commit 226c149` for
+the v0.2.1 sequential installed-product closure proof. It intentionally avoids
+parallel HTTP-heavy proof suites and never enables primary uninstall.
+
 ## Boundaries
 
 Do not claim this lane proves full lifecycle completion. It proves the

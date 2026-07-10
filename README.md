@@ -13,9 +13,10 @@ It is exposed through the HTTP API, the browser/web UI served by the API
 server, the CLI, and the optional Telegram adapter.
 
 ## Current Product Truth
-Current checkpoint language: the project is ready for fresh VM proof, not
-finished. The installed daily-driver product gate passes on the local stable
-runtime, but fresh Debian VM proof and several lifecycle lanes remain pending.
+Current checkpoint language: v0.2.1 release closure and installed-product
+hardening are in progress. The lifecycle roadmap is complete through primary
+non-no-op update, verified rollback, primary preserve-data uninstall wiring,
+and strict local uninstall activation policy. Final v0.2.1 has not been tagged.
 
 The user interacts with the assistant layer. The assistant interprets intent,
 asks the agent layer for grounded runtime/tool facts or bounded action results

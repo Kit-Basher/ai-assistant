@@ -14,6 +14,8 @@ Canonical install/runtime path:
 
 - stable runtime install root: `~/.local/share/personal-agent/runtime`
 - stable mutable state: `~/.local/share/personal-agent`
+- stable host lifecycle policy/state:
+  `~/.local/share/personal-agent/host_lifecycle` with mode `0700`
 - stable operator config/policy: `~/.config/personal-agent`
 - stable user service: `personal-agent-api.service`
 - supported stable service-management story: `systemctl --user ...`
@@ -118,6 +120,8 @@ Canonical packaging/build path:
 - canonical release gate: `python scripts/release_gate.py`
 - fast pre-check before the heavier gate: `python scripts/release_smoke.py`
 - pre-VM readiness gate: `python scripts/prove_ready.py`
+- v0.2.1 sequential release-closure gate:
+  `python scripts/v0_2_1_release_closure.py --expected-commit <commit>`
 - isolated first-run/fresh-state proof: `python scripts/first_run_smoke.py`
 - post-install VM proof smoke: `python scripts/vm_proof_smoke.py --expected-commit <commit>`
 - installed daily-driver product gate:

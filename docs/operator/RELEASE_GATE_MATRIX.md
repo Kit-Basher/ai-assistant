@@ -198,6 +198,12 @@ enable/disable helpers, update-shaped marker survival, marker consumption, and
 reinstall disabled default using isolated policy roots. Its installed-host check
 is read-only and never creates the active marker or runs uninstall.
 
+`v0_2_1_release_closure.py` is the sequential release-closure orchestrator for
+the v0.2.1 cycle. It runs the installed-product proof set without parallel HTTP
+load, captures durations, and reports aggregate PASS/WARN/FAIL/SKIP counts. It
+does not enable the primary uninstall marker and does not run active primary
+uninstall.
+
 `uninstall_execution_smoke.py` is the isolated Uninstall Executor v1 gate. It
 removes only generated fixture runtime/service/launcher artifacts through the
 Executor Registry, verifies backups, memory, preferences, secrets, repository,

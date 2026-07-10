@@ -100,6 +100,27 @@ class TestAPIServerRuntime(unittest.TestCase):
     def _managed_action_journal_store(self) -> PersistentManagedActionJournalStore:
         return PersistentManagedActionJournalStore(Path(self.db_path).with_name("managed_actions.db"))
 
+    def test_search_status_uses_short_cache_with_timing(self) -> None:
+        calls = {"count": 0}
+
+        class _Search:
+            def status(self) -> dict[str, object]:
+                calls["count"] += 1
+                return {"ok": True, "enabled": True, "endpoint_configured": True, "reason": None}
+
+        fake = SimpleNamespace(
+            _safe_web_search=lambda: _Search(),
+            _search_persisted_config_loaded=False,
+            _search_runtime_config_error=None,
+        )
+        first = AgentRuntime.search_status(fake)  # type: ignore[arg-type]
+        second = AgentRuntime.search_status(fake)  # type: ignore[arg-type]
+        self.assertEqual(1, calls["count"])
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertIn("timing_ms", first)
+        self.assertIn("cached_age_ms", second)
+
     def test_health_includes_safe_mode_fields(self) -> None:
         runtime = AgentRuntime(_config(self.registry_path, self.db_path))
         runtime._autopilot_safety_state.enter_safe_mode(reason="churn_detected", now_epoch=1_700_000_000)
