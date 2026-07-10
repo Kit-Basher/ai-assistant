@@ -63,6 +63,7 @@ Commands:
 - `python scripts/restart_survival_smoke.py`
 - `python scripts/browser_ui_survival_smoke.py`
 - `python scripts/perf_smoke.py`
+- `python scripts/rc1_latency_closure_smoke.py`
 - `python scripts/daily_driver_smoke.py --timeout 90`
 - `python scripts/prove_core_workflows.py`
 - `python scripts/webui_robustness_smoke.py`
@@ -101,6 +102,12 @@ chat, RAM-system-check rendering, refresh behavior, temporary API interruption
 and restart recovery, stale Plan Mode confirmation safety, bounded long
 transcripts, special-character rendering, duplicate-send protection, and
 console/network diagnostics. It is a live-runtime gate, not CI-safe.
+
+`rc1_latency_closure_smoke.py` is the installed RC1 latency distribution gate.
+It samples `/ready`, `/state`, `/search/status`, direct `htop` package-state
+lookup, `htop` Plan Mode preview, and pending-action lookup sequentially. It
+does not enable uninstall, confirm package installation, refresh apt metadata,
+or perform network package-manager work.
 
 `operator_lifecycle_smoke.py` is the installed operator-lifecycle gate. It
 proves health, broken-status, storage, repair, backup, restore, update,

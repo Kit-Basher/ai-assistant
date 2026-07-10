@@ -13,7 +13,7 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-EXPECTED_PREFIX = "226c149"
+EXPECTED_PREFIX = "b0a7fe5"
 
 
 def _login_command(*argv: str) -> tuple[str, ...]:
@@ -44,6 +44,7 @@ def build_gates(*, expected_commit: str = EXPECTED_PREFIX, include_primary_updat
         Gate("repository_hygiene", "git diff whitespace", _login_command("git", "diff", "--check"), 30),
         Gate("host_policy_status", "primary uninstall policy status", _login_command(py, "scripts/primary_uninstall_policy.py", "status"), 30),
         Gate("promotion", "promote local stable", _login_command("bash", "scripts/promote_local_stable.sh"), 420),
+        Gate("latency_closure", "rc1 latency closure", _login_command(py, "scripts/rc1_latency_closure_smoke.py"), 180),
         Gate("core_unit_tests", "release smoke", _login_command(py, "scripts/release_smoke.py"), 240),
         Gate("lifecycle_proofs", "primary uninstall activation policy", _login_command(py, "scripts/primary_uninstall_policy_smoke.py"), 120),
         Gate(
@@ -160,6 +161,8 @@ def main() -> int:
         f"PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']} SKIP={counts['SKIP']} "
         f"TOTAL_SECONDS={total_seconds}"
     )
+    recommendation = "v0.2.1" if counts["FAIL"] == 0 and counts["WARN"] == 0 else "v0.2.1-rc2"
+    print(f"RELEASE_RECOMMENDATION={recommendation}")
     print("UNINSTALL_MARKER_ENABLED_BY_RUNNER=false")
     return 0 if counts["FAIL"] == 0 else 1
 

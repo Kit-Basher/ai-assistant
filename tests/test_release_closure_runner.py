@@ -25,9 +25,12 @@ class ReleaseClosureRunnerTests(unittest.TestCase):
         module = _load_module()
         gates = module.build_gates(expected_commit="abc123", include_primary_update=True)
         self.assertEqual("checkpoint", gates[0].phase)
-        self.assertEqual("promotion", [gate.phase for gate in gates][3])
+        self.assertIn("promotion", [gate.phase for gate in gates])
+        self.assertIn("latency_closure", [gate.phase for gate in gates])
         commands = [" ".join(gate.command) for gate in gates]
         joined = "\n".join(commands)
+        self.assertEqual("b0a7fe5", module.EXPECTED_PREFIX)
+        self.assertIn("rc1_latency_closure_smoke.py", joined)
         self.assertIn("primary_uninstall_enablement_smoke.py", joined)
         self.assertIn("primary_update_enablement_smoke.py", joined)
         self.assertNotIn("primary_uninstall_policy.py enable", joined)

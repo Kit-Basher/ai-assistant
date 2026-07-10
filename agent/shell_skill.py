@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 import re
@@ -43,6 +44,9 @@ _SUPPORTED_SAFE_COMMANDS = {
 }
 _SUPPORTED_INSTALL_MANAGERS = {"apt", "pip"}
 _SUPPORTED_PYTHON_PACKAGE_SCOPES = {"user", "venv"}
+_DPKG_QUERY = "/usr/bin/dpkg-query"
+_DPKG_STATUS_DB = Path("/var/lib/dpkg/status")
+_PACKAGE_STATE_CACHE_TTL_SECONDS = 5.0
 
 
 class ShellSkill(FileSystemSkill):
@@ -114,6 +118,105 @@ class ShellSkill(FileSystemSkill):
         if pattern.fullmatch(candidate) is None:
             return None
         return candidate
+
+    def _dpkg_status_mtime(self) -> int:
+        try:
+            return int(_DPKG_STATUS_DB.stat().st_mtime_ns)
+        except OSError:
+            return 0
+
+    def _package_state_cache(self) -> dict[tuple[str, int], tuple[float, dict[str, Any]]]:
+        cache = getattr(self, "_package_state_cache_store", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._package_state_cache_store = cache
+        return cache
+
+    def invalidate_package_state_cache(self) -> None:
+        cache = getattr(self, "_package_state_cache_store", None)
+        if isinstance(cache, dict):
+            cache.clear()
+
+    def debian_package_state(self, package: str | None, *, timeout_seconds: float = 1.0) -> dict[str, Any]:
+        started = time.monotonic()
+        package_name = self._validated_name(package, pattern=_PACKAGE_NAME_RE, field_name="package")
+        if package_name is None:
+            return {
+                "ok": False,
+                "package": package,
+                "state": "invalid_package",
+                "installed": False,
+                "available": False,
+                "cached": False,
+                "timing_ms": {"total_ms": int(max(0.0, time.monotonic() - started) * 1000)},
+            }
+        db_mtime = self._dpkg_status_mtime()
+        cache_key = (package_name, db_mtime)
+        cache = self._package_state_cache()
+        cached = cache.get(cache_key)
+        now = time.monotonic()
+        if isinstance(cached, tuple) and len(cached) == 2 and now - cached[0] <= _PACKAGE_STATE_CACHE_TTL_SECONDS:
+            payload = dict(cached[1])
+            payload["cached"] = True
+            payload["timing_ms"] = {"total_ms": int(max(0.0, time.monotonic() - started) * 1000)}
+            return payload
+        if not Path(_DPKG_QUERY).is_file():
+            payload = {
+                "ok": False,
+                "package": package_name,
+                "state": "package_manager_unavailable",
+                "installed": False,
+                "available": False,
+                "binary": _DPKG_QUERY,
+                "cached": False,
+            }
+            payload["timing_ms"] = {"total_ms": int(max(0.0, time.monotonic() - started) * 1000)}
+            return payload
+        argv = [_DPKG_QUERY, "-W", "-f=${db:Status-Status}\n", package_name]
+        try:
+            proc = subprocess.run(
+                argv,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=max(0.1, min(float(timeout_seconds), 2.0)),
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            payload = {
+                "ok": False,
+                "package": package_name,
+                "state": "timeout",
+                "installed": False,
+                "available": False,
+                "binary": _DPKG_QUERY,
+                "argv": argv,
+                "cached": False,
+                "timed_out": True,
+            }
+            payload["timing_ms"] = {"total_ms": int(max(0.0, time.monotonic() - started) * 1000)}
+            return payload
+        stdout = (proc.stdout or "").strip().lower()
+        stderr = (proc.stderr or "").strip().lower()
+        installed = proc.returncode == 0 and stdout == "installed"
+        state = "installed" if installed else "not_installed"
+        if proc.returncode != 0 and "no packages found" in stderr:
+            state = "unknown_package"
+        payload = {
+            "ok": True,
+            "package": package_name,
+            "state": state,
+            "installed": installed,
+            "available": installed,
+            "binary": _DPKG_QUERY,
+            "argv": argv,
+            "cached": False,
+            "exit_code": int(proc.returncode),
+            "timed_out": False,
+            "timing_ms": {"total_ms": int(max(0.0, time.monotonic() - started) * 1000)},
+        }
+        cache[cache_key] = (time.monotonic(), dict(payload))
+        return payload
 
     @staticmethod
     def _truncate_output(text: str, max_chars: int) -> tuple[str, bool]:
@@ -338,10 +441,22 @@ class ShellSkill(FileSystemSkill):
         if error is not None:
             return error
         assert argv is not None
+        if normalized_manager == "apt":
+            package_state = self.debian_package_state(normalized_package)
+        else:
+            package_state = {
+                "ok": True,
+                "package": normalized_package,
+                "state": "not_checked_for_python_package",
+                "installed": False,
+                "available": None,
+                "cached": False,
+                "timing_ms": {"total_ms": 0},
+            }
         return self._result(
             "install_package_preview",
             ok=True,
-            mutated=not preview_dry_run,
+            mutated=False,
             command_name=f"{normalized_manager}_install",
             argv=argv,
             cwd=str(resolved_cwd),
@@ -351,6 +466,7 @@ class ShellSkill(FileSystemSkill):
                 "package": normalized_package,
                 "scope": normalized_scope,
                 "dry_run": preview_dry_run,
+                "package_state": package_state,
             },
         )
 

@@ -5,10 +5,10 @@ marketing copy and it is not a final release claim.
 
 ## Current Checkpoint
 
-- Tag: `v0.2.1-primary-uninstall-activation-policy-v1`
-- Commit: `226c1497db85549de38417c22488fa859f8b2d41`
+- Tag: `v0.2.1-rc1`
+- Commit: `b0a7fe51d271c528c644289018458944860dd5ec`
 - Fresh Debian VM proof: not run
-- Release status: v0.2.1 release closure in progress; not final
+- Release status: RC1 latency closure complete; final v0.2.1 decision pending clean commit/tag
 
 ## Next Phase: v0.2.1 Release Closure and Installed-Product Hardening
 
@@ -29,6 +29,24 @@ Next work:
 
 After release closure, return to broader tool authorization and Plan Mode
 policy maturity.
+
+## RC1 Latency Closure
+
+The remaining RC1 warnings were performance-related. Current measured closure:
+
+- `python scripts/rc1_latency_closure_smoke.py`: `PASS=6 WARN=0 FAIL=0`,
+  warm `/ready` median/p90 1 ms, `htop` preview median 843 ms and p90 976 ms
+  in the full sequential closure run.
+- `python scripts/daily_driver_maturity_audit.py`: `PASS=35 WARN=0 FAIL=0`;
+  `install htop` preview distribution median 1088 ms and p90 1152 ms after
+  same-user pending-state bounding.
+- `python scripts/perf_smoke.py`: `PASS=10 WARN=0 FAIL=0`.
+- `python scripts/prove_ready.py`: `PASS=14 WARN=0 FAIL=0 NOTES=1`.
+- `python scripts/v0_2_1_release_closure.py`: `PASS=29 WARN=0 FAIL=0 SKIP=0`.
+
+The note is expected isolated-proof classification, not a release warning.
+No destructive active primary uninstall was run, and the primary uninstall
+activation marker remains absent.
 
 ## Current Confirmed Proof
 
@@ -177,7 +195,7 @@ policy maturity.
 - `python scripts/prove_daily_driver_product.py`: `PASS`
 - `python scripts/daily_driver_smoke.py --timeout 90`: `PASS=9 BLOCKED=0 FAIL=0`
 - `python scripts/prove_pre_vm_complete.py`: `PRE_VM_COMPLETE=yes`, `BLOCKERS=0`, `UNKNOWN_AREAS=0`, `WARNINGS=7`
-- `python scripts/prove_ready.py`: `READY_FOR_VM_PROOF=yes`, `RELEASE_BLOCKERS=0`, `WARNINGS=2`
+- `python scripts/prove_ready.py`: `READY_FOR_VM_PROOF=yes`, `RELEASE_BLOCKERS=0`, `WARNINGS=0`, `NOTES=1`
 - `git status`: clean at the checkpoint
 
 Real-use journey truth:

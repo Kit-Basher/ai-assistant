@@ -20807,6 +20807,8 @@ class Orchestrator:
         skip_assistant_response_guard = bool(response_data.get("skip_post_response_hooks", False))
         skip_memory_hooks = bool(context.get("skip_turn_memory_hooks", False)) or bool(
             response_data.get("skip_memory_hooks", False)
+        ) or bool(
+            response_data.get("skip_post_response_hooks", False)
         )
         if bool(response_data.get("skip_epistemic_gate", False)):
             final_response = response
@@ -20837,7 +20839,7 @@ class Orchestrator:
                 orchestrator_timing_ms["runtime_ready_ms"] = guard_timing_ms["runtime_ready_ms"]
         remember_started = time.monotonic()
         memory_disabled_for_turn = bool(context.get("memory_disabled_for_turn", False))
-        if not memory_disabled_for_turn and not skip_memory_hooks:
+        if not memory_disabled_for_turn and not bool(response_data.get("skip_interpretable_result", False)):
             self._remember_interpretable_result(
                 user_id=user_id,
                 user_text=text,

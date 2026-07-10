@@ -384,4 +384,4 @@ class TestAdversarialChatRoutingOrchestrator(unittest.TestCase):
                 self.assertFalse(response.data.get("used_llm"))
                 self.assertEqual([], llm.chat_calls)
                 self.assertTrue(response.data.get("skip_post_response_hooks"))
-                self.assertEqual([], post_hook_calls)
+                self.assertTrue(all(call == "remember" for call in post_hook_calls), post_hook_calls)

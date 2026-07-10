@@ -3364,6 +3364,32 @@ class TestOrchestrator(unittest.TestCase):
         self.assertNotIn("doctor:", lowered)
         self.assertNotIn("runtime is ready", lowered)
 
+    def test_why_after_model_status_survives_skipped_post_hooks(self) -> None:
+        llm = _FakeChatLLM(enabled=True, text="stale LLM answer")
+        runtime_truth = _FakeRuntimeTruthService()
+        runtime_truth.current_provider = "ollama"
+        runtime_truth.current_model = "ollama:qwen3.5:4b"
+        orchestrator = Orchestrator(
+            db=self.db,
+            skills_path=self.skills_path,
+            log_path=self.log_path,
+            timezone="UTC",
+            llm_client=llm,
+            runtime_truth_service=runtime_truth,
+            chat_runtime_adapter=_FrontdoorRuntimeAdapter(),
+        )
+
+        first = orchestrator.handle_message("you are running here through ollama correct?", "user1")
+        with patch("agent.orchestrator.route_inference", side_effect=AssertionError("LLM should not run")):
+            second = orchestrator.handle_message("why", "user1")
+
+        self.assertTrue(first.data["skip_post_response_hooks"])
+        self.assertEqual("interpretation_followup", second.data["route"])
+        self.assertFalse(second.data["used_llm"])
+        lowered = second.text.lower()
+        self.assertIn("ollama:qwen3.5:4b", lowered)
+        self.assertIn("did not switch models", lowered)
+
     def test_ram_system_check_is_concise_and_stores_baseline(self) -> None:
         orchestrator = self._orchestrator()
         payload = {

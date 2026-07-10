@@ -47,6 +47,46 @@ class TestMemoryRuntime(unittest.TestCase):
         rows = self.runtime.list_pending_items("u1", thread_id="thread-a", include_expired=True, now_ts=10)
         self.assertEqual("EXPIRED", rows[0]["status"])
 
+    def test_pending_persistence_prunes_old_inactive_items_but_keeps_active(self) -> None:
+        self.runtime.set_thread_state("u1", thread_id="thread-a")
+        for index in range(60):
+            self.runtime.add_pending_item(
+                "u1",
+                {
+                    "pending_id": f"old-{index:02d}",
+                    "kind": "confirmation",
+                    "origin_tool": "package_install",
+                    "question": "Old inactive preview.",
+                    "options": ["yes", "no"],
+                    "created_at": index + 1,
+                    "expires_at": index + 2,
+                    "thread_id": "thread-a",
+                    "status": "ABORTED",
+                },
+            )
+        self.runtime.add_pending_item(
+            "u1",
+            {
+                "pending_id": "active-waiting",
+                "kind": "confirmation",
+                "origin_tool": "package_install",
+                "question": "Active preview.",
+                "options": ["yes", "no"],
+                "created_at": 1000,
+                "expires_at": 9999999999,
+                "thread_id": "thread-a",
+                "status": "WAITING_FOR_USER",
+            },
+        )
+
+        rows = self.runtime.list_pending_items("u1", thread_id="thread-a", include_expired=True, now_ts=100)
+        pending_ids = [str(row.get("pending_id") or "") for row in rows]
+
+        self.assertEqual(51, len(rows))
+        self.assertNotIn("old-00", pending_ids)
+        self.assertIn("old-59", pending_ids)
+        self.assertIn("active-waiting", pending_ids)
+
     def test_followup_is_ambiguous_when_multiple_pending_in_same_thread(self) -> None:
         self.runtime.set_thread_state("u1", thread_id="thread-a")
         for pending_id in ("p1", "p2"):

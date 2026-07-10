@@ -2,8 +2,8 @@
 
 Checkpoint:
 
-- Tag: `v0.2.1-primary-uninstall-activation-policy-v1`
-- Commit: `226c1497db85549de38417c22488fa859f8b2d41`
+- Tag: `v0.2.1-rc1`
+- Commit: `b0a7fe51d271c528c644289018458944860dd5ec`
 
 ## Completed Capability Set
 
@@ -56,9 +56,8 @@ enable command or create the marker from chat.
 ## Host Policy Finding
 
 The current installed host has
-`~/.local/share/personal-agent/host_lifecycle` owned by the current user but
-mode `0775`. The strict uninstall policy expects `0700`. This is a real policy
-mismatch for an activation marker directory, not a need for broader access: the
+`~/.local/share/personal-agent/host_lifecycle` owned by the current user with
+mode `0700`, matching the strict uninstall activation-policy expectation. The
 host runner and API run as the same user and can read operation records under
 `0700`.
 
@@ -74,16 +73,20 @@ Known warning classes:
 - install-preview latency from deterministic package/status route setup.
 - transient HTTP timeouts under concurrent proof load.
 
-Release closure keeps proofs sequential. `/ready` now omits optional model-watch
-and recent Telegram details from the fast path and includes `timing_ms`.
-`/search/status` uses a short bounded cache and reports cache/timing metadata.
+Release closure keeps proofs sequential. `/ready` keeps the current detailed
+runtime-truth contract and includes `timing_ms`; RC1 latency closure separates
+cold and warm budgets. `/search/status` uses a short bounded cache and reports
+cache/timing metadata. Package preview now uses direct bounded dpkg status
+inspection instead of any apt refresh or network path. RC1 latency closure also
+bounds same-user Plan Mode pending-state growth so repeated previews do not
+rewrite an unbounded inactive pending list.
 
 ## Release Proof
 
 Sequential release closure runner:
 
 ```bash
-python scripts/v0_2_1_release_closure.py --expected-commit 226c149
+python scripts/v0_2_1_release_closure.py --expected-commit b0a7fe5
 ```
 
 This runner does not enable the primary uninstall marker and does not run active
@@ -95,8 +98,9 @@ Core supporting gates:
 bash scripts/promote_local_stable.sh
 python scripts/primary_uninstall_policy.py status
 python scripts/primary_uninstall_policy_smoke.py
-python scripts/primary_uninstall_enablement_smoke.py --allow-primary-uninstall-shaped-proof --expected-commit 226c149
-python scripts/primary_update_enablement_smoke.py --allow-primary-update-proof --expected-commit 226c149
+python scripts/rc1_latency_closure_smoke.py
+python scripts/primary_uninstall_enablement_smoke.py --allow-primary-uninstall-shaped-proof --expected-commit b0a7fe5
+python scripts/primary_update_enablement_smoke.py --allow-primary-update-proof --expected-commit b0a7fe5
 python scripts/prove_ready.py
 python scripts/docs_truth_smoke.py
 python scripts/release_gate_matrix_smoke.py
@@ -149,3 +153,8 @@ warnings that need observation.
 Choose final `v0.2.1` only after functional gates pass, host policy is
 understood or repaired, latency warnings are bounded, Debian recovery docs match
 the installed host, and the working tree is clean after commit.
+
+RC1 latency closure result: `rc1_latency_closure_smoke.py` reports
+`PASS=6 WARN=0 FAIL=0`; `daily_driver_maturity_audit.py` reports
+`PASS=35 WARN=0 FAIL=0`; `prove_ready.py` reports `PASS=14 WARN=0 FAIL=0
+NOTES=1`.

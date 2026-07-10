@@ -86,6 +86,48 @@ class TestShellSkill(unittest.TestCase):
         self.assertEqual(["apt-get", "-s", "install", "-y", "ripgrep"], result["argv"])
         run_mock.assert_called_once()
 
+    def test_debian_package_state_uses_exact_dpkg_query_without_shell(self) -> None:
+        with patch(
+            "agent.shell_skill.subprocess.run",
+            return_value=subprocess.CompletedProcess(["/usr/bin/dpkg-query"], 0, "installed\n", ""),
+        ) as run_mock:
+            result = self.skill.debian_package_state("htop")
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["installed"])
+        argv = run_mock.call_args.args[0]
+        self.assertEqual("/usr/bin/dpkg-query", argv[0])
+        self.assertFalse(run_mock.call_args.kwargs.get("shell", False))
+        self.assertLessEqual(run_mock.call_args.kwargs["timeout"], 2.0)
+
+    def test_package_preview_adds_state_without_mutation_or_apt_update(self) -> None:
+        with patch(
+            "agent.shell_skill.subprocess.run",
+            return_value=subprocess.CompletedProcess(["/usr/bin/dpkg-query"], 1, "", "no packages found matching htop\n"),
+        ) as run_mock:
+            result = self.skill.preview_install_package(manager="apt", package="htop")
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("unknown_package", result["package_state"]["state"])
+        calls = [" ".join(call.args[0]) for call in run_mock.call_args_list]
+        self.assertFalse(any("apt update" in call or "apt-get update" in call for call in calls))
+
+    def test_package_state_cache_reuses_and_invalidates(self) -> None:
+        with patch(
+            "agent.shell_skill.subprocess.run",
+            return_value=subprocess.CompletedProcess(["/usr/bin/dpkg-query"], 0, "installed\n", ""),
+        ) as run_mock:
+            first = self.skill.debian_package_state("htop")
+            second = self.skill.debian_package_state("htop")
+            self.skill.invalidate_package_state_cache()
+            third = self.skill.debian_package_state("htop")
+
+        self.assertFalse(first["cached"])
+        self.assertTrue(second["cached"])
+        self.assertFalse(third["cached"])
+        self.assertEqual(2, run_mock.call_count)
+
     def test_install_requests_reject_invalid_values(self) -> None:
         invalid_manager = self.skill.install_package(manager="brew", package="ripgrep")
         invalid_package = self.skill.install_package(manager="apt", package="ripgrep;rm")

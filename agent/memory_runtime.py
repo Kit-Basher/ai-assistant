@@ -59,6 +59,11 @@ _MANAGED_RUNTIME_SUFFIXES = (
     "working_memory_state",
     "persistence_status",
 )
+_MAX_INACTIVE_PENDING_ITEMS = 50
+_ACTIVE_PENDING_STATUSES = {
+    PENDING_STATUS_READY_TO_RESUME,
+    PENDING_STATUS_WAITING_FOR_USER,
+}
 
 
 def _now_epoch() -> int:
@@ -537,15 +542,36 @@ class MemoryRuntime:
         return normalized
 
     def _save_pending_items(self, user_id: str, rows: list[dict[str, Any]]) -> bool:
-        ordered = sorted(
+        ordered = self._prune_pending_items(
             [normalize_pending_item(row, default_thread_id=self._default_thread_id(user_id)) for row in rows],
-            key=lambda row: (int(row.get("created_at") or 0), str(row.get("pending_id") or "")),
         )
         return self._persist_json_revisioned(
             user_id,
             key=self._pending_key(user_id),
             kind="pending_items",
             payload=ordered,
+        )
+
+    @staticmethod
+    def _prune_pending_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = sorted(
+            [dict(row) for row in rows if isinstance(row, dict)],
+            key=lambda row: (int(row.get("created_at") or 0), str(row.get("pending_id") or "")),
+        )
+        active = [
+            row
+            for row in ordered
+            if str(row.get("status") or "").strip() in _ACTIVE_PENDING_STATUSES
+        ]
+        inactive = [
+            row
+            for row in ordered
+            if str(row.get("status") or "").strip() not in _ACTIVE_PENDING_STATUSES
+        ]
+        kept_inactive = inactive[-_MAX_INACTIVE_PENDING_ITEMS:]
+        return sorted(
+            [*kept_inactive, *active],
+            key=lambda row: (int(row.get("created_at") or 0), str(row.get("pending_id") or "")),
         )
 
     @_with_runtime_lock
