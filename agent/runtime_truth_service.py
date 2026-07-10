@@ -1926,6 +1926,7 @@ class RuntimeTruthService:
         cwd: str | None = None,
         timeout_s: float = 10.0,
         max_output_chars: int = 4000,
+        invocation_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload = self._shell_skill().install_package(
             manager=manager,
@@ -1935,6 +1936,7 @@ class RuntimeTruthService:
             cwd=cwd,
             timeout_s=timeout_s,
             max_output_chars=max_output_chars,
+            invocation_context=invocation_context,
         )
         return {
             **dict(payload),

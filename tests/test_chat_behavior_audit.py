@@ -129,7 +129,7 @@ class TestChatBehaviorAudit(unittest.TestCase):
             "what model am i using": ("model_status", ("model", "configured")),
             "is memory on": ("agent_memory", ("memory", "separate from system ram")),
             "why arent you working": ("runtime_status", ("chat target", "runtime")),
-            "what can you do": ("assistant_capabilities", ("system inspection", "local memory")),
+            "what can you do": ("capability_policy", ("capability policy", "requires confirmation")),
             "install a skill that lets you browse": ("action_tool", ("browser", "preview")),
             "fix yourself": ("runtime_status", ("diagnostics", "code changes")),
             "use the best local model": ("model_status", ("local", "model")),

@@ -137,6 +137,15 @@ class TestShellSkill(unittest.TestCase):
         self.assertFalse(invalid_package["ok"])
         self.assertEqual("invalid_package_name", invalid_package["blocked_reason"])
 
+    def test_install_mutation_requires_trusted_invocation_context(self) -> None:
+        with patch("agent.shell_skill.subprocess.run") as run_mock:
+            result = self.skill.install_package(manager="apt", package="ripgrep")
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["mutated"])
+        self.assertEqual("generic_bypass_blocked", result["blocked_reason"])
+        run_mock.assert_not_called()
+
     def test_create_directory_works_only_inside_allowed_roots(self) -> None:
         inside = self.skill.create_directory("logs")
         outside = self.skill.create_directory("../outside/logs")

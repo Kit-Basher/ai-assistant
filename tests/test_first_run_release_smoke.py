@@ -239,10 +239,11 @@ class TestFirstRunReleaseSmoke(unittest.TestCase):
             orch, "_safe_mode_containment_response", return_value=None
         ):
             abandoned = orch.handle_message("what can you do?", "user1", chat_context={"source_surface": "webui"})
-        self.assertEqual("LLM reply", abandoned.text)
+        self.assertIn("Capability policy v1 is active", abandoned.text)
+        self.assertEqual("capability_policy", abandoned.data["route"])
         self.assertEqual("true", str(self.db.get_user_pref(onboarding_completed_key("user1")) or "").strip().lower())
         calls_after_abandon = len(llm.chat_calls)
-        self.assertGreater(calls_after_abandon, 0)
+        self.assertEqual(0, calls_after_abandon)
 
         with patch.object(orch, "_interpret_previous_result_followup", return_value=None), patch.object(
             orch, "_deep_system_followup_response", return_value=None

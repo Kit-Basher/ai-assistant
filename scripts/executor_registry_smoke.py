@@ -167,7 +167,7 @@ def run(base_url: str, timeout: float) -> list[Check]:
     uninstall_result = uninstall_confirm_payload.get("executor_result") if isinstance(uninstall_confirm_payload.get("executor_result"), dict) else {}
     checks.append(
         _pass("uninstall live guard refuses installed runtime", _assistant_text(uninstall_confirm), 'POST /chat {"message": "yes"}')
-        if uninstall_result.get("error_code") == "uninstall_live_execution_not_enabled" and uninstall_result.get("mutated") is False
+        if uninstall_result.get("error_code") in {"uninstall_live_execution_not_enabled", "local_activation_required", "marker_missing"} and uninstall_result.get("mutated") is False
         else _fail("uninstall live guard refuses installed runtime", json.dumps(uninstall_confirm, sort_keys=True)[:1400], 'POST /chat {"message": "yes"}')
     )
 

@@ -277,6 +277,39 @@ class ExecutorRegistryTests(unittest.TestCase):
         self.assertTrue(payload["mutated"])
         self.assertEqual("test.enabled", payload["executor_id"])
 
+    def test_migrated_executor_includes_capability_authorization_metadata(self) -> None:
+        registry = ExecutorRegistry(self.journal_path)
+
+        def _run(plan, action):
+            return {
+                "ok": True,
+                "mutated": True,
+                "resources_touched": ["/tmp/example-cleanup"],
+                "user_message": "cleaned example",
+            }
+
+        registry.register(
+            ExecutorSpec(
+                executor_id="operator.cleanup.v1",
+                action_type="operator.cleanup",
+                status="enabled",
+                run=_run,
+                capability_id="cleanup.execute",
+            )
+        )
+        result = registry.execute_confirmed_plan(
+            plan=_plan(action_type="operator.cleanup", target="example cleanup", executor_status="enabled"),
+            action={"pending_id": "confirm-test"},
+        )
+        payload = result.to_dict()
+        self.assertTrue(result.ok)
+        self.assertTrue(result.mutated)
+        self.assertEqual("cleanup.execute", payload["capability_id"])
+        self.assertEqual(1, payload["policy_schema_version"])
+        self.assertEqual("plan_and_confirm", payload["authorization_mode"])
+        self.assertTrue(payload["authorization_decision_id"].startswith("authz-"))
+        self.assertIn("authorization", payload["details"])
+
     def test_update_executor_fixture_promotes_staged_release(self) -> None:
         root = Path(self.tmpdir.name)
         runtime = root / "runtime"

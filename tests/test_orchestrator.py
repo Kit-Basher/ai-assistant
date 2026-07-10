@@ -731,6 +731,7 @@ class _FakeRuntimeTruthService:
         cwd: str | None = None,
         timeout_s: float = 10.0,
         max_output_chars: int = 4000,
+        invocation_context: dict[str, object] | None = None,
     ) -> dict[str, object]:
         self.calls.append(("shell_install_package", (manager, package, scope, dry_run, cwd)))
         if self.shell_skill is None:
@@ -743,6 +744,7 @@ class _FakeRuntimeTruthService:
             cwd=cwd,
             timeout_s=timeout_s,
             max_output_chars=max_output_chars,
+            invocation_context=invocation_context,
         )
 
     def shell_preview_install_package(
@@ -4308,6 +4310,8 @@ class TestOrchestrator(unittest.TestCase):
         )
 
         def _fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+            if argv == ["/usr/bin/dpkg-query", "-W", "-f=${db:Status-Status}\n", "ripgrep"]:
+                return subprocess.CompletedProcess(argv, 1, "", "no packages found matching ripgrep\n")
             if argv == ["apt-get", "install", "-y", "ripgrep"]:
                 return subprocess.CompletedProcess(argv, 0, "Installing ripgrep\n", "")
             raise AssertionError(f"unexpected argv: {argv!r}")
