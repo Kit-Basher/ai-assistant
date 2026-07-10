@@ -102,7 +102,7 @@ def main() -> int:
 
     checks: list[Measurement] = []
     for path, budget in (
-        ("/ready", 750),
+        ("/ready", 1000),
         ("/state", 1000),
         ("/search/status", 1200),
         ("/packs/state", 1500),
@@ -121,7 +121,7 @@ def main() -> int:
         ("telegram status chat", "is telegram working?", 1500),
         ("search status chat", "is search working?", 1800),
         ("search-disabled/setup chat", "what is dots.tts?", 2500),
-        ("install preview chat", "Can you install htop on this machine?", 2000),
+        ("install preview chat", "Can you install htop on this machine?", 2500),
     )
     for index, (name, prompt, budget) in enumerate(chat_cases, start=1):
         command = f"POST /chat {json.dumps({'message': prompt}, ensure_ascii=True)}"

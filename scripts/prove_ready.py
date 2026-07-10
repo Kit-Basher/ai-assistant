@@ -47,6 +47,7 @@ CORE_PY_COMPILE: tuple[str, ...] = (
     "scripts/chat_eval.py",
     "scripts/llm_behavior_eval.py",
     "scripts/perf_smoke.py",
+    "scripts/rc1_latency_closure_smoke.py",
     "scripts/executor_registry_smoke.py",
     "scripts/support_bundle_v2_smoke.py",
     "scripts/backup_v1_smoke.py",
@@ -78,6 +79,7 @@ def _gates() -> list[Gate]:
         Gate("py_compile core files", (sys.executable, "-m", "py_compile", *CORE_PY_COMPILE), 120),
         Gate("chat_eval deterministic adversarial routing", (sys.executable, "scripts/chat_eval.py"), 180),
         Gate("llm_behavior_eval deterministic e2e behavior", (sys.executable, "scripts/llm_behavior_eval.py"), 180),
+        Gate("rc1_latency_closure_smoke latency distributions", (sys.executable, "scripts/rc1_latency_closure_smoke.py"), 180),
         Gate("perf_smoke read-only latency smoke", (sys.executable, "scripts/perf_smoke.py"), 180),
         Gate("release_smoke canonical smoke suite", (sys.executable, "scripts/release_smoke.py"), 420),
         Gate("host_lifecycle_runner_smoke shared host runner", (sys.executable, "scripts/host_lifecycle_runner_smoke.py"), 120),
@@ -144,9 +146,16 @@ def _classify(gate: Gate, returncode: int, output: str) -> tuple[str, str, str]:
             return "FAIL", "release-blocking", "Fix the failing core workflow proof before release."
         not_proven_match = re.search(r"^not_proven workflows:\s*(.+)$", output, re.MULTILINE | re.IGNORECASE)
         if not_proven_match and not_proven_match.group(1).strip().lower() != "none":
-            return "WARN", "expected-isolated-proof", "prove_core_workflows.py marks nested release gates NOT_PROVEN by design; prove_ready.py runs the direct behavior gate separately above."
+            return "NOTE", "expected-isolated-proof", "prove_core_workflows.py marks nested release gates NOT_PROVEN by design; prove_ready.py runs the direct behavior gate separately above."
         if "blocked workflows: internet/search status" in lowered:
-            return "WARN", "expected-isolated-proof", "Isolated proof search BLOCKED is expected unless trusted SearXNG is configured."
+            return "NOTE", "expected-isolated-proof", "Isolated proof search BLOCKED is expected unless trusted SearXNG is configured."
+    if gate.name.startswith("rc1_latency_closure_smoke"):
+        failed = _extract_count("FAIL", output)
+        warned = _extract_count("WARN", output)
+        if failed:
+            return "FAIL", "release-blocking", "Fix the failing RC1 latency closure probe before final release."
+        if warned:
+            return "WARN", "runtime-state", "One or more RC1 latency closure distributions exceeded the measured budget."
     if gate.name.startswith("perf_smoke"):
         failed = _extract_count("FAIL", output)
         warned = _extract_count("WARN", output)
@@ -202,17 +211,22 @@ def main() -> int:
 
     blocking_failures = [row for row in results if row.status == "FAIL" and row.gate.release_blocking]
     warnings = [row for row in results if row.status == "WARN"]
+    notes = [row for row in results if row.status == "NOTE"]
     passed = [row for row in results if row.status == "PASS"]
     print("## Summary")
-    print(f"PASS={len(passed)} WARN={len(warnings)} FAIL={len(blocking_failures)}")
+    print(f"PASS={len(passed)} WARN={len(warnings)} FAIL={len(blocking_failures)} NOTES={len(notes)}")
     print(f"READY_FOR_VM_PROOF: {'yes' if not blocking_failures else 'no'}")
     print(f"RELEASE_BLOCKERS: {len(blocking_failures)}")
     print(f"WARNINGS: {len(warnings)}")
+    print(f"NOTES: {len(notes)}")
     print("NEXT_ACTIONS:")
     if warnings:
         for row in warnings:
             print(f"- [{row.category}] {row.gate.name}: {row.next_action}")
-    elif not blocking_failures:
+    if notes:
+        for row in notes:
+            print(f"- note [{row.category}] {row.gate.name}: {row.next_action}")
+    if not warnings and not notes and not blocking_failures:
         print("- Run the fresh Debian VM install proof when ready.")
     if blocking_failures:
         first = blocking_failures[0]

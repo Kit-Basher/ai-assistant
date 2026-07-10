@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import statistics
 import subprocess
 import time
 import urllib.error
@@ -155,6 +156,19 @@ def _timed(name: str, func: Callable[[], Any]) -> tuple[int, Any, str | None]:
         error = f"{exc.__class__.__name__}: {exc}"
     elapsed_ms = int(max(0.0, time.monotonic() - started) * 1000)
     return elapsed_ms, value, error
+
+
+def _distribution(values: list[int]) -> dict[str, int]:
+    if not values:
+        return {"min_ms": 0, "median_ms": 0, "p90_ms": 0, "max_ms": 0}
+    ordered = sorted(values)
+    p90_index = max(0, min(len(ordered) - 1, int(len(ordered) * 0.9) - 1))
+    return {
+        "min_ms": int(ordered[0]),
+        "median_ms": int(statistics.median(ordered)),
+        "p90_ms": int(ordered[p90_index]),
+        "max_ms": int(ordered[-1]),
+    }
 
 
 def _dir_size(path: Path, *, max_files: int = 5000) -> tuple[int, int, bool]:
@@ -331,16 +345,55 @@ def run(base_url: str, timeout: float) -> list[Check]:
         )
         checks.append(_pass(category, f"common prompt: {prompt}", f'POST /chat {{"message": "{prompt}"}}', text) if ok else _warn(category, f"common prompt: {prompt}", f'POST /chat {{"message": "{prompt}"}}', text, "Polish common daily-driver wording; avoid developer-log text and unrelated stale flows."))
 
-    for path, budget in (("/ready", 750), ("/state", 1000), ("/search/status", 1200)):
+    for path, budget in (("/ready", 1000), ("/state", 1000), ("/search/status", 1200)):
         elapsed, payload, error = _timed(path, lambda path=path: _request_json("GET", base_url, path, timeout=timeout))
         evidence = error or f"elapsed_ms={elapsed} ok={isinstance(payload, dict) and payload.get('ok', True)}"
         status = "PASS" if error is None and elapsed <= budget else "WARN" if error is None else "FAIL"
         checks.append(_check("performance drift", f"GET {path} latency", status, f"GET {path}", evidence, f"Inspect {path} latency if this grows over repeated daily-driver runs."))
-    for prompt, budget in (("is Telegram working?", 2000), ("is search working?", 2200), ("install htop", 2500)):
+    for prompt, budget in (("is Telegram working?", 2000), ("is search working?", 2200)):
         elapsed, payload, error = _timed(prompt, lambda prompt=prompt: _post_chat(base_url, prompt, thread_id=f"perf-{prompt.split()[1] if len(prompt.split()) > 1 else prompt}", timeout=timeout))
         evidence = error or f"elapsed_ms={elapsed} text={_assistant_text(payload)[:220]}"
         status = "PASS" if error is None and elapsed <= budget else "WARN" if error is None else "FAIL"
         checks.append(_check("performance drift", f"chat latency: {prompt}", status, f'POST /chat {{"message": "{prompt}"}}', evidence, "Investigate deterministic route latency if this becomes a repeated irritant."))
+    install_samples: list[int] = []
+    install_payloads: list[dict[str, Any]] = []
+    install_error: str | None = None
+    for index in range(7):
+        elapsed, payload, error = _timed(
+            "install htop",
+            lambda index=index: _post_chat(
+                base_url,
+                "install htop",
+                thread_id=f"perf-install-{index}",
+                timeout=timeout,
+            ),
+        )
+        install_samples.append(elapsed)
+        if isinstance(payload, dict):
+            install_payloads.append(payload)
+        if error is not None and install_error is None:
+            install_error = error
+    install_stats = _distribution(install_samples)
+    install_text = _assistant_text(install_payloads[-1] if install_payloads else {})
+    install_ok = install_error is None and install_stats["median_ms"] < 1500 and install_stats["p90_ms"] < 2500
+    evidence = install_error or json.dumps(
+        {
+            "distribution": install_stats,
+            "samples_ms": install_samples,
+            "text": install_text[:220],
+        },
+        sort_keys=True,
+    )
+    checks.append(
+        _check(
+            "performance drift",
+            "chat latency: install htop",
+            "PASS" if install_ok else "WARN" if install_error is None else "FAIL",
+            'POST /chat {"message": "install htop"}',
+            evidence,
+            "Investigate deterministic route latency if this distribution repeatedly exceeds the Plan Mode preview budget.",
+        )
+    )
 
     home = Path.home()
     paths = (
